@@ -132,6 +132,17 @@ class Tools:
 
     
     async def search_messages(self, query: str, limit: int = 5) -> List[Dict]:
+        """
+        Search past conversation turns by semantic similarity.
+        Searches both user messages and STELLA responses.
+
+        Args:
+            query: Keywords or phrase to search for
+            limit: Max results (default 5)
+
+        Returns: List of turns with id, role, message, timestamp, score, 
+                and surrounding context (adjacent turns for continuity).
+        """
         results = self.resolver.search_messages(query, limit)
         
         output = []

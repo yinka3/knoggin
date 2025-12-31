@@ -201,6 +201,35 @@ class MemGraphStore:
                 logger.info(f"Cleaned up {deleted} null-type entities")
             return deleted
     
+    def get_orphan_entities(self, protected_id: int = 1) -> List[int]:
+        """Find entity IDs with no relationships, excluding protected (user)."""
+        query = """
+        MATCH (e:Entity)
+        WHERE NOT (e)-[:RELATED_TO]-() AND e.id <> $protected_id
+        RETURN e.id as id
+        """
+        with self.driver.session() as session:
+            result = session.run(query, {"protected_id": protected_id})
+            return [record["id"] for record in result]
+    
+    def bulk_delete_entities(self, entity_ids: List[int]) -> int:
+        """DETACH DELETE entities by ID list. Returns count deleted."""
+        if not entity_ids:
+            return 0
+        query = """
+        MATCH (e:Entity)
+        WHERE e.id IN $ids
+        DETACH DELETE e
+        RETURN count(e) as deleted
+        """
+        with self.driver.session() as session:
+            result = session.run(query, {"ids": entity_ids})
+            record = result.single()
+            deleted = record["deleted"] if record else 0
+            if deleted > 0:
+                logger.info(f"Bulk deleted {deleted} orphan entities")
+            return deleted
+    
     def has_direct_edge(self, id_a: int, id_b: int) -> bool:
         query = """
         MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b})
@@ -396,14 +425,10 @@ class MemGraphStore:
         query = """
         MATCH (start:Entity {canonical_name: $start_name})
         MATCH (end:Entity {canonical_name: $end_name})
-        MATCH p = shortestPath((start)-[:RELATED_TO*..4]-(end))
-        WHERE ALL(n IN nodes(p) WHERE
-            $active_only = false OR
-            NOT EXISTS((n)-[:BELONGS_TO]->(:Topic)) OR
-            NOT EXISTS((n)-[:BELONGS_TO]->(:Topic {status: 'inactive'}))
-        )
+        MATCH p = (start)-[:RELATED_TO *BFS ..4]-(end)
         RETURN [n in nodes(p) | n.canonical_name] as names,
             [r in relationships(p) | r.message_ids] as evidence_ids
+        LIMIT 1
         """
         with self.driver.session() as session:
             result = session.run(query, {
@@ -486,61 +511,83 @@ class MemGraphStore:
             merged_summary: Pre-computed summary (from LLM or concat)
         """
         
-        query = """
-        MATCH (p:Entity {id: $primary_id})
-        MATCH (s:Entity {id: $secondary_id})
-
-        WITH p, s, coalesce(p.aliases, []) + coalesce(s.aliases, []) + [s.canonical_name] AS combined_aliases
-        UNWIND combined_aliases AS alias
-        WITH p, s, collect(DISTINCT alias) AS unique_aliases
-
-        SET p.aliases = unique_aliases,
-            p.summary = $summary,
-            p.confidence = CASE WHEN coalesce(s.confidence, 0) > coalesce(p.confidence, 0) THEN s.confidence ELSE p.confidence END,
-            p.last_mentioned = CASE WHEN coalesce(s.last_mentioned, 0) > coalesce(p.last_mentioned, 0) THEN s.last_mentioned ELSE p.last_mentioned END,
-            p.last_updated = timestamp()
-
-        WITH p, s
-
-        OPTIONAL MATCH (s)-[r_source:RELATED_TO]-(target:Entity)
-        WHERE target.id <> p.id
-
-        WITH p, s, r_source, target
-        WHERE r_source IS NOT NULL
-
-        MERGE (p)-[r_target:RELATED_TO]-(target)
-        ON CREATE SET 
-            r_target.weight = r_source.weight,
-            r_target.confidence = r_source.confidence,
-            r_target.message_ids = r_source.message_ids,
-            r_target.last_seen = r_source.last_seen
-        ON MATCH SET
-            r_target.weight = r_target.weight + r_source.weight,
-            r_target.confidence = CASE WHEN r_source.confidence > r_target.confidence THEN r_source.confidence ELSE r_target.confidence END,
-            r_target.last_seen = CASE WHEN r_source.last_seen > r_target.last_seen THEN r_source.last_seen ELSE r_target.last_seen END
-
-        WITH p, s, r_target, r_source
-        UNWIND coalesce(r_target.message_ids, []) + coalesce(r_source.message_ids, []) AS mid
-        WITH p, s, r_target, collect(DISTINCT mid) AS unique_mids
-        SET r_target.message_ids = unique_mids
-
-        WITH DISTINCT s
-        DETACH DELETE s
-        RETURN count(s) as deleted
-        """
-
+        def _execute_merge(tx):
+            # Step 1: Get both entities and validate they exist
+            check = tx.run("""
+                MATCH (p:Entity {id: $primary_id})
+                MATCH (s:Entity {id: $secondary_id})
+                RETURN p.canonical_name as p_name, 
+                    p.aliases as p_aliases,
+                    s.canonical_name as s_name, 
+                    s.aliases as s_aliases,
+                    s.confidence as s_conf,
+                    s.last_mentioned as s_last
+            """, primary_id=primary_id, secondary_id=secondary_id).single()
+            
+            if not check:
+                logger.error(f"Merge failed: one or both entities not found ({primary_id}, {secondary_id})")
+                return False
+            
+            # Step 2: Update primary with merged data
+            combined_aliases = list(set(
+                (check["p_aliases"] or []) + 
+                (check["s_aliases"] or []) + 
+                [check["s_name"]]
+            ))
+            
+            tx.run("""
+                MATCH (p:Entity {id: $primary_id})
+                SET p.aliases = $aliases,
+                    p.summary = $summary,
+                    p.last_updated = timestamp()
+                WITH p
+                MATCH (s:Entity {id: $secondary_id})
+                SET p.confidence = CASE 
+                        WHEN coalesce(s.confidence, 0) > coalesce(p.confidence, 0) 
+                        THEN s.confidence ELSE p.confidence END,
+                    p.last_mentioned = CASE 
+                        WHEN coalesce(s.last_mentioned, 0) > coalesce(p.last_mentioned, 0) 
+                        THEN s.last_mentioned ELSE p.last_mentioned END
+            """, primary_id=primary_id, secondary_id=secondary_id, 
+                aliases=combined_aliases, summary=merged_summary)
+            
+            # Step 3: Transfer relationships from secondary to primary
+            tx.run("""
+                MATCH (s:Entity {id: $secondary_id})-[r_old:RELATED_TO]-(target:Entity)
+                WHERE target.id <> $primary_id
+                MATCH (p:Entity {id: $primary_id})
+                MERGE (p)-[r_new:RELATED_TO]-(target)
+                ON CREATE SET
+                    r_new.weight = r_old.weight,
+                    r_new.confidence = r_old.confidence,
+                    r_new.message_ids = r_old.message_ids,
+                    r_new.last_seen = r_old.last_seen
+                ON MATCH SET
+                    r_new.weight = r_new.weight + r_old.weight,
+                    r_new.confidence = CASE 
+                        WHEN r_old.confidence > r_new.confidence 
+                        THEN r_old.confidence ELSE r_new.confidence END,
+                    r_new.last_seen = CASE 
+                        WHEN r_old.last_seen > r_new.last_seen 
+                        THEN r_old.last_seen ELSE r_new.last_seen END,
+                    r_new.message_ids = r_new.message_ids + r_old.message_ids
+            """, primary_id=primary_id, secondary_id=secondary_id)
+            
+            # Step 4: Delete secondary entity
+            result = tx.run("""
+                MATCH (s:Entity {id: $secondary_id})
+                DETACH DELETE s
+                RETURN count(*) as deleted
+            """, secondary_id=secondary_id).single()
+            
+            return result and result["deleted"] > 0
+    
         with self.driver.session() as session:
             try:
-                result = session.run(query, {
-                    "primary_id": primary_id, 
-                    "secondary_id": secondary_id, 
-                    "summary": merged_summary
-                })
-                record = result.single()
-                if record and record["deleted"] > 0:
+                success = session.execute_write(_execute_merge)
+                if success:
                     logger.info(f"Merged entity {secondary_id} into {primary_id}")
-                    return True
-                return False
+                return success
             except Exception as e:
                 logger.error(f"Merge transaction failed: {e}")
                 return False

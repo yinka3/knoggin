@@ -3,7 +3,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_messages",
-            "description": "Search past user messages by semantic similarity. Use when looking for what the user said about a topic.",
+            "description": "Search past conversation by semantic similarity. Searches both user messages and STELLA responses. Use when looking for what was discussed about a topic.",
             "parameters": {
                 "type": "object",
                 "properties": {

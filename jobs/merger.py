@@ -113,7 +113,7 @@ class MergeDetectionJob(BaseJob):
             "entity_b": candidate["profile_b"]
         })
         
-        result = await self.llm.call_reasoning(system, user_content, self.llm.DEFAULT_STRUCTURED_MODEL)
+        result = await self.llm.call_reasoning(system, user_content)
         
         try:
             return float(result.strip())
@@ -203,7 +203,7 @@ class MergeDetectionJob(BaseJob):
             "summary_b": summary_b
         }, indent=2)
         
-        result = await self.llm.call_reasoning(system_prompt, user_content, self.llm.DEFAULT_STRUCTURED_MODEL)
+        result = await self.llm.call_reasoning(system_prompt, user_content)
         
         if result and result.startswith("MERGE_CONFLICT"):
             logger.warning(f"Merge conflict for {primary_name}: {result}")

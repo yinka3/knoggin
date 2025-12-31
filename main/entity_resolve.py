@@ -299,3 +299,31 @@ class EntityResolver:
     
         logger.info(f"Merge detection complete: {len(candidates)} candidates found")
         return candidates
+    
+    def remove_entities(self, entity_ids: List[int]) -> int:
+        """Remove entities from resolver indexes. Call after Memgraph deletion."""
+        if not entity_ids:
+            return 0
+        
+        removed = 0
+        with self._lock:
+            for eid in entity_ids:
+                if eid in self.entity_profiles:
+                    del self.entity_profiles[eid]
+                    removed += 1
+                
+                # Remove aliases pointing to this ID
+                to_remove = [alias for alias, id_ in self._name_to_id.items() if id_ == eid]
+                for alias in to_remove:
+                    del self._name_to_id[alias]
+            
+            # Remove from FAISS
+            if removed > 0:
+                try:
+                    self.index_id_map.remove_ids(np.array(entity_ids, dtype=np.int64))
+                except Exception as e:
+                    logger.warning(f"FAISS removal failed: {e}")
+        
+        if removed > 0:
+            logger.info(f"Removed {removed} entities from resolver")
+        return removed

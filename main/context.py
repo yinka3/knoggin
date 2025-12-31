@@ -28,10 +28,10 @@ from utils import format_relative_time
 
 load_dotenv()
 
-BATCH_SIZE = 5
+BATCH_SIZE = 10
 PROFILE_INTERVAL = 15
-SESSION_WINDOW = 50
-BATCH_TIMEOUT_SECONDS = 90
+SESSION_WINDOW = 60
+BATCH_TIMEOUT_SECONDS = 60
 
 class Context:
 

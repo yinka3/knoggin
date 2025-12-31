@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 class AgentContext:
     user_query: str = ""
     call_count: int = 0
-    max_calls: int = 5
+    max_calls: int = 8
     attempt_count: int = 0
     max_attempts: int = 8
     trace_id: str = ""
@@ -262,7 +262,7 @@ async def run(
     tools = Tools(user_name, store, ent_resolver, redis_client, active_topics)
 
     if hot_topics:
-        ctx.hot_topic_context = tools.get_hot_topic_context(hot_topics)
+        ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics)
 
     last_result = None
     step = 0

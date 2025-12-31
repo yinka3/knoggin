@@ -55,7 +55,8 @@ class LLMService:
         logger.info(
             f"LLMService initialized | "
             f"structured={self._structured_model} | "
-            f"reasoning={self._reasoning_model}"
+            f"reasoning={self._reasoning_model} | "
+            f"agent={self._agent_model}" 
         )
 
     @property
