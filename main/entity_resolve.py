@@ -253,7 +253,7 @@ class EntityResolver:
                 if id_i == id_j:
                     continue
                 score = fuzz.WRatio(aliases[i], aliases[j])
-                if score >= 85:
+                if score >= 91:
                     pair_key = tuple(sorted([id_i, id_j]))
                     if pair_key not in seen_pairs or score > seen_pairs[pair_key]:
                         seen_pairs[pair_key] = score

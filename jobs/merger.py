@@ -38,38 +38,43 @@ class MergeDetectionJob(BaseJob):
         return profile_complete is not None
     
     async def execute(self, ctx: JobContext) -> JobResult:
-        warning = "⚠️ **Memory Consolidation in Progress.** I am currently merging duplicate entities. Answers regarding these people might be temporarily inconsistent."
+        await ctx.redis.set(f"merge_ran:{ctx.user_name}", "true")
+    
 
+        candidates = self.ent_resolver.detect_merge_candidates()
+        
+        if not candidates:
+            return JobResult(success=True, summary="No merge candidates found")
+        
+
+        auto_merge, hitl = [], []
+
+        for candidate in candidates:
+            score = await self._get_merge_judgment(candidate)
+            if score is None:
+                continue
+            
+            candidate["llm_score"] = score
+            
+            if score >= self.AUTO_MERGE_THRESHOLD:
+                auto_merge.append(candidate)
+            elif score >= self.HITL_THRESHOLD:
+                hitl.append(candidate)
+            else:
+                logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
+
+        logger.info(f"Merge split: {len(auto_merge)} auto, {len(hitl)} HITL")
+        
+        if not auto_merge and not hitl:
+            return JobResult(success=True, summary="No merges qualified")
+
+        warning = "⚠️ **Memory Consolidation in Progress.** Merging duplicate entities."
+    
         async with JobNotifier(ctx.redis, warning):
             lock_key = "system:maintenance_lock"
-            await ctx.redis.set(lock_key, "true", ex=600)
+            await ctx.redis.set(lock_key, "true", ex=60)  # Shorter TTL now
+            
             try:
-                logger.info("Batch Lock passed to Merge Job")
-                await ctx.redis.set(f"merge_ran:{ctx.user_name}", "true")
-                
-                candidates = self.ent_resolver.detect_merge_candidates()
-                
-                if not candidates:
-                    return JobResult(success=True, summary="No merge candidates found")
-                
-                auto_merge, hitl = [], []
-
-                for candidate in candidates:
-                    score = await self._get_merge_judgment(candidate)
-                    if score is None:
-                        continue
-                    
-                    candidate["llm_score"] = score
-                    
-                    if score >= self.AUTO_MERGE_THRESHOLD:
-                        auto_merge.append(candidate)
-                    elif score >= self.HITL_THRESHOLD:
-                        hitl.append(candidate)
-                    else:
-                        logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
-
-                logger.info(f"Merge split: {len(auto_merge)} auto, {len(hitl)} HITL")
-                
                 merged_ids = set()
                 successful = 0
                 failed = 0
@@ -91,15 +96,14 @@ class MergeDetectionJob(BaseJob):
                         failed += 1
                 
                 proposals_stored = await self._store_hitl_proposals(ctx, hitl, merged_ids)
-                                
+            
             finally:
                 await ctx.redis.delete(lock_key)
-                logger.info("Maintenance Complete. Resuming Write Path.")
 
-            return JobResult(
-                success=True,
-                summary=f"{successful} merged, {failed} failed, {proposals_stored} HITL proposals"
-            )
+        return JobResult(
+            success=True,
+            summary=f"{successful} merged, {failed} failed, {proposals_stored} HITL proposals"
+        )
     
     async def on_shutdown(self, ctx: JobContext) -> None:
         """Set pending flag so next session picks up merge work."""

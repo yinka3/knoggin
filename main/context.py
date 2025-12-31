@@ -11,6 +11,7 @@ from jobs.mood import MoodCheckpointJob
 from jobs.profile import ProfileRefinementJob
 from jobs.scheduler import Scheduler
 from jobs.merger import MergeDetectionJob
+from jobs.cleaner import EntityCleanupJob
 from config import get_config_value
 from main.processor import BatchProcessor
 from main.service import LLMService
@@ -51,8 +52,10 @@ class Context:
         self._batch_timer_task: asyncio.Task = None
         self._batch_processing_lock = asyncio.Lock()
         self.batch_processor: BatchProcessor = None
+        self._batch_in_progress = False
         self.profile_job: BaseJob = None
         self.merge_job: BaseJob = None
+        self.cleanup_job: BaseJob = None
         self.trace_logger = get_trace_logger()
 
     @classmethod
@@ -118,6 +121,11 @@ class Context:
             store=instance.store,
             executor=instance.executor)
         
+        instance.cleanup_job = EntityCleanupJob(
+            user_name=user_name,
+            store=instance.store,
+            ent_resolver=instance.ent_resolver)
+
         instance.merge_job = MergeDetectionJob(
             user_name, instance.ent_resolver, instance.store, instance.llm)
 
@@ -258,6 +266,9 @@ class Context:
             if await self.profile_job.should_run(ctx):
                 await self.profile_job.execute(ctx)
             
+            if await self.cleanup_job.should_run(ctx):
+                await self.cleanup_job.execute(ctx)
+            
             if await self.merge_job.should_run(ctx):
                 await self.merge_job.execute(ctx)
 
@@ -275,7 +286,7 @@ class Context:
         buffer_len = await self.redis_client.llen(buffer_key)
         await self.scheduler.record_activity()
         
-        if buffer_len >= BATCH_SIZE:
+        if buffer_len >= BATCH_SIZE and not self._batch_in_progress:
             if self._batch_timer_task:
                 self._batch_timer_task.cancel()
                 self._batch_timer_task = None
@@ -330,40 +341,47 @@ class Context:
         while await self.redis_client.exists("system:maintenance_lock"):
             logger.warning("Maintenance Lock Active: Pausing Batch Processing...")
             await asyncio.sleep(2)
-            
-        async with self._batch_processing_lock:
-            logger.info("Starting batch processing...")
-            
-            buffer_key = f"buffer:{self.user_name}"
-            messages = await self.batch_processor.get_buffered_messages(buffer_key, BATCH_SIZE)
-            
-            if not messages:
-                return
-            
-            conversation = await self.get_conversation_context(SESSION_WINDOW * 2)
-            session_text = "\n".join([
-                f"[{turn['role_label']}]: {turn['content']}" 
-                for turn in conversation
-            ])
-            
-            result = await self.batch_processor.run(messages, session_text)
-            
-            if not result.success:
-                await self.batch_processor.move_to_dead_letter(messages, result.error)
-            else:
-                if result.emotions:
-                    await self.redis_client.rpush(f"emotions:{self.user_name}", *result.emotions)
+        
+        if self._batch_in_progress:
+            return
+
+        self._batch_in_progress = True
+        try:  
+            async with self._batch_processing_lock:
+                logger.info("Starting batch processing...")
                 
-                if result.extraction_result:
-                    await self._write_to_graph(
-                        result.entity_ids,
-                        result.new_entity_ids,
-                        result.alias_updated_ids,
-                        result.extraction_result
-                    )
-            
-            await self.redis_client.ltrim(buffer_key, len(messages), -1)
-            logger.debug(f"Trimmed {len(messages)} from {buffer_key}")
+                buffer_key = f"buffer:{self.user_name}"
+                messages = await self.batch_processor.get_buffered_messages(buffer_key, BATCH_SIZE)
+                
+                if not messages:
+                    return
+                
+                conversation = await self.get_conversation_context(SESSION_WINDOW * 2)
+                session_text = "\n".join([
+                    f"[{turn['role_label']}]: {turn['content']}" 
+                    for turn in conversation
+                ])
+                
+                result = await self.batch_processor.run(messages, session_text)
+                
+                if not result.success:
+                    await self.batch_processor.move_to_dead_letter(messages, result.error)
+                else:
+                    if result.emotions:
+                        await self.redis_client.rpush(f"emotions:{self.user_name}", *result.emotions)
+                    
+                    if result.extraction_result:
+                        await self._write_to_graph(
+                            result.entity_ids,
+                            result.new_entity_ids,
+                            result.alias_updated_ids,
+                            result.extraction_result
+                        )
+                
+                await self.redis_client.ltrim(buffer_key, len(messages), -1)
+                logger.debug(f"Trimmed {len(messages)} from {buffer_key}")
+        finally:
+            self._batch_in_progress = False
 
     
     async def _write_to_graph(
