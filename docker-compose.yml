@@ -47,8 +47,6 @@ services:
     environment:
       - QUICK_CONNECT_MG_HOST=memgraph
       - QUICK_CONNECT_MG_PORT=7687
-      - QUICK_CONNECT_MG_USERNAME=${MEMGRAPH_USER}
-      - QUICK_CONNECT_MG_PASSWORD=${MEMGRAPH_PASSWORD}
     restart: unless-stopped
 
   vestige-api:
