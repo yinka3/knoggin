@@ -30,9 +30,9 @@ from utils import format_relative_time
 load_dotenv()
 
 BATCH_SIZE = 10
-PROFILE_INTERVAL = 15
+PROFILE_INTERVAL = 30
 SESSION_WINDOW = 60
-BATCH_TIMEOUT_SECONDS = 60
+BATCH_TIMEOUT_SECONDS = 30
 
 class Context:
 
@@ -132,7 +132,7 @@ class Context:
         # Scheduler only gets DLQ
         instance.scheduler = Scheduler(user_name)
         instance.scheduler.register(DLQReplayJob())
-        instance.scheduler.register(MoodCheckpointJob(user_name, instance.store))
+        # instance.scheduler.register(MoodCheckpointJob(user_name, instance.store))
         await instance.scheduler.start()
         
         return instance
@@ -159,7 +159,8 @@ class Context:
                 self._fire_and_forget(self.process_batch())
         except asyncio.CancelledError:
             pass
-
+        finally:
+            self._batch_timer_task = None
 
     async def get_next_msg_id(self) -> int:
         return await self.redis_client.incr("global:next_msg_id")
@@ -351,35 +352,52 @@ class Context:
                 logger.info("Starting batch processing...")
                 
                 buffer_key = f"buffer:{self.user_name}"
-                messages = await self.batch_processor.get_buffered_messages(buffer_key, BATCH_SIZE)
-                
-                if not messages:
-                    return
-                
-                conversation = await self.get_conversation_context(SESSION_WINDOW * 2)
-                session_text = "\n".join([
-                    f"[{turn['role_label']}]: {turn['content']}" 
-                    for turn in conversation
-                ])
-                
-                result = await self.batch_processor.run(messages, session_text)
-                
-                if not result.success:
-                    await self.batch_processor.move_to_dead_letter(messages, result.error)
-                else:
-                    if result.emotions:
-                        await self.redis_client.rpush(f"emotions:{self.user_name}", *result.emotions)
+
+                while True:
+                    if await self.redis_client.exists("system:maintenance_lock"):
+                        logger.info("Maintenance lock detected during loop. Pausing...")
+                        await asyncio.sleep(2)
+                        continue
+
+                    q_len = await self.redis_client.llen(buffer_key)
+                    if q_len == 0:
+                        logger.debug("Buffer empty, consumer loop exiting.")
+                        break
+
+                    messages = await self.batch_processor.get_buffered_messages(buffer_key, BATCH_SIZE)
                     
-                    if result.extraction_result:
-                        await self._write_to_graph(
-                            result.entity_ids,
-                            result.new_entity_ids,
-                            result.alias_updated_ids,
-                            result.extraction_result
-                        )
-                
-                await self.redis_client.ltrim(buffer_key, len(messages), -1)
-                logger.debug(f"Trimmed {len(messages)} from {buffer_key}")
+                    if not messages:
+                        return
+                    
+                    conversation = await self.get_conversation_context(SESSION_WINDOW * 2)
+                    session_text = "\n".join([
+                        f"[{turn['role_label']}]: {turn['content']}" 
+                        for turn in conversation
+                    ])
+                    
+                    result = await self.batch_processor.run(messages, session_text)
+                    
+                    if not result.success:
+                        await self.batch_processor.move_to_dead_letter(messages, result.error)
+                    else:
+                        if result.emotions:
+                            await self.redis_client.rpush(f"emotions:{self.user_name}", *result.emotions)
+                        
+                        if result.extraction_result:
+                            await self._write_to_graph(
+                                result.entity_ids,
+                                result.new_entity_ids,
+                                result.alias_updated_ids,
+                                result.extraction_result
+                            )
+                    
+                    await self.redis_client.ltrim(buffer_key, len(messages), -1)
+                    await asyncio.sleep(0.1)
+                    
+                if self._batch_timer_task:
+                    self._batch_timer_task.cancel()
+                    self._batch_timer_task = None
+                    
         finally:
             self._batch_in_progress = False
 
@@ -479,7 +497,7 @@ class Context:
             self._batch_timer_task = None
         
         buffer_key = f"buffer:{self.user_name}"
-        while await self.redis_client.llen(buffer_key) > 0:
+        if await self.redis_client.llen(buffer_key) > 0:
             await self.process_batch()
         
         logger.info("Running Last job sequence before shutdown")
