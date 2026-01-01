@@ -60,59 +60,73 @@ class MemGraphStore:
         logger.info("Memgraph schema indices verified.")
     
     def write_batch(self, entities: List[Dict], relationships: List[Dict], is_user_message: bool = False):
+        entity_params = []
+        for e in entities:
+            e_clean = e.copy()
+            e_clean["aliases"] = e.get("aliases") or []
+            entity_params.append(e_clean)
+
+        relationship_params = []
+        for r in relationships:
+            r_clean = r.copy()
+            r_clean["confidence"] = r.get("confidence", 1.0)
+            relationship_params.append(r_clean)
+
         def _write(tx: 'ManagedTransaction'):
-            for ent in entities:
+            if entity_params:
                 tx.run("""
-                    MERGE (e:Entity {id: $id})
+                    UNWIND $batch AS data
+                    MERGE (e:Entity {id: data.id})
                     ON CREATE SET
-                        e.canonical_name = $canonical_name,
-                        e.aliases = $aliases,
-                        e.type = $type,
-                        e.summary = $summary,
-                        e.confidence = $confidence,
+                        e.canonical_name = data.canonical_name,
+                        e.aliases = data.aliases,
+                        e.type = data.type,
+                        e.summary = data.summary,
+                        e.confidence = data.confidence,
                         e.last_updated = timestamp(),
                         e.last_mentioned = timestamp(),
-                        e.embedding = $embedding
+                        e.embedding = data.embedding
                     ON MATCH SET 
-                        e.canonical_name = $canonical_name,
-                        e.confidence = $confidence,
+                        e.canonical_name = data.canonical_name,
+                        e.confidence = data.confidence,
                         e.last_updated = timestamp(),
                         e.last_mentioned = timestamp()
 
-                    WITH e
-                    UNWIND coalesce(e.aliases, []) + $aliases AS alias
-                    WITH e, collect(DISTINCT alias) AS unique_aliases
+                    WITH e, data
+                    UNWIND coalesce(e.aliases, []) + data.aliases AS alias
+                    WITH e, data, collect(DISTINCT alias) AS unique_aliases
                     SET e.aliases = unique_aliases
 
-                    WITH e
-                    FOREACH (_ IN CASE WHEN $topic IS NOT NULL AND $topic <> "" THEN [1] ELSE [] END |
-                        MERGE (t:Topic {name: $topic})
+                    WITH e, data
+                    FOREACH (_ IN CASE WHEN data.topic IS NOT NULL AND data.topic <> "" THEN [1] ELSE [] END |
+                        MERGE (t:Topic {name: data.topic})
                         MERGE (e)-[:BELONGS_TO]->(t)
                     )
-                """, **ent, is_user_message=is_user_message)
+                """, batch=entity_params, is_user_message=is_user_message)
 
-            for rel in relationships:
+            if relationship_params:
                 tx.run("""
-                    MATCH (a:Entity {canonical_name: $entity_a})
-                    MATCH (b:Entity {canonical_name: $entity_b})
+                    UNWIND $batch AS rel
+                    MATCH (a:Entity {canonical_name: rel.entity_a})
+                    MATCH (b:Entity {canonical_name: rel.entity_b})
                     MERGE (a)-[r:RELATED_TO]-(b)
                     
                     ON CREATE SET 
                         r.weight = 1, 
-                        r.confidence = $confidence,
+                        r.confidence = rel.confidence,
                         r.last_seen = timestamp(), 
-                        r.message_ids = [$message_id]
+                        r.message_ids = [rel.message_id]
                         
                     ON MATCH SET 
                         r.weight = r.weight + 1,
-                        r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
+                        r.confidence = CASE WHEN rel.confidence > r.confidence THEN rel.confidence ELSE r.confidence END,
                         r.last_seen = timestamp()
                        
-                    WITH r
-                    UNWIND coalesce(r.message_ids, []) + [$message_id] AS mid
+                    WITH r, rel
+                    UNWIND coalesce(r.message_ids, []) + [rel.message_id] AS mid
                     WITH r, collect(DISTINCT mid) AS unique_ids
                     SET r.message_ids = unique_ids
-                """, **rel)
+                """, batch=relationship_params)
 
         with self.driver.session() as session:
             session.execute_write(_write)
@@ -328,24 +342,61 @@ class MemGraphStore:
             
             return grouped
     
-    def search_entity(self, query: str, limit: int = 5):
+    def search_entity(self, query: str, limit: int = 5, connections_limit: int = 5) -> list[dict]:
         """
-        Search for entities by name or alias.
+        Search for entities by name/alias with top connections included.
         """
-        query_cypher = """
+        cypher = """
         MATCH (e:Entity)
-        WHERE (e.canonical_name CONTAINS $query 
-            OR ANY(alias IN e.aliases WHERE alias CONTAINS $query))
+        WHERE toLower(e.canonical_name) CONTAINS toLower($query)
+        OR ANY(alias IN e.aliases WHERE toLower(alias) CONTAINS toLower($query))
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         WITH e, t
         WHERE t IS NULL OR t.status IS NULL OR t.status <> 'inactive'
-        RETURN e.id as id, e.canonical_name as name, e.summary as summary, e.type as type
-        ORDER BY e.last_mentioned DESC
+        WITH e
         LIMIT $limit
+        OPTIONAL MATCH (e)-[r:RELATED_TO]-(conn:Entity)
+        RETURN e.id AS id,
+            e.canonical_name AS canonical_name,
+            e.aliases AS aliases,
+            e.type AS type,
+            e.summary AS summary,
+            e.topic AS topic,
+            e.last_mentioned AS last_mentioned,
+            e.last_updated AS last_updated,
+            conn.canonical_name AS conn_name,
+            conn.aliases AS conn_aliases,
+            r.weight AS conn_weight
+        ORDER BY e.last_mentioned DESC, conn_weight DESC
         """
+        
         with self.driver.session() as session:
-            result = session.run(query_cypher, {"query": query, "limit": limit})
-            return [record.data() for record in result]
+            result = session.run(cypher, {"query": query, "limit": limit})
+            
+            entities = {}
+            for row in result:
+                eid = row["id"]
+                
+                if eid not in entities:
+                    entities[eid] = {
+                        "id": eid,
+                        "canonical_name": row["canonical_name"],
+                        "aliases": row["aliases"] or [],
+                        "type": row["type"],
+                        "summary": row["summary"],
+                        "topic": row["topic"],
+                        "last_mentioned": row["last_mentioned"],
+                        "last_updated": row["last_updated"],
+                        "top_connections": []
+                    }
+                
+                if row["conn_name"] and len(entities[eid]["top_connections"]) < connections_limit:
+                    entities[eid]["top_connections"].append({
+                        "canonical_name": row["conn_name"],
+                        "aliases": row["conn_aliases"] or []
+                    })
+            
+            return list(entities.values())
     
     def get_entity_profile(self, entity_name: str):
         """
