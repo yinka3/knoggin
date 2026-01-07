@@ -50,8 +50,7 @@ STELLA serves as the conversational agent, using a bounded 5-state machine for r
 
 **Tools:**
 - `search_messages` — Semantic search over past messages
-- `search_entities` — Find entities by name or alias
-- `get_profile` — Full profile for a known entity
+- `search_entity` — Find entities by name or alias
 - `get_connections` — Find related entities
 - `get_activity` — Recent interactions involving an entity
 - `find_path` — Shortest connection path between two entities
