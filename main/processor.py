@@ -140,7 +140,7 @@ class BatchProcessor:
 
     async def _build_known_entities(self, mentions: List[Tuple[str, str, str]]) -> List[Dict]:
         mention_names = [name for name, _, _ in mentions]
-        entities = self.store.get_entities_by_name(mention_names)
+        entities = self.store.get_entities_by_names(mention_names)
         
         seen_ids = set()
         known = []

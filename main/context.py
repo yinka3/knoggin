@@ -24,15 +24,13 @@ from main.entity_resolve import EntityResolver
 from db.memgraph import MemGraphStore
 from main.prompts import *
 from log.llm_trace import get_trace_logger
-from utils import format_relative_time
 
 
 load_dotenv()
 
-BATCH_SIZE = 10
-PROFILE_INTERVAL = 30
+BATCH_SIZE = 20
 SESSION_WINDOW = 60
-BATCH_TIMEOUT_SECONDS = 30
+BATCH_TIMEOUT_SECONDS = 15
 
 class Context:
 
@@ -142,7 +140,9 @@ class Context:
         if task.cancelled():
             return
         if exc := task.exception():
+            import traceback
             logger.error(f"Background task failed: {exc}")
+            logger.error("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     
     def _fire_and_forget(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -190,7 +190,6 @@ class Context:
         pipe = self.redis_client.pipeline()
         pipe.hset(conv_key, turn_key, json.dumps(payload))
         pipe.zadd(sorted_key, {turn_key: timestamp.timestamp()})
-        pipe.zremrangebyrank(sorted_key, 0, -(SESSION_WINDOW * 2 + 1)) # keep more since it's both sides
         await pipe.execute()
         
         return turn_id
@@ -203,23 +202,26 @@ class Context:
             'timestamp': msg.timestamp.isoformat()
         }))
 
-        await self.add_to_conversation_log(
+        turn_id = await self.add_to_conversation_log(
             role="user",
             content=msg.message.strip(),
             timestamp=msg.timestamp,
             user_msg_id=msg.id
         )
+
+        await self.redis_client.hset(
+            f"lookup:msg_to_turn:{self.user_name}", 
+            msg_key, 
+            f"turn_{turn_id}"
+        )
+
         self.ent_resolver.add_message(msg_key, msg.message.strip())
     
 
     async def _get_or_create_user_entity(self, user_name: str):
         loop = asyncio.get_running_loop()
 
-        entity_id = await loop.run_in_executor(
-            self.executor,
-            self.ent_resolver.get_id,
-            user_name
-        )
+        entity_id = self.ent_resolver.get_id(user_name)
 
         if entity_id:
             logger.info(f"User {user_name} recognized.")
@@ -302,6 +304,14 @@ class Context:
             await self.redis_client.set(checkpoint_key, 0)
             self._fire_and_forget(self._run_session_jobs())
     
+    async def add_assistant_turn(self, content: str, timestamp: datetime):
+        turn_id = await self.add_to_conversation_log(
+            role="assistant",
+            content=content,
+            timestamp=timestamp
+        )
+        self.ent_resolver.add_message(f"turn_{turn_id}", content)
+    
     async def get_conversation_context(self, num_turns: int) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
         sorted_key = f"recent_conversation:{self.user_name}"
@@ -324,14 +334,14 @@ class Context:
                 parsed = json.loads(data)
                 role_label = "User" if parsed["role"] == "user" else "STELLA"
                 ts = datetime.fromisoformat(parsed['timestamp'])
-                relative = format_relative_time(now, ts)
+                date_str = ts.strftime("%Y-%m-%d")
                 results.append({
                     "turn_id": turn_id,
                     "role": parsed["role"],
                     "role_label": role_label,
                     "content": parsed["content"],
                     "timestamp": parsed["timestamp"],
-                    "relative": relative,
+                    "relative": f"[{date_str}]",
                     "user_msg_id": parsed.get("user_msg_id")
                 })
         
@@ -343,14 +353,15 @@ class Context:
             logger.warning("Maintenance Lock Active: Pausing Batch Processing...")
             await asyncio.sleep(2)
         
-        if self._batch_in_progress:
-            return
+        async with self._batch_processing_lock:
+            if self._batch_in_progress:
+                return
+            self._batch_in_progress = True
 
-        self._batch_in_progress = True
         try:  
             async with self._batch_processing_lock:
                 logger.info("Starting batch processing...")
-                
+                logger.info(f"I have {BATCH_SIZE}")
                 buffer_key = f"buffer:{self.user_name}"
 
                 while True:
@@ -369,7 +380,7 @@ class Context:
                     if not messages:
                         return
                     
-                    conversation = await self.get_conversation_context(SESSION_WINDOW * 2)
+                    conversation = await self.get_conversation_context(SESSION_WINDOW)
                     session_text = "\n".join([
                         f"[{turn['role_label']}]: {turn['content']}" 
                         for turn in conversation
@@ -494,19 +505,17 @@ class Context:
         
         if self._batch_timer_task:
             self._batch_timer_task.cancel()
-            self._batch_timer_task = None
         
+        if self._background_tasks:
+            logger.info(f"Waiting for {len(self._background_tasks)} background tasks...")
+            await asyncio.wait(self._background_tasks, timeout=120)
+
         buffer_key = f"buffer:{self.user_name}"
         if await self.redis_client.llen(buffer_key) > 0:
             await self.process_batch()
         
         logger.info("Running Last job sequence before shutdown")
         await self._run_session_jobs()
-
-        await asyncio.sleep(SESSION_WINDOW // 2)
-        if self._background_tasks:
-            logger.info(f"Waiting for {len(self._background_tasks)} background tasks...")
-            await asyncio.wait(self._background_tasks, timeout=90)
         
         logger.info("Shutdown complete")
 
