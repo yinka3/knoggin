@@ -99,7 +99,7 @@ class BatchProcessor:
             if user_id and user_id not in entity_ids:
                 entity_ids.append(user_id)
             
-            connections = await self._extract_connections(entity_ids, messages)
+            connections = await self._extract_connections(entity_ids, messages, session_text)
             if not connections:
                 logger.error("Connection extraction failed")
             result.extraction_result = connections
@@ -114,7 +114,7 @@ class BatchProcessor:
     
     async def _extract_mentions(self, messages: List[Dict]) -> Tuple[Dict[str, Dict], List[str]]:
         """Run NER and emotion detection across all messages."""
-        loop = asyncio.get_running_loop()
+        # loop = asyncio.get_running_loop()
         
         combined_text = "\n".join([f"[MSG {m['id']}]: {m['message']}" for m in messages])
         mentions = await self.nlp.extract_mentions(self.user_name, self.topics, combined_text)
@@ -124,36 +124,35 @@ class BatchProcessor:
             if text not in unique_mentions:
                 unique_mentions[text] = {"type": typ, "topic": topic}
         
-        emotion_tasks = [
-            loop.run_in_executor(self.executor, self.nlp.analyze_emotion, m["message"])
-            for m in messages
-        ]
-        all_emotions = await asyncio.gather(*emotion_tasks)
+        # emotion_tasks = [
+        #     loop.run_in_executor(self.executor, self.nlp.analyze_emotion, m["message"])
+        #     for m in messages
+        # ]
+        # all_emotions = await asyncio.gather(*emotion_tasks)
         
         emotions = []
-        for emotion_list in all_emotions:
-            if emotion_list:
-                dominant = max(emotion_list, key=lambda x: x["score"])
-                emotions.append(dominant["label"])
+        # for emotion_list in all_emotions:
+        #     if emotion_list:
+        #         dominant = max(emotion_list, key=lambda x: x["score"])
+        #         emotions.append(dominant["label"])
         
         return unique_mentions, emotions
 
     async def _build_known_entities(self, mentions: List[Tuple[str, str, str]]) -> List[Dict]:
-        matched_ids = set()
+        mention_names = [name for name, _, _ in mentions]
+        entities = self.store.get_entities_by_name(mention_names)
+        
+        seen_ids = set()
         known = []
-        
-        for mention_name, _, _ in mentions:
-            entities = self.store.get_entities_by_name(mention_name)
-            for ent in entities:
-                if ent["id"] not in matched_ids:
-                    matched_ids.add(ent["id"])
-                    known.append({
-                        "canonical_name": ent["canonical_name"],
-                        "type": ent["type"],
-                        "aliases": ent["aliases"] or [],
-                        "summary": ent.get("summary") or ""
-                    })
-        
+        for ent in entities:
+            if ent["id"] not in seen_ids:
+                seen_ids.add(ent["id"])
+                known.append({
+                    "canonical_name": ent["canonical_name"],
+                    "type": ent["type"],
+                    "aliases": ent["aliases"] or [],
+                    "summary": ent.get("summary") or ""
+                })
         return known
 
     async def _disambiguate(
@@ -243,7 +242,8 @@ class BatchProcessor:
     async def _extract_connections(
         self,
         entity_ids: List[int],
-        messages: List[Dict]
+        messages: List[Dict],
+        session_text: str
     ) -> Optional[ConnectionExtractionResponse]:
         """Extract connections between entities."""
         candidates = []
@@ -258,7 +258,7 @@ class BatchProcessor:
         
         messages_text = "\n".join([f"{m['id']}: \"{m['message']}\"" for m in messages])
         
-        system_04 = get_connection_reasoning_prompt(self.user_name, messages_text)
+        system_04 = get_connection_reasoning_prompt(self.user_name, messages_text, session_text)
         user_04 = json.dumps({"candidate_entities": candidates, "messages": messages})
         
         reasoning = await self.llm.call_reasoning(system_04, user_04)
