@@ -262,16 +262,17 @@ class MemGraphStore:
             result = session.run(query, {"entity_id": entity_id})
             return {record["neighbor_id"] for record in result}
     
-    def get_entities_by_name(self, name: str) -> List[Dict]:
+    def get_entities_by_names(self, names: List[str]) -> List[Dict]:
+        lower_names = [n.lower() for n in names]
         query = """
         MATCH (e:Entity)
-        WHERE toLower(e.canonical_name) = toLower($name)
-        OR any(alias IN e.aliases WHERE toLower(alias) = toLower($name))
+        WHERE toLower(e.canonical_name) IN $names
+            OR any(alias IN e.aliases WHERE toLower(alias) IN $names)
         RETURN e.id as id, e.canonical_name as canonical_name, 
             e.type as type, e.aliases as aliases, e.summary as summary
         """
         with self.driver.session() as session:
-            result = session.run(query, {"name": name})
+            result = session.run(query, {"names": lower_names})
             return [dict(record) for record in result]
 
     def set_topic_status(self, topic_name: str, status: str):
@@ -312,37 +313,49 @@ class MemGraphStore:
                 "message_count": message_count
             }).consume()
     
+    def reset_all_topics_to_active(self):
+        """Set all topics to active status."""
+        query = "MATCH (t:Topic) SET t.status = NULL"
+        with self.driver.session() as session:
+            session.run(query).consume()
     
-    def get_hot_topic_context(self, hot_topic_names: List[str]):
+    def get_hot_topic_context_with_messages(self, hot_topic_names: List[str], msg_limit: int = 5, slim: bool = False) -> dict:
         """
-        Retrieves the top 3 most recently active entities for each Hot Topic.
+        Get top entities + recent message IDs per hot topic.
+        slim=True: returns name + aliases only (no summaries)
         """
-        query = """
+        if slim:
+            entity_projection = "{name: e.canonical_name, aliases: e.aliases}"
+            msg_limit = 20
+        else:
+            entity_projection = "{name: e.canonical_name, summary: e.summary}"
+        
+        query = f"""
         MATCH (t:Topic) WHERE t.name IN $hot_topics
         MATCH (e:Entity)-[:BELONGS_TO]->(t)
-
-        WITH t, e ORDER BY e.last_mentioned DESC 
-        WITH t, collect(e)[..3] as top_entities
-        UNWIND top_entities as e
-        RETURN t.name as topic, e.canonical_name as name, e.summary as summary
+        OPTIONAL MATCH (e)-[r:RELATED_TO]-()
+        
+        WITH t, e, r ORDER BY e.last_mentioned DESC
+        WITH t, 
+            collect(DISTINCT {entity_projection})[..3] as entities,
+            reduce(flat = [], arr IN collect(DISTINCT r.message_ids) | flat + arr) as flat_msgs
+        
+        RETURN t.name as topic, 
+            entities,
+            flat_msgs[..$msg_limit] as message_ids
         """
         
         with self.driver.session() as session:
-            result = session.run(query, {"hot_topics": hot_topic_names})
-            
-            grouped = {}
-            for record in result:
-                topic = record["topic"]
-                if topic not in grouped:
-                    grouped[topic] = []
-                grouped[topic].append({
-                    "name": record["name"],
-                    "summary": record["summary"]
-                })
-            
-            return grouped
+            result = session.run(query, {"hot_topics": hot_topic_names, "msg_limit": msg_limit})
+            return {
+                record["topic"]: {
+                    "entities": record["entities"],
+                    "message_ids": record["message_ids"] or []
+                }
+                for record in result
+            }
     
-    def search_entity(self, query: str, limit: int = 5, connections_limit: int = 5) -> list[dict]:
+    def search_entity(self, query: str, limit: int = 5, connections_limit: int = 5, evidence_limit: int = 5) -> list[dict]:
         """
         Search for entities by name/alias with top connections included.
         """
@@ -366,12 +379,14 @@ class MemGraphStore:
             e.last_updated AS last_updated,
             conn.canonical_name AS conn_name,
             conn.aliases AS conn_aliases,
-            r.weight AS conn_weight
+            conn.summary AS conn_summary,
+            r.weight AS conn_weight,
+            r.message_ids AS evidence_ids
         ORDER BY e.last_mentioned DESC, conn_weight DESC
         """
         
         with self.driver.session() as session:
-            result = session.run(cypher, {"query": query, "limit": limit})
+            result = session.run(cypher, {"query": query, "limit": limit, "evidence_limit": evidence_limit})
             
             entities = {}
             for row in result:
@@ -393,9 +408,11 @@ class MemGraphStore:
                 if row["conn_name"] and len(entities[eid]["top_connections"]) < connections_limit:
                     entities[eid]["top_connections"].append({
                         "canonical_name": row["conn_name"],
-                        "aliases": row["conn_aliases"] or []
+                        "aliases": row["conn_aliases"] or [],
+                        "summary": row["conn_summary"] or "",
+                        "weight": row["conn_weight"],
+                        "evidence_ids": (row["evidence_ids"] or [])[:evidence_limit]
                     })
-            
             return list(entities.values())
     
     def get_entity_profile(self, entity_name: str):
