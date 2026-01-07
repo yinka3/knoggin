@@ -9,7 +9,7 @@ import redis
 
 from agent.tools import Tools
 from main.service import LLMService
-from main.system_prompt import get_stella_prompt
+from agent.system_prompt import get_stella_prompt
 from schema.dtypes import (
     ClarificationRequest,
     ClarificationResult,
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 class AgentContext:
     user_query: str = ""
     call_count: int = 0
-    max_calls: int = 8
+    max_calls: int = 6
     attempt_count: int = 0
     max_attempts: int = 8
     trace_id: str = ""
@@ -50,16 +50,31 @@ class AgentContext:
     tools_used: List[str] = field(default_factory=list)
     _previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     _last_error: Optional[str] = None
+    _tool_call_counts: Dict[str, int] = field(default_factory=dict)
+
+    TOOL_LIMITS: Dict[str, int] = field(default_factory=lambda: {
+        "search_messages": 3,
+        "get_connections": 3,
+        "search_entity": 4,
+        "get_activity": 5,
+        "find_path": 5,
+    })
 
     def is_duplicate(self, tool_name: str, args: Dict) -> bool:
         call_sig = (tool_name, str(sorted(args.items())))
         return call_sig in self._previous_calls
+
+    def tool_limit_reached(self, tool_name: str) -> bool:
+        limit = self.TOOL_LIMITS.get(tool_name, 6) # same as max calls
+        return self._tool_call_counts.get(tool_name, 0) >= limit
 
     def record_call(self, tool_name: str, args: Dict):
         call_sig = (tool_name, str(sorted(args.items())))
         self._previous_calls.add(call_sig)
         self.call_count += 1
         self.tools_used.append(tool_name)
+        self._tool_call_counts[tool_name] = self._tool_call_counts.get(tool_name, 0) + 1
+
 
     def has_evidence(self) -> bool:
         return bool(self.entity_profiles or self.retrieved_messages or self.graph_results)
@@ -105,7 +120,7 @@ def build_user_message(ctx: AgentContext, last_result: Optional[Dict] = None) ->
                 if data is None or data == [] or data == {}:
                     msg += f"- `{tool}`: No results found\n"
                 else:
-                    msg += f"- `{tool}`: {json.dumps(data, indent=2, default=str)[:500]}\n"
+                    msg += f"- `{tool}`: {json.dumps(data, indent=2, default=str)}\n"
 
     if ctx.hot_topic_context:
         msg += f"\n**Hot topic context (pre-fetched):**\n```json\n{json.dumps(ctx.hot_topic_context, indent=2, default=str)}\n```\n"
@@ -127,11 +142,12 @@ async def call_the_doctor(
     ctx: AgentContext,
     user_name: str,
     last_result: Optional[Dict] = None,
-    persona: str = ""
+    persona: str = "",
+    date: str = ""
 ) -> StellaResponse:
     
-    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    system_prompt = get_stella_prompt(user_name, current_time, persona)
+    # current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    system_prompt = get_stella_prompt(user_name, date, persona)
     user_message = build_user_message(ctx, last_result)
 
     response = await llm.call_with_tools(
@@ -140,8 +156,16 @@ async def call_the_doctor(
         tools=TOOL_SCHEMAS
     )
 
-    if not response or not response.get("tool_calls"):
-        return FinalResponse(content="I couldn't determine how to help.")
+    if not response:
+        return FinalResponse(content="System Error: LLM failed to respond.")
+    
+    content = response.get("content", "") or ""
+    
+    if not response.get("tool_calls"):
+        return FinalResponse(content=content)
+    
+    if content:
+        logger.info(f"[STELLA THOUGHT]: {content}")
 
     tool_calls = response["tool_calls"]
     if len(tool_calls) == 1:
@@ -149,8 +173,6 @@ async def call_the_doctor(
         name = tc["name"]
         args = json.loads(tc["arguments"])
 
-        if name == "finish":
-            return FinalResponse(content=args.get("response", ""))
         if name == "request_clarification":
             return ClarificationRequest(question=args.get("question", ""))
         return ToolCall(name=name, args=args)
@@ -160,14 +182,14 @@ async def call_the_doctor(
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
     dispatch = {
-        "search_messages": lambda: tools.search_messages(args.get("query", ""), args.get("limit", 5)),
-        "search_entities": lambda: tools.search_entities(args.get("query", "")),
-        "get_profile": lambda: tools.get_profile(args.get("entity_name", "")),
+        "search_messages": lambda: tools.search_messages(args.get("query", ""), args.get("limit", 15)),
+        "search_entity": lambda: tools.search_entity(args.get("query", ""), args.get("limit", 5)),
         "get_connections": lambda: tools.get_connections(args.get("entity_name", "")),
         "get_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
         "find_path": lambda: tools.find_path(args.get("entity_a", ""), args.get("entity_b", ""))
     }
 
+    logger.info(f"[TOOL CALL] {name}: {json.dumps(args)}")
     if name not in dispatch:
         return {"error": f"Unknown tool: {name}"}
 
@@ -187,13 +209,21 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
     if not data:
         return
 
+    def _merge_unique(target_list: List, new_items, key_func):
+        existing_keys = {key_func(item) for item in target_list}
+        for item in new_items:
+            k = key_func(item)
+            if k not in existing_keys:
+                target_list.append(item)
+                existing_keys.add(k)
+
     if tool_name == "search_messages":
-        ctx.retrieved_messages.extend(data if isinstance(data, list) else [])
-    elif tool_name == "search_entities":
-        ctx.entity_profiles.extend(data if isinstance(data, list) else [])
-    elif tool_name == "get_profile":
-        if data:
-            ctx.entity_profiles.append(data)
+        _merge_unique(ctx.retrieved_messages, data if isinstance(data, list) else [], lambda x: x['id'])
+        if len(ctx.retrieved_messages) > 30:
+            ctx.retrieved_messages.sort(key=lambda x: x.get('score', 0), reverse=True)
+            ctx.retrieved_messages = ctx.retrieved_messages[:30]
+    elif tool_name == "search_entity":
+        _merge_unique(ctx.entity_profiles, data if isinstance(data, list) else [], lambda x: x['id'])
     elif tool_name in ("get_connections", "get_activity", "find_path"):
         ctx.graph_results.extend(data if isinstance(data, list) else [])
 
@@ -207,12 +237,7 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
     if data is None:
         return "No results", 0
 
-    if tool_name == "get_profile":
-        if data:
-            return f"Found: {data.get('name', data.get('canonical_name', 'unknown'))}", 1
-        return "Not found", 0
-
-    if tool_name in ("get_connections", "get_activity", "search_messages", "search_entities"):
+    if tool_name in ("get_connections", "get_activity", "search_messages", "search_entity"):
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} results", count
 
@@ -222,7 +247,7 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         return "No path", 0
 
     return "Completed", 1
-
+    
 
 async def run(
     user_query: str,
@@ -233,7 +258,10 @@ async def run(
     llm: LLMService,
     store: 'MemGraphStore',
     ent_resolver: 'EntityResolver',
-    redis_client: redis.Redis
+    redis_client: redis.Redis,
+    persona: str = "",
+    slim_hot_context: bool = False,
+    date: str = ""
 ) -> RunResult:
     
     # Check for system warnings
@@ -262,23 +290,33 @@ async def run(
     tools = Tools(user_name, store, ent_resolver, redis_client, active_topics)
 
     if hot_topics:
-        ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics)
+        ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=slim_hot_context)
+        logger.info(f"[HOT CONTEXT] {json.dumps(ctx.hot_topic_context, indent=2, default=str)[:1000]}")
 
     last_result = None
     step = 0
 
     while ctx.attempt_count < ctx.max_attempts:
         ctx.attempt_count += 1
+        should_force_conclusion = (
+            ctx.attempt_count >= ctx.max_attempts - 1  # Last attempt
+            and ctx.has_evidence()
+        )
         step += 1
         step_start = time.perf_counter()
 
-        response = await call_the_doctor(llm, ctx, user_name, last_result)
+        if should_force_conclusion:
+            ctx._last_error = "Final attempt. You MUST respond now using accumulated evidence. Do not call any tools."
+
+        response = await call_the_doctor(llm, ctx, user_name, last_result, persona, date)
 
         # Handle final response
         if isinstance(response, FinalResponse):
             logger.info(f"[STELLA] Trace {trace.trace_id} completed: {len(trace.entries)} tool calls")
+            logger.info(f"[STELLA] Max attempts reached for query: {user_query[:50]}...")
+            logger.info(f"[STELLA] Trace {trace.trace_id} fallback: {len(trace.entries)} tool calls")
             for entry in trace.entries:
-                logger.debug(f"  Step {entry.step}: {entry.tool} -> {entry.result_summary} ({entry.duration_ms:.0f}ms)")
+                logger.info(f"  Step {entry.step}: {entry.tool} -> {entry.result_summary} ({entry.duration_ms:.0f}ms)")
             
             final_text = system_warning + response.content if system_warning else response.content
             return CompleteResult(
@@ -328,6 +366,12 @@ async def run(
                 all_results.append({"tool": tool_name, "error": ctx._last_error})
                 continue
 
+            # Check per-tool limit
+            if ctx.tool_limit_reached(tool_name):
+                ctx._last_error = f"{tool_name} limit reached ({ctx.TOOL_LIMITS[tool_name]}). Use a different tool or conclude."
+                all_results.append({"tool": tool_name, "error": ctx._last_error})
+                continue
+
             # Check call limit
             if ctx.call_count >= ctx.max_calls:
                 ctx._last_error = "Call limit reached. You must finish with accumulated evidence or request clarification."
@@ -347,6 +391,7 @@ async def run(
 
             # Execute
             result = await execute_tool(tools, tool_name, args)
+            logger.info(f"[TOOL RESULT] {tool_name}: {json.dumps(result, default=str)[:1000]}")
             result_summary, result_count = summarize_result(tool_name, result)
             
             trace.entries.append(TraceEntry(

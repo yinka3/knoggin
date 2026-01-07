@@ -1,8 +1,6 @@
 import json
-from typing import List, Dict, Optional, TYPE_CHECKING
+from typing import List, Dict, Optional
 
-import faiss
-import numpy as np
 from rapidfuzz import process as fuzzy_process, fuzz
 import redis
 from main.entity_resolve import EntityResolver
@@ -63,87 +61,79 @@ class Tools:
         return results
     
 
-    async def _get_surrounding_context(self, msg_id: str, window: int = 2) -> List[Dict]:
-        """Get surrounding turns for context using pipeline."""
+    async def _get_surrounding_context(self, msg_id: str, window: int = 5) -> List[Dict]:
+        """Get surrounding turns for context."""
         sorted_key = f"recent_conversation:{self.user_name}"
         conv_key = f"conversation:{self.user_name}"
+        lookup_key = f"lookup:msg_to_turn:{self.user_name}"
         
-        # Find target turn
+        target_turn_id = msg_id
         if msg_id.startswith("msg_"):
-            user_msg_id = int(msg_id.replace("msg_", ""))
-            # Need to scan for matching user_msg_id — unavoidable without reverse index
-            all_turns = await self.redis.zrange(sorted_key, 0, -1)
-            all_data = await self.redis.hmget(conv_key, *all_turns)
-            
-            target_idx = None
-            parsed_turns = []
-            for i, (turn_id, raw) in enumerate(zip(all_turns, all_data)):
-                if raw:
-                    data = json.loads(raw)
-                    parsed_turns.append({"turn_id": turn_id, **data})
-                    if data.get("user_msg_id") == user_msg_id:
-                        target_idx = i
-            
-            if target_idx is None:
+            target_turn_id = await self.redis.hget(lookup_key, msg_id)
+            if not target_turn_id:
                 return []
-            
-            # Slice window
-            start = max(0, target_idx - window)
-            end = min(len(parsed_turns), target_idx + window + 1)
-            
-            return [
-                {"role": t["role"], "content": t["content"], "timestamp": t["timestamp"]}
-                for t in parsed_turns[start:end]
-                if t["turn_id"] != f"turn_{target_idx}"  # exclude the match itself
-            ]
         
-        else:
+        rank = await self.redis.zrank(sorted_key, target_turn_id)
+        if rank is None:
+            return []
 
-            all_turns = await self.redis.zrange(sorted_key, 0, -1)
             
-            if msg_id not in all_turns:
-                return []
+        start = max(0, rank - (window * 5))
+        end = rank + window
             
-            target_idx = all_turns.index(msg_id)
-            start = max(0, target_idx - window)
-            end = min(len(all_turns), target_idx + window + 1)
+        turn_ids = await self.redis.zrange(sorted_key, start, end)
+        if not turn_ids:
+            return []  
             
-            context_turns = [t for t in all_turns[start:end] if t != msg_id]
-            
-            if not context_turns:
-                return []
-            
-            pipe = self.redis.pipeline()
-            for turn_id in context_turns:
-                pipe.hget(conv_key, turn_id)
-            results = await pipe.execute()
-            
-            context = []
-            for raw in results:
-                if raw:
-                    data = json.loads(raw)
-                    context.append({
-                        "role": data["role"],
-                        "content": data["content"],
-                        "timestamp": data["timestamp"]
-                    })
-            
-            return context
+        pipe = self.redis.pipeline()
+        for _id in turn_ids:
+            pipe.hget(conv_key, _id)
+        results = await pipe.execute()
+
+        user_turns = []
+        assistant_turns = []
+        
+        for t_id, raw in zip(turn_ids, results):
+            if raw and t_id != target_turn_id:
+                data = json.loads(raw)
+                turn = {
+                    "role": data["role"],
+                    "timestamp": data["timestamp"]
+                }
+
+                if data["role"] == "user":
+                    turn["content"] = data["content"]
+                else:
+                    turn["content"] = data["content"][:250]
+
+                if data["role"] == "user":
+                    user_turns.append(turn)
+                else:
+                    assistant_turns.append(turn)
+        
+        user_turns = user_turns[:(window * 5)]
+        assistant_turns = assistant_turns[:window]
+        
+        context = user_turns + assistant_turns
+        context.sort(key=lambda x: x["timestamp"])
+        
+        return context
 
     
-    async def search_messages(self, query: str, limit: int = 5) -> List[Dict]:
+    async def search_messages(self, query: str, limit: int = 10) -> List[Dict]:
         """
-        Search past conversation turns by semantic similarity.
-        Searches both user messages and STELLA responses.
+        Search the user's actual messages by keyword or phrase. 
+        Use when you need their exact words, a direct quote, or when entity-based tools found nothing relevant. 
+        This is raw recall, not summarized knowledge.
 
         Args:
             query: Keywords or phrase to search for
-            limit: Max results (default 5)
+            limit: Max results (default 10)
 
         Returns: List of turns with id, role, message, timestamp, score, 
                 and surrounding context (adjacent turns for continuity).
         """
-        results = self.resolver.search_messages(query, limit)
+        results = self.resolver._search_messages(query, limit)
         
         output = []
         for msg_id, score in results:
@@ -177,11 +167,11 @@ class Tools:
         
         return output
 
-    async def search_entities(self, query: str, limit: int = 5) -> List[Dict]:
+    async def search_entity(self, query: str, limit: int = 5) -> List[Dict]:
         """
-        Search for entities by name or alias.
-        Use when you need to find a person, place, or thing but aren't sure of exact name.
-        Returns partial matches — use get_profile for full details after identifying.
+        Find a person, place, or thing by name. 
+        Returns their full profile (type, summary, aliases, topic) and their 5 strongest connections.
+        Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.
         
         Args:
             query: Name or partial name to search
@@ -189,35 +179,23 @@ class Tools:
         
         Returns: List of matching entities with id, name, summary snippet, type.
         """
-        return self.store.search_entity(query, limit) or []
-
-    async def get_profile(self, entity_name: str) -> Optional[Dict]:
-        """
-        Get full profile for a specific entity.
-        Use when you know the exact entity name and need complete information.
+        results = self.store.search_entity(query, limit)
+    
+        if not results:
+            return []
         
-        Args:
-            entity_name: Exact canonical name of the entity
+        for entity in results:
+            for conn in entity.get("top_connections", []):
+                evidence_ids = conn.pop("evidence_ids", [])
+                conn["evidence"] = await self._hydrate_evidence(evidence_ids)
         
-        Returns: Full profile with summary, type, aliases, topic, last_mentioned.
-        Returns None if entity not found.
-        """
-        canonical = self._resolve_entity_name(entity_name)
-        if not canonical:
-            return None
-        
-        entity_id = self.resolver.get_id(canonical)
-        if entity_id:
-            profile = self.resolver.entity_profiles.get(entity_id)
-            if profile:
-                return profile
-            
-        return self.store.get_entity_profile(canonical)
+        return results
 
     async def get_connections(self, entity_name: str, active_only: bool = True) -> List[Dict]:
         """
-        Find all entities connected to a given entity.
-        Use when asked about someone's relationships, network, or "who knows who".
+        Get the full relationship network for an entity.
+        Returns all connections (up to 50) with evidence — the actual messages that established each connection. 
+        Use when you need comprehensive relationship details beyond the top 5 from search_entity..
         
         Args:
             entity_name: The entity to find connections for
@@ -237,8 +215,9 @@ class Tools:
 
     async def get_recent_activity(self, entity_name: str, hours: int = 24) -> List[Dict]:
         """
-        Get recent interactions involving an entity within a time window.
-        Use when asked "what happened with X recently" or "any updates on X".
+        Get recent interactions involving an entity within a time window. 
+        Use for 'what happened with X lately' or 'any updates on X this week'. 
+        Default is 24 hours; use 168 for a week..
         
         Args:
             entity_name: Entity to check activity for
@@ -258,9 +237,9 @@ class Tools:
 
     async def find_path(self, entity_a: str, entity_b: str) -> List[Dict]:
         """
-        Find the shortest connection path between two entities.
-        Use when asked "how is X connected to Y" or "what's the relationship between X and Y".
-        Requires both entities to be known — use get_profile first if unsure.
+        "Trace the connection chain between two specific entities. 
+        Use for 'how is X connected to Y' or 'what links X to Y'. Returns the shortest path showing each hop. 
+        Requires both entities to exist in memory.
 
         Args:
             entity_a: First entity name
@@ -288,7 +267,7 @@ class Tools:
         
         return []
 
-    async def get_hot_topic_context(self, hot_topics: List[str]) -> Dict[str, List[Dict]]:
+    async def get_hot_topic_context(self, hot_topics: List[str], slim: bool = False) -> Dict[str, Dict]:
         """
         Retrieve pre-cached context for frequently accessed topics.
         Called automatically at start — you already have this data in hot_topic_context.
@@ -296,12 +275,33 @@ class Tools:
         
         Args:
             hot_topics: List of topic names marked as "hot"
-        
+            slim: Returns if you want more information or not
+
         Returns: Dict mapping topic name to list of top entities with summaries.
         """
         if not hot_topics:
             return {}
-        return self.store.get_hot_topic_context(hot_topics)
+        raw = self.store.get_hot_topic_context_with_messages(hot_topics, msg_limit=10, slim=slim)
+    
+        # Hydrate message IDs from Redis
+        content_key = f"message_content:{self.user_name}"
+        
+        for _, data in raw.items():
+                messages = []
+                for msg_id in data.pop("message_ids", []):
+                    raw_msg = await self.redis.hget(content_key, msg_id)
+                    if raw_msg:
+                        parsed = json.loads(raw_msg)
+                        messages.append({
+                            "id": msg_id,
+                            "message": parsed["message"]
+                        })
+                data["messages"] = messages
+        
+        return raw
+
+
+
 
     # def web_search(self, query: str) -> List[Dict]:
     #     """
@@ -316,3 +316,26 @@ class Tools:
     #     """
     #     # TODO: Implement web search
     #     return []
+
+        # async def get_profile(self, entity_name: str) -> Optional[Dict]:
+        # """
+        # Get full profile for a specific entity.
+        # Use when you know the exact entity name and need complete information.
+        
+        # Args:
+        #     entity_name: Exact canonical name of the entity
+        
+        # Returns: Full profile with summary, type, aliases, topic, last_mentioned.
+        # Returns None if entity not found.
+        # """
+        # canonical = self._resolve_entity_name(entity_name)
+        # if not canonical:
+        #     return None
+        
+        # entity_id = self.resolver.get_id(canonical)
+        # if entity_id:
+        #     profile = self.resolver.entity_profiles.get(entity_id)
+        #     if profile:
+        #         return profile
+            
+        # return self.store.get_entity_profile(canonical)
