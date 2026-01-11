@@ -28,7 +28,7 @@ from log.llm_trace import get_trace_logger
 
 load_dotenv()
 
-BATCH_SIZE = 20
+BATCH_SIZE = 10
 SESSION_WINDOW = 60
 BATCH_TIMEOUT_SECONDS = 15
 
@@ -355,36 +355,42 @@ class Context:
         
         async with self._batch_processing_lock:
             if self._batch_in_progress:
+                logger.info("process_batch: already in progress, returning")
                 return
             self._batch_in_progress = True
+            logger.info("process_batch: flag set, starting processing")
 
         try:  
-            async with self._batch_processing_lock:
-                logger.info("Starting batch processing...")
-                logger.info(f"I have {BATCH_SIZE}")
-                buffer_key = f"buffer:{self.user_name}"
-
-                while True:
+            while True:
+                async with self._batch_processing_lock:
                     if await self.redis_client.exists("system:maintenance_lock"):
                         logger.info("Maintenance lock detected during loop. Pausing...")
                         await asyncio.sleep(2)
                         continue
+
+                    logger.info("Starting batch processing...")
+                    logger.info(f"I have {BATCH_SIZE}")
+                    buffer_key = f"buffer:{self.user_name}"
 
                     q_len = await self.redis_client.llen(buffer_key)
                     if q_len == 0:
                         logger.debug("Buffer empty, consumer loop exiting.")
                         break
 
-                    messages = await self.batch_processor.get_buffered_messages(buffer_key, BATCH_SIZE)
-                    
+                    raw = await self.redis_client.lrange(buffer_key, 0, BATCH_SIZE - 1)
+                    messages = [json.loads(m) for m in raw] if raw else []
                     if not messages:
                         return
                     
                     conversation = await self.get_conversation_context(SESSION_WINDOW)
-                    session_text = "\n".join([
-                        f"[{turn['role_label']}]: {turn['content']}" 
-                        for turn in conversation
-                    ])
+                    lines = []
+                    for turn in conversation:
+                        content = turn['content']
+                        if turn['role'] == 'assistant' and len(content) > 200:
+                            content = content[:200] + "..."
+                        lines.append(f"[{turn['role_label']}]: {content}")
+
+                    session_text = "\n".join(lines)
                     
                     result = await self.batch_processor.run(messages, session_text)
                     
@@ -403,14 +409,16 @@ class Context:
                             )
                     
                     await self.redis_client.ltrim(buffer_key, len(messages), -1)
-                    await asyncio.sleep(0.1)
+
+                await asyncio.sleep(0.5)
                     
-                if self._batch_timer_task:
-                    self._batch_timer_task.cancel()
-                    self._batch_timer_task = None
-                    
+            if self._batch_timer_task:
+                self._batch_timer_task.cancel()
+                self._batch_timer_task = None
+                
         finally:
-            self._batch_in_progress = False
+            async with self._batch_processing_lock:
+                self._batch_in_progress = False
 
     
     async def _write_to_graph(
@@ -518,7 +526,6 @@ class Context:
         await self._run_session_jobs()
         
         logger.info("Shutdown complete")
-
         
     async def shutdown(self):
 

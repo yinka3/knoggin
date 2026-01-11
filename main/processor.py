@@ -269,11 +269,6 @@ class BatchProcessor:
         return await self.llm.call_structured(system_05, reasoning, ConnectionExtractionResponse)
 
 
-    async def get_buffered_messages(self, buffer_key: str, batch_size: int) -> List[Dict]:
-        """Read messages from Redis buffer."""
-        raw = await self.redis.lrange(buffer_key, 0, batch_size - 1)
-        return [json.loads(m) for m in raw] if raw else []
-
     async def move_to_dead_letter(self, messages: List[Dict], error: str):
         """Store failed batch in DLQ."""
         

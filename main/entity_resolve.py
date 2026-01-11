@@ -14,7 +14,7 @@ from db.memgraph import MemGraphStore
 
 class EntityResolver:
 
-    def __init__(self, store: 'MemGraphStore', embedding_model='dunzhang/stella_en_1.5B_v5'):
+    def __init__(self, store: 'MemGraphStore', embedding_model='dunzhang/stella_en_400M_v5'):
         self.store = store
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger.info(f"EntityResolver using device: {device}")
@@ -24,7 +24,7 @@ class EntityResolver:
         self.index_id_map = faiss.IndexIDMap2(faiss.IndexFlatIP(self.embedding_dim))
         self.entity_profiles = {}
         self._name_to_id = {}
-        self.msg_index = faiss.IndexIDMap2(faiss.IndexFlatIP(self.embedding_dim))
+        self.msg_index = faiss.IndexIDMap2(faiss.IndexScalarQuantizer(self.embedding_dim, faiss.ScalarQuantizer.QT_fp16, faiss.METRIC_INNER_PRODUCT))
         self.msg_int_to_id: dict[int, str] = {}
         self._message_texts = {}
         self._lock = threading.RLock()
@@ -147,7 +147,7 @@ class EntityResolver:
         self.msg_id_order.append(msg_key)
         self.bm25_index = BM25Okapi(self.msg_corpus)
 
-    def _search_messages(self, query: str, k: int = 15) -> list[tuple[str, float]]:
+    def _search_messages(self, query: str, k: int = 10) -> list[tuple[str, float]]:
         if not self.msg_int_to_id:
             return []
         
@@ -185,7 +185,7 @@ class EntityResolver:
             return []
         
         if len(results) > 1:
-                candidate_keys = list(results.keys())[:60]
+                candidate_keys = list(results.keys())[:45]
                 pairs = [(query, self._message_texts[msg_key]) for msg_key in candidate_keys]
                 scores = self.cross_encoder.predict(pairs)
                 reranked = list(zip(candidate_keys, scores))

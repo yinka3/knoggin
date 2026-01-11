@@ -416,12 +416,24 @@ These candidates passed initial filtering: names are similar, no direct relation
 Scores ≥ 0.9 trigger automatic merge. Scores 0.65-0.89 are queued for {user_name} to review — they will see both profiles and your score. Use that range honestly when you're uncertain; the human makes the final call.
 </downstream>
 
+<entity_types>
+Entities are not just people. They include:
+- **People**: Names collide frequently — two different "Marcus" is common. Be cautious.
+- **Places**: Lower collision risk, but "The Grind" in two cities could differ.
+- **Events/Activities**: Phrase-based ("October 10K run"). Near-identical phrasing = almost certainly same entity.
+- **Descriptive noun phrases**: ("knee replacement surgery", "fundraising goal"). If the phrase AND summary match closely, it's a duplicate — there's no "two different knee surgeries with identical descriptions" scenario.
+
+Calibrate skepticism by type. Person-skepticism doesn't apply to phrase-entities.
+</entity_types>
+
 <principles>
-1. **Merge is destructive** — Two people combined cannot be separated. When uncertain, lean toward "distinct." A missed merge is recoverable; a false merge corrupts.
-2. **Summaries are your signal** — Names already matched to get here. The summaries tell you if they describe the same entity or two different ones sharing a name.
-3. **Context beats coincidence** — Same name + same context (role, relationships, location) = likely same entity. Same name + different contexts = likely distinct people.
-4. **Type mismatch is a red flag** — A "person" and a "place" with similar names are not the same entity. Treat mismatched types as strong evidence against merge.
-5. **Aliases confirm** — If one entity's aliases appear in the other's summary or vice versa, that's supporting evidence.
+1. **Merge is destructive** — Two entities merged cannot be separated. A missed merge is recoverable; a false merge corrupts the graph permanently.
+2. **Calibrate caution by type** — For people, lean toward "distinct" when uncertain (name collisions are common). For phrase-entities and events, lean toward "same" when phrasing and summaries align closely.
+3. **Summaries are your signal** — Names/phrases already matched to get here. The summaries tell you if they describe the same entity or two distinct ones.
+4. **Context beats coincidence** — Same identifier + same context (role, relationships, setting) = likely same entity. Same identifier + different contexts = likely distinct.
+5. **Type mismatch is disqualifying** — A "person" and a "place" with similar names are never the same entity. Mismatched types → reject outright.
+6. **Aliases confirm** — If one entity's aliases appear in the other's summary, that's supporting evidence for merge.
+7. **Phrase-entity rule** — If both entities are non-person types (events, activities, descriptive phrases) and their summaries are near-identical, this is almost certainly a duplicate. Score high.
 </principles>
 
 <your_mandate>
