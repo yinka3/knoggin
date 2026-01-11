@@ -1,0 +1,203 @@
+import asyncio
+import sys
+import json
+import argparse
+from pathlib import Path
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from loguru import logger
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from agent.loop import run
+from db.memgraph import MemGraphStore
+from main.context import Context
+from schema.dtypes import MessageData
+
+logger.remove()
+logger.add(sys.stdout, level="INFO")
+
+USER_NAME = "Adeyinka"
+EVAL_DATE = "2025-12-05 00:30"
+
+CUSTOM_TOPICS = [
+    "Workplace Dynamics",
+    "Academic Arcs",
+    "Intramural Sports",
+    "Interpersonal Relationships",
+    "Family & Heritage",
+    "Campus Geography",
+    "Mental Health & Wellness",
+    "Food & Dining",
+    "Entertainment & Media",
+    "Daily Routines"
+]
+
+
+async def ingest_haystack(context: Context, messages: list):
+    total = len(messages)
+    batch_size = 10  # Match BATCH_SIZE from context.py
+    
+    for i, turn in enumerate(messages):
+        ts = datetime.strptime(turn["timestamp"], "%Y-%m-%d %H:%M")
+        ts = ts.replace(tzinfo=timezone.utc)
+        
+        if turn["role"] == "user":
+            msg = MessageData(message=turn["content"], timestamp=ts)
+            await context.add(msg)
+        
+        if (i + 1) % 100 == 0:
+            logger.info(f"Ingested {i + 1}/{total} turns")
+        if (i + 1) % batch_size == 0:
+            logger.info(f"Batch {(i + 1) // batch_size} queued, waiting for processing...")
+            await wait_for_batch_drain(context)
+        else:
+            await asyncio.sleep(0.2)
+    
+    logger.info("Ingestion complete, waiting for final processing...")
+
+async def ask_stella(context: Context, question: str) -> str:
+    topics = context.store.get_topics_by_status()
+    active = topics.get("active", []) + topics.get("hot", [])
+    
+    result = await run(
+        user_query=question,
+        user_name=context.user_name,
+        conversation_history=[],
+        hot_topics=[],
+        active_topics=active,
+        llm=context.llm,
+        store=context.store,
+        ent_resolver=context.ent_resolver,
+        redis_client=context.redis_client,
+        date=EVAL_DATE,
+        slim_hot_context=True
+    )
+    
+    return result.get("response") or result.get("question", "No response")
+
+
+async def wait_for_batch_drain(context: Context, timeout: int = 120):
+    """Wait for current batch to finish processing."""
+    user = context.user_name
+    start = asyncio.get_event_loop().time()
+    
+    while asyncio.get_event_loop().time() - start < timeout:
+        buffer_len = await context.redis_client.llen(f"buffer:{user}")
+        in_progress = context._batch_in_progress
+        
+        if buffer_len == 0 and not in_progress:
+            logger.debug("Batch drained, continuing...")
+            return
+        
+        await asyncio.sleep(2)
+    
+    logger.warning(f"Batch drain timeout after {timeout}s")
+
+
+async def wait_for_processing(context: Context, poll_interval: int = 30, max_wait: int = 600):
+    """Wait until buffer is empty and jobs have run. Max 15 min default."""
+    user = context.user_name
+    start = asyncio.get_event_loop().time()
+    
+    while asyncio.get_event_loop().time() - start < max_wait:
+        buffer_len = await context.redis_client.llen(f"buffer:{user}")
+        in_progress = context._batch_in_progress
+        
+        if buffer_len == 0 and not in_progress:
+            # Buffer drained, check if profile job completed
+            profile_done = await context.redis_client.get(f"profile_complete:{user}")
+            if profile_done:
+                logger.info("Processing complete.")
+                return
+            
+            # Also check if dirty set is empty (nothing to profile)
+            dirty_count = await context.redis_client.scard(f"dirty_entities:{user}")
+            if dirty_count == 0:
+                logger.info("No pending profile work, continuing...")
+                await asyncio.sleep(60)  # Brief wait for any stragglers
+                return
+            
+            logger.info(f"Waiting for profile job... ({dirty_count} dirty entities)")
+        else:
+            logger.info(f"Buffer: {buffer_len}, in_progress: {in_progress}")
+        
+        await asyncio.sleep(poll_interval)
+    
+    logger.warning(f"Processing wait timed out after {max_wait}s, continuing anyway")
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--skip", action="store_true", help="Skip ingestion")
+    args = parser.parse_args()
+    
+    base_path = Path(__file__).parent.parent
+    msgs_file = base_path / "data/custom_benchmark_msgs.json"
+    questions_file = base_path / "data/custom_benchmark_questions.json"
+    
+    with open(msgs_file, "r") as f:
+        messages = json.load(f)
+    
+    with open(questions_file, "r") as f:
+        questions = json.load(f)
+    
+    logger.info(f"Loaded {len(messages)} messages, {len(questions)} questions")
+    
+    executor = ThreadPoolExecutor(max_workers=5)
+    store = MemGraphStore()
+    context = await Context.create(
+        user_name=USER_NAME,
+        store=store,
+        cpu_executor=executor,
+        topics=CUSTOM_TOPICS
+    )
+    
+    results = []
+    
+    try:
+        if not args.skip:
+            logger.info("Starting ingestion...")
+            await ingest_haystack(context, messages)
+            await wait_for_processing(context)
+        else:
+            logger.info("Skipping ingestion (--skip)")
+        
+        logger.info(f"Evaluating {len(questions)} questions...")
+        
+        for i, q in enumerate(questions):
+            logger.info(f"\n{'='*60}")
+            logger.info(f"[{i+1}/{len(questions)}] {q['test_case']} ({q['category']})")
+            logger.info(f"Q: {q['natural_query']}")
+            
+            response = await ask_stella(context, q["natural_query"])
+            
+            logger.info(f"Expected: {q['ground_truth']}")
+            logger.info(f"Got: {response}")
+            
+            results.append({
+                "index": i,
+                "test_case": q["test_case"],
+                "category": q["category"],
+                "question": q["natural_query"],
+                "expected": q["ground_truth"],
+                "evidence_turns": q["evidence_turns"],
+                "response": response
+            })
+            
+            await asyncio.sleep(1)
+        
+        output_file = base_path / "custom_benchmark_results.json"
+        with open(output_file, "w") as f:
+            json.dump(results, f, indent=2)
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Results saved to {output_file}")
+        logger.info(f"Total: {len(results)} questions evaluated")
+        
+    finally:
+        await context.shutdown()
+        store.close()
+        executor.shutdown(wait=True)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
