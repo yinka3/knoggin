@@ -10,6 +10,7 @@ from jobs.base import BaseJob, JobContext, JobNotifier, JobResult
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
 from main.prompts import get_profile_update_prompt
+from schema.dtypes import BatchProfileResponse, ProfileUpdate
 
 
 class ProfileRefinementJob(BaseJob):
@@ -18,21 +19,22 @@ class ProfileRefinementJob(BaseJob):
     using the sliding window of recent messages.
     
     Triggers:
-    1. VOLUME: If >=5 entities are dirty (ensures we catch them in the 75-msg window).
+    1. VOLUME: If >=20 entities are dirty (ensures we catch them in the 75-msg window).
     2. TIME: If user is idle for >5 minutes and we have ANY dirty entities.
     """
     
-    MSG_WINDOW = 75
-    VOLUME_THRESHOLD = 5
-    IDLE_THRESHOLD = 300
-    USER_IDLE_THRESHOLD = 600
-    USER_MSG_COUNT = 45
-    
+    MSG_WINDOW = 40
+    VOLUME_THRESHOLD = 20
+    IDLE_THRESHOLD = 60
+    USER_IDLE_THRESHOLD = 300
+    PROFILE_BATCH_SIZE = 5
+
     def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, executor):
         self.llm = llm
         self.resolver = resolver
         self.store = store
         self.executor = executor
+        self.batch_semaphore = asyncio.Semaphore(2)
 
     @property
     def name(self) -> str:
@@ -83,27 +85,20 @@ class ProfileRefinementJob(BaseJob):
         turn_data = await ctx.redis.hmget(conv_key, *turn_ids)
         
         results = []
-        now = datetime.now(timezone.utc)
         
         for data in turn_data:
             if data:
                 parsed = json.loads(data)
                 ts = datetime.fromisoformat(parsed['timestamp'])
-                delta = (now - ts).total_seconds()
+                date_str = ts.strftime("%Y-%m-%d")
                 
-                if delta < 3600:
-                    relative = f"{int(delta // 60)}m ago" if delta >= 60 else "just now"
-                elif delta < 86400:
-                    relative = f"{int(delta // 3600)}h ago"
-                else:
-                    relative = f"{int(delta // 86400)}d ago"
                 
                 role_label = "User" if parsed["role"] == "user" else "STELLA"
                 results.append({
                     "role": parsed["role"],
                     "role_label": role_label,
                     "content": parsed["content"],
-                    "formatted": f"({relative}) [{role_label}]: {parsed['content']}",
+                    "formatted": f"[{date_str}] [{role_label}]: {parsed['content']}",
                     "raw": parsed["content"]
                 })
         
@@ -115,8 +110,7 @@ class ProfileRefinementJob(BaseJob):
         async with JobNotifier(ctx.redis, warning):
             dirty_key = f"dirty_entities:{ctx.user_name}"
             dirty_count = await ctx.redis.scard(dirty_key)
-            raw_ids = await ctx.redis.spop(dirty_key, dirty_count)
-            await ctx.redis.delete(dirty_key)
+            raw_ids = await ctx.redis.spop(dirty_key, 30) # 
             
             user_id = self.resolver.get_id(ctx.user_name)
             entity_ids = [int(id_str) for id_str in raw_ids if int(id_str) != user_id] if raw_ids else []
@@ -124,7 +118,7 @@ class ProfileRefinementJob(BaseJob):
             updates = []
             
             if entity_ids:
-                conversation = await self._get_conversation_context(ctx, self.MSG_WINDOW * 2)
+                conversation = await self._get_conversation_context(ctx, self.MSG_WINDOW)
         
                 if not conversation:
                     await ctx.redis.sadd(dirty_key, *[str(eid) for eid in entity_ids])
@@ -153,17 +147,9 @@ class ProfileRefinementJob(BaseJob):
             
             return JobResult(success=True, summary=summary)
     
-    def _extract_summary(self, response: str) -> str:
-        """Extract summary from reasoning+summary response."""
-        if "<summary>" in response and "</summary>" in response:
-            start = response.index("<summary>") + len("<summary>")
-            end = response.index("</summary>")
-            return response[start:end].strip()
-        return response.strip()
-    
     async def _refine_user_profile(self, ctx: JobContext, user_id: int, profile: dict) -> bool:
         """Execute user profile refinement."""
-        conversation = await self._get_conversation_context(ctx, self.USER_MSG_COUNT * 2)
+        conversation = await self._get_conversation_context(ctx, int(self.MSG_WINDOW * 1.5))
     
         if not conversation:
             return False
@@ -183,12 +169,12 @@ class ProfileRefinementJob(BaseJob):
             "known_aliases": [ctx.user_name]
         }, indent=2)
         
-        raw_response = await self.llm.call_reasoning(system_prompt, user_content)
+        raw_response = await self.llm.call_structured(system_prompt, user_content, ProfileUpdate)
 
         if not raw_response:
             return None
 
-        new_summary = self._extract_summary(raw_response)
+        new_summary = raw_response.summary
         
         if not new_summary or new_summary == profile.get("summary", ""):
             return None
@@ -207,97 +193,122 @@ class ProfileRefinementJob(BaseJob):
             partial(
                 self.store.update_entity_profile,
                 entity_id=user_id,
-                canonical_name=ctx.user_name,
+                canonical_name=raw_response.canonical_name,
                 summary=new_summary,
                 embedding=embedding,
                 last_msg_id=current_msg_id,
-                topic=profile.get("topic", "Personal")
+                topic=raw_response.topic
             )
         )
         
         logger.info(f"Refined user profile for {ctx.user_name}")
         return True
-    
 
-    async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]):
-        current_msg_id = await ctx.redis.get("global:next_msg_id")
-        current_msg_id = int(current_msg_id) if current_msg_id else 0
-        
-        semaphore = asyncio.Semaphore(5)
 
-        async def update_single(ent_id: int) -> Optional[dict]:
-            async with semaphore:
-                profile = self.resolver.entity_profiles.get(ent_id)
-                if not profile:
-                    return None
-                
-                canonical_name = profile.get("canonical_name", "Unknown")
-                entity_type = profile.get("type", "unknown")
-                existing_summary = profile.get("summary", "")
-
-                mentions = self.resolver.get_mentions_for_id(ent_id)
-                if not mentions:
-                    return None
-
-                pattern = re.compile(
-                    r'\b(' + '|'.join(re.escape(m) for m in mentions) + r')\b', 
-                    re.IGNORECASE
-                )
-                
-                observations = []
-
-                for i, turn in enumerate(conversation):
-                    if turn["role"] == "user" and pattern.search(turn["raw"]):
-                        if i > 0 and conversation[i-1]["role"] == "assistant":
-                            observations.append(conversation[i-1]["formatted"])
-                        observations.append(turn["formatted"])
-                        if i + 1 < len(conversation) and conversation[i+1]["role"] == "assistant":
-                            observations.append(conversation[i+1]["formatted"])
+    async def _process_single_batch(
+        self, 
+        ctx: JobContext,
+        batch: List[dict], 
+        conversation_text: str, 
+        current_msg_id: int
+    ) -> List[dict]:
+        """Process one batch of entities. Returns list of updates."""
+        async with self.batch_semaphore:
+            llm_input = [{
+                "entity_name": e["entity_name"],
+                "entity_type": e["entity_type"],
+                "existing_summary": e["existing_summary"],
+                "known_aliases": e["known_aliases"]
+            } for e in batch]
             
-                if not observations:
-                    return None
+            system_prompt = get_profile_update_prompt(ctx.user_name)
+            user_content = json.dumps({
+                "entities": llm_input,
+                "conversation": conversation_text
+            }, indent=2)
+            
+            response = await self.llm.call_structured(
+                system_prompt, 
+                user_content, 
+                BatchProfileResponse
+            )
+            
+            if not response or not response.profiles:
+                logger.warning(f"Batch profile failed for entities: {[e['entity_name'] for e in batch]}")
+                return []
+            
+            updates = []
+            for j, profile_out in enumerate(response.profiles):
+                if j >= len(batch):
+                    break
                 
-                system_prompt = get_profile_update_prompt(ctx.user_name)
-                user_content = json.dumps({
-                    "entity_name": canonical_name,
-                    "entity_type": entity_type,
-                    "existing_summary": existing_summary,
-                    "new_observations": observations,
-                    "known_aliases": mentions
-                }, indent=2)
+                orig = batch[j]
+                new_summary = profile_out.summary
                 
-                raw_response = await self.llm.call_reasoning(system_prompt, user_content)
-
-                if not raw_response:
-                    return None
-
-                new_summary = self._extract_summary(raw_response)
-
-                if not new_summary or new_summary == existing_summary:
-                    return None
+                if not new_summary or new_summary == orig["existing_summary"]:
+                    continue
                 
                 loop = asyncio.get_running_loop()
                 embedding = await loop.run_in_executor(
                     self.executor,
-                    partial(self.resolver.update_profile_summary, ent_id, new_summary)
+                    partial(self.resolver.update_profile_summary, orig["ent_id"], new_summary)
                 )
                 
-                logger.info(f"Refined profile for {canonical_name} (ID: {ent_id})")
+                logger.info(f"Refined profile for {orig['entity_name']} (ID: {orig['ent_id']})")
                 
-                return {
-                    "id": ent_id,
-                    "canonical_name": canonical_name,
+                updates.append({
+                    "id": orig["ent_id"],
+                    "canonical_name": orig["entity_name"],
                     "summary": new_summary,
-                    "topic": profile.get("topic", "General"),
+                    "topic": profile_out.topic or orig["topic"],
                     "embedding": embedding,
                     "last_msg_id": current_msg_id
-                }
+                })
+            
+            return updates
+    
+
+    async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]):
+        """Process entities in batches instead of individually."""
         
-        results = await asyncio.gather(*[update_single(eid) for eid in entity_ids])
-        return [r for r in results if r is not None]
+        current_msg_id = await ctx.redis.get("global:next_msg_id")
+        current_msg_id = int(current_msg_id) if current_msg_id else 0
+        
+        entity_inputs = []
+        for ent_id in entity_ids:
+            profile = self.resolver.entity_profiles.get(ent_id)
+            if not profile:
+                continue
+            
+            entity_inputs.append({
+                "ent_id": ent_id,
+                "entity_name": profile.get("canonical_name", "Unknown"),
+                "entity_type": profile.get("type", "unknown"),
+                "existing_summary": profile.get("summary", ""),
+                "known_aliases": self.resolver.get_mentions_for_id(ent_id),
+                "topic": profile.get("topic", "General")
+            })
+        
+        if not entity_inputs:
+            return []
+        
+        conversation_text = "\n".join([turn["formatted"] for turn in conversation])
+        
+        batches = [
+            entity_inputs[i:i + self.PROFILE_BATCH_SIZE]
+            for i in range(0, len(entity_inputs), self.PROFILE_BATCH_SIZE)
+        ]
+        
+        tasks = [
+            self._process_single_batch(ctx, batch, conversation_text, current_msg_id)
+            for batch in batches
+        ]
+        
+        results = await asyncio.gather(*tasks)
+        return [update for batch_updates in results for update in batch_updates]
 
     async def _write_updates(self, updates: List[dict]):
-        """Write profile updates directly to Memgraph."""
+        """Write profile updates to Memgraph sequentially."""
         loop = asyncio.get_running_loop()
         
         for update in updates:
