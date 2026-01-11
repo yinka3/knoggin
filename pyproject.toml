@@ -22,8 +22,9 @@ dependencies = [
     "redis>=7.1.0",
     "redis-tools>=0.0.2",
     "sentence-transformers>=5.2.0",
-    "torch>=2.9.1",
     "transformers==4.41.2",
+    "torch>=2.6.0,<2.7.0",
+    "xformers>=0.0.29.post3",
 ]
 
 [tool.setuptools.package-data]

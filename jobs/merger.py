@@ -163,7 +163,7 @@ class MergeDetectionJob(BaseJob):
         user_content = json.dumps({
             "entity_a": candidate["profile_a"],
             "entity_b": candidate["profile_b"]
-        })
+        }, indent=2)
         
         result = await self.llm.call_reasoning(system, user_content)
         

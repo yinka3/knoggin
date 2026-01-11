@@ -26,7 +26,6 @@ class ProfileRefinementJob(BaseJob):
     MSG_WINDOW = 40
     VOLUME_THRESHOLD = 20
     IDLE_THRESHOLD = 60
-    USER_IDLE_THRESHOLD = 300
     PROFILE_BATCH_SIZE = 5
 
     def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, executor):
@@ -44,7 +43,7 @@ class ProfileRefinementJob(BaseJob):
         dirty_key = f"dirty_entities:{ctx.user_name}"
         return await ctx.redis.scard(dirty_key) > 0
     
-    async def _maybe_refine_user(self, ctx: JobContext, dirty_count: int) -> bool:
+    async def _maybe_refine_user(self, ctx: JobContext, has_updates: bool = False) -> bool:
         """
         Check conditions and trigger user profile refinement if needed.
         Returns True if refinement ran.
@@ -53,7 +52,7 @@ class ProfileRefinementJob(BaseJob):
         if await ctx.redis.get(ran_key):
             return False
         
-        if dirty_count < self.VOLUME_THRESHOLD and ctx.idle_seconds < self.USER_IDLE_THRESHOLD:
+        if not has_updates:
             return False
         
         user_id = self.resolver.get_id(ctx.user_name)
@@ -129,7 +128,7 @@ class ProfileRefinementJob(BaseJob):
                 if updates:
                     await self._write_updates(updates)
             
-            user_refined = await self._maybe_refine_user(ctx, dirty_count)
+            user_refined = await self._maybe_refine_user(ctx, has_updates=bool(updates))
             
             parts = []
             if updates:

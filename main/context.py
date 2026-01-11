@@ -15,7 +15,7 @@ from jobs.cleaner import EntityCleanupJob
 from config import get_config_value
 from main.processor import BatchProcessor
 from main.service import LLMService
-from redisclient import AsyncRedisClient
+from main.redisclient import AsyncRedisClient
 from typing import List, Set
 from functools import partial
 from schema.dtypes import *
