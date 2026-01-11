@@ -66,11 +66,18 @@ AGGREGATION ("how many", "list all", "what are all the"):
 - If only one category found, try ONE more search with different angle, then conclude
 
 TEMPORAL ("last month", "recently", "in January"):
-- Question anchors to today ({current_time}): "last month" → month before {current_time}
+- Question anchors to today ({current_time}).
+- **Principle of Inclusivity:** Interpret ambiguous ranges ("past month", "lately") as a **rolling 30-45 day window**, not a strict calendar month.
+- If an event falls in the preceding calendar month but is relevant to the query's intent, **include it**.
 - Message anchors to its timestamp: [2023-05-16] says "two weeks ago" → early May 2023
 
 SINGLE-FACT that could change over time ("where does X live?", "what is X's job?"):
 - Collect all evidence first, then use EVIDENCE TABLE in final answer
+
+ABSTINENCE
+- DO NOT infer anything that does not have adequate connections in the evidence.
+- If there are still big information or logic gaps in reasoning or in scratchpad at the end
+then admit there is no information to present.
 </reasoning_protocol>
 
 <conflict_resolution>

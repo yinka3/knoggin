@@ -61,7 +61,7 @@ class Tools:
         return results
     
 
-    async def _get_surrounding_context(self, msg_id: str, window: int = 5) -> List[Dict]:
+    async def _get_surrounding_context(self, msg_id: str, forward: int = 3, target_total: int = 10) -> List[Dict]:
         """Get surrounding turns for context."""
         sorted_key = f"recent_conversation:{self.user_name}"
         conv_key = f"conversation:{self.user_name}"
@@ -78,8 +78,9 @@ class Tools:
             return []
 
             
-        start = max(0, rank - (window * 5))
-        end = rank + window
+        back_fetch = target_total * 2 
+        start = max(0, rank - back_fetch)
+        end = rank + forward + 1
             
         turn_ids = await self.redis.zrange(sorted_key, start, end)
         if not turn_ids:
@@ -90,37 +91,67 @@ class Tools:
             pipe.hget(conv_key, _id)
         results = await pipe.execute()
 
-        user_turns = []
-        assistant_turns = []
+        raw_map = {tid: res for tid, res in zip(turn_ids, results) if res}
         
-        for t_id, raw in zip(turn_ids, results):
-            if raw and t_id != target_turn_id:
-                data = json.loads(raw)
-                turn = {
-                    "role": data["role"],
-                    "timestamp": data["timestamp"]
-                }
+        if target_turn_id not in turn_ids: return []
+        target_index = turn_ids.index(target_turn_id)
 
-                if data["role"] == "user":
-                    turn["content"] = data["content"]
-                else:
-                    turn["content"] = data["content"][:250]
+        pre_context = []
+        post_context = []
 
-                if data["role"] == "user":
-                    user_turns.append(turn)
-                else:
-                    assistant_turns.append(turn)
-        
-        user_turns = user_turns[:(window * 5)]
-        assistant_turns = assistant_turns[:window]
-        
-        context = user_turns + assistant_turns
-        context.sort(key=lambda x: x["timestamp"])
-        
-        return context
+        current_back_count = 0
+        max_back = target_total - forward
+
+        for i in range(target_index - 1, -1, -1):
+            tid = turn_ids[i]
+            if tid not in raw_map: continue
+            
+            data = json.loads(raw_map[tid])
+            role = data.get("role", "unknown")
+            content = data.get("content", "") or ""
+            
+            # if role != "user":
+            #     if len(content) > 200:
+            #         content = content[:200] + "...(truncated)"
+            
+            pre_context.append({
+                "role": role,
+                "timestamp": data.get("timestamp", ""),
+                "content": content,
+                "id": tid
+            })
+            
+            current_back_count += 1
+            if current_back_count >= max_back:
+                break
+
+        pre_context.reverse()
+
+        tgt_data = json.loads(raw_map[target_turn_id])
+        target_msg = {
+            "role": tgt_data.get("role", "unknown"),
+            "timestamp": tgt_data.get("timestamp", ""),
+            "content": tgt_data.get("content", ""),
+            "id": target_turn_id,
+            "is_hit": True
+        }
+
+        for i in range(target_index + 1, min(len(turn_ids), target_index + forward + 1)):
+            tid = turn_ids[i]
+            if tid not in raw_map: continue
+            
+            data = json.loads(raw_map[tid])
+            post_context.append({
+                "role": data.get("role", "unknown"),
+                "timestamp": data.get("timestamp", ""),
+                "content": data.get("content", ""),
+                "id": tid
+            })
+
+        return pre_context + [target_msg] + post_context
 
     
-    async def search_messages(self, query: str, limit: int = 10) -> List[Dict]:
+    async def search_messages(self, query: str, limit: int = 8) -> List[Dict]:
         """
         Search the user's actual messages by keyword or phrase. 
         Use when you need their exact words, a direct quote, or when entity-based tools found nothing relevant. 
@@ -134,9 +165,16 @@ class Tools:
                 and surrounding context (adjacent turns for continuity).
         """
         results = self.resolver._search_messages(query, limit)
-        
+        seen_ids = set()
         output = []
         for msg_id, score in results:
+            if msg_id in seen_ids:
+                continue
+
+            context = await self._get_surrounding_context(msg_id)
+            for msg in context:
+                seen_ids.add(msg['id'])
+
             if msg_id.startswith("msg_"):
                 content_key = f"message_content:{self.user_name}"
                 raw = await self.redis.hget(content_key, msg_id)
@@ -148,7 +186,7 @@ class Tools:
                         "message": data["message"],
                         "timestamp": data["timestamp"],
                         "score": score,
-                        "context": await self._get_surrounding_context(msg_id)
+                        "context": context
                     })
                     
             elif msg_id.startswith("turn_"):
@@ -162,7 +200,7 @@ class Tools:
                         "message": data["content"],
                         "timestamp": data["timestamp"],
                         "score": score,
-                        "context": await self._get_surrounding_context(msg_id)
+                        "context": context
                     })
         
         return output

@@ -21,6 +21,14 @@ from schema.dtypes import (
     ToolCall,
     TraceEntry,
 )
+
+from agent.formatters import (
+    format_retrieved_messages,
+    format_entity_results,
+    format_graph_results,
+    format_path_results,
+    format_hot_topic_context,
+)
 from schema.tool_schema import TOOL_SCHEMAS
 import time
 
@@ -36,6 +44,7 @@ class AgentContext:
     max_calls: int = 6
     attempt_count: int = 0
     max_attempts: int = 8
+    consecutive_errors: int = 0
     trace_id: str = ""
     
     history: List[Dict] = field(default_factory=list)
@@ -46,6 +55,7 @@ class AgentContext:
     retrieved_messages: List[Dict] = field(default_factory=list)
     entity_profiles: List[Dict] = field(default_factory=list)
     graph_results: List[Dict] = field(default_factory=list)
+    path_results: List[Dict] = field(default_factory=list)
     
     tools_used: List[str] = field(default_factory=list)
     _previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
@@ -77,7 +87,7 @@ class AgentContext:
 
 
     def has_evidence(self) -> bool:
-        return bool(self.entity_profiles or self.retrieved_messages or self.graph_results)
+        return bool(self.entity_profiles or self.retrieved_messages or self.graph_results or self.path_results)
 
 
 def build_user_message(ctx: AgentContext, last_result: Optional[Dict] = None) -> str:
@@ -113,26 +123,36 @@ def build_user_message(ctx: AgentContext, last_result: Optional[Dict] = None) ->
         results = last_result if isinstance(last_result, list) else [last_result]
         for r in results:
             tool = r.get("tool", "unknown")
-            if "error" in r:
+            data = r.get("result", {}).get("data")
+            
+            if tool in ("search_messages", "search_entity", "get_connections", "get_activity", "find_path"):
+                count = len(data) if isinstance(data, list) else 0
+                if count > 0:
+                    msg += f"- `{tool}`: Success. Found {count} items. (See 'Retrieved Context' below)\n"
+                else:
+                    msg += f"- `{tool}`: No results found.\n"
+            elif "error" in r:
                 msg += f"- `{tool}`: Error - {r['error']}\n"
             else:
-                data = r.get("result", {}).get("data")
-                if data is None or data == [] or data == {}:
+                if not data:
                     msg += f"- `{tool}`: No results found\n"
                 else:
                     msg += f"- `{tool}`: {json.dumps(data, indent=2, default=str)}\n"
 
     if ctx.hot_topic_context:
-        msg += f"\n**Hot topic context (pre-fetched):**\n```json\n{json.dumps(ctx.hot_topic_context, indent=2, default=str)}\n```\n"
+        msg += f"\n**Hot topic context (pre-fetched):**\n{format_hot_topic_context(ctx.hot_topic_context)}\n"
 
     if ctx.entity_profiles:
-        msg += f"\n**Accumulated profiles ({len(ctx.entity_profiles)}):**\n```json\n{json.dumps(ctx.entity_profiles, indent=2, default=str)}\n```\n"
+        msg += f"\n**Accumulated profiles ({len(ctx.entity_profiles)}):**\n{format_entity_results(ctx.entity_profiles)}\n"
 
     if ctx.graph_results:
-        msg += f"\n**Accumulated graph results ({len(ctx.graph_results)}):**\n```json\n{json.dumps(ctx.graph_results, indent=2, default=str)}\n```\n"
+        msg += f"\n**Accumulated graph results ({len(ctx.graph_results)}):**\n{format_graph_results(ctx.graph_results)}\n"
+
+    if ctx.path_results:
+        msg += f"\n**Path results:**\n{format_path_results(ctx.path_results)}\n"
 
     if ctx.retrieved_messages:
-        msg += f"\n**Accumulated messages ({len(ctx.retrieved_messages)}):**\n```json\n{json.dumps(ctx.retrieved_messages, indent=2, default=str)}\n```\n"
+        msg += f"\n**Accumulated messages ({len(ctx.retrieved_messages)}):**\n{format_retrieved_messages(ctx.retrieved_messages)}\n"
 
     return msg
 
@@ -182,8 +202,8 @@ async def call_the_doctor(
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
     dispatch = {
-        "search_messages": lambda: tools.search_messages(args.get("query", ""), args.get("limit", 15)),
-        "search_entity": lambda: tools.search_entity(args.get("query", ""), args.get("limit", 5)),
+        "search_messages": lambda: tools.search_messages(args.get("query", ""), min(args.get("limit", 8), 8)),
+        "search_entity": lambda: tools.search_entity(args.get("query", ""), min(args.get("limit", 5), 5)),
         "get_connections": lambda: tools.get_connections(args.get("entity_name", "")),
         "get_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
         "find_path": lambda: tools.find_path(args.get("entity_a", ""), args.get("entity_b", ""))
@@ -224,8 +244,10 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             ctx.retrieved_messages = ctx.retrieved_messages[:30]
     elif tool_name == "search_entity":
         _merge_unique(ctx.entity_profiles, data if isinstance(data, list) else [], lambda x: x['id'])
-    elif tool_name in ("get_connections", "get_activity", "find_path"):
+    elif tool_name in ("get_connections", "get_activity"):
         ctx.graph_results.extend(data if isinstance(data, list) else [])
+    elif tool_name == "find_path":
+        ctx.path_results.extend(data if isinstance(data, list) else [])
 
 
 def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
@@ -351,6 +373,12 @@ async def run(
 
             # Check duplicate
             if ctx.is_duplicate(tool_name, args):
+                ctx.consecutive_errors += 1
+                if ctx.consecutive_errors >= 3:
+                    logger.warning(f"Breaking loop: {ctx.consecutive_errors} consecutive errors.")
+                    ctx._last_error = "Too many repeated errors. Stopping to save cost."
+                    break
+
                 ctx._last_error = f"Already called {tool_name} with these args. Use accumulated context or try different parameters."
                 trace.entries.append(TraceEntry(
                     step=step,
@@ -388,7 +416,8 @@ async def run(
                 ))
                 all_results.append({"tool": tool_name, "error": ctx._last_error})
                 continue
-
+            
+            ctx.consecutive_errors = 0
             # Execute
             result = await execute_tool(tools, tool_name, args)
             logger.info(f"[TOOL RESULT] {tool_name}: {json.dumps(result, default=str)[:1000]}")
