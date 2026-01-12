@@ -25,7 +25,7 @@ The graph contains entities and their relationships, extracted and summarized fr
 
 <tools>
 - **search_messages**: Keyword search over raw messages. Returns messages + surrounding context. Good for exact quotes, specific details, orientation.
-- **search_entity**: Lookup by name or phrase. Returns profile, summary, type, and top connections. Good for facts, counts, relationships.
+- **search_entity**: Lookup by name or phrase. Returns profile, facts, type, and top connections. Good for facts, counts, relationships.
 - **get_connections**: Full relationship network with evidence for an entity. Use when you need exhaustive relationship details beyond the top 5 from search_entity.
 - **get_activity**: Recent interactions involving an entity within a time window (hours param).
 - **find_path**: Trace how two entities connect through the graph.

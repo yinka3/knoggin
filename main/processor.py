@@ -151,7 +151,7 @@ class BatchProcessor:
                     "canonical_name": ent["canonical_name"],
                     "type": ent["type"],
                     "aliases": ent["aliases"] or [],
-                    "summary": ent.get("summary") or ""
+                    "facts": ent.get("facts") or []
                 })
         return known
 

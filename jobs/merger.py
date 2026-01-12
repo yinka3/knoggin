@@ -1,11 +1,11 @@
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 import numpy as np
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult, JobNotifier
-from main.prompts import get_merge_judgment_prompt, get_summary_merge_prompt
+from main.prompts import get_merge_judgment_prompt
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
 from db.memgraph import MemGraphStore
@@ -82,7 +82,7 @@ class MergeDetectionJob(BaseJob):
 
         logger.info(f"Preparing to merge {len(clean_batch)} pairs in parallel...")
         
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(2)
         final_merge_list = []
 
         async def prepare_single_merge(c):
@@ -90,31 +90,23 @@ class MergeDetectionJob(BaseJob):
                 p_id = c["primary_id"]
                 s_id = c["secondary_id"]
                 
-                # Fetch profiles
                 p_profile = self.ent_resolver.entity_profiles.get(p_id, {})
                 s_profile = self.ent_resolver.entity_profiles.get(s_id, {})
                 
                 try:
-                    new_summary = await self._merge_summaries_llm(
-                        ctx.user_name,
-                        primary_name=p_profile.get("canonical_name", "Unknown"),
-                        entity_type=p_profile.get("type", "unknown"),
-                        all_aliases=list(set(
-                            self.ent_resolver.get_mentions_for_id(p_id) +
-                            self.ent_resolver.get_mentions_for_id(s_id)
-                        )),
-                        summary_a=p_profile.get("summary", ""),
-                        summary_b=s_profile.get("summary", "")
+                    merged_facts = self._merge_facts(
+                        p_profile.get("facts", []),
+                        s_profile.get("facts", [])
                     )
                     return {
                         "primary_id": p_id,
                         "secondary_id": s_id,
-                        "new_summary": new_summary,
+                        "merged_facts": merged_facts,
                         "primary_name": c["primary_name"],
                         "secondary_name": c["secondary_name"]
                     }
                 except Exception as e:
-                    logger.error(f"Summary gen failed for {p_id}/{s_id}: {e}")
+                    logger.error(f"Fact merge failed for {p_id}/{s_id}: {e}")
                     return None
         
         tasks = [prepare_single_merge(c) for c in clean_batch]
@@ -138,7 +130,7 @@ class MergeDetectionJob(BaseJob):
                     success = await self._execute_merge_db_only(
                         item["primary_id"], 
                         item["secondary_id"], 
-                        item["new_summary"]
+                        item["merged_facts"]
                     )
                     
                     if success:
@@ -173,9 +165,21 @@ class MergeDetectionJob(BaseJob):
             logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']}): {result}")
             return None
     
+
+    def _merge_facts(self, facts_a: List[str], facts_b: List[str]) -> List[str]:
+        """Combine fact ledgers, deduplicate exact matches."""
+        combined = facts_a + facts_b
+        seen = set()
+        merged = []
+        for fact in combined:
+            if fact not in seen:
+                seen.add(fact)
+                merged.append(fact)
+        return merged
+    
         
-    async def _execute_merge_db_only(self, primary_id: int, secondary_id: int, merged_summary: str, max_retries: int = 2) -> bool:
-            """Execute DB merge with pre-computed summary."""
+    async def _execute_merge_db_only(self, primary_id: int, secondary_id: int, merged_facts: List[str], max_retries: int = 2) -> bool:
+            """Execute DB merge with pre-computed facts."""
             loop = asyncio.get_running_loop()
             
             for attempt in range(1, max_retries + 1):
@@ -185,7 +189,7 @@ class MergeDetectionJob(BaseJob):
                         self.store.merge_entities,
                         primary_id,
                         secondary_id,
-                        merged_summary
+                        merged_facts
                     )
                     
                     if success:
@@ -201,41 +205,6 @@ class MergeDetectionJob(BaseJob):
             
             return False
 
-    
-    async def _merge_summaries_llm(
-        self,
-        user_name: str,
-        primary_name: str,
-        entity_type: str,
-        all_aliases: list[str],
-        summary_a: str, 
-        summary_b: str
-    ) -> str:
-        """Merge two summaries using VEGAPUNK-07."""
-        
-        if not summary_a and not summary_b:
-            return ""
-        if not summary_a:
-            return summary_b
-        if not summary_b:
-            return summary_a
-        
-        system_prompt = get_summary_merge_prompt(user_name)
-        user_content = json.dumps({
-            "entity_name": primary_name,
-            "entity_type": entity_type,
-            "all_aliases": all_aliases,
-            "summary_a": summary_a,
-            "summary_b": summary_b
-        }, indent=2)
-        
-        result = await self.llm.call_reasoning(system_prompt, user_content)
-        
-        if result and result.startswith("MERGE_CONFLICT"):
-            logger.warning(f"Merge conflict for {primary_name}: {result}")
-            return f"{summary_a} {summary_b}"
-        
-        return result or f"{summary_a} {summary_b}"
     
     def _sync_resolver(self, primary_id: int, secondary_id: int):
         """Update EntityResolver after merge."""

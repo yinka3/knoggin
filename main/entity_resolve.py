@@ -60,8 +60,7 @@ class EntityResolver:
                     self.entity_profiles[ent_id] = {
                         "canonical_name": canonical,
                         "type": ent["type"],
-                        "topic": ent["topic"] or "General",
-                        "summary": ent["summary"] or ""
+                        "facts": ent["facts"] or []
                     }
                     
                     if embedding and len(embedding) == self.embedding_dim:
@@ -230,7 +229,7 @@ class EntityResolver:
             "canonical_name": canonical_name,
             "type": entity_type,
             "topic": topic,
-            "summary": ""
+            "facts": []
         }
         
         embedding = self.add_entity(entity_id, profile)
@@ -245,12 +244,11 @@ class EntityResolver:
     def add_entity(self, entity_id: int, profile: Dict) -> List[float]:
 
         canonical_name = profile.get("canonical_name", "")
-        summary = profile.get("summary", "") or ""
+        facts = profile.get("facts", [])
 
-        resolution_text = f"{canonical_name}. {summary}"
+        resolution_text = f"{canonical_name}. " + " ".join(facts)
         embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
         faiss.normalize_L2(embedding_np.reshape(1, -1))
-
 
         with self._lock:
 
@@ -259,9 +257,10 @@ class EntityResolver:
                 oldest_id = next(iter(self.entity_profiles))
                 del self.entity_profiles[oldest_id]
                 
-            logger.info(f"Adding entity {entity_id}-{profile["canonical_name"]} to resolver indexes.")
+            logger.info(f"Adding entity {entity_id}-{profile['canonical_name']} to resolver indexes.")
 
             profile.setdefault("topic", "General")
+            profile.setdefault("facts", [])
             profile.setdefault("first_seen", datetime.now(timezone.utc).isoformat())
             profile["last_seen"] = datetime.now(timezone.utc).isoformat()
             
@@ -275,9 +274,9 @@ class EntityResolver:
         return embedding_np.tolist()
     
 
-    def update_profile_summary(self, entity_id: int, new_summary: str) -> List[float]:
+    def update_profile_embedding(self, entity_id: int, resolution_text: str) -> List[float]:
         """
-        Update entity summary and recompute embedding.
+        Update entity facts and recompute embedding.
         Returns new embedding.
         """
         with self._lock:
@@ -286,11 +285,8 @@ class EntityResolver:
                 logger.warning(f"Cannot update profile for unknown entity {entity_id}")
                 return []
             
-            canonical_name = profile.get("canonical_name", "")
-            profile["summary"] = new_summary
             profile["last_seen"] = datetime.now(timezone.utc).isoformat()
             
-            resolution_text = f"{canonical_name}. {new_summary[:200]}"
             embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
             faiss.normalize_L2(embedding_np.reshape(1, -1))
 
@@ -303,7 +299,7 @@ class EntityResolver:
             return embedding_np.tolist()
 
     def detect_merge_candidates(self) -> list:
-        """Detect potential entity merges using name matching and summary similarity."""
+        """Detect potential entity merges using name matching and facts similarity."""
         
         logger.info(f"Merge detection started, {len(self.entity_profiles)} entities to scan")
         
@@ -376,12 +372,10 @@ class EntityResolver:
                     del self.entity_profiles[eid]
                     removed += 1
                 
-                # Remove aliases pointing to this ID
                 to_remove = [alias for alias, id_ in self._name_to_id.items() if id_ == eid]
                 for alias in to_remove:
                     del self._name_to_id[alias]
             
-            # Remove from FAISS
             if removed > 0:
                 try:
                     self.index_id_map.remove_ids(np.array(entity_ids, dtype=np.int64))

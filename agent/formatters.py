@@ -70,7 +70,7 @@ def format_entity_results(entities: List[Dict], k: int = 5) -> str:
         aliases = ent.get("aliases", [])
         topic = ent.get("topic", "General")
         last_mentioned = _format_timestamp(ent.get("last_mentioned"))
-        summary = ent.get("summary", "No summary available.")
+        facts = ent.get("facts", [])
         
         block = f"=== {name} ({ent_type}) ===\n"
         
@@ -79,7 +79,13 @@ def format_entity_results(entities: List[Dict], k: int = 5) -> str:
         
         block += f"Topic: {topic}\n"
         block += f"Last talked about: {last_mentioned}\n"
-        block += f"Summary: {summary}\n"
+        
+        if facts:
+            block += "Facts:\n"
+            for fact in facts:
+                block += f"  - {fact}\n"
+        else:
+            block += "Facts: None recorded\n"
         
         connections = ent.get("top_connections", [])
         if connections:

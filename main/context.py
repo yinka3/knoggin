@@ -230,22 +230,22 @@ class Context:
         logger.info(f"Creating new USER entity for {user_name}")
         new_id = await self.get_next_ent_id()
         
-        summary = get_config_value("user_summary") or f"The primary user named {user_name}"
+        initial_fact = get_config_value("user_summary") or f"The primary user named {user_name}"
 
         embedding = await loop.run_in_executor(
             self.executor,
             partial(self.ent_resolver.register_entity, new_id, user_name, [user_name], "person", "Personal")
         )
-        
-        self.ent_resolver.entity_profiles[new_id]["summary"] = summary
+
+        self.ent_resolver.entity_profiles[new_id]["facts"] = [initial_fact]
 
         user_entity = {
             "id": new_id,
             "canonical_name": user_name,
             "type": "person",
             "confidence": 1.0,
-            "summary": summary,
-            "topic": "Personal",
+            "facts": [initial_fact], 
+            "topic": "Identity",
             "embedding": embedding,
             "aliases": [user_name]
         }
@@ -454,7 +454,6 @@ class Context:
                     "canonical_name": profile["canonical_name"],
                     "type": profile.get("type", ""),
                     "confidence": 1.0,
-                    "summary": "",
                     "topic": profile.get("topic", "General"),
                     "embedding": self.ent_resolver.get_embedding_for_id(ent_id),
                     "aliases": self.ent_resolver.get_mentions_for_id(ent_id)
@@ -470,9 +469,8 @@ class Context:
                     "canonical_name": profile["canonical_name"],
                     "type": profile.get("type", ""),
                     "confidence": 1.0,
-                    "summary": "",
                     "topic": profile.get("topic", "General"),
-                    "embedding": [],
+                    "embedding": self.ent_resolver.get_embedding_for_id(ent_id),
                     "aliases": self.ent_resolver.get_mentions_for_id(ent_id)
                 })
 

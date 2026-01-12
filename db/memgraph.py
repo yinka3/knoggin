@@ -81,7 +81,7 @@ class MemGraphStore:
                         e.canonical_name = data.canonical_name,
                         e.aliases = data.aliases,
                         e.type = data.type,
-                        e.summary = data.summary,
+                        e.facts = [],
                         e.confidence = data.confidence,
                         e.last_updated = timestamp(),
                         e.last_mentioned = timestamp(),
@@ -147,7 +147,7 @@ class MemGraphStore:
             e.aliases AS aliases,
             e.type AS type,
             e.topic AS topic,
-            e.summary AS summary,
+            e.facts AS facts,
             e.embedding AS embedding
         """
         with self.driver.session() as session:
@@ -156,11 +156,10 @@ class MemGraphStore:
     
 
     def update_entity_profile(self, entity_id: int, canonical_name: str, 
-                        summary: str, embedding: List[float], 
-                        last_msg_id: int, topic: str = "General"):
+                        facts: List[str], embedding: List[float], 
+                        last_msg_id: int):
         """
-        Update an existing entity's profile without touching relationships.
-        Called by GraphBuilder when processing PROFILE_UPDATE messages.
+        Update an existing entity's fact ledger.
         """
         def _update(tx: 'ManagedTransaction'):
             tx.run("""
@@ -168,7 +167,7 @@ class MemGraphStore:
                 
                 ON CREATE SET
                     e.canonical_name = $canonical_name,
-                    e.summary = $summary,
+                    e.facts = $facts,
                     e.embedding = $embedding,
                     e.last_profiled_msg_id = $last_msg_id,
                     e.last_updated = timestamp(),
@@ -176,28 +175,21 @@ class MemGraphStore:
 
                 ON MATCH SET
                     e.canonical_name = $canonical_name,
-                    e.summary = $summary,
+                    e.facts = $facts,
                     e.embedding = $embedding,
                     e.last_updated = timestamp(),
                     e.last_profiled_msg_id = $last_msg_id
-                
-                WITH e
-                FOREACH (_ IN CASE WHEN $topic IS NOT NULL AND $topic <> "" THEN [1] ELSE [] END |
-                    MERGE (t:Topic {name: $topic})
-                    MERGE (e)-[:BELONGS_TO]->(t)
-                )
             """, 
             id=entity_id, 
             canonical_name=canonical_name, 
-            summary=summary,
+            facts=facts,
             embedding=embedding,
-            last_msg_id=last_msg_id,
-            topic=topic
+            last_msg_id=last_msg_id
             )
         
         with self.driver.session() as session:
             session.execute_write(_update)
-            logger.info(f"Updated entity {entity_id} profile (checkpoint: msg_{last_msg_id})")
+        logger.info(f"Updated entity {entity_id} ledger (checkpoint: msg_{last_msg_id})")
 
     def cleanup_null_entities(self) -> int:
         """Remove entities with null type and their relationships."""
@@ -269,7 +261,7 @@ class MemGraphStore:
         WHERE toLower(e.canonical_name) IN $names
             OR any(alias IN e.aliases WHERE toLower(alias) IN $names)
         RETURN e.id as id, e.canonical_name as canonical_name, 
-            e.type as type, e.aliases as aliases, e.summary as summary
+            e.type as type, e.aliases as aliases, e.facts as facts
         """
         with self.driver.session() as session:
             result = session.run(query, {"names": lower_names})
@@ -328,7 +320,7 @@ class MemGraphStore:
             entity_projection = "{name: e.canonical_name, aliases: e.aliases}"
             msg_limit = 20
         else:
-            entity_projection = "{name: e.canonical_name, summary: e.summary}"
+            entity_projection = "{name: e.canonical_name, facts: e.facts}"
         
         query = f"""
         MATCH (t:Topic) WHERE t.name IN $hot_topics
@@ -373,13 +365,13 @@ class MemGraphStore:
             e.canonical_name AS canonical_name,
             e.aliases AS aliases,
             e.type AS type,
-            e.summary AS summary,
+            e.facts AS facts,
             e.topic AS topic,
             e.last_mentioned AS last_mentioned,
             e.last_updated AS last_updated,
             conn.canonical_name AS conn_name,
             conn.aliases AS conn_aliases,
-            conn.summary AS conn_summary,
+            conn.facts AS conn_facts,
             r.weight AS conn_weight,
             r.message_ids AS evidence_ids
         ORDER BY e.last_mentioned DESC, conn_weight DESC
@@ -398,7 +390,7 @@ class MemGraphStore:
                         "canonical_name": row["canonical_name"],
                         "aliases": row["aliases"] or [],
                         "type": row["type"],
-                        "summary": row["summary"],
+                        "facts": row["facts"],
                         "topic": row["topic"],
                         "last_mentioned": row["last_mentioned"],
                         "last_updated": row["last_updated"],
@@ -409,7 +401,7 @@ class MemGraphStore:
                     entities[eid]["top_connections"].append({
                         "canonical_name": row["conn_name"],
                         "aliases": row["conn_aliases"] or [],
-                        "summary": row["conn_summary"] or "",
+                        "facts": row["conn_facts"] or [],  # List, not string
                         "weight": row["conn_weight"],
                         "evidence_ids": (row["evidence_ids"] or [])[:evidence_limit]
                     })
@@ -429,7 +421,7 @@ class MemGraphStore:
             e.canonical_name as canonical_name,
             e.aliases as aliases,
             e.type as type,
-            e.summary as summary,
+            e.facts AS facts,
             e.last_mentioned as last_mentioned,
             e.last_updated as last_updated,
             t.name as topic
@@ -460,7 +452,7 @@ class MemGraphStore:
         RETURN
             source.canonical_name as source,
             target.canonical_name as target,
-            target.summary as target_summary,
+            target.facts as target_facts,
             r.weight as connection_strength,
             r.message_ids as evidence_ids,
             r.confidence as confidence,
@@ -543,7 +535,7 @@ class MemGraphStore:
         RETURN e.id as id,
             e.canonical_name as canonical_name,
             e.type as type,
-            e.summary as summary,
+            e.facts as facts,
             t.name as topic
         ORDER BY e.last_mentioned DESC
         LIMIT $limit
@@ -568,7 +560,7 @@ class MemGraphStore:
             result = session.run(query, {"user_name": user_name, "limit": limit})
             return [dict(record) for record in result]
     
-    def merge_entities(self, primary_id: int, secondary_id: int, merged_summary: str) -> bool:
+    def merge_entities(self, primary_id: int, secondary_id: int, merged_facts: List[str]) -> bool:
         """
         Merge secondary entity into primary (single transaction).
         Primary survives with combined data, secondary is deleted.
@@ -576,7 +568,7 @@ class MemGraphStore:
         Args:
             primary_id: Entity that survives
             secondary_id: Entity that gets merged and deleted
-            merged_summary: Pre-computed summary (from LLM or concat)
+            merged_facts: Pre-computed facts
         """
         
         def _execute_merge(tx):
@@ -606,7 +598,7 @@ class MemGraphStore:
             tx.run("""
                 MATCH (p:Entity {id: $primary_id})
                 SET p.aliases = $aliases,
-                    p.summary = $summary,
+                    p.facts = $facts,
                     p.last_updated = timestamp()
                 WITH p
                 MATCH (s:Entity {id: $secondary_id})
@@ -617,7 +609,7 @@ class MemGraphStore:
                         WHEN coalesce(s.last_mentioned, 0) > coalesce(p.last_mentioned, 0) 
                         THEN s.last_mentioned ELSE p.last_mentioned END
             """, primary_id=primary_id, secondary_id=secondary_id, 
-                aliases=combined_aliases, summary=merged_summary)
+                aliases=combined_aliases, facts=merged_facts)
             
             # Step 3: Transfer relationships from secondary to primary
             tx.run("""

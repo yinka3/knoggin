@@ -25,8 +25,13 @@ class ConnectionExtractionResponse(BaseModel):
 
 class ProfileUpdate(BaseModel):
     canonical_name: str
-    summary: str = Field(..., description="Updated biographical summary merging old facts with new observations.")
-    topic: str = Field(..., description="Broad thematic category.")
+    facts: List[str] = Field(
+        ..., 
+        description="List of atomic facts. "
+                    "Maintain existing facts. "
+                    "Append new ones. "
+                    "Mark invalid ones with ' [INVALIDATED: <date>]'."
+    )
 
 
 class BatchProfileResponse(BaseModel):

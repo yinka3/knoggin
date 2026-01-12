@@ -9,7 +9,7 @@ from db.memgraph import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobNotifier, JobResult
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
-from main.prompts import get_profile_update_prompt
+from main.prompts import get_profile_reasoning_prompt, get_profile_formatter_prompt
 from schema.dtypes import BatchProfileResponse, ProfileUpdate
 
 
@@ -24,7 +24,7 @@ class ProfileRefinementJob(BaseJob):
     """
     
     MSG_WINDOW = 40
-    VOLUME_THRESHOLD = 20
+    VOLUME_THRESHOLD = 30
     IDLE_THRESHOLD = 60
     PROFILE_BATCH_SIZE = 5
 
@@ -108,8 +108,7 @@ class ProfileRefinementJob(BaseJob):
 
         async with JobNotifier(ctx.redis, warning):
             dirty_key = f"dirty_entities:{ctx.user_name}"
-            dirty_count = await ctx.redis.scard(dirty_key)
-            raw_ids = await ctx.redis.spop(dirty_key, 30) # 
+            raw_ids = await ctx.redis.spop(dirty_key, self.VOLUME_THRESHOLD) # 
             
             user_id = self.resolver.get_id(ctx.user_name)
             entity_ids = [int(id_str) for id_str in raw_ids if int(id_str) != user_id] if raw_ids else []
@@ -153,35 +152,51 @@ class ProfileRefinementJob(BaseJob):
         if not conversation:
             return False
         
-        observations = [turn["formatted"] for turn in conversation]
+        conversation_text = "\n".join([turn["formatted"] for turn in conversation])
     
-        if not observations:
+        if not conversation_text:
             return False
         
-        context_text = "\n".join(observations)
-        system_prompt = get_profile_update_prompt(ctx.user_name)
+        existing_facts = profile.get("facts", [])
+        
+        system_reasoning = get_profile_reasoning_prompt(ctx.user_name)
         user_content = json.dumps({
-            "entity_name": ctx.user_name,
-            "entity_type": "person",
-            "existing_summary": profile.get("summary", ""),
-            "new_observations": context_text,
-            "known_aliases": [ctx.user_name]
+            "entities": [{
+                "entity_name": ctx.user_name,
+                "entity_type": "person",
+                "existing_facts": existing_facts,
+                "known_aliases": [ctx.user_name]
+            }],
+            "conversation": conversation_text
         }, indent=2)
         
-        raw_response = await self.llm.call_structured(system_prompt, user_content, ProfileUpdate)
+        reasoning = await self.llm.call_reasoning(system_reasoning, user_content)
 
-        if not raw_response:
-            return None
+        if not reasoning or "<ledgers>" not in reasoning:
+            logger.warning(f"VEGAPUNK-06 returned no ledgers for user profile")
+            return False
 
-        new_summary = raw_response.summary
+        system_formatter = get_profile_formatter_prompt()
+        response = await self.llm.call_structured(
+            system_formatter, 
+            reasoning, 
+            BatchProfileResponse
+        )
         
-        if not new_summary or new_summary == profile.get("summary", ""):
-            return None
+        if not response or not response.profiles:
+            return False
+        
+        new_facts = response.profiles[0].facts
+        
+        if not new_facts or new_facts == existing_facts:
+            return False
+        
+        resolution_text = f"{ctx.user_name}. " + " ".join(new_facts)
         
         loop = asyncio.get_running_loop()
         embedding = await loop.run_in_executor(
             self.executor,
-            partial(self.resolver.update_profile_summary, user_id, new_summary)
+            partial(self.resolver.update_profile_embedding, user_id, resolution_text)
         )
         
         current_msg_id = await ctx.redis.get("global:next_msg_id")
@@ -192,11 +207,10 @@ class ProfileRefinementJob(BaseJob):
             partial(
                 self.store.update_entity_profile,
                 entity_id=user_id,
-                canonical_name=raw_response.canonical_name,
-                summary=new_summary,
+                canonical_name=ctx.user_name,
+                facts=new_facts,
                 embedding=embedding,
-                last_msg_id=current_msg_id,
-                topic=raw_response.topic
+                last_msg_id=current_msg_id
             )
         )
         
@@ -207,33 +221,40 @@ class ProfileRefinementJob(BaseJob):
     async def _process_single_batch(
         self, 
         ctx: JobContext,
-        batch: List[dict], 
+        batch: List[Dict], 
         conversation_text: str, 
         current_msg_id: int
-    ) -> List[dict]:
+    ) -> List[Dict]:
         """Process one batch of entities. Returns list of updates."""
         async with self.batch_semaphore:
             llm_input = [{
                 "entity_name": e["entity_name"],
                 "entity_type": e["entity_type"],
-                "existing_summary": e["existing_summary"],
+                "existing_facts": e["existing_facts"],
                 "known_aliases": e["known_aliases"]
             } for e in batch]
             
-            system_prompt = get_profile_update_prompt(ctx.user_name)
+            system_reasoning = get_profile_reasoning_prompt(ctx.user_name)
             user_content = json.dumps({
                 "entities": llm_input,
                 "conversation": conversation_text
             }, indent=2)
             
+            reasoning = await self.llm.call_reasoning(system_reasoning, user_content)
+            
+            if not reasoning or "<ledgers>" not in reasoning:
+                logger.warning(f"VEGAPUNK-06 returned no ledgers block for: {[e['entity_name'] for e in batch]}")
+                return []
+            
+            system_formatter = get_profile_formatter_prompt()
             response = await self.llm.call_structured(
-                system_prompt, 
-                user_content, 
+                system_formatter, 
+                reasoning, 
                 BatchProfileResponse
             )
             
             if not response or not response.profiles:
-                logger.warning(f"Batch profile failed for entities: {[e['entity_name'] for e in batch]}")
+                logger.warning(f"VEGAPUNK-06b failed for: {[e['entity_name'] for e in batch]}")
                 return []
             
             updates = []
@@ -242,28 +263,29 @@ class ProfileRefinementJob(BaseJob):
                     break
                 
                 orig = batch[j]
-                new_summary = profile_out.summary
+                new_facts = profile_out.facts
                 
-                if not new_summary or new_summary == orig["existing_summary"]:
+                if not new_facts or new_facts == orig["existing_facts"]:
                     continue
+                
+                resolution_text = f"{orig['entity_name']}. " + " ".join(new_facts)
                 
                 loop = asyncio.get_running_loop()
                 embedding = await loop.run_in_executor(
                     self.executor,
-                    partial(self.resolver.update_profile_summary, orig["ent_id"], new_summary)
+                    partial(self.resolver.update_profile_embedding, orig["ent_id"], resolution_text)
                 )
                 
-                logger.info(f"Refined profile for {orig['entity_name']} (ID: {orig['ent_id']})")
+                logger.info(f"Refined facts for {orig['entity_name']} (ID: {orig['ent_id']})")
                 
                 updates.append({
                     "id": orig["ent_id"],
                     "canonical_name": orig["entity_name"],
-                    "summary": new_summary,
-                    "topic": profile_out.topic or orig["topic"],
+                    "facts": new_facts,
                     "embedding": embedding,
                     "last_msg_id": current_msg_id
                 })
-            
+        
             return updates
     
 
@@ -279,13 +301,14 @@ class ProfileRefinementJob(BaseJob):
             if not profile:
                 continue
             
+            existing_facts = profile.get("facts", [])
+            
             entity_inputs.append({
                 "ent_id": ent_id,
                 "entity_name": profile.get("canonical_name", "Unknown"),
                 "entity_type": profile.get("type", "unknown"),
-                "existing_summary": profile.get("summary", ""),
-                "known_aliases": self.resolver.get_mentions_for_id(ent_id),
-                "topic": profile.get("topic", "General")
+                "existing_facts": existing_facts,
+                "known_aliases": self.resolver.get_mentions_for_id(ent_id)
             })
         
         if not entity_inputs:
@@ -306,7 +329,7 @@ class ProfileRefinementJob(BaseJob):
         results = await asyncio.gather(*tasks)
         return [update for batch_updates in results for update in batch_updates]
 
-    async def _write_updates(self, updates: List[dict]):
+    async def _write_updates(self, updates: List[Dict]):
         """Write profile updates to Memgraph sequentially."""
         loop = asyncio.get_running_loop()
         
@@ -317,10 +340,9 @@ class ProfileRefinementJob(BaseJob):
                     self.store.update_entity_profile,
                     entity_id=update["id"],
                     canonical_name=update["canonical_name"],
-                    summary=update["summary"],
+                    facts=update["facts"],
                     embedding=update["embedding"],
-                    last_msg_id=update["last_msg_id"],
-                    topic=update["topic"]
+                    last_msg_id=update["last_msg_id"]
                 )
             )
         

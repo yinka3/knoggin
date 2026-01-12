@@ -18,7 +18,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_entity",
-            "description": "Find a person, place, or thing by name. Returns their full profile (type, summary, aliases, topic) and their 5 strongest connections. Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.",
+            "description": "Find a person, place, or thing by name. Returns their full profile (type, facts, aliases, topic) and their 5 strongest connections. Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.",
             "parameters": {
                 "type": "object",
                 "properties": {
