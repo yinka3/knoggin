@@ -93,3 +93,6 @@ redis_data/
 memgraph_data/
 memgraph_log/
 *.log
+
+# Preserved code for later use(not integrated with current repo)
+preserve/

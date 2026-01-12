@@ -159,15 +159,15 @@ function handleSSEEvent(event, query) {
   const data = event.data
 
   if (type === 'message') {
-    appendMessage(data.response, 'assistant')
-    history.push({ role: 'user', content: query })
-    history.push({ role: 'assistant', content: data.response })
+      appendMessage(data.response, 'assistant')
+      history.push({ role: 'user', content: query, timestamp: new Date().toISOString() })
+      history.push({ role: 'assistant', content: data.response, timestamp: new Date().toISOString() })
   } 
   else if (type === 'clarification') {
-    appendMessage(data.question, 'assistant')
-    history.push({ role: 'user', content: query })
-    history.push({ role: 'assistant', content: data.question })
-  } 
+      appendMessage(data.question, 'assistant')
+      history.push({ role: 'user', content: query, timestamp: new Date().toISOString() })
+      history.push({ role: 'assistant', content: data.question, timestamp: new Date().toISOString() })
+  }
   else if (type === 'done') {
     loadProfiles()
   } 

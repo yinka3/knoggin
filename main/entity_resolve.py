@@ -1,30 +1,36 @@
 from datetime import datetime, timezone
 from loguru import logger
 import threading
+from rank_bm25 import BM25Okapi
 from typing import Dict, List, Optional, Tuple
 from rapidfuzz import fuzz
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
+import torch
 from db.memgraph import MemGraphStore
 
 
 
 class EntityResolver:
 
-    def __init__(self, store: 'MemGraphStore', embedding_model='dunzhang/stella_en_1.5B_v5'):
+    def __init__(self, store: 'MemGraphStore', embedding_model='dunzhang/stella_en_400M_v5'):
         self.store = store
-        
-        self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True, device='cpu')
-
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        logger.info(f"EntityResolver using device: {device}")
+        self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True, device=device, model_kwargs={"torch_dtype": torch.float16})
+        self.cross_encoder = CrossEncoder('BAAI/bge-reranker-base', device=device)
         self.embedding_dim = 1024
         self.index_id_map = faiss.IndexIDMap2(faiss.IndexFlatIP(self.embedding_dim))
         self.entity_profiles = {}
         self._name_to_id = {}
-        self.msg_index = faiss.IndexIDMap2(faiss.IndexFlatIP(self.embedding_dim))
+        self.msg_index = faiss.IndexIDMap2(faiss.IndexScalarQuantizer(self.embedding_dim, faiss.ScalarQuantizer.QT_fp16, faiss.METRIC_INNER_PRODUCT))
         self.msg_int_to_id: dict[int, str] = {}
+        self._message_texts = {}
         self._lock = threading.RLock()
-
+        self.bm25_index: Optional[BM25Okapi] = None
+        self.msg_corpus: list[list[str]] = []
+        self.msg_id_order: list[str] = []
     
         self._hydrate_from_store()
 
@@ -98,29 +104,97 @@ class EntityResolver:
     def hydrate_messages(self, messages: dict[str, dict]):
         if not messages:
             return
-        ids, texts = [], []
-        for msg_id, data in messages.items():
-            int_id = int(msg_id.split("_")[1])
-            self.msg_int_to_id[int_id] = msg_id
-            ids.append(int_id)
-            texts.append(data["message"])
         
-        embs = self.embedding_model.encode(texts)
+        ids, texts, tokens = [], [], []
+        for msg_key, data in messages.items():
+            prefix, num = msg_key.split("_")
+            num = int(num)
+            int_id = num if prefix == "msg" else num + 1_000_000
+            
+            text = data.get("message") or data.get("content", "")
+            self._message_texts[msg_key] = text
+            self.msg_int_to_id[int_id] = msg_key
+            ids.append(int_id)
+            texts.append(text)
+            tokens.append(text.lower().split())
+            self.msg_id_order.append(msg_key)
+        
+
+        embs = self.embedding_model.encode(texts).astype(np.float32)
         faiss.normalize_L2(embs)
         self.msg_index.add_with_ids(embs, np.array(ids, dtype=np.int64))
+        
 
-    def add_message(self, msg_id: str, text: str):
-        int_id = int(msg_id.split("_")[1])
-        self.msg_int_to_id[int_id] = msg_id
-        emb = self.embedding_model.encode([text])
+        self.msg_corpus = tokens
+        self.bm25_index = BM25Okapi(tokens)
+
+    
+    def add_message(self, msg_key: str, text: str):
+        prefix, num = msg_key.split("_")
+        num = int(num)
+        
+        # hacky solution: offset to 1 mill
+        int_id = num if prefix == "msg" else num + 1_000_000
+        
+        self.msg_int_to_id[int_id] = msg_key
+        self._message_texts[msg_key] = text
+
+        emb = self.embedding_model.encode([text]).astype(np.float32)
         faiss.normalize_L2(emb)
         self.msg_index.add_with_ids(emb, np.array([int_id], dtype=np.int64))
+        
+        self.msg_corpus.append(text.lower().split())
+        self.msg_id_order.append(msg_key)
+        self.bm25_index = BM25Okapi(self.msg_corpus)
 
-    def search_messages(self, query: str, k: int = 5) -> list[tuple[str, float]]:
-        q_emb = self.embedding_model.encode([query])
+    def _search_messages(self, query: str, k: int = 10) -> list[tuple[str, float]]:
+        if not self.msg_int_to_id:
+            return []
+        
+        results = {}
+        
+        q_emb = self.embedding_model.encode([query]).astype(np.float32)
         faiss.normalize_L2(q_emb)
-        scores, ids = self.msg_index.search(q_emb, k)
-        return [(self.msg_int_to_id[int(i)], float(s)) for i, s in zip(ids[0], scores[0]) if i >= 0]
+        sem_scores, sem_ids = self.msg_index.search(q_emb, 50) #hardcoded for convienence
+        
+        for idx, score in zip(sem_ids[0], sem_scores[0]):
+            if idx >= 0:
+                if int(idx) not in self.msg_int_to_id:
+                    logger.warning(f"FAISS returned ID {idx} not in msg_int_to_id")
+                    continue
+                msg_key = self.msg_int_to_id[int(idx)]
+                results[msg_key] = ("semantic", float(score))
+        
+        if self.bm25_index:
+            tokens = query.lower().split()
+            bm25_scores = self.bm25_index.get_scores(tokens)
+            top_indices = np.argsort(bm25_scores)[::-1][:75] #hardcoded for convienence
+            max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1.0
+            
+            for idx in top_indices:
+                if bm25_scores[idx] > 0:
+                    msg_key = self.msg_id_order[idx]
+                    norm_score = bm25_scores[idx] / max_bm25
+                    if msg_key in results:
+                        _, sem_score = results[msg_key]
+                        results[msg_key] = ("both", sem_score + norm_score)
+                    else:
+                        results[msg_key] = ("keyword", norm_score)
+        
+        if not results:
+            return []
+        
+        if len(results) > 1:
+                candidate_keys = list(results.keys())[:45]
+                pairs = [(query, self._message_texts[msg_key]) for msg_key in candidate_keys]
+                scores = self.cross_encoder.predict(pairs)
+                reranked = list(zip(candidate_keys, scores))
+                reranked.sort(key=lambda x: x[1], reverse=True)
+                return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
+            
+        # Fallback: single result
+        sorted_results = sorted(results.items(), key=lambda x: x[1][1], reverse=True)[:k]
+        return [(key, score) for key, (_, score) in sorted_results]
     
     def validate_existing(self, canonical_name: str, mentions: List[str]) -> Tuple[Optional[int], bool]:
         """
@@ -174,7 +248,7 @@ class EntityResolver:
         summary = profile.get("summary", "") or ""
 
         resolution_text = f"{canonical_name}. {summary}"
-        embedding_np = self.embedding_model.encode([resolution_text])[0]
+        embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
         faiss.normalize_L2(embedding_np.reshape(1, -1))
 
 
@@ -217,7 +291,7 @@ class EntityResolver:
             profile["last_seen"] = datetime.now(timezone.utc).isoformat()
             
             resolution_text = f"{canonical_name}. {new_summary[:200]}"
-            embedding_np = self.embedding_model.encode([resolution_text])[0]
+            embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
             faiss.normalize_L2(embedding_np.reshape(1, -1))
 
             self.index_id_map.remove_ids(np.array([entity_id], dtype=np.int64))
@@ -243,7 +317,7 @@ class EntityResolver:
                 if id_i == id_j:
                     continue
                 score = fuzz.WRatio(aliases[i], aliases[j])
-                if score >= 85:
+                if score >= 91:
                     pair_key = tuple(sorted([id_i, id_j]))
                     if pair_key not in seen_pairs or score > seen_pairs[pair_key]:
                         seen_pairs[pair_key] = score
@@ -289,3 +363,31 @@ class EntityResolver:
     
         logger.info(f"Merge detection complete: {len(candidates)} candidates found")
         return candidates
+    
+    def remove_entities(self, entity_ids: List[int]) -> int:
+        """Remove entities from resolver indexes. Call after Memgraph deletion."""
+        if not entity_ids:
+            return 0
+        
+        removed = 0
+        with self._lock:
+            for eid in entity_ids:
+                if eid in self.entity_profiles:
+                    del self.entity_profiles[eid]
+                    removed += 1
+                
+                # Remove aliases pointing to this ID
+                to_remove = [alias for alias, id_ in self._name_to_id.items() if id_ == eid]
+                for alias in to_remove:
+                    del self._name_to_id[alias]
+            
+            # Remove from FAISS
+            if removed > 0:
+                try:
+                    self.index_id_map.remove_ids(np.array(entity_ids, dtype=np.int64))
+                except Exception as e:
+                    logger.warning(f"FAISS removal failed: {e}")
+        
+        if removed > 0:
+            logger.info(f"Removed {removed} entities from resolver")
+        return removed

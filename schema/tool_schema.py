@@ -3,11 +3,26 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_messages",
-            "description": "Search past user messages by semantic similarity. Use when looking for what the user said about a topic.",
+            "description": "Search the user's actual messages by keyword or phrase. Use when you need their exact words, a direct quote, or when entity-based tools found nothing relevant. This is raw recall, not summarized knowledge.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Keywords or phrase to search for"},
+                    "limit": {"type": "integer", "description": "Max results (default 10)"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_entity",
+            "description": "Find a person, place, or thing by name. Returns their full profile (type, summary, aliases, topic) and their 5 strongest connections. Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Name or partial name to search"},
                     "limit": {"type": "integer", "description": "Max results (default 5)"}
                 },
                 "required": ["query"]
@@ -17,36 +32,8 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_entities",
-            "description": "Search for entities by name or alias. Use when you need to find a person/place/thing but aren't sure of exact name.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Name or partial name to search"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_profile",
-            "description": "Get full profile for a specific entity. Use when you know the exact entity name and need complete information.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "entity_name": {"type": "string", "description": "Exact canonical name of the entity"}
-                },
-                "required": ["entity_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "get_connections",
-            "description": "Find all entities connected to a given entity. Use when asked about relationships or 'who knows who'.",
+            "description": "Get the full relationship network for an entity. Returns all connections (up to 50) with evidence — the actual messages that established each connection. Use when you need comprehensive relationship details beyond the top 5 from search_entity.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -60,12 +47,12 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_activity",
-            "description": "Get recent interactions involving an entity. Use for 'what happened with X recently'.",
+            "description": "Get recent interactions involving an entity within a time window. Use for 'what happened with X lately' or 'any updates on X this week'. Default is 24 hours; use 168 for a week.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "entity_name": {"type": "string", "description": "Entity to check activity for"},
-                    "hours": {"type": "integer", "description": "How far back to look (default 24, use 168 for week)"}
+                    "hours": {"type": "integer", "description": "How far back to look (default 24, use 168 for a week)"}
                 },
                 "required": ["entity_name"]
             }
@@ -75,7 +62,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "find_path",
-            "description": "Find shortest connection path between two entities. Use for 'how is X connected to Y' or 'what's the relationship between X and Y'. Requires both entities known — use get_profile first if unsure.",
+            "description": "Trace the connection chain between two specific entities. Use for 'how is X connected to Y' or 'what links X to Y'. Returns the shortest path showing each hop. Requires both entities to exist in memory.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -101,20 +88,6 @@ TOOL_SCHEMAS = [
     #         }
     #     }
     # },
-    {
-        "type": "function",
-        "function": {
-            "name": "finish",
-            "description": "Provide final response to user. Call when you have enough evidence to answer.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "response": {"type": "string", "description": "Your answer to the user"}
-                },
-                "required": ["response"]
-            }
-        }
-    },
     {
         "type": "function",
         "function": {

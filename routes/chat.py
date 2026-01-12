@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -9,7 +9,7 @@ from loguru import logger
 from routes.main import get_context
 from routes.models import ChatRequest
 from main.context import Context
-from schema.dtypes import MessageData, CompleteResult, ClarificationResult
+from schema.dtypes import MessageData
 from agent.loop import run
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -36,7 +36,7 @@ async def chat(request: ChatRequest, context: Context = Depends(get_context)):
         try:
             msg = MessageData(
                 message=request.message,
-                timestamp=datetime.now()
+                timestamp=datetime.now(timezone.utc)
             )
             context._fire_and_forget(context.add(msg))
             
@@ -69,6 +69,12 @@ async def chat(request: ChatRequest, context: Context = Depends(get_context)):
             status = result.get("status")
 
             if status == "complete":
+                turn_id = await context.add_to_conversation_log(
+                    role="assistant",
+                    content=result["response"],
+                    timestamp=datetime.now(timezone.utc)
+                )
+                context.ent_resolver.add_message(f"turn_{turn_id}", result["response"])
                 yield format_sse({"response": result["response"]}, "message")
                 yield format_sse({
                     "tools_used": result["tools_used"],
@@ -78,6 +84,12 @@ async def chat(request: ChatRequest, context: Context = Depends(get_context)):
                 }, "done")
             
             elif status == "clarification_needed":
+                turn_id = await context.add_to_conversation_log(
+                    role="assistant",
+                    content=result["question"],
+                    timestamp=datetime.now(timezone.utc)
+                )
+                context.ent_resolver.add_message(f"turn_{turn_id}", result["question"])
                 yield format_sse({"question": result["question"]}, "clarification")
                 yield format_sse({
                     "tools_used": result["tools_used"],

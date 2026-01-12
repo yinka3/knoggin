@@ -9,3 +9,4 @@ def setup_logging(log_level="INFO", log_file="vestige.log"):
     logger.add(log_file, format=fmt, level=log_level, rotation="2 MB", retention=10)
     
     logger.info("Logging configured successfully.")
+    

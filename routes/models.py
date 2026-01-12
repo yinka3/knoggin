@@ -5,6 +5,7 @@ from typing import List, Optional, Literal
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
+    timestamp: Optional[str] = None
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=5, max_length=500)

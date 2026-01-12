@@ -28,6 +28,13 @@ class ProfileUpdate(BaseModel):
     summary: str = Field(..., description="Updated biographical summary merging old facts with new observations.")
     topic: str = Field(..., description="Broad thematic category.")
 
+
+class BatchProfileResponse(BaseModel):
+    profiles: List[ProfileUpdate] = Field(
+        ..., 
+        description="One ProfileUpdate per input entity, in same order as input."
+    )
+
 class ResolutionEntry(BaseModel):
     verdict: Literal["EXISTING", "NEW_GROUP", "NEW_SINGLE"] = Field(
         ..., 

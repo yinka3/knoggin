@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from loguru import logger
-from redisclient import AsyncRedisClient
+from main.redisclient import AsyncRedisClient
 from jobs.base import BaseJob, JobContext
 
 

@@ -1,4 +1,7 @@
+import asyncio
+import json
 import os
+import re
 from typing import Dict, List, Optional, Type, TypeVar
 from openai import AsyncOpenAI, OpenAI
 import instructor
@@ -55,7 +58,8 @@ class LLMService:
         logger.info(
             f"LLMService initialized | "
             f"structured={self._structured_model} | "
-            f"reasoning={self._reasoning_model}"
+            f"reasoning={self._reasoning_model} | "
+            f"agent={self._agent_model}" 
         )
 
     @property
@@ -99,7 +103,13 @@ class LLMService:
                 response_model=response_model,
                 max_retries=max_retries,
                 temperature=temperature,
-                extra_body={"provider": {"allow_fallbacks": True}}
+                extra_body={
+                    "provider": {
+                        "allow_fallbacks": True,
+                        "data_collection": "deny"
+                    },
+                    "plugins": [{"id": "response-healing"}]
+                }
             )
             
             if self._trace:
@@ -119,7 +129,8 @@ class LLMService:
         system: str,
         user: str,
         model: Optional[str] = None,
-        temperature: float = 1.0
+        temperature: float = 1.0,
+        max_retries: int = 5
     ) -> Optional[str]:
         """Free-form reasoning, returns raw text. Returns None on failure."""
         model = model or self._reasoning_model
@@ -131,29 +142,50 @@ class LLMService:
                 f"SYSTEM:\n{system}\n\n"
             )
         
-        try:
-            response = await self._client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user}
-                ],
-                temperature=temperature,
-                extra_body={"provider": {"allow_fallbacks": True}, "reasoning": {"effort": "minimal"}}
-            )
-            
-            content = response.choices[0].message.content
-            
-            if self._trace:
-                self._trace.debug(f"[REASONING] Response:\n{content}")
-            
-            return content
-            
-        except Exception as e:
-            if self._trace:
-                self._trace.error(f"[REASONING] Failed: {e}")
-            logger.error(f"Reasoning LLM call failed: {e}")
-            return None
+
+        for attempt in range(max_retries):
+            try:
+                response = await self._client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user}
+                    ],
+                    temperature=temperature,
+                    extra_body={
+                        "provider": {
+                            "allow_fallbacks": True,
+                            "data_collection": "deny",
+                            # "zdr": True # zero data rentention(can uncomment if you want, might increase latency tho)
+                        }, 
+                        "reasoning": {"effort": "low"}
+                    }
+                )
+                
+                content = response.choices[0].message.content
+                
+                # CHECK FOR "GHOST" RESPONSES
+                if not content or not content.strip():
+                    if attempt < max_retries - 1:
+                        logger.warning(f"LLM returned empty content. Retrying ({attempt+1}/{max_retries})...")
+                        continue
+                    else:
+                        logger.error("LLM returned empty content after max retries.")
+                        return None
+
+                if self._trace:
+                    self._trace.debug(f"[REASONING] Response:\n{content}")
+                
+                return content
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"LLM call failed: {e}. Retrying ({attempt+1}/{max_retries})...")
+                else:
+                    logger.error(f"Reasoning LLM call failed after retries: {e}")
+                    if self._trace:
+                        self._trace.error(f"[REASONING] Failed: {e}")
+                    return None
     
     async def call_with_tools(
         self,
@@ -162,46 +194,106 @@ class LLMService:
         tools: List[Dict],
         model: Optional[str] = None,
         temperature: float = 0.0,
+        max_retries: int = 3
     ) -> Optional[Dict]:
-        """Sync call with function tools. Returns parsed tool call."""
+        """Call with function tools. Returns parsed tool call."""
         model = model or self._agent_model
         
         if self._trace:
             self._trace.debug(f"[TOOLS SYNC] Model: {model}\nTools: {[t['function']['name'] for t in tools]}")
         
-        try:
-            response = await self._client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user}
-                ],
-                tools=tools,
-                tool_choice="required",
-                temperature=temperature,
-                extra_body={"provider": {"allow_fallbacks": True}}
-            )
+        for attempt in range(max_retries):
+            try:
+                response = await self._client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user}
+                    ],
+                    tools=tools,
+                    tool_choice="auto",
+                    temperature=temperature,
+                    extra_body={"provider": {
+                            "allow_fallbacks": True,
+                            "data_collection": "deny"
+                            # "zdr": True
+                            }
+                        }
+                )
+                
+                message = response.choices[0].message
+                
+                # VALIDATION: It must have either text OR a tool call.
+                # If both are missing, it's a failed generation.
+                has_content = message.content and message.content.strip()
+                has_tools = message.tool_calls and len(message.tool_calls) > 0
+                
+                if not has_content and not has_tools:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Agent returned empty response (no text, no tools). Retrying ({attempt+1}/{max_retries})...")
+                        continue
+                    else:
+                        logger.error("Agent returned empty response after max retries.")
+                        return None
             
-            message = response.choices[0].message
-            
-            tool_calls = []
-            if message.tool_calls:
-                tool_calls = [
-                    {"name": tc.function.name, "arguments": tc.function.arguments}
-                    for tc in message.tool_calls
-                ]
-            
-            if self._trace:
-                self._trace.debug(f"[TOOLS SYNC] Response: {tool_calls}")
-            
-            return {
-                "content": message.content,
-                "tool_calls": tool_calls
-            }
-            
-        except Exception as e:
-            if self._trace:
-                self._trace.error(f"[TOOLS SYNC] Failed: {e}")
-            logger.error(f"Tool call failed: {e}")
-            return None
+                
+                # Process Tool Calls
+                tool_calls = []
+                if message.tool_calls:
+                    tool_calls = [
+                        {"name": tc.function.name, "arguments": tc.function.arguments}
+                        for tc in message.tool_calls
+                    ]
+                
+                if message.content:
+                    logger.info(f"[STELLA THOUGHT]: {message.content[:200]}")
+                    print(f"\n=== SCRATCHPAD ===\n{message.content}\n==================\n")
+                
+                # if not has_tools and has_content and "<invoke" in message.content:
+                #     parsed = self._parse_xml_tool_calls(message.content)
+                #     if parsed:
+                #         tool_calls = parsed
+                #         logger.info(f"Parsed {len(parsed)} tool calls from XML fallback")
+                
+                if self._trace:
+                    self._trace.info(f"[TOOLS SYNC] Response: {tool_calls} | Content: {message.content}")
+                
+                return {
+                    "content": message.content,
+                    "tool_calls": tool_calls
+                }
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Agent tool call failed: {e}. Retrying ({attempt+1}/{max_retries})...")
+                    await asyncio.sleep(1) 
+                else:
+                    logger.error(f"Tool call failed after retries: {e}")
+                    if self._trace:
+                        self._trace.error(f"[TOOLS SYNC] Failed: {e}")
+                    return None
+    
+    def _parse_xml_tool_calls(self, content: str) -> list:
+        """Fallback parser for DeepSeek XML tool calls.(Or any model with xml tool calls)"""
+        tools = []
+        pattern = r'<invoke name="([^"]+)">(.*?)</invoke>'
+        matches = re.findall(pattern, content, re.DOTALL)
+        
+        for name, params_block in matches:
+            args = {}
+            param_pattern = r'<parameter name="([^"]+)"[^>]*>([^<]*)</parameter>'
+            for param_name, param_value in re.findall(param_pattern, params_block):
+                param_value = param_value.strip()
+                
+                # Type conversion
+                if param_value.isdigit():
+                    args[param_name] = int(param_value)
+                elif param_value.lower() in ('true', 'false'):
+                    args[param_name] = param_value.lower() == 'true'
+                else:
+                    args[param_name] = param_value
+                    
+            tools.append({"name": name, "arguments": json.dumps(args)})
+        
+        return tools
     

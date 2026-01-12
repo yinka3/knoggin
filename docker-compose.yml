@@ -5,7 +5,7 @@ services:
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
-      - ./redis_data:/data
+      - redis_data:/data
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
@@ -47,8 +47,6 @@ services:
     environment:
       - QUICK_CONNECT_MG_HOST=memgraph
       - QUICK_CONNECT_MG_PORT=7687
-      - QUICK_CONNECT_MG_USERNAME=${MEMGRAPH_USER}
-      - QUICK_CONNECT_MG_PASSWORD=${MEMGRAPH_PASSWORD}
     restart: unless-stopped
 
   vestige-api:
@@ -85,3 +83,4 @@ services:
 volumes:
   mg_lib:
   mg_log:
+  redis_data:

@@ -1,5 +1,5 @@
 import torch
-from main.prompts import ner_prompt
+from main.prompts import ner_formatter_prompt, ner_reasoning_prompt
 from main.service import LLMService
 from schema.dtypes import *
 from typing import List, Tuple
@@ -44,9 +44,20 @@ class NLPPipeline:
             return []
         logger.info(topics_list)
 
-        system_prompt = ner_prompt(user_name, topics_list)
+        system_01 = ner_reasoning_prompt(user_name, topics_list)
+        reasoning = await self.llm_client.call_reasoning(system_01, text)
         
-        response = await self.llm_client.call_structured(system_prompt, text, ExtractionResponse)
+        if not reasoning or "<entities>" not in reasoning:
+            logger.warning("VEGAPUNK-01 returned no entities block")
+            return []
+
+        # Phase 2: Structure
+        system_01b = ner_formatter_prompt()
+        response = await self.llm_client.call_structured(system_01b, reasoning, ExtractionResponse)
+        
+        if not response:
+            return []
+
         return [(e.name, e.label, e.topic) for e in response.entities]
 
     
@@ -54,7 +65,7 @@ class NLPPipeline:
         if not text or not text.strip():
             return []
         try:
-            results = self.emotion_classifier(text)
+            results = self.emotion_classifier(text, truncation=True)
             return results[0] if results else []
         except Exception:
             return []

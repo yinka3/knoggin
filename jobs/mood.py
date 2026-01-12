@@ -28,9 +28,9 @@ class MoodCheckpointJob(BaseJob):
         if not raw_emotions:
             return JobResult(success=True, summary="No emotions to log")
         
-        emotions = [e.decode() if isinstance(e, bytes) else e for e in raw_emotions]
+        emotions = [e if isinstance(e, bytes) else e for e in raw_emotions]
         
-        self._write_checkpoint(ctx.user_name, emotions)
+        self._write_checkpoint(emotions)
         
         return JobResult(success=True, summary=f"Logged checkpoint: {len(emotions)} emotions")
 
@@ -44,7 +44,7 @@ class MoodCheckpointJob(BaseJob):
         
         await ctx.redis.delete(emotions_key)
         
-        emotions = [e.decode() if isinstance(e, bytes) else e for e in remaining]
+        emotions = [e if isinstance(e, bytes) else e for e in remaining]
         
         self._write_checkpoint(emotions)
         
