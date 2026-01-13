@@ -88,7 +88,7 @@ class ProfileRefinementJob(BaseJob):
             
             parsed = json.loads(data)
             ts = datetime.fromisoformat(parsed['timestamp'])
-            date_str = ts.strftime("%Y-%m-%d")
+            date_str = ts.strftime("%Y-%m-%d %H:%M")
             
             role_label = "User" if parsed["role"] == "user" else "STELLA"
             turn = {

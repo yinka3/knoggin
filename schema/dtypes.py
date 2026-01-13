@@ -1,13 +1,13 @@
 from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional, TypedDict, Union
 
 
 class MessageData(BaseModel):
     id: int = -1
     message: str
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
 
 class EntityPair(BaseModel):
     entity_a: str = Field(..., description="First entity canonical_name (alphabetically first).")

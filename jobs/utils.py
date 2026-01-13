@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 from typing import List, Optional
 from rapidfuzz import fuzz
@@ -28,7 +28,7 @@ def process_extracted_facts(
     if not new_facts:
         return existing_facts
     
-    date_str = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M")
+    date_str = timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     
     to_invalidate = set()
     clean_new_facts = []

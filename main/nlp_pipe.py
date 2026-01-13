@@ -1,3 +1,4 @@
+import re
 import torch
 from main.prompts import ner_formatter_prompt, ner_reasoning_prompt
 from main.service import LLMService
@@ -36,9 +37,29 @@ class NLPPipeline:
             device=device_id
         )
     
+    def _parse_entities(self, reasoning: str) -> Optional[ExtractionResponse]:
+        """Parse <entities> block and validate via Pydantic."""
+        match = re.search(r"<entities>(.*?)</entities>", reasoning, re.DOTALL)
+        if not match:
+            return None
+        
+        entities = []
+        for line in match.group(1).strip().split("\n"):
+            parts = line.split("|")
+            if len(parts) != 3:
+                continue
+            name, label, topic = [p.strip() for p in parts]
+            if name:
+                entities.append(EntityItem(name=name, label=label, topic=topic))
+        
+        if not entities:
+            return None
+        
+        return ExtractionResponse(entities=entities)
+    
     async def extract_mentions(self, user_name: str, topics_list: List, text: str) -> List[Tuple[str, str, str]]:
         """
-        Extracts entities using Qwen-2.5-14B via OpenRouter.
+        Extracts entities and noun phrases.
         """
         if not text or not text.strip():
             return []
@@ -51,11 +72,10 @@ class NLPPipeline:
             logger.warning("VEGAPUNK-01 returned no entities block")
             return []
 
-        # Phase 2: Structure
-        system_01b = ner_formatter_prompt()
-        response = await self.llm_client.call_structured(system_01b, reasoning, ExtractionResponse)
-        
+        response = self._parse_entities(reasoning)
+    
         if not response:
+            logger.warning("No entities parsed from VEGAPUNK-01")
             return []
 
         return [(e.name, e.label, e.topic) for e in response.entities]

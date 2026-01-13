@@ -85,6 +85,13 @@ async def ingest_haystack(context: Context, haystack_sessions: list, haystack_da
     logger.info("Haystack ingestion complete")
 
 
+async def wait_for_drain(context: Context, timeout: int = 120):
+    start = asyncio.get_event_loop().time()
+    while asyncio.get_event_loop().time() - start < timeout:
+        if await context.redis_client.llen(f"buffer:{context.user_name}") == 0:
+            return
+        await asyncio.sleep(5)
+
 async def ask_stella(context: Context, question: str, question_date: str) -> str:
     topics = context.store.get_topics_by_status()
     active = topics.get("active", []) + topics.get("hot", [])
@@ -177,8 +184,7 @@ async def main():
         
         logger.info("Waiting for processing...")
         await asyncio.sleep(30)
-        await context._flush_batch_shutdown()
-        
+        await wait_for_drain(context)
         response = await ask_stella(context, q["question"], q["question_date"])
         
         logger.info(f"\n{'='*60}")
@@ -206,9 +212,8 @@ async def main():
         logger.info(f"\nSaved to {output_file}")
         
     finally:
-        await context.redis_client.aclose()
+        await context.shutdown()
         store.close()
-        executor.shutdown(wait=True)
 
 
 if __name__ == "__main__":

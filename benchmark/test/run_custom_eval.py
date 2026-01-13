@@ -77,16 +77,15 @@ async def ask_stella(context: Context, question: str) -> str:
 
 
 async def wait_for_batch_drain(context: Context, timeout: int = 120):
-    """Wait for current batch to finish processing."""
+    """Wait for buffer to empty."""
     user = context.user_name
     start = asyncio.get_event_loop().time()
     
     while asyncio.get_event_loop().time() - start < timeout:
         buffer_len = await context.redis_client.llen(f"buffer:{user}")
-        in_progress = context._batch_in_progress
         
-        if buffer_len == 0 and not in_progress:
-            logger.debug("Batch drained, continuing...")
+        if buffer_len == 0:
+            logger.debug("Buffer drained, continuing...")
             return
         
         await asyncio.sleep(2)
@@ -95,31 +94,28 @@ async def wait_for_batch_drain(context: Context, timeout: int = 120):
 
 
 async def wait_for_processing(context: Context, poll_interval: int = 30, max_wait: int = 600):
-    """Wait until buffer is empty and jobs have run. Max 15 min default."""
+    """Wait until buffer is empty and profile job has run."""
     user = context.user_name
     start = asyncio.get_event_loop().time()
     
     while asyncio.get_event_loop().time() - start < max_wait:
         buffer_len = await context.redis_client.llen(f"buffer:{user}")
-        in_progress = context._batch_in_progress
         
-        if buffer_len == 0 and not in_progress:
-            # Buffer drained, check if profile job completed
+        if buffer_len == 0:
             profile_done = await context.redis_client.get(f"profile_complete:{user}")
             if profile_done:
                 logger.info("Processing complete.")
                 return
             
-            # Also check if dirty set is empty (nothing to profile)
             dirty_count = await context.redis_client.scard(f"dirty_entities:{user}")
             if dirty_count == 0:
                 logger.info("No pending profile work, continuing...")
-                await asyncio.sleep(60)  # Brief wait for any stragglers
+                await asyncio.sleep(60)
                 return
             
             logger.info(f"Waiting for profile job... ({dirty_count} dirty entities)")
         else:
-            logger.info(f"Buffer: {buffer_len}, in_progress: {in_progress}")
+            logger.info(f"Buffer: {buffer_len}")
         
         await asyncio.sleep(poll_interval)
     

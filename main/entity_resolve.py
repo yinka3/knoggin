@@ -31,6 +31,7 @@ class EntityResolver:
         self.bm25_index: Optional[BM25Okapi] = None
         self.msg_corpus: list[list[str]] = []
         self.msg_id_order: list[str] = []
+        self._bm25_dirty = True
     
         self._hydrate_from_store()
 
@@ -78,17 +79,14 @@ class EntityResolver:
         except Exception as e:
             logger.error(f"Hydration failed: {e}")
             raise
-
-    def get_mentions(self) -> Dict[str, int]:
-        """Get copy of _name_to_id for persistence."""
-        with self._lock:
-            return self._name_to_id.copy()
     
     def get_id(self, name: str) -> Optional[int]:
         return self._name_to_id.get(name.lower())
     
     def get_mentions_for_id(self, entity_id: int) -> List[str]:
-        return [mention for mention, eid in self._name_to_id.items() if eid == entity_id]
+        with self._lock:
+            items = list(self._name_to_id.items())
+        return [mention for mention, eid in items if eid == entity_id]
     
     def get_embedding_for_id(self, entity_id: int) -> List[float]:
         """Retrieve embedding from FAISS by ID."""
@@ -144,11 +142,15 @@ class EntityResolver:
         
         self.msg_corpus.append(text.lower().split())
         self.msg_id_order.append(msg_key)
-        self.bm25_index = BM25Okapi(self.msg_corpus)
+        self._bm25_dirty = True
 
     def _search_messages(self, query: str, k: int = 10) -> list[tuple[str, float]]:
         if not self.msg_int_to_id:
             return []
+        
+        if self._bm25_dirty:
+            self.bm25_index = BM25Okapi(self.msg_corpus)
+            self._bm25_dirty = False
         
         results = {}
         
@@ -184,7 +186,7 @@ class EntityResolver:
             return []
         
         if len(results) > 1:
-                candidate_keys = list(results.keys())[:45]
+                candidate_keys = list(results.keys())[:45] #hardcoded for convienence
                 pairs = [(query, self._message_texts[msg_key]) for msg_key in candidate_keys]
                 scores = self.cross_encoder.predict(pairs)
                 reranked = list(zip(candidate_keys, scores))

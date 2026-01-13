@@ -117,34 +117,24 @@ class MergeDetectionJob(BaseJob):
         warning = "⚠️ **Memory Consolidation in Progress.** Merging duplicate entities."
     
         async with JobNotifier(ctx.redis, warning):
-            lock_key = "system:maintenance_lock"
-            lock_acquired = await ctx.redis.set(lock_key, "true", nx=True, ex=120)
-            if not lock_acquired:
-                return JobResult(success=False, summary="Lock held by another job")
-            await ctx.redis.set(lock_key, "true", ex=60)
+            successful = 0
+            failed = 0
             
-            try:
-                successful = 0
-                failed = 0
+            for item in final_merge_list:
+                success = await self._execute_merge_db_only(
+                    item["primary_id"], 
+                    item["secondary_id"], 
+                    item["merged_facts"]
+                )
                 
-                for item in final_merge_list:
-                    success = await self._execute_merge_db_only(
-                        item["primary_id"], 
-                        item["secondary_id"], 
-                        item["merged_facts"]
-                    )
-                    
-                    if success:
-                        successful += 1
-                        self._sync_resolver(item["primary_id"], item["secondary_id"])
-                        logger.info(f"Merged {item['primary_name']} <- {item['secondary_name']}")
-                    else:
-                        failed += 1
-                
-                proposals_stored = await self._store_hitl_proposals(ctx, hitl, seen_ids)
+                if success:
+                    successful += 1
+                    self._sync_resolver(item["primary_id"], item["secondary_id"])
+                    logger.info(f"Merged {item['primary_name']} <- {item['secondary_name']}")
+                else:
+                    failed += 1
             
-            finally:
-                await ctx.redis.delete(lock_key)
+            proposals_stored = await self._store_hitl_proposals(ctx, hitl, seen_ids)
 
         return JobResult(
             success=True,
