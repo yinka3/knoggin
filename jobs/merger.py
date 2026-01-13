@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timezone
+import re
 from typing import List, Optional
 import numpy as np
 from loguru import logger
@@ -159,11 +160,17 @@ class MergeDetectionJob(BaseJob):
         
         result = await self.llm.call_reasoning(system, user_content)
         
-        try:
-            return float(result.strip())
-        except (ValueError, AttributeError):
-            logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']}): {result}")
+        if not result:
             return None
+        
+        match = re.search(r"(\d+\.?\d*)", result.strip())
+        if match:
+            score = float(match.group(1))
+            if 0.0 <= score <= 1.0:
+                return score
+        
+        logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']}): {result}")
+        return None
     
 
     def _merge_facts(self, facts_a: List[str], facts_b: List[str]) -> List[str]:

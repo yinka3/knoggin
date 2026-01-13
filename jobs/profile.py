@@ -2,16 +2,14 @@ import asyncio
 from datetime import datetime, timezone
 from functools import partial
 import json
-import re
-from typing import Dict, List, Optional
+from typing import Dict, List
 from loguru import logger
 from db.memgraph import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobNotifier, JobResult
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
-from main.prompts import get_profile_reasoning_prompt, get_profile_formatter_prompt
-from schema.dtypes import BatchProfileResponse, ProfileUpdate
-
+from main.prompts import get_profile_extraction_prompt
+from jobs.utils import process_extracted_facts, parse_new_facts
 
 class ProfileRefinementJob(BaseJob):
     """
@@ -23,7 +21,7 @@ class ProfileRefinementJob(BaseJob):
     2. TIME: If user is idle for >5 minutes and we have ANY dirty entities.
     """
     
-    MSG_WINDOW = 40
+    MSG_WINDOW = 20
     VOLUME_THRESHOLD = 30
     IDLE_THRESHOLD = 60
     PROFILE_BATCH_SIZE = 5
@@ -43,16 +41,13 @@ class ProfileRefinementJob(BaseJob):
         dirty_key = f"dirty_entities:{ctx.user_name}"
         return await ctx.redis.scard(dirty_key) > 0
     
-    async def _maybe_refine_user(self, ctx: JobContext, has_updates: bool = False) -> bool:
+    async def _maybe_refine_user(self, ctx: JobContext) -> bool:
         """
         Check conditions and trigger user profile refinement if needed.
         Returns True if refinement ran.
         """
         ran_key = f"user_profile_ran:{ctx.user_name}"
         if await ctx.redis.get(ran_key):
-            return False
-        
-        if not has_updates:
             return False
         
         user_id = self.resolver.get_id(ctx.user_name)
@@ -71,37 +66,59 @@ class ProfileRefinementJob(BaseJob):
         
         return success
     
-    async def _get_conversation_context(self, ctx: JobContext, num_turns: int) -> List[Dict]:
+    async def _get_conversation_context(self, ctx: JobContext, num_turns: int, user_ratio: float = 0.75) -> List[Dict]:
         """Fetch recent conversation with both user and STELLA turns."""
         sorted_key = f"recent_conversation:{ctx.user_name}"
         conv_key = f"conversation:{ctx.user_name}"
         
-        turn_ids = await ctx.redis.zrevrange(sorted_key, 0, num_turns - 1)
+        fetch_count = int(num_turns * 2)
+        turn_ids = await ctx.redis.zrevrange(sorted_key, 0, fetch_count - 1)
         if not turn_ids:
             return []
         
         turn_ids.reverse()
         turn_data = await ctx.redis.hmget(conv_key, *turn_ids)
         
-        results = []
+        user_turns = []
+        assistant_turns = []
         
-        for data in turn_data:
-            if data:
-                parsed = json.loads(data)
-                ts = datetime.fromisoformat(parsed['timestamp'])
-                date_str = ts.strftime("%Y-%m-%d")
-                
-                
-                role_label = "User" if parsed["role"] == "user" else "STELLA"
-                results.append({
-                    "role": parsed["role"],
-                    "role_label": role_label,
-                    "content": parsed["content"],
-                    "formatted": f"[{date_str}] [{role_label}]: {parsed['content']}",
-                    "raw": parsed["content"]
-                })
+        for turn_id, data in zip(turn_ids, turn_data):
+            if not data:
+                continue
+            
+            parsed = json.loads(data)
+            ts = datetime.fromisoformat(parsed['timestamp'])
+            date_str = ts.strftime("%Y-%m-%d")
+            
+            role_label = "User" if parsed["role"] == "user" else "STELLA"
+            turn = {
+                "turn_id": turn_id,
+                "role": parsed["role"],
+                "role_label": role_label,
+                "content": parsed["content"],
+                "formatted": f"[{date_str}] [{role_label}]: {parsed['content']}",
+                "raw": parsed["content"],
+                "timestamp": parsed["timestamp"]
+            }
+            
+            if parsed["role"] == "user":
+                user_turns.append(turn)
+            else:
+                assistant_turns.append(turn)
         
-        return results
+        user_count = min(len(user_turns), int(num_turns * user_ratio))
+        assistant_count = min(len(assistant_turns), num_turns - user_count)
+        
+        if user_count < int(num_turns * user_ratio):
+            assistant_count = min(len(assistant_turns), num_turns - user_count)
+        
+        selected_user = user_turns[-user_count:] if user_count else []
+        selected_assistant = assistant_turns[-assistant_count:] if assistant_count else []
+        
+        combined = selected_user + selected_assistant
+        combined.sort(key=lambda x: x["timestamp"])
+        
+        return combined
 
     async def execute(self, ctx: JobContext) -> JobResult:
         warning = "⚠️ **Deepening Profiles.** I am reading through recent conversations to update entity details. Please wait a moment for the best results."
@@ -127,7 +144,7 @@ class ProfileRefinementJob(BaseJob):
                 if updates:
                     await self._write_updates(updates)
             
-            user_refined = await self._maybe_refine_user(ctx, has_updates=bool(updates))
+            user_refined = await self._maybe_refine_user(ctx)
             
             parts = []
             if updates:
@@ -148,18 +165,20 @@ class ProfileRefinementJob(BaseJob):
     async def _refine_user_profile(self, ctx: JobContext, user_id: int, profile: dict) -> bool:
         """Execute user profile refinement."""
         conversation = await self._get_conversation_context(ctx, int(self.MSG_WINDOW * 1.5))
-    
+
         if not conversation:
+            logger.warning("User profile refinement: no conversation context")
             return False
         
         conversation_text = "\n".join([turn["formatted"] for turn in conversation])
-    
+
         if not conversation_text:
+            logger.warning("User profile refinement: empty conversation text")
             return False
         
         existing_facts = profile.get("facts", [])
         
-        system_reasoning = get_profile_reasoning_prompt(ctx.user_name)
+        system_reasoning = get_profile_extraction_prompt(ctx.user_name)
         user_content = json.dumps({
             "entities": [{
                 "entity_name": ctx.user_name,
@@ -172,26 +191,42 @@ class ProfileRefinementJob(BaseJob):
         
         reasoning = await self.llm.call_reasoning(system_reasoning, user_content)
 
-        if not reasoning or "<ledgers>" not in reasoning:
-            logger.warning(f"VEGAPUNK-06 returned no ledgers for user profile")
+        if not reasoning:
+            logger.warning("VEGAPUNK-06 returned None for user profile")
             return False
-
-        system_formatter = get_profile_formatter_prompt()
-        response = await self.llm.call_structured(
-            system_formatter, 
-            reasoning, 
-            BatchProfileResponse
-        )
+        
+        response = parse_new_facts(reasoning)
         
         if not response or not response.profiles:
+            logger.warning("No facts parsed for user profile")
+            return False
+
+        profile_map = {p.canonical_name.lower(): p for p in response.profiles}
+        profile_out = profile_map.get(ctx.user_name.lower())
+        
+        if not profile_out:
+            logger.warning(f"User {ctx.user_name} not found in parsed response")
             return False
         
-        new_facts = response.profiles[0].facts
-        
-        if not new_facts or new_facts == existing_facts:
+        new_facts = profile_out.facts
+    
+        if not new_facts:
+            logger.debug("No new facts extracted for user profile")
             return False
         
-        resolution_text = f"{ctx.user_name}. " + " ".join(new_facts)
+        merged_facts = process_extracted_facts(
+            existing_facts=existing_facts,
+            new_facts=new_facts,
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        )
+        
+        if merged_facts == existing_facts:
+            logger.debug("No fact changes after merge for user profile")
+            return False
+        
+        logger.info(f"User profile: {len(existing_facts)} existing -> {len(merged_facts)} merged facts")
+        
+        resolution_text = f"{ctx.user_name}. " + " ".join(merged_facts)
         
         loop = asyncio.get_running_loop()
         embedding = await loop.run_in_executor(
@@ -208,15 +243,16 @@ class ProfileRefinementJob(BaseJob):
                 self.store.update_entity_profile,
                 entity_id=user_id,
                 canonical_name=ctx.user_name,
-                facts=new_facts,
+                facts=merged_facts,
                 embedding=embedding,
                 last_msg_id=current_msg_id
             )
         )
         
+        self.resolver.entity_profiles[user_id]["facts"] = merged_facts
+        
         logger.info(f"Refined user profile for {ctx.user_name}")
         return True
-
 
     async def _process_single_batch(
         self, 
@@ -234,7 +270,7 @@ class ProfileRefinementJob(BaseJob):
                 "known_aliases": e["known_aliases"]
             } for e in batch]
             
-            system_reasoning = get_profile_reasoning_prompt(ctx.user_name)
+            system_reasoning = get_profile_extraction_prompt(ctx.user_name)
             user_content = json.dumps({
                 "entities": llm_input,
                 "conversation": conversation_text
@@ -242,33 +278,40 @@ class ProfileRefinementJob(BaseJob):
             
             reasoning = await self.llm.call_reasoning(system_reasoning, user_content)
             
-            if not reasoning or "<ledgers>" not in reasoning:
-                logger.warning(f"VEGAPUNK-06 returned no ledgers block for: {[e['entity_name'] for e in batch]}")
+            if not reasoning:
+                logger.warning(f"VEGAPUNK-06 returned None for: {[e['entity_name'] for e in batch]}")
                 return []
             
-            system_formatter = get_profile_formatter_prompt()
-            response = await self.llm.call_structured(
-                system_formatter, 
-                reasoning, 
-                BatchProfileResponse
-            )
+            response = parse_new_facts(reasoning)
             
             if not response or not response.profiles:
-                logger.warning(f"VEGAPUNK-06b failed for: {[e['entity_name'] for e in batch]}")
+                logger.warning(f"No facts parsed for: {[e['entity_name'] for e in batch]}")
                 return []
             
             updates = []
-            for j, profile_out in enumerate(response.profiles):
-                if j >= len(batch):
-                    break
-                
-                orig = batch[j]
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            profile_map = {p.canonical_name.lower(): p for p in response.profiles}
+            for orig in batch:
+
+                profile_out = profile_map.get(orig["entity_name"].lower())
+                if not profile_out:
+                    continue
+
                 new_facts = profile_out.facts
                 
-                if not new_facts or new_facts == orig["existing_facts"]:
+                if not new_facts:
+                    continue
+            
+                merged_facts = process_extracted_facts(
+                    existing_facts=orig["existing_facts"],
+                    new_facts=new_facts,
+                    timestamp=timestamp
+                )
+                
+                if merged_facts == orig["existing_facts"]:
                     continue
                 
-                resolution_text = f"{orig['entity_name']}. " + " ".join(new_facts)
+                resolution_text = f"{orig['entity_name']}. " + " ".join(merged_facts)
                 
                 loop = asyncio.get_running_loop()
                 embedding = await loop.run_in_executor(
@@ -276,16 +319,18 @@ class ProfileRefinementJob(BaseJob):
                     partial(self.resolver.update_profile_embedding, orig["ent_id"], resolution_text)
                 )
                 
-                logger.info(f"Refined facts for {orig['entity_name']} (ID: {orig['ent_id']})")
+                self.resolver.entity_profiles[orig["ent_id"]]["facts"] = merged_facts
+                
+                logger.info(f"Refined facts for {orig['entity_name']}: {len(orig['existing_facts'])} -> {len(merged_facts)}")
                 
                 updates.append({
                     "id": orig["ent_id"],
                     "canonical_name": orig["entity_name"],
-                    "facts": new_facts,
+                    "facts": merged_facts,
                     "embedding": embedding,
                     "last_msg_id": current_msg_id
                 })
-        
+    
             return updates
     
 
