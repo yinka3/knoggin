@@ -146,7 +146,7 @@ class MemGraphStore:
             e.canonical_name AS canonical_name,
             e.aliases AS aliases,
             e.type AS type,
-            e.topic AS topic,
+            t.name AS topic,
             e.facts AS facts,
             e.embedding AS embedding
         """
@@ -366,7 +366,7 @@ class MemGraphStore:
             e.aliases AS aliases,
             e.type AS type,
             e.facts AS facts,
-            e.topic AS topic,
+            t.name AS topic,
             e.last_mentioned AS last_mentioned,
             e.last_updated AS last_updated,
             conn.canonical_name AS conn_name,

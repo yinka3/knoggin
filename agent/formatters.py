@@ -122,6 +122,9 @@ def format_graph_results(results: List[Dict]) -> str:
             last_seen = _format_timestamp(r.get("last_seen"))
             
             block = f"--- {source} → {target} ---\n"
+            target_facts = r.get("target_facts", [])
+            if target_facts:
+                block += f"Facts: {' | '.join(target_facts[:3])}\n"
             block += f"Strength: {strength} | Last talked about: {last_seen}\n"
         
         elif "entity" in r:
@@ -185,7 +188,7 @@ def format_hot_topic_context(context: Dict[str, Dict]) -> str:
     blocks = []
     for topic, data in context.items():
         entities = data.get("entities", [])
-        messages = data.get("messages", [])
+        # messages = data.get("messages", [])
         
         entity_names = []
         for ent in entities:
@@ -194,15 +197,18 @@ def format_hot_topic_context(context: Dict[str, Dict]) -> str:
                 entity_names.append(name)
         
         block = f"[HOT: {topic}]\n"
-        
-        if entity_names:
-            block += f"Entities: {', '.join(entity_names)}\n"
-        
-        if messages:
-            block += "Recent:\n"
-            for msg in messages[:5]:
-                text = msg.get("message", "")
-                block += f"  \"{text}\"\n"
+
+        if entities:
+            block += "Entities:\n"
+            for ent in entities:
+                name = ent.get("name", "")
+                facts = ent.get("facts", [])
+                
+                if name:
+                    if facts:
+                        block += f"  • {name}: {' | '.join(facts[:3])}\n"
+                    else:
+                        block += f"  • {name}\n"
         
         blocks.append(block)
     

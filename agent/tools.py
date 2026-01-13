@@ -229,7 +229,7 @@ class Tools:
         
         return results
 
-    async def get_connections(self, entity_name: str, active_only: bool = True) -> List[Dict]:
+    async def get_connections(self, entity_name: str) -> List[Dict]:
         """
         Get the full relationship network for an entity.
         Returns all connections (up to 50) with evidence — the actual messages that established each connection. 
@@ -244,12 +244,23 @@ class Tools:
         canonical = self._resolve_entity_name(entity_name)
         if not canonical:
             return []
-        results = self.store.get_related_entities([canonical], active_only) or []
+        results = self.store.get_related_entities([canonical], active_only=True) or []
+    
+        if results:
+            for r in results:
+                r["evidence"] = await self._hydrate_evidence(r.pop("evidence_ids", []))
+            return results
         
-        for r in results:
-            r["evidence"] = await self._hydrate_evidence(r.pop("evidence_ids", []))
+        hidden_results = self.store.get_related_entities([canonical], active_only=False) or []
         
-        return results
+        if hidden_results:
+            return [{
+                "hidden": True,
+                "count": len(hidden_results),
+                "message": f"{len(hidden_results)} connection(s) exist through inactive topics"
+            }]
+        
+        return []
 
     async def get_recent_activity(self, entity_name: str, hours: int = 24) -> List[Dict]:
         """

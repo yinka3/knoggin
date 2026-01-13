@@ -33,7 +33,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_connections",
-            "description": "Get the full relationship network for an entity. Returns all connections (up to 50) with evidence — the actual messages that established each connection. Use when you need comprehensive relationship details beyond the top 5 from search_entity.",
+            "description": "Get the full relationship network for an entity. Returns all connections (up to 50) with evidence. Connections through inactive topics are noted but not detailed.",
             "parameters": {
                 "type": "object",
                 "properties": {

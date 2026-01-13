@@ -269,9 +269,6 @@ class Context:
             if await self.profile_job.should_run(ctx):
                 await self.profile_job.execute(ctx)
             
-            if await self.cleanup_job.should_run(ctx):
-                await self.cleanup_job.execute(ctx)
-            
             if await self.merge_job.should_run(ctx):
                 await self.merge_job.execute(ctx)
 
