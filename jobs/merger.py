@@ -14,14 +14,12 @@ from db.memgraph import MemGraphStore
 
 class MergeDetectionJob(BaseJob):
     """
-    Detects and merges duplicate entities based on embedding similarity.
-    
-    Trigger: User idle for IDLE_THRESHOLD seconds, hasn't run this session.
-    Auto-merges high-confidence pairs (>= 0.93), stores others for HITL review.
+    Detects and processes duplicate entities (merge) and parent/child relationships (hierarchy).
     """
     
     AUTO_MERGE_THRESHOLD = 0.93
     HITL_THRESHOLD = 0.65
+    HIERARCHY_FUZZ_THRESHOLD = 70
 
     def __init__(self, user_name: str, ent_resolver: EntityResolver, store: MemGraphStore, llm_client: LLMService):
         self.user_name = user_name
@@ -40,105 +38,22 @@ class MergeDetectionJob(BaseJob):
     async def execute(self, ctx: JobContext) -> JobResult:
         await ctx.redis.set(f"merge_ran:{ctx.user_name}", "true")
     
-
         candidates = self.ent_resolver.detect_merge_candidates()
         if not candidates:
-            return JobResult(success=True, summary="No merge candidates found")
+            return JobResult(success=True, summary="No candidates found")
         
-        auto_merge, hitl = [], []
-
-
-        for candidate in candidates:
-            score = await self._get_merge_judgment(candidate)
-            if score is None:
-                continue
-            
-            candidate["llm_score"] = score
-            
-            if score >= self.AUTO_MERGE_THRESHOLD:
-                auto_merge.append(candidate)
-            elif score >= self.HITL_THRESHOLD:
-                hitl.append(candidate)
-            else:
-                logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
-
-        logger.info(f"Merge split: {len(auto_merge)} auto, {len(hitl)} HITL")
+        merge_candidates = [c for c in candidates if c["relationship"] == "merge"]
+        hierarchy_candidates = [c for c in candidates if c["relationship"] == "hierarchy"]
         
-        if not auto_merge and not hitl:
-            return JobResult(success=True, summary="No merges qualified")
+        logger.info(f"Processing {len(merge_candidates)} merge, {len(hierarchy_candidates)} hierarchy candidates")
         
-        clean_batch = []
-        seen_ids = set()
-
-        for c in auto_merge:
-            p_id = c["primary_id"]
-            s_id = c["secondary_id"]
-            
-            if p_id in seen_ids or s_id in seen_ids:
-                continue # Skip this one for the next run
-            
-            seen_ids.add(p_id)
-            seen_ids.add(s_id)
-            clean_batch.append(c)
-
-        logger.info(f"Preparing to merge {len(clean_batch)} pairs in parallel...")
+        merge_summary = await self._process_merges(ctx, merge_candidates)
         
-        sem = asyncio.Semaphore(2)
-        final_merge_list = []
-
-        async def prepare_single_merge(c):
-            async with sem:
-                p_id = c["primary_id"]
-                s_id = c["secondary_id"]
-                
-                p_profile = self.ent_resolver.entity_profiles.get(p_id, {})
-                s_profile = self.ent_resolver.entity_profiles.get(s_id, {})
-                
-                try:
-                    merged_facts = self._merge_facts(
-                        p_profile.get("facts", []),
-                        s_profile.get("facts", [])
-                    )
-                    return {
-                        "primary_id": p_id,
-                        "secondary_id": s_id,
-                        "merged_facts": merged_facts,
-                        "primary_name": c["primary_name"],
-                        "secondary_name": c["secondary_name"]
-                    }
-                except Exception as e:
-                    logger.error(f"Fact merge failed for {p_id}/{s_id}: {e}")
-                    return None
+        hierarchy_summary = await self._process_hierarchy(ctx, hierarchy_candidates)
         
-        tasks = [prepare_single_merge(c) for c in clean_batch]
-        results = await asyncio.gather(*tasks)
-        final_merge_list = [r for r in results if r is not None]
-
-        warning = "⚠️ **Memory Consolidation in Progress.** Merging duplicate entities."
-    
-        async with JobNotifier(ctx.redis, warning):
-            successful = 0
-            failed = 0
-            
-            for item in final_merge_list:
-                success = await self._execute_merge_db_only(
-                    item["primary_id"], 
-                    item["secondary_id"], 
-                    item["merged_facts"]
-                )
-                
-                if success:
-                    successful += 1
-                    self._sync_resolver(item["primary_id"], item["secondary_id"])
-                    logger.info(f"Merged {item['primary_name']} <- {item['secondary_name']}")
-                else:
-                    failed += 1
-            
-            proposals_stored = await self._store_hitl_proposals(ctx, hitl, seen_ids)
-
         return JobResult(
             success=True,
-            summary=f"{successful} merged, {failed} failed, {proposals_stored} HITL proposals"
+            summary=f"{merge_summary}; {hierarchy_summary}"
         )
     
     async def _get_merge_judgment(self, candidate: dict) -> Optional[float]:
@@ -153,10 +68,18 @@ class MergeDetectionJob(BaseJob):
         if not result:
             return None
         
-        match = re.search(r"(\d+\.?\d*)", result.strip())
-        if match:
-            score = float(match.group(1))
+        tag_match = re.search(r"<score>\s*([\d.]+)\s*</score>", result)
+        if tag_match:
+            score = float(tag_match.group(1))
             if 0.0 <= score <= 1.0:
+                return score
+        
+        # fallback: last float in response (for unstructured outputs)
+        floats = re.findall(r"\b(0\.\d+|1\.0{0,2})\b", result)
+        if floats:
+            score = float(floats[-1])
+            if 0.0 <= score <= 1.0:
+                logger.debug(f"Used fallback extraction for ({candidate['primary_id']}, {candidate['secondary_id']}): {score}")
                 return score
         
         logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']}): {result}")
@@ -220,6 +143,145 @@ class MergeDetectionJob(BaseJob):
             )
         except Exception as e:
             logger.warning(f"FAISS removal failed for {secondary_id}: {e}")
+    
+    async def _process_merges(self, ctx: JobContext, candidates: list) -> str:
+        if not candidates:
+            return "0 merged"
+        
+        auto_merge, hitl = [], []
+
+        for candidate in candidates:
+            score = await self._get_merge_judgment(candidate)
+            if score is None:
+                continue
+            
+            candidate["llm_score"] = score
+            
+            if score >= self.AUTO_MERGE_THRESHOLD:
+                auto_merge.append(candidate)
+            elif score >= self.HITL_THRESHOLD:
+                hitl.append(candidate)
+            else:
+                logger.info(f"Rejected merge ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
+
+        logger.info(f"Merge split: {len(auto_merge)} auto, {len(hitl)} HITL")
+        
+        if not auto_merge and not hitl:
+            return "0 merged"
+        
+        clean_batch = []
+        seen_ids = set()
+
+        for c in auto_merge:
+            p_id = c["primary_id"]
+            s_id = c["secondary_id"]
+            
+            if p_id in seen_ids or s_id in seen_ids:
+                continue
+            
+            seen_ids.add(p_id)
+            seen_ids.add(s_id)
+            clean_batch.append(c)
+
+        sem = asyncio.Semaphore(2)
+        final_merge_list = []
+
+        async def prepare_single_merge(c):
+            async with sem:
+                p_id = c["primary_id"]
+                s_id = c["secondary_id"]
+                
+                p_profile = self.ent_resolver.entity_profiles.get(p_id, {})
+                s_profile = self.ent_resolver.entity_profiles.get(s_id, {})
+                
+                try:
+                    merged_facts = self._merge_facts(
+                        p_profile.get("facts", []),
+                        s_profile.get("facts", [])
+                    )
+                    return {
+                        "primary_id": p_id,
+                        "secondary_id": s_id,
+                        "merged_facts": merged_facts,
+                        "primary_name": c["primary_name"],
+                        "secondary_name": c["secondary_name"]
+                    }
+                except Exception as e:
+                    logger.error(f"Fact merge failed for {p_id}/{s_id}: {e}")
+                    return None
+        
+        tasks = [prepare_single_merge(c) for c in clean_batch]
+        results = await asyncio.gather(*tasks)
+        final_merge_list = [r for r in results if r is not None]
+
+        warning = "⚠️ **Memory Consolidation in Progress.** Merging duplicate entities."
+
+        async with JobNotifier(ctx.redis, warning):
+            successful = 0
+            failed = 0
+            
+            for item in final_merge_list:
+                success = await self._execute_merge_db_only(
+                    item["primary_id"], 
+                    item["secondary_id"], 
+                    item["merged_facts"]
+                )
+                
+                if success:
+                    successful += 1
+                    self._sync_resolver(item["primary_id"], item["secondary_id"])
+                    logger.info(f"Merged {item['primary_name']} <- {item['secondary_name']}")
+                else:
+                    failed += 1
+            
+            proposals_stored = await self._store_hitl_proposals(ctx, hitl, seen_ids)
+
+        return f"{successful} merged, {failed} failed, {proposals_stored} HITL"
+    
+    async def _process_hierarchy(self, candidates: list) -> str:
+        """Create PART_OF edges for parent/child relationships."""
+        if not candidates:
+            return "0 hierarchy edges"
+        
+        # Deduplicate - don't create duplicate edges
+        seen_pairs = set()
+        unique_candidates = []
+        
+        for c in candidates:
+            pair_key = (c["parent_id"], c["child_id"])
+            if pair_key not in seen_pairs:
+                seen_pairs.add(pair_key)
+                unique_candidates.append(c)
+        
+        loop = asyncio.get_running_loop()
+        created = 0
+        failed = 0
+        
+        for c in unique_candidates:
+            parent_id = c["parent_id"]
+            child_id = c["child_id"]
+            parent_name = c["primary_name"] if c["primary_id"] == parent_id else c["secondary_name"]
+            child_name = c["secondary_name"] if c["secondary_id"] == child_id else c["primary_name"]
+            
+            try:
+                success = await loop.run_in_executor(
+                    None,
+                    self.store.create_hierarchy_edge,
+                    parent_id,
+                    child_id
+                )
+                
+                if success:
+                    created += 1
+                    logger.info(f"Hierarchy: {child_name} -[:PART_OF]-> {parent_name}")
+                else:
+                    failed += 1
+                    
+            except Exception as e:
+                logger.error(f"Hierarchy edge failed ({parent_id}, {child_id}): {e}")
+                failed += 1
+        
+        return f"{created} hierarchy edges, {failed} failed"
     
     async def _store_hitl_proposals(self, ctx: JobContext, proposals: list, merged_ids: set) -> int:
         stored = 0

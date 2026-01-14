@@ -73,7 +73,10 @@ async def ask_stella(context: Context, question: str) -> str:
         slim_hot_context=True
     )
     
-    return result.get("response") or result.get("question", "No response")
+    response = result.get("response") or result.get("question", "No response")
+    tools_used = result.get("tools_used", [])
+    
+    return response, tools_used
 
 
 async def wait_for_batch_drain(context: Context, timeout: int = 120):
@@ -164,7 +167,7 @@ async def main():
             logger.info(f"[{i+1}/{len(questions)}] {q['test_case']} ({q['category']})")
             logger.info(f"Q: {q['natural_query']}")
             
-            response = await ask_stella(context, q["natural_query"])
+            response, tools_used = await ask_stella(context, q["natural_query"])
             
             logger.info(f"Expected: {q['ground_truth']}")
             logger.info(f"Got: {response}")
@@ -176,7 +179,8 @@ async def main():
                 "question": q["natural_query"],
                 "expected": q["ground_truth"],
                 "evidence_turns": q["evidence_turns"],
-                "response": response
+                "response": response,
+                "tools_used": tools_used
             })
             
             await asyncio.sleep(1)

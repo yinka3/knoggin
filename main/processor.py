@@ -46,7 +46,7 @@ class BatchProcessor:
             store: MemGraphStore,
             cpu_executor: ThreadPoolExecutor,
             user_name: str,
-            active_topics: List[str],
+            topics_config: Dict,
             get_next_ent_id):
         
             self.redis = redis_client
@@ -56,7 +56,8 @@ class BatchProcessor:
             self.store = store
             self.executor = cpu_executor
             self.user_name = user_name
-            self.topics = active_topics
+            self.topics_config = topics_config
+            self.active_topics = list(topics_config.keys())
             self._get_next_ent_id = get_next_ent_id
         
     async def run(self, messages: List[Dict], session_text: str) -> BatchResult:
@@ -117,7 +118,7 @@ class BatchProcessor:
         # loop = asyncio.get_running_loop()
         
         combined_text = "\n".join([f"[MSG {m['id']}]: {m['message']}" for m in messages])
-        mentions = await self.nlp.extract_mentions(self.user_name, self.topics, combined_text)
+        mentions = await self.nlp.extract_mentions(self.user_name, combined_text)
         
         unique_mentions: Dict[str, Dict] = {}
         for text, typ, topic in mentions:
@@ -140,19 +141,21 @@ class BatchProcessor:
 
     async def _build_known_entities(self, mentions: List[Tuple[str, str, str]]) -> List[Dict]:
         mention_names = [name for name, _, _ in mentions]
-        entities = self.store.get_entities_by_names(mention_names)
+        candidate_ids = set()
+        for name in mention_names:
+            candidate_ids.update(self.ent_resolver.get_candidate_ids(name))
         
-        seen_ids = set()
         known = []
-        for ent in entities:
-            if ent["id"] not in seen_ids:
-                seen_ids.add(ent["id"])
+        for eid in candidate_ids:
+            profile = self.ent_resolver.entity_profiles.get(eid)
+            if profile:
                 known.append({
-                    "canonical_name": ent["canonical_name"],
-                    "type": ent["type"],
-                    "aliases": ent["aliases"] or [],
-                    "facts": ent.get("facts") or []
+                    "canonical_name": profile["canonical_name"],
+                    "type": profile.get("type"),
+                    "aliases": self.ent_resolver.get_mentions_for_id(eid),
+                    "facts": profile.get("facts", [])
                 })
+        
         return known
 
     async def _disambiguate(

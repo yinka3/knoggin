@@ -47,7 +47,7 @@ class MemGraphStore:
         queries = [
             "CREATE CONSTRAINT ON (e:Entity) ASSERT e.id IS UNIQUE;",
             "CREATE CONSTRAINT ON (t:Topic) ASSERT t.name IS UNIQUE",
-            "CREATE INDEX ON :MoodCheckpoint(timestamp);"
+            "CREATE INDEX ON :MoodCheckpoint(timestamp);",
             "CREATE INDEX ON :Entity(canonical_name);"
         ]
         
@@ -109,7 +109,10 @@ class MemGraphStore:
                     UNWIND $batch AS rel
                     MATCH (a:Entity {canonical_name: rel.entity_a})
                     MATCH (b:Entity {canonical_name: rel.entity_b})
-                    MERGE (a)-[r:RELATED_TO]-(b)
+                    WITH a, b, rel,
+                        CASE WHEN a.id < b.id THEN a ELSE b END AS node_a,
+                        CASE WHEN a.id < b.id THEN b ELSE a END AS node_b
+                    MERGE (node_a)-[r:RELATED_TO]->(node_b)
                     
                     ON CREATE SET 
                         r.weight = 1, 
@@ -121,7 +124,7 @@ class MemGraphStore:
                         r.weight = r.weight + 1,
                         r.confidence = CASE WHEN rel.confidence > r.confidence THEN rel.confidence ELSE r.confidence END,
                         r.last_seen = timestamp()
-                       
+                    
                     WITH r, rel
                     UNWIND coalesce(r.message_ids, []) + [rel.message_id] AS mid
                     WITH r, collect(DISTINCT mid) AS unique_ids
@@ -358,9 +361,13 @@ class MemGraphStore:
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         WITH e, t
         WHERE t IS NULL OR t.status IS NULL OR t.status <> 'inactive'
-        WITH e
+        WITH e, t
         LIMIT $limit
         OPTIONAL MATCH (e)-[r:RELATED_TO]-(conn:Entity)
+        OPTIONAL MATCH (e)-[:PART_OF]->(parent:Entity)
+        OPTIONAL MATCH (child:Entity)-[:PART_OF]->(e)
+        WITH e, t, r, conn, parent,
+            count(DISTINCT child) as children_count
         RETURN e.id AS id,
             e.canonical_name AS canonical_name,
             e.aliases AS aliases,
@@ -373,12 +380,14 @@ class MemGraphStore:
             conn.aliases AS conn_aliases,
             conn.facts AS conn_facts,
             r.weight AS conn_weight,
-            r.message_ids AS evidence_ids
+            r.message_ids AS evidence_ids,
+            parent.canonical_name AS parent_name,
+            children_count
         ORDER BY e.last_mentioned DESC, conn_weight DESC
         """
         
         with self.driver.session() as session:
-            result = session.run(cypher, {"query": query, "limit": limit, "evidence_limit": evidence_limit})
+            result = session.run(cypher, {"query": query, "limit": limit})
             
             entities = {}
             for row in result:
@@ -394,14 +403,18 @@ class MemGraphStore:
                         "topic": row["topic"],
                         "last_mentioned": row["last_mentioned"],
                         "last_updated": row["last_updated"],
-                        "top_connections": []
+                        "top_connections": [],
+                        "hierarchy": {
+                            "parent": row["parent_name"],
+                            "children_count": row["children_count"]
+                        }
                     }
                 
                 if row["conn_name"] and len(entities[eid]["top_connections"]) < connections_limit:
                     entities[eid]["top_connections"].append({
                         "canonical_name": row["conn_name"],
                         "aliases": row["conn_aliases"] or [],
-                        "facts": row["conn_facts"] or [],  # List, not string
+                        "facts": row["conn_facts"] or [],
                         "weight": row["conn_weight"],
                         "evidence_ids": (row["evidence_ids"] or [])[:evidence_limit]
                     })
@@ -481,36 +494,101 @@ class MemGraphStore:
             return [record.data() for record in result]
     
     
-    def _find_path_filtered(self, start_name: str, end_name: str, active_only: bool = True) -> List[Dict]:
+    def _build_path_data(self, names: List[str], evidence: List[List[str]]) -> List[Dict]:
+        """Convert raw query results into path structure."""
+        return [
+            {
+                "step": i,
+                "entity_a": names[i],
+                "entity_b": names[i + 1],
+                "evidence_refs": evidence[i]
+            }
+            for i in range(len(evidence))
+        ]
+
+
+    def _find_shortest_path(self, start_name: str, end_name: str) -> tuple[List[str], List[List[str]], bool] | None:
+        """
+        Find shortest path regardless of topic status.
+        Returns: (names, evidence_ids, has_inactive) or None if no path.
+        """
         query = """
         MATCH (start:Entity {canonical_name: $start_name})
         MATCH (end:Entity {canonical_name: $end_name})
         MATCH p = (start)-[:RELATED_TO *BFS ..4]-(end)
-        RETURN [n in nodes(p) | n.canonical_name] as names,
-            [r in relationships(p) | r.message_ids] as evidence_ids
+        UNWIND nodes(p) AS n
+        OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
+        WITH p, collect(COALESCE(t.status, 'active')) AS statuses,
+            [node IN nodes(p) | node.canonical_name] AS names,
+            [r IN relationships(p) | r.message_ids] AS evidence_ids
+        RETURN names, evidence_ids,
+            ANY(s IN statuses WHERE s = 'inactive') AS has_inactive
         LIMIT 1
         """
+        
         with self.driver.session() as session:
-            result = session.run(query, {
-                "start_name": start_name, 
-                "end_name": end_name,
-                "active_only": active_only
-            })
-            record = result.single()
+            record = session.run(query, {"start_name": start_name, "end_name": end_name}).single()
             if not record:
-                return []
-            
-            path_data = []
-            names = record["names"]
-            evidence = record["evidence_ids"]
-            for i in range(len(evidence)):
-                path_data.append({
-                    "step": i,
-                    "entity_a": names[i],
-                    "entity_b": names[i+1],
-                    "evidence_refs": evidence[i]
-                })
-            return path_data
+                return None
+            return record["names"], record["evidence_ids"], record["has_inactive"]
+
+
+    def _find_active_only_path(self, start_name: str, end_name: str) -> tuple[List[str], List[List[str]]] | None:
+        """
+        Find shortest path excluding inactive-topic entities.
+        Returns: (names, evidence_ids) or None if no path.
+        """
+        query = """
+        MATCH (start:Entity {canonical_name: $start_name})
+        MATCH (end:Entity {canonical_name: $end_name})
+        MATCH p = (start)-[:RELATED_TO *BFS ..4]-(end)
+        WHERE ALL(n IN nodes(p) WHERE
+            NOT EXISTS {
+                MATCH (n)-[:BELONGS_TO]->(t:Topic)
+                WHERE t.status = 'inactive'
+            }
+        )
+        RETURN [n IN nodes(p) | n.canonical_name] AS names,
+            [r IN relationships(p) | r.message_ids] AS evidence_ids
+        LIMIT 1
+        """
+        
+        with self.driver.session() as session:
+            record = session.run(query, {"start_name": start_name, "end_name": end_name}).single()
+            if not record:
+                return None
+            return record["names"], record["evidence_ids"]
+
+
+    def _find_path_filtered(self, start_name: str, end_name: str, active_only: bool = True) -> tuple[List[Dict], bool]:
+        """
+        Find path between entities with topic filtering.
+        
+        Returns: (path_data, has_inactive_shortcut)
+        - path_data: usable path (empty if none found)
+        - has_inactive_shortcut: True if shorter path exists through inactive topics
+        """
+        shortest = self._find_shortest_path(start_name, end_name)
+        
+        if not shortest:
+            return [], False
+        
+        names, evidence, has_inactive = shortest
+        
+        if not has_inactive:
+            return self._build_path_data(names, evidence), False
+        
+        if not active_only:
+            return self._build_path_data(names, evidence), False
+        
+        active_path = self._find_active_only_path(start_name, end_name)
+        
+        if active_path:
+            active_names, active_evidence = active_path
+            return self._build_path_data(active_names, active_evidence), True
+        
+        # No active path, only inactive exists
+        return [], True
     
     def get_topics_by_status(self) -> dict:
         query = """
@@ -559,6 +637,72 @@ class MemGraphStore:
         with self.driver.session() as session:
             result = session.run(query, {"user_name": user_name, "limit": limit})
             return [dict(record) for record in result]
+    
+    def create_hierarchy_edge(self, parent_id: int, child_id: int) -> bool:
+        """
+        Create PART_OF relationship: (child)-[:PART_OF]->(parent)
+        
+        Returns True if created, False if already exists or failed.
+        """
+        query = """
+        MATCH (child:Entity {id: $child_id})
+        MATCH (parent:Entity {id: $parent_id})
+        WHERE NOT (child)-[:PART_OF]->(parent)
+        CREATE (child)-[:PART_OF {created_at: timestamp()}]->(parent)
+        RETURN true as created
+        """
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {
+                    "child_id": child_id,
+                    "parent_id": parent_id
+                })
+                return len(list(result)) > 0
+            
+        except Exception as e:
+            logger.error(f"Failed to create hierarchy edge ({child_id})-[:PART_OF]->({parent_id}): {e}")
+            return False
+
+
+    def get_parent_entities(self, entity_id: int) -> List[Dict]:
+        """Get entities this one is PART_OF."""
+        query = """
+        MATCH (child:Entity {id: $entity_id})-[:PART_OF]->(parent:Entity)
+        RETURN parent.id as id,
+            parent.canonical_name as canonical_name,
+            parent.type as type,
+            parent.facts as facts
+        """
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"entity_id": entity_id})
+                return [dict(record) for record in result]
+        
+        except Exception as e:
+            logger.error(f"Failed to get parents for entity {entity_id}: {e}")
+            return []
+
+
+    def get_child_entities(self, entity_id: int) -> List[Dict]:
+        """Get entities that are PART_OF this one."""
+        query = """
+        MATCH (child:Entity)-[:PART_OF]->(parent:Entity {id: $entity_id})
+        RETURN child.id as id,
+            child.canonical_name as canonical_name,
+            child.type as type,
+            child.facts as facts
+        """
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"entity_id": entity_id})
+                return [dict(record) for record in result]
+        
+        except Exception as e:
+            logger.error(f"Failed to get children for entity {entity_id}: {e}")
+            return []
     
     def merge_entities(self, primary_id: int, secondary_id: int, merged_facts: List[str]) -> bool:
         """
@@ -616,7 +760,10 @@ class MemGraphStore:
                 MATCH (s:Entity {id: $secondary_id})-[r_old:RELATED_TO]-(target:Entity)
                 WHERE target.id <> $primary_id
                 MATCH (p:Entity {id: $primary_id})
-                MERGE (p)-[r_new:RELATED_TO]-(target)
+                WITH p, target, r_old,
+                    CASE WHEN p.id < target.id THEN p ELSE target END AS node_a,
+                    CASE WHEN p.id < target.id THEN target ELSE p END AS node_b
+                MERGE (node_a)-[r_new:RELATED_TO]->(node_b)
                 ON CREATE SET
                     r_new.weight = r_old.weight,
                     r_new.confidence = r_old.confidence,

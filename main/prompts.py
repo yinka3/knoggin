@@ -1,4 +1,4 @@
-def ner_reasoning_prompt(user_name: str, topics_list: list) -> str:
+def ner_reasoning_prompt(user_name: str, label_block: str) -> str:
    return f"""
 You are VEGAPUNK-01, the entry point for Vestige's extraction pipeline.
 
@@ -11,33 +11,53 @@ All messages are from **{user_name}**. First-person ("I", "me", "my") refers to 
 Never extract {user_name} — they are the root node, tracked separately.
 </speaker_context>
 
+<extraction_bias>
+Prefer over-extraction. Downstream stages filter noise; missed entities are unrecoverable. When uncertain, extract.
+</extraction_bias>
+
 <principles>
 1. **Extract proper nouns** — People, places, organizations, apps, products, named things.
    - YES: "Marcus", "IronWorks Gym", "Macbook Pro", "Project Aurora"
    
 2. **Extract anchored noun chunks** — Only if tied to a proper noun, specific modifier, or explicit intent.
-   - YES: "dentist appointment Thursday", "birthday gift for Mom"
-   - NO: "new laptop", "dinner plans", "the meeting"
+   - Litmus test: Would this phrase help someone search for it later? If yes, extract.
+   - Pronoun possessives (his/her/their) are NOT anchors — the entity must be recoverable without context.
+   - YES: "dentist appointment Thursday", "Kwame's project", "birthday gift for Mom"
+   - YES (temporal as qualifier): "March trip", "summer internship"
+   - NO: "new laptop", "dinner plans", "the meeting", "his project", "her garden"
 
-3. **Skip generics** — No identifying detail, no extraction.
+3. **Handle compound mentions** — Extract phrases as units, but also extract embedded proper nouns separately.
+   - "birthday gift for Mom" → extract as phrase AND extract "Mom" separately
+   - "lunch with Derek at Panera" → extract phrase, "Derek", and "Panera"
+
+4. **Skip generics** — No identifying detail, no extraction.
    - NO: "the store", "my phone", "that place", "some book"
 
-4. **Extract verbatim** — Do not normalize or correct spelling. Extract exactly as written.
+5. **Skip bare temporals and common nouns** — Days, months, seasons, and generic nouns need qualifying context.
+   - NO: "Monday", "March", "summer", "exam", "research", "A film"
+   - YES: "March trip", "summer internship", "orgo exam", "Hitchcock film"
 
-5. **Label to describe** — Assign a concise semantic type. Roughly right is fine.
-   - People: person, friend, coworker, doctor, professor
-   - Places: place, restaurant, gym, city
-   - Things: product, app, project, event
+6. **Skip quoted speech** — Phrases in quotation marks are usually dialogue or emphasis, not named entities. Only extract if it's a title of a work or an established name.
+   - NO: "'Great potential, needs focus.'", "'the patriarchy'"
+   - YES: "'The Second Sex'" (book title)
+
+7. **Extract verbatim** — Do not normalize or correct spelling. Extract exactly as written.
+
+8. **Label from allowed set** — Each topic has defined labels. Pick the closest match from that topic's list.
+   - If nothing fits, use "other" — but prefer a defined label when reasonable.
+   - Labels enable hierarchy detection (e.g., "exam" as child of "course"), so accuracy matters.
 </principles>
 
-<topics>
-Active topics: {topics_list}
-Assign each entity to the closest semantic match from this list.
-</topics>
+<topic_labels>
+{label_block}
+</topic_labels>
+
+Assign each entity to a topic, then pick a label from that topic's allowed set.
+If an entity could belong to multiple topics, choose the topic where the label fits best.
 
 <output>
 <scratchpad>
-Brief notes on what you found. Under 50 words.
+Brief notes on what you found. Before finalizing, scan once more for any named thing you might have skipped. Empty is valid only if the message is purely generic.
 </scratchpad>
 
 <entities>
@@ -45,28 +65,6 @@ name | label | topic
 </entities>
 </output>
 """
-
-# def ner_formatter_prompt() -> str:
-#   return """
-# You are VEGAPUNK-01B, Vestige's NER formatter.
-
-# <vestige>
-# Vestige is a personal knowledge graph. Structured data keeps extraction clean.
-# </vestige>
-
-# <upstream>
-# VEGAPUNK-01 analyzed messages and listed extractions in an <entities> block. You parse, not judge.
-# </upstream>
-
-# <principles>
-# 1. **Transform, don't think** — VEGAPUNK-01 decided. You structure.
-# 2. **Preserve spelling** — Names exactly as written.
-# </principles>
-
-# <your_mandate>
-# Parse the <entities> block into JSON. Each line is: name | label | topic
-# </your_mandate>
-# """
 
 def get_disambiguation_reasoning_prompt(user_name: str, messages_text: str) -> str:
   return f"""
@@ -95,6 +93,11 @@ VEGAPUNK-03 will parse your output into structured data. The resolver will valid
 3. **Session context reveals continuity** — Recent messages show who {user_name} has been talking about and gives additional context for mapping entities.
 4. **Grouping unmatched mentions needs evidence** — Multiple NEW mentions being the same entity requires proof in the messages. "Professor Okonkwo" and "Prof O" with linking context = NEW_GROUP. Similar names alone ≠ same entity.
 5. **Every mention lands somewhere** — Your job is resolution, not filtering. Every input mention gets a verdict.
+6. **Name collisions:** When known_entities contains multiple entities with similar base names:
+- Match requires fact alignment, not just name match
+- Compare the mention's surrounding context against each candidate's facts
+- If context contradicts a candidate's facts, skip that candidate
+- If multiple candidates fit equally well, output as NEW_SINGLE with a context-qualified name
 </principles>
 
 <your_mandate>
@@ -352,37 +355,6 @@ One line per entity with new facts. Omit entities with no new facts.
 </output>
 """
 
-# def get_profile_formatter_prompt() -> str:
-#     return r"""
-# You are VEGAPUNK-06b, a structured output formatter.
-
-# <task>
-# Convert fact extraction output into structured JSON.
-# </task>
-
-# <input>
-# You receive reasoning output containing a <new_facts> block with one line per entity:
-# EntityName: fact1 | fact2 [UPDATES: old_fact] | fact3
-# </input>
-
-# <rules>
-# - Parse each line: entity name before colon, pipe-delimited facts after
-# - Trim whitespace from each fact
-# - Preserve [UPDATES: ...] suffixes exactly as written
-# - Return profiles in same order as input
-# - Only include entities that appear in the <new_facts> block
-# </rules>
-
-# <output>
-# {
-#   "profiles": [
-#     {"canonical_name": "EntityName", "facts": ["fact1", "fact2 [UPDATES: old_fact]", "fact3"]},
-#     ...
-#   ]
-# }
-# </output>
-# """
-
 def get_merge_judgment_prompt(user_name: str) -> str:
    return f"""
 You are VEGAPUNK-07, the merge arbiter for {user_name}'s knowledge graph.
@@ -403,12 +375,22 @@ Two entities have similar names. Decide: same entity captured twice, or two dist
 - `entity_b`: name, type, aliases, facts
 </what_you_receive>
 
-<output>
-Return ONLY a float 0.0-1.0.
-- High (0.85+): Confident same entity
-- Mid (0.5-0.84): Uncertain
-- Low (<0.5): Likely distinct
+<reasoning>
+Think through:
+- Type match?
+- Name/alias overlap?
+- Fact alignment — supporting, contradicting, or insufficient?
+- Risk assessment — worse to merge distinct entities or leave duplicates?
+</reasoning>
 
-No explanation. Just the number.
+<output>
+Return a single float 0.0-1.0 inside score tags.
+
+Scoring:
+- 0.85+: Confident same entity
+- 0.4-0.84: Uncertain
+- <0.4: Likely distinct
+
+<score>0.XX</score>
 </output>
 """

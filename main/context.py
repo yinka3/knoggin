@@ -52,11 +52,15 @@ class Context:
         user_name: str,
         store: MemGraphStore,
         cpu_executor: ThreadPoolExecutor,
-        topics: List[str] = ["General"]
+        topics_config: dict = None
     ) -> "Context":
+        
+        if topics_config is None:
+            topics_config = {"General": {"labels": [], "hierarchy": {}}}
+
         redis_conn = AsyncRedisClient().get_client()
         
-        instance = cls(user_name, topics, redis_conn)
+        instance = cls(user_name, topics_config, redis_conn)
         instance.llm = LLMService(trace_logger=get_trace_logger())
         
         instance.store = store
@@ -70,13 +74,18 @@ class Context:
         if not current_redis or int(current_redis) < max_id:
             await redis_conn.set("global:next_ent_id", max_id)
             logger.info(f"Startup Sync: Reset global:next_ent_id to {max_id} from Memgraph")
+        
+        hierarchy_config = {
+            topic: config.get("hierarchy", {})
+            for topic, config in topics_config.items()
+        }
             
         instance.nlp_pipe = await loop.run_in_executor(
             instance.executor, 
-            partial(NLPPipeline, llm=instance.llm)
+            partial(NLPPipeline, llm=instance.llm, topics_config=topics_config)
         )
         
-        instance.ent_resolver = EntityResolver(store=instance.store)
+        instance.ent_resolver = EntityResolver(store=instance.store, hierarchy_config=hierarchy_config)
 
         raw_msgs = await redis_conn.hgetall(f"message_content:{user_name}")
         messages = {k: json.loads(v) for k, v in raw_msgs.items()}
@@ -100,7 +109,7 @@ class Context:
             store=instance.store,
             cpu_executor=instance.executor,
             user_name=user_name,
-            active_topics=topics,
+            topics_config=topics_config,
             get_next_ent_id=instance.get_next_ent_id
         )
 
@@ -381,9 +390,9 @@ class Context:
             partial(self.store.write_batch, entities, relationships, True)
         )
         
-        if new_entity_ids:
+        if entity_ids:
             dirty_key = f"dirty_entities:{self.user_name}"
-            await self.redis_client.sadd(dirty_key, *[str(eid) for eid in new_entity_ids])
+            await self.redis_client.sadd(dirty_key, *[str(eid) for eid in entity_ids])
             await self.redis_client.delete(f"profile_complete:{self.user_name}")
         
         logger.info(f"Wrote {len(entities)} entities, {len(relationships)} relationships to graph")

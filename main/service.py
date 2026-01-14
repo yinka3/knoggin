@@ -64,14 +64,17 @@ class LLMService:
 
     @property
     def structured_model(self) -> str:
+        """Model used for structuring or non-reasoning tasks"""
         return self._structured_model
     
     @property
     def reasoning_model(self) -> str:
+        """Model used for reasoning tasks"""
         return self._reasoning_model
     
     @property
     def agent_model(self) -> str:
+        """Model used for agent"""
         return self._agent_model
 
     async def call_structured(

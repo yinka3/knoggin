@@ -1,6 +1,6 @@
 import re
 import torch
-from main.prompts import ner_formatter_prompt, ner_reasoning_prompt
+from main.prompts import ner_reasoning_prompt
 from main.service import LLMService
 from schema.dtypes import *
 from typing import List, Tuple
@@ -21,11 +21,14 @@ class NLPPipeline:
     def __init__(
         self,
         llm: LLMService,
+        topics_config: dict,
         emotion_model: str = "j-hartmann/emotion-english-distilroberta-base",
         device: Optional[str] = None
     ):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.llm_client = llm
+        self.topics_config = topics_config
+        self._label_block = self._build_label_block(topics_config)
         self._init_emotion(emotion_model)
         
     def _init_emotion(self, model_name: str):
@@ -36,6 +39,13 @@ class NLPPipeline:
             top_k=None,
             device=device_id
         )
+    
+    def _build_label_block(self, topics_config: dict) -> str:
+        lines = []
+        for topic, config in topics_config.items():
+            labels = config.get("labels", [])
+            lines.append(f"  - **{topic}**: {', '.join(labels)}")
+        return "\n".join(lines)
     
     def _parse_entities(self, reasoning: str) -> Optional[ExtractionResponse]:
         """Parse <entities> block and validate via Pydantic."""
@@ -57,15 +67,14 @@ class NLPPipeline:
         
         return ExtractionResponse(entities=entities)
     
-    async def extract_mentions(self, user_name: str, topics_list: List, text: str) -> List[Tuple[str, str, str]]:
+    async def extract_mentions(self, user_name: str, text: str) -> List[Tuple[str, str, str]]:
         """
         Extracts entities and noun phrases.
         """
         if not text or not text.strip():
             return []
-        logger.info(topics_list)
 
-        system_01 = ner_reasoning_prompt(user_name, topics_list)
+        system_01 = ner_reasoning_prompt(user_name, self._label_block)
         reasoning = await self.llm_client.call_reasoning(system_01, text)
         
         if not reasoning or "<entities>" not in reasoning:

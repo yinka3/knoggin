@@ -47,10 +47,12 @@ class Tools:
     async def _hydrate_evidence(self, evidence_ids: list[str]) -> list[dict]:
         if not evidence_ids:
             return []
+        
         content_key = f"message_content:{self.user_name}"
+        raw_results = await self.redis.hmget(content_key, *evidence_ids)
+        
         results = []
-        for msg_id in evidence_ids:
-            raw = await self.redis.hget(content_key, msg_id)
+        for msg_id, raw in zip(evidence_ids, raw_results):
             if raw:
                 data = json.loads(raw)
                 results.append({
@@ -304,14 +306,16 @@ class Tools:
         if not canonical_a or not canonical_b:
             return []
 
-        path = self.store._find_path_filtered(canonical_a, canonical_b, active_only=True)
+        path, has_inactive_shortcut = self.store._find_path_filtered(canonical_a, canonical_b, active_only=True)
+        
         if path:
             for step in path:
                 step["evidence"] = await self._hydrate_evidence(step.pop("evidence_refs", []))
+            if has_inactive_shortcut:
+                path.append({"note": "A shorter connection exists through inactive topics"})
             return path
-
-        full_path = self.store._find_path_filtered(canonical_a, canonical_b, active_only=False)
-        if full_path:
+        
+        if has_inactive_shortcut:
             return [{"hidden": True, "message": "Connection exists through inactive topics"}]
         
         return []
@@ -330,15 +334,17 @@ class Tools:
         """
         if not hot_topics:
             return {}
+        
         raw = self.store.get_hot_topic_context_with_messages(hot_topics, msg_limit=10, slim=slim)
-    
-        # Hydrate message IDs from Redis
         content_key = f"message_content:{self.user_name}"
         
         for _, data in raw.items():
+            msg_ids = data.get("message_ids", [])
+            
+            if msg_ids:
+                raw_msgs = await self.redis.hmget(content_key, *msg_ids)
                 messages = []
-                for msg_id in data.pop("message_ids", []):
-                    raw_msg = await self.redis.hget(content_key, msg_id)
+                for msg_id, raw_msg in zip(msg_ids, raw_msgs):
                     if raw_msg:
                         parsed = json.loads(raw_msg)
                         messages.append({
@@ -346,8 +352,64 @@ class Tools:
                             "message": parsed["message"]
                         })
                 data["messages"] = messages
+            else:
+                data["messages"] = []
+            
+            data.pop("message_ids", None)
         
         return raw
+    
+    async def get_hierarchy(self, entity_name: str, direction: str = "both") -> Dict:
+        """
+        Get hierarchy relationships for an entity.
+        
+        Args:
+            entity_name: Entity to check hierarchy for
+            direction: "up" (parents), "down" (children), or "both"
+        
+        Returns:
+            Dict with parent chain and/or children list
+        """
+        canonical = self._resolve_entity_name(entity_name)
+        if not canonical:
+            return {"error": f"Entity '{entity_name}' not found"}
+        
+        entity_id = self.resolver.get_id(canonical)
+        if not entity_id:
+            return {"error": f"Could not resolve '{canonical}' to ID"}
+        
+        result = {
+            "entity": canonical,
+            "entity_id": entity_id
+        }
+        
+        if direction in ("up", "both"):
+            parents = self.store.get_parent_entities(entity_id)
+            result["parents"] = parents
+            
+            if parents:
+                ancestry = []
+                current_id = entity_id
+                visited = {current_id}
+                
+                while True:
+                    parent_list = self.store.get_parent_entities(current_id)
+                    if not parent_list:
+                        break
+                    parent = parent_list[0]  # assume single parent for now
+                    if parent["id"] in visited:
+                        break  # cycle protection
+                    visited.add(parent["id"])
+                    ancestry.append(parent["canonical_name"])
+                    current_id = parent["id"]
+                
+                result["ancestry"] = ancestry
+        
+        if direction in ("down", "both"):
+            children = self.store.get_child_entities(entity_id)
+            result["children"] = children
+        
+        return result
 
 
 

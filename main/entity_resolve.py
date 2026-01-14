@@ -14,8 +14,10 @@ from db.memgraph import MemGraphStore
 
 class EntityResolver:
 
-    def __init__(self, store: 'MemGraphStore', embedding_model='dunzhang/stella_en_400M_v5'):
+    def __init__(self, store: 'MemGraphStore', hierarchy_config: dict = None, embedding_model='dunzhang/stella_en_400M_v5'):
         self.store = store
+        self.hierarchy_config = hierarchy_config or {}
+
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger.info(f"EntityResolver using device: {device}")
         self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True, device=device, model_kwargs={"torch_dtype": torch.float16})
@@ -97,6 +99,30 @@ class EntityResolver:
             except Exception as e:
                 logger.warning(f"Could not retrieve embedding for {entity_id}: {e}")
                 return []
+            
+    def get_hierarchy_relationship(self, type_a: str, type_b: str, topic: str) -> Optional[str]:
+        """
+        Check if two types have a parent/child relationship within a topic.
+        
+        Returns:
+            "parent" if type_a is parent of type_b
+            "child" if type_a is child of type_b
+            None if no hierarchy relationship
+        """
+        topic_hierarchy = self.hierarchy_config.get(topic, {})
+        
+        if not topic_hierarchy:
+            return None
+        
+        if type_a in topic_hierarchy:
+            if type_b in topic_hierarchy[type_a]:
+                return "parent"
+        
+        if type_b in topic_hierarchy:
+            if type_a in topic_hierarchy[type_b]:
+                return "child"
+        
+        return None
     
     def hydrate_messages(self, messages: dict[str, dict]):
         if not messages:
@@ -122,8 +148,8 @@ class EntityResolver:
         self.msg_index.add_with_ids(embs, np.array(ids, dtype=np.int64))
         
 
-        self.msg_corpus = tokens
-        self.bm25_index = BM25Okapi(tokens)
+        self.msg_corpus.extend(tokens)
+        self.bm25_index = BM25Okapi(self.msg_corpus)
 
     
     def add_message(self, msg_key: str, text: str):
@@ -216,6 +242,20 @@ class EntityResolver:
 
             return entity_id, len(new_aliases) > 0
     
+    def get_candidate_ids(self, name: str) -> List[int]:
+        """Return all entity IDs that could match this name."""
+        name_lower = name.lower()
+        candidates = set()
+        
+        if name_lower in self._name_to_id:
+            candidates.add(self._name_to_id[name_lower])
+        
+        for alias, eid in self._name_to_id.items():
+            if name_lower in alias or alias in name_lower:
+                candidates.add(eid)
+        
+        return list(candidates)
+    
     def register_entity(
         self, 
         entity_id: int, 
@@ -239,7 +279,12 @@ class EntityResolver:
         with self._lock:
             self._name_to_id[canonical_name.lower()] = entity_id
             for mention in mentions:
-                self._name_to_id[mention.lower()] = entity_id
+                mention_lower = mention.lower()
+                existing_id = self._name_to_id.get(mention_lower)
+                if existing_id and existing_id != entity_id:
+                    logger.warning(f"Alias collision: '{mention}' belongs to {existing_id}, skipping for {entity_id}")
+                    continue
+                self._name_to_id[mention_lower] = entity_id
 
         return embedding
 
@@ -315,7 +360,7 @@ class EntityResolver:
                 if id_i == id_j:
                     continue
                 score = fuzz.WRatio(aliases[i], aliases[j])
-                if score >= 91:
+                if score >= 70:
                     pair_key = tuple(sorted([id_i, id_j]))
                     if pair_key not in seen_pairs or score > seen_pairs[pair_key]:
                         seen_pairs[pair_key] = score
@@ -326,10 +371,48 @@ class EntityResolver:
             if self.store.has_direct_edge(id_a, id_b):
                 logger.debug(f"Blocked ({id_a}, {id_b}) | Direct edge exists")
                 continue
+
             profile_a = self.entity_profiles.get(id_a, {})
             profile_b = self.entity_profiles.get(id_b, {})
             type_a = profile_a.get("type")
             type_b = profile_b.get("type")
+            topic_a = profile_a.get("topic", "General")
+            topic_b = profile_b.get("topic", "General")
+
+            canonical_a = profile_a.get("canonical_name", "").lower()
+            canonical_b = profile_b.get("canonical_name", "").lower()
+            is_substring = canonical_a in canonical_b or canonical_b in canonical_a
+
+
+            relationship = "merge" # default
+            parent_id = None
+            child_id = None
+            
+            # check hierarchy if same topic
+            if topic_a == topic_b and type_a and type_b:
+                hierarchy_rel = self.get_hierarchy_relationship(type_a, type_b, topic_a)
+                
+                if hierarchy_rel == "parent":
+                    relationship = "hierarchy"
+                    parent_id = id_a
+                    child_id = id_b
+                elif hierarchy_rel == "child":
+                    relationship = "hierarchy"
+                    parent_id = id_b
+                    child_id = id_a
+            
+            # for merges, keep high threshold
+            if relationship == "merge" and fuzz_score < 91:
+                continue
+            
+            # for hierarchy, medium threshold is fine
+            if relationship == "hierarchy":
+                # Substring = strong signal, lower threshold OK
+                # No substring = need higher confidence
+                if is_substring and fuzz_score < 70:
+                    continue
+                if not is_substring and fuzz_score < 85:
+                    continue
 
             neighbors_a = self.store.get_neighbor_ids(id_a)
             neighbors_b = self.store.get_neighbor_ids(id_b)
@@ -341,7 +424,7 @@ class EntityResolver:
                 high_confidence = fuzz_score >= 95 and type_a and type_b and type_a == type_b
             
                 if not high_confidence:
-                    logger.debug(f"Blocked ({id_a}, {id_b}) | Shared neighbors: {shared_neighbors} (score={fuzz_score}, types={type_a}/{type_b})")
+                    logger.info(f"Blocked ({id_a}, {id_b}) | Shared neighbors: {shared_neighbors} (score={fuzz_score}, types={type_a}/{type_b})")
                     continue
                 else:
                     logger.info(f"Passed ({id_a}, {id_b}) | Shared neighbors as supporting evidence (score={fuzz_score}, type={type_a})")
@@ -351,15 +434,30 @@ class EntityResolver:
                 "secondary_id": id_b,
                 "primary_name": profile_a.get("canonical_name", "Unknown"),
                 "secondary_name": profile_b.get("canonical_name", "Unknown"),
-                "profile_a": profile_a,
-                "profile_b": profile_b,
+                "primary_type": type_a,
+                "secondary_type": type_b,
+                "topic": topic_a,
+                "profile_a": {
+                    **profile_a,
+                    "aliases": self.get_mentions_for_id(id_a)
+                },
+                "profile_b": {
+                    **profile_b,
+                    "aliases": self.get_mentions_for_id(id_b)
+                },
                 "fuzz_score": fuzz_score,
-                "shared_neighbor_count": len(shared_neighbors)
+                "shared_neighbor_count": len(shared_neighbors),
+                "relationship": relationship,
+                "parent_id": parent_id,
+                "child_id": child_id,
             })
             
             logger.info(f"Candidate ({id_a}, {id_b}) {profile_a.get('canonical_name')} <-> {profile_b.get('canonical_name')} | score={fuzz_score}")
     
-        logger.info(f"Merge detection complete: {len(candidates)} candidates found")
+        merge_count = sum(1 for c in candidates if c["relationship"] == "merge")
+        hierarchy_count = sum(1 for c in candidates if c["relationship"] == "hierarchy")
+        logger.info(f"Detection complete: {merge_count} merge, {hierarchy_count} hierarchy candidates")
+        
         return candidates
     
     def remove_entities(self, entity_ids: List[int]) -> int:
@@ -387,3 +485,43 @@ class EntityResolver:
         if removed > 0:
             logger.info(f"Removed {removed} entities from resolver")
         return removed
+    
+    def debug_search(self, query: str, target_msg_id: str, k: int = 20):
+        """Check if a specific message appears in search results and where."""
+        
+        # BM25
+        tokens = query.lower().split()
+        bm25_scores = self.bm25_index.get_scores(tokens)
+        bm25_ranked = sorted(enumerate(bm25_scores), key=lambda x: x[1], reverse=True)
+        bm25_position = None
+        for rank, (idx, score) in enumerate(bm25_ranked):
+            if self.msg_id_order[idx] == target_msg_id:
+                bm25_position = (rank, score)
+                break
+        
+        # Vector
+        q_emb = self.embedding_model.encode([query]).astype(np.float32)
+        faiss.normalize_L2(q_emb)
+        scores, ids = self.msg_index.search(q_emb, 100)
+        
+        vector_position = None
+        for rank, (idx, score) in enumerate(zip(ids[0], scores[0])):
+            if idx >= 0 and self.msg_int_to_id.get(int(idx)) == target_msg_id:
+                vector_position = (rank, score)
+                break
+        
+        # Full search result
+        results = self._search_messages(query, k)
+        final_position = None
+        for rank, (msg_id, score) in enumerate(results):
+            if msg_id == target_msg_id:
+                final_position = (rank, score)
+                break
+        
+        return {
+            "query": query,
+            "target": target_msg_id,
+            "bm25": bm25_position,      # (rank, score) or None
+            "vector": vector_position,   # (rank, score) or None
+            "final": final_position      # (rank, score) or None
+        }
