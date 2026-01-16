@@ -97,6 +97,7 @@ class MemGraphStore:
         """Convert DB record to Fact dataclass."""
         return Fact(
             id=record["id"],
+            source_entity_id=record["source_entity_id"],
             content=record["content"],
             valid_at=datetime.fromisoformat(record["valid_at"]),
             invalid_at=datetime.fromisoformat(record["invalid_at"]) if record["invalid_at"] else None,
@@ -111,7 +112,8 @@ class MemGraphStore:
         MATCH (e:Entity {id: $entity_id})
         CREATE (f:Fact {
             id: $fact_id,
-            content: $valid_at,
+            source_entity_id: $entity_id,
+            content: $content,
             valid_at: $valid_at,
             invalid_at: $invalid_at,
             archived_at: $archived_at,
