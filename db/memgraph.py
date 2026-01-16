@@ -1,9 +1,12 @@
+from datetime import datetime
 import time
 from loguru import logger
 from typing import Dict, List, Tuple
 from neo4j import GraphDatabase, ManagedTransaction
 from dotenv import load_dotenv
 import os
+
+from schema.dtypes import Fact
 load_dotenv()
 
 MEMGRAPH_USER=os.environ.get("MEMGRAPH_USER")
@@ -89,6 +92,137 @@ class MemGraphStore:
         with self.driver.session() as session:
             result = session.run(query, {"id": int(message_id)}).single()
             return result["content"] if result else ""
+    
+    def _hydrate_fact(self, record) -> Fact:
+        """Convert DB record to Fact dataclass."""
+        return Fact(
+            id=record["id"],
+            content=record["content"],
+            valid_at=datetime.fromisoformat(record["valid_at"]),
+            invalid_at=datetime.fromisoformat(record["invalid_at"]) if record["invalid_at"] else None,
+            confidence=record["confidence"],
+            embedding=record["embedding"] or [],
+            source_msg_id=record["source_msg_id"]
+        )
+
+    def create_fact(self, entity_id: int, fact: Fact):
+        """Create a fact."""
+        query="""
+        MATCH (e:Entity {id: $entity_id})
+        CREATE (f:Fact {
+            id: $fact_id,
+            content: $valid_at,
+            valid_at: $valid_at,
+            invalid_at: $invalid_at,
+            archived_at: $archived_at,
+            confidence: $confidence,
+            created_at: timestamp(),
+            embedding: $embedding
+        })
+        CREATE (e)-[:HAS_FACT]->(f)
+        WITH f
+        CALL {
+            WITH f
+            MATCH (m:Message {id: $msg_id})
+            WHERE $msg_id IS NOT NULL
+            CREATE (f)-[:EXTRACTED_FROM]->(m)
+        }
+        RETURN f.id as id
+        """
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {
+                        "entity_id": entity_id,
+                        "facts_id": fact.id,
+                        "content": fact.content,
+                        "valid_at": fact.valid_at.isoformat(),
+                        "invalid_at": fact.invalid_at.isoformat() if fact.invalid_at else None,
+                        "archived_at": fact.archived_at.isoformat() if fact.archived_at else None,
+                        "confidence": fact.confidence,
+                        "embedding": fact.embedding,
+                        "msg_id": fact.source_msg_id
+                        })
+                return result is not None
+        except Exception as e:
+            logger.error(f"Failed to create fact {fact.id}: {e}")
+            return False
+    
+    def invalidate_fact(self, fact_id: str, invalid_at: datetime) -> bool:
+        """Mark fact as invalid."""
+        query = """
+        MATCH (f:Fact {id: $fact_id})
+        SET f.invalid_at = $invalid_at
+        RETURN f.id as id
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {
+                    "fact_id": fact_id,
+                    "invalid_at": invalid_at.isoformat()
+                }).single()
+                return result is not None
+        except Exception as e:
+            logger.error(f"Failed to invalidate fact {fact_id}: {e}")
+            return False
+    
+
+    def get_facts_for_entity(self, entity_id: int, active_only: bool = True):
+        """Get a fact from an entity."""
+
+        query = """
+        MATCH (e:Entity {id: $entity_id})-[:HAS_FACT]->(f:Fact)
+        """ + ("WHERE f.invalid_at IS NULL" if active_only else "") + """
+        OPTIONAL MATCH (f)-[:EXTRACTED_FROM]->(m:Message)
+        RETURN f.id as id, f.content as content, f.valid_at as valid_at,
+            f.invalid_at as invalid_at, f.confidence as confidence, f.embedding as embedding
+            m.id as source_msg_id
+        ORDER BY f.created_at DESC
+        """
+
+        try:
+            with self.driver.session() as session:
+                result= session.run(query, {"entity_id": entity_id})
+                return [self._hydrate_fact(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get facts for entity {entity_id}: {e}")
+            return []
+    
+
+    def invalidate_fact(self, fact_id: str, invalid_at: datetime) -> bool:
+        """Mark fact as invalid."""
+        query = """
+        MATCH (f:Fact {id: $fact_id})
+        SET f.invalid_at = $invalid_at
+        RETURN f.id as id
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {
+                    "fact_id": fact_id,
+                    "invalid_at": invalid_at.isoformat()
+                }).single()
+                return result is not None
+        except Exception as e:
+            logger.error(f"Failed to invalidate fact {fact_id}: {e}")
+            return False
+
+
+    def get_facts_from_message(self, msg_id: str) -> List[Fact]:
+        """Fetch all facts extracted from a message."""
+        query = """
+        MATCH (f:Fact)-[:EXTRACTED_FROM]->(m:Message {id: $msg_id})
+        RETURN f.id as id, f.content as content, f.valid_at as valid_at,
+            f.invalid_at as invalid_at, f.confidence as confidence,
+            f.embedding as embedding, $msg_id as source_msg_id
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"msg_id": msg_id})
+                return [self._hydrate_fact(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get facts from message {msg_id}: {e}")
+            return []
     
     def write_batch(self, entities: List[Dict], relationships: List[Dict]):
         entity_params = []
