@@ -12,8 +12,8 @@ class BatchConsumer:
                  get_session_context: Callable[[int], Awaitable[List[Dict]]],
                  run_session_jobs: Callable[[], Awaitable[None]],
                  write_to_graph: Callable[[BatchResult], Awaitable[None]],
-                 batch_size: int = 10, batch_timeout: float =  15.0, 
-                 checkpoint_interval: int = 30, session_window: int = 60):
+                 batch_size: int = 7, batch_timeout: float =  15.0, 
+                 checkpoint_interval: int = 30, session_window: int = 30):
         
         self.user_name = user_name
         self.processor = processor
@@ -120,19 +120,31 @@ class BatchConsumer:
             if not result.success:
                 await self.processor.move_to_dead_letter(messages, result.error)
             else:
+                loop = asyncio.get_running_loop()
+                batch = [
+                    {
+                        "id": msg['id'],
+                        "content": msg['message'],
+                        "role": msg.get('role', 'user'),
+                        "timestamp": msg.get('timestamp', '')
+                    }
+                    for msg in messages
+                ]
+                await loop.run_in_executor(None, self.processor.store.save_message_logs, batch)
+                    
                 if result.emotions:
                     await self.redis.rpush(f"emotions:{self.user_name}", *result.emotions)
                 
                 if result.extraction_result:
                    await self.write_to_graph(result)
 
-            await self.redis.ltrim(self._buffer_key, len(messages), -1)
+                count = await self.redis.incrby(self._checkpoint_key, len(messages))
+                if count >= self.checkpoint_interval:
+                    await self.run_session_jobs()
+                    await self.redis.set(self._checkpoint_key, 0)
 
-            # Checkpoint check
-            count = await self.redis.incrby(self._checkpoint_key, len(messages))
-            if count >= self.checkpoint_interval:
-                await self.redis.set(self._checkpoint_key, 0)
-                await self.run_session_jobs()
+            await self.redis.ltrim(self._buffer_key, len(messages), -1)
+           
     
     def _format_session_text(self, conversation: List[Dict]) -> str:
         lines = []

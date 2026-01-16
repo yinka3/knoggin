@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-STRUCTURED_MODEL = os.environ.get("STRUCTURED_MODEL", "google/gemini-2.5-flash")
-REASONING_MODEL = os.environ.get("REASONING_MODEL", "google/gemini-3-flash-preview")
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "anthropic/claude-sonnet-4.5")
+STRUCTURED_MODEL = os.environ.get("STRUCTURED_MODEL", "google/gemini-2.5-flash-lite")
+REASONING_MODEL = os.environ.get("REASONING_MODEL", "google/gemini-2.5-flash")
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "google/gemini-3-flash-preview")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 T = TypeVar('T', bound=BaseModel)
@@ -161,7 +161,7 @@ class LLMService:
                             "data_collection": "deny",
                             # "zdr": True # zero data rentention(can uncomment if you want, might increase latency tho)
                         }, 
-                        "reasoning": {"effort": "low"}
+                        "reasoning": {"effort": "medium"}
                     }
                 )
                 
@@ -276,27 +276,27 @@ class LLMService:
                         self._trace.error(f"[TOOLS SYNC] Failed: {e}")
                     return None
     
-    def _parse_xml_tool_calls(self, content: str) -> list:
-        """Fallback parser for DeepSeek XML tool calls.(Or any model with xml tool calls)"""
-        tools = []
-        pattern = r'<invoke name="([^"]+)">(.*?)</invoke>'
-        matches = re.findall(pattern, content, re.DOTALL)
+    # def _parse_xml_tool_calls(self, content: str) -> list:
+    #     """Fallback parser for DeepSeek XML tool calls.(Or any model with xml tool calls)"""
+    #     tools = []
+    #     pattern = r'<invoke name="([^"]+)">(.*?)</invoke>'
+    #     matches = re.findall(pattern, content, re.DOTALL)
         
-        for name, params_block in matches:
-            args = {}
-            param_pattern = r'<parameter name="([^"]+)"[^>]*>([^<]*)</parameter>'
-            for param_name, param_value in re.findall(param_pattern, params_block):
-                param_value = param_value.strip()
+    #     for name, params_block in matches:
+    #         args = {}
+    #         param_pattern = r'<parameter name="([^"]+)"[^>]*>([^<]*)</parameter>'
+    #         for param_name, param_value in re.findall(param_pattern, params_block):
+    #             param_value = param_value.strip()
                 
-                # Type conversion
-                if param_value.isdigit():
-                    args[param_name] = int(param_value)
-                elif param_value.lower() in ('true', 'false'):
-                    args[param_name] = param_value.lower() == 'true'
-                else:
-                    args[param_name] = param_value
+    #             # Type conversion
+    #             if param_value.isdigit():
+    #                 args[param_name] = int(param_value)
+    #             elif param_value.lower() in ('true', 'false'):
+    #                 args[param_name] = param_value.lower() == 'true'
+    #             else:
+    #                 args[param_name] = param_value
                     
-            tools.append({"name": name, "arguments": json.dumps(args)})
+    #         tools.append({"name": name, "arguments": json.dumps(args)})
         
-        return tools
+    #     return tools
     

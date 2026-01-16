@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
+import uuid
 from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -18,19 +19,51 @@ logger.add(sys.stdout, level="INFO")
 
 USER_NAME = "Adeyinka"
 EVAL_DATE = "2025-12-05 00:30"
-
-CUSTOM_TOPICS = [
-    "Workplace Dynamics",
-    "Academic Arcs",
-    "Intramural Sports",
-    "Interpersonal Relationships",
-    "Family & Heritage",
-    "Campus Geography",
-    "Mental Health & Wellness",
-    "Food & Dining",
-    "Entertainment & Media",
-    "Daily Routines"
-]
+SESSION_ID = str(uuid.uuid4())
+TOPIC_CONFIG = {
+    "Workplace Dynamics": {
+        "labels": ["person", "business", "role", "product"],
+        "hierarchy": {
+            "business": ["role"]
+        }
+    },
+    "Academic Arcs": {
+        "labels": ["person", "course", "assignment", "exam", "project", "group"],
+        "hierarchy": {
+            "course": ["assignment", "exam", "project"]
+        }
+    },
+    "Intramural Sports": {
+        "labels": ["person", "team", "sport", "game", "position"],
+        "hierarchy": {
+            "team": ["position"]
+        }
+    },
+    "Interpersonal Relationships": {
+        "labels": ["person", "group", "event"]
+    },
+    "Family & Heritage": {
+        "labels": ["person", "tradition", "place", "pet"]
+    },
+    "Campus Geography": {
+        "labels": ["building", "room", "landmark", "dorm", "facility"]
+    },
+    "Mental Health & Wellness": {
+        "labels": ["person", "condition", "resource", "habit"]
+    },
+    "Food & Dining": {
+        "labels": ["restaurant", "dish", "cuisine", "person"],
+        "hierarchy": {
+            "restaurant": ["dish"]
+        }
+    },
+    "Entertainment & Media": {
+        "labels": ["show", "movie", "music", "party", "person"]
+    },
+    "Daily Routines": {
+        "labels": ["activity", "place", "habit"]
+    }
+}
 
 
 async def ingest_haystack(context: Context, messages: list):
@@ -56,15 +89,13 @@ async def ingest_haystack(context: Context, messages: list):
     logger.info("Ingestion complete, waiting for final processing...")
 
 async def ask_stella(context: Context, question: str) -> str:
-    topics = context.store.get_topics_by_status()
-    active = topics.get("active", []) + topics.get("hot", [])
     
     result = await run(
         user_query=question,
         user_name=context.user_name,
         conversation_history=[],
         hot_topics=[],
-        active_topics=active,
+        topics_config=TOPIC_CONFIG,
         llm=context.llm,
         store=context.store,
         ent_resolver=context.ent_resolver,
@@ -147,7 +178,8 @@ async def main():
         user_name=USER_NAME,
         store=store,
         cpu_executor=executor,
-        topics=CUSTOM_TOPICS
+        topics_config=TOPIC_CONFIG,
+        session_id=SESSION_ID
     )
     
     results = []
@@ -194,6 +226,18 @@ async def main():
         logger.info(f"Total: {len(results)} questions evaluated")
         
     finally:
+        from jobs.cleaner import EntityCleanupJob
+        from jobs.base import JobContext
+        
+        ctx = JobContext(
+            user_name=context.user_name,
+            redis=context.redis_client,
+            idle_seconds=0
+        )
+        cleaner = EntityCleanupJob(context.user_name, context.store, context.ent_resolver)
+        result = await cleaner.execute(ctx)
+        logger.info(f"Cleaner: {result.summary}")
+        
         await context.shutdown()
         store.close()
         executor.shutdown(wait=True)

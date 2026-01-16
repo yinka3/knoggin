@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, timezone
 from loguru import logger
 import threading
@@ -14,10 +15,10 @@ from db.memgraph import MemGraphStore
 
 class EntityResolver:
 
-    def __init__(self, store: 'MemGraphStore', hierarchy_config: dict = None, embedding_model='dunzhang/stella_en_400M_v5'):
+    def __init__(self, store: 'MemGraphStore', session_id: str = None, hierarchy_config: dict = None, embedding_model='dunzhang/stella_en_400M_v5'):
         self.store = store
         self.hierarchy_config = hierarchy_config or {}
-
+        self.session_id = session_id
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger.info(f"EntityResolver using device: {device}")
         self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True, device=device, model_kwargs={"torch_dtype": torch.float16})
@@ -28,7 +29,6 @@ class EntityResolver:
         self._name_to_id = {}
         self.msg_index = faiss.IndexIDMap2(faiss.IndexScalarQuantizer(self.embedding_dim, faiss.ScalarQuantizer.QT_fp16, faiss.METRIC_INNER_PRODUCT))
         self.msg_int_to_id: dict[int, str] = {}
-        self._message_texts = {}
         self._lock = threading.RLock()
         self.bm25_index: Optional[BM25Okapi] = None
         self.msg_corpus: list[list[str]] = []
@@ -128,21 +128,19 @@ class EntityResolver:
         if not messages:
             return
         
-        ids, texts, tokens = [], [], []
+        ids, tokens = [], []
         for msg_key, data in messages.items():
             prefix, num = msg_key.split("_")
             num = int(num)
             int_id = num if prefix == "msg" else num + 1_000_000
             
             text = data.get("message") or data.get("content", "")
-            self._message_texts[msg_key] = text
             self.msg_int_to_id[int_id] = msg_key
             ids.append(int_id)
-            texts.append(text)
             tokens.append(text.lower().split())
             self.msg_id_order.append(msg_key)
         
-
+        texts = [data.get("message") or data.get("content", "") for data in messages.values()]
         embs = self.embedding_model.encode(texts).astype(np.float32)
         faiss.normalize_L2(embs)
         self.msg_index.add_with_ids(embs, np.array(ids, dtype=np.int64))
@@ -160,7 +158,6 @@ class EntityResolver:
         int_id = num if prefix == "msg" else num + 1_000_000
         
         self.msg_int_to_id[int_id] = msg_key
-        self._message_texts[msg_key] = text
 
         emb = self.embedding_model.encode([text]).astype(np.float32)
         faiss.normalize_L2(emb)
@@ -212,12 +209,16 @@ class EntityResolver:
             return []
         
         if len(results) > 1:
-                candidate_keys = list(results.keys())[:45] #hardcoded for convienence
-                pairs = [(query, self._message_texts[msg_key]) for msg_key in candidate_keys]
-                scores = self.cross_encoder.predict(pairs)
-                reranked = list(zip(candidate_keys, scores))
-                reranked.sort(key=lambda x: x[1], reverse=True)
-                return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
+            candidate_keys = list(results.keys())[:45] #hardcoded for convienence
+            pairs = []
+            for msg_key in candidate_keys:
+                msg_id = int(msg_key.split("_")[1]) 
+                text = self.store.get_message_text(msg_id)
+                pairs.append((query, text))
+            scores = self.cross_encoder.predict(pairs)
+            reranked = list(zip(candidate_keys, scores))
+            reranked.sort(key=lambda x: x[1], reverse=True)
+            return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
             
         # Fallback: single result
         sorted_results = sorted(results.items(), key=lambda x: x[1][1], reverse=True)[:k]
@@ -242,16 +243,36 @@ class EntityResolver:
 
             return entity_id, len(new_aliases) > 0
     
-    def get_candidate_ids(self, name: str) -> List[int]:
-        """Return all entity IDs that could match this name."""
-        name_lower = name.lower()
-        candidates = set()
+    def _build_generic_tokens(self, min_entity_freq: int = 10) -> set:
+        """Tokens appearing in N+ distinct entities are generic."""
+        token_to_entities = defaultdict(set)
         
-        if name_lower in self._name_to_id:
-            candidates.add(self._name_to_id[name_lower])
+        for ent_id, profile in self.entity_profiles.items():
+            canonical = profile.get("canonical_name", "").lower()
+            for token in canonical.split():
+                token_to_entities[token].add(ent_id)
+            
+            for alias in self.get_mentions_for_id(ent_id):
+                for token in alias.lower().split():
+                    token_to_entities[token].add(ent_id)
+        
+        return {token for token, ent_ids in token_to_entities.items() 
+                if len(ent_ids) >= min_entity_freq}
+    
+    def get_candidate_ids(
+        self, 
+        mention: str,
+        fuzzy_threshold: int = 75,
+    ) -> List[int]:
+
+        candidates = set()
+        mention_lower = mention.lower()
+        
+        if mention_lower in self._name_to_id:
+            candidates.add(self._name_to_id[mention_lower])
         
         for alias, eid in self._name_to_id.items():
-            if name_lower in alias or alias in name_lower:
+            if fuzz.WRatio(mention_lower, alias) >= fuzzy_threshold:
                 candidates.add(eid)
         
         return list(candidates)
@@ -262,7 +283,8 @@ class EntityResolver:
         canonical_name: str, 
         mentions: List[str], 
         entity_type: str, 
-        topic: str
+        topic: str,
+        session_id: str = None
     ) -> List[float]:
         """
         Register new entity: update all indexes and return embedding.
@@ -271,7 +293,8 @@ class EntityResolver:
             "canonical_name": canonical_name,
             "type": entity_type,
             "topic": topic,
-            "facts": []
+            "facts": [],
+            "session_id": session_id or self.session_id
         }
         
         embedding = self.add_entity(entity_id, profile)
@@ -349,27 +372,50 @@ class EntityResolver:
         """Detect potential entity merges using name matching and facts similarity."""
         
         logger.info(f"Merge detection started, {len(self.entity_profiles)} entities to scan")
+
+        generic = self._build_generic_tokens()
+        logger.debug(f"Generic tokens (10+ entities): {generic}")
         
         candidates = []
         seen_pairs = {}
         aliases = list(self._name_to_id.keys())
+        
         for i in range(len(aliases)):
             for j in range(i + 1, len(aliases)):
                 id_i = self._name_to_id[aliases[i]]
                 id_j = self._name_to_id[aliases[j]]
                 if id_i == id_j:
                     continue
+                
                 score = fuzz.WRatio(aliases[i], aliases[j])
-                if score >= 70:
-                    pair_key = tuple(sorted([id_i, id_j]))
-                    if pair_key not in seen_pairs or score > seen_pairs[pair_key]:
-                        seen_pairs[pair_key] = score
-                    
+                is_substring = aliases[i] in aliases[j] or aliases[j] in aliases[i]
+                
+                # Relaxed gate for substring matches
+                if is_substring and score >= 75:
+                    pass
+                elif score >= 85:
+                    pass
+                else:
+                    continue
+                
+                pair_key = tuple(sorted([id_i, id_j]))
+                tokens_i = set(aliases[i].lower().split()) - generic
+                tokens_j = set(aliases[j].lower().split()) - generic
+                
+                if not (tokens_i & tokens_j):
+                    logger.debug(f"Skipped ({id_i}, {id_j}): no meaningful token overlap")
+                    continue
+                
+                if pair_key not in seen_pairs or score > seen_pairs[pair_key]:
+                    seen_pairs[pair_key] = score
 
-        
         for (id_a, id_b), fuzz_score in seen_pairs.items():
             if self.store.has_direct_edge(id_a, id_b):
                 logger.debug(f"Blocked ({id_a}, {id_b}) | Direct edge exists")
+                continue
+
+            if self.store.has_hierarchy_edge(id_a, id_b):
+                logger.debug(f"Blocked ({id_a}, {id_b}) | Hierarchy edge exists")
                 continue
 
             profile_a = self.entity_profiles.get(id_a, {})
@@ -383,12 +429,11 @@ class EntityResolver:
             canonical_b = profile_b.get("canonical_name", "").lower()
             is_substring = canonical_a in canonical_b or canonical_b in canonical_a
 
-
-            relationship = "merge" # default
+            relationship = "merge"
             parent_id = None
             child_id = None
             
-            # check hierarchy if same topic
+            # Check hierarchy if same topic
             if topic_a == topic_b and type_a and type_b:
                 hierarchy_rel = self.get_hierarchy_relationship(type_a, type_b, topic_a)
                 
@@ -401,26 +446,26 @@ class EntityResolver:
                     parent_id = id_b
                     child_id = id_a
             
-            # for merges, keep high threshold
-            if relationship == "merge" and fuzz_score < 91:
-                continue
-            
-            # for hierarchy, medium threshold is fine
-            if relationship == "hierarchy":
-                # Substring = strong signal, lower threshold OK
-                # No substring = need higher confidence
-                if is_substring and fuzz_score < 70:
+            # Second gate: stricter thresholds before LLM
+            if relationship == "merge":                
+                if is_substring and fuzz_score >= 75:
+                    pass
+                elif fuzz_score < 91:
                     continue
-                if not is_substring and fuzz_score < 85:
+            
+            if relationship == "hierarchy":
+                if is_substring and fuzz_score < 80:
+                    continue
+                if not is_substring and fuzz_score < 90:
                     continue
 
             neighbors_a = self.store.get_neighbor_ids(id_a)
             neighbors_b = self.store.get_neighbor_ids(id_b)
-            neighbors_a.discard(1) # user id - hardcoded for now
+            neighbors_a.discard(1)  # user id - hardcoded for now
             neighbors_b.discard(1)
             
             shared_neighbors = neighbors_a & neighbors_b
-            if shared_neighbors:
+            if shared_neighbors and relationship == "merge":
                 high_confidence = fuzz_score >= 95 and type_a and type_b and type_a == type_b
             
                 if not high_confidence:
@@ -436,6 +481,8 @@ class EntityResolver:
                 "secondary_name": profile_b.get("canonical_name", "Unknown"),
                 "primary_type": type_a,
                 "secondary_type": type_b,
+                "primary_session": profile_a.get("session_id"),
+                "secondary_session": profile_b.get("session_id"),
                 "topic": topic_a,
                 "profile_a": {
                     **profile_a,
@@ -453,7 +500,7 @@ class EntityResolver:
             })
             
             logger.info(f"Candidate ({id_a}, {id_b}) {profile_a.get('canonical_name')} <-> {profile_b.get('canonical_name')} | score={fuzz_score}")
-    
+
         merge_count = sum(1 for c in candidates if c["relationship"] == "merge")
         hierarchy_count = sum(1 for c in candidates if c["relationship"] == "hierarchy")
         logger.info(f"Detection complete: {merge_count} merge, {hierarchy_count} hierarchy candidates")

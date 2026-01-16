@@ -21,7 +21,7 @@ class ProfileRefinementJob(BaseJob):
     2. TIME: If user is idle for >5 minutes and we have ANY dirty entities.
     """
     
-    MSG_WINDOW = 20
+    MSG_WINDOW = 30
     VOLUME_THRESHOLD = 30
     IDLE_THRESHOLD = 60
     PROFILE_BATCH_SIZE = 5
@@ -164,7 +164,7 @@ class ProfileRefinementJob(BaseJob):
     
     async def _refine_user_profile(self, ctx: JobContext, user_id: int, profile: dict) -> bool:
         """Execute user profile refinement."""
-        conversation = await self._get_conversation_context(ctx, int(self.MSG_WINDOW * 1.5))
+        conversation = await self._get_conversation_context(ctx, self.MSG_WINDOW)
 
         if not conversation:
             logger.warning("User profile refinement: no conversation context")
@@ -187,7 +187,7 @@ class ProfileRefinementJob(BaseJob):
                 "known_aliases": [ctx.user_name]
             }],
             "conversation": conversation_text
-        }, indent=2)
+        })
         
         reasoning = await self.llm.call_reasoning(system_reasoning, user_content)
 
@@ -274,7 +274,7 @@ class ProfileRefinementJob(BaseJob):
             user_content = json.dumps({
                 "entities": llm_input,
                 "conversation": conversation_text
-            }, indent=2)
+            })
             
             reasoning = await self.llm.call_reasoning(system_reasoning, user_content)
             

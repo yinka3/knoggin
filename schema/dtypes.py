@@ -13,7 +13,6 @@ class EntityPair(BaseModel):
     entity_a: str = Field(..., description="First entity canonical_name (alphabetically first).")
     entity_b: str = Field(..., description="Second entity canonical_name (alphabetically second).")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score 0.0-1.0")
-    reason: str = Field(..., description="Short explanation for the connection")
 
 class MessageConnections(BaseModel):
     message_id: int = Field(..., description="Copy exactly from input.")
@@ -21,7 +20,6 @@ class MessageConnections(BaseModel):
 
 class ConnectionExtractionResponse(BaseModel):
     message_results: List[MessageConnections] = Field(..., description="Per-message entity connections.")
-    reasoning_trace: str = Field(..., description="Chain of thought analysis before extraction")
 
 class ProfileUpdate(BaseModel):
     canonical_name: str
@@ -136,3 +134,14 @@ class QueryTrace:
     user_query: str
     started_at: datetime
     entries: List[TraceEntry] = field(default_factory=list)
+
+
+@dataclass
+class Fact:
+    id: str
+    content: str
+    valid_at: datetime
+    invalid_at: Optional[datetime] = None
+    source_msg_id: Optional[str] = None
+    confidence: float = 1.0
+    embedding: List[float] = field(default_factory=list)

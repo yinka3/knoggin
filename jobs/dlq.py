@@ -10,17 +10,30 @@ class DLQReplayJob(BaseJob):
     - Parks 'fatal' errors (code bugs) so they don't loop forever.
     """
     
-    INTERVAL = 300
+    INTERVAL = 60
     BATCH_SIZE = 50
     
 
     TRANSIENT_ERRORS = [
+        # Network
         "ConnectionError",
         "TimeoutError",
-        "BusyLoadingError",
-        "Service Unavailable",
+        "socket.timeout",
         "Connection refused",
-        "socket.timeout"
+        "ECONNRESET",
+        
+        # HTTP
+        "Service Unavailable",  # 503
+        "Bad Gateway",          # 502
+        "Gateway Timeout",      # 504
+        "rate limit",           # 429
+        "Too Many Requests",    # 429
+        
+        # Redis
+        "BusyLoadingError",
+        
+        # OpenRouter
+        "overloaded",
     ]
 
     @property
@@ -28,10 +41,15 @@ class DLQReplayJob(BaseJob):
         return "dlq_auto_replay"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        if not ctx.last_run:
-            return True
-            
-        elapsed = time.time() - ctx.last_run.timestamp()
+        last_run_key = f"last_run:{self.name}"
+        last_run_ts = await ctx.redis.get(last_run_key)
+        
+        if not last_run_ts:
+            # First run — set timestamp, skip this cycle
+            await ctx.redis.set(last_run_key, time.time())
+            return False
+        
+        elapsed = time.time() - float(last_run_ts)
         return elapsed >= self.INTERVAL
 
     async def execute(self, ctx: JobContext) -> JobResult:

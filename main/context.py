@@ -3,6 +3,7 @@ import redis.asyncio as redis
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 import json
+from jobs.archive import FactArchivalJob
 from jobs.base import BaseJob, JobContext
 from jobs.dlq import DLQReplayJob
 from jobs.mood import MoodCheckpointJob
@@ -23,7 +24,7 @@ from main.entity_resolve import EntityResolver
 from db.memgraph import MemGraphStore
 from main.prompts import *
 from log.llm_trace import get_trace_logger
-
+import uuid
 
 class Context:
 
@@ -43,7 +44,6 @@ class Context:
         self.consumer: BatchConsumer = None
         self.profile_job: BaseJob = None
         self.merge_job: BaseJob = None
-        self.cleanup_job: BaseJob = None
         self.trace_logger = get_trace_logger()
 
     @classmethod
@@ -52,14 +52,23 @@ class Context:
         user_name: str,
         store: MemGraphStore,
         cpu_executor: ThreadPoolExecutor,
-        topics_config: dict = None
+        topics_config: dict = None,
+        session_id: str = None
     ) -> "Context":
         
         if topics_config is None:
             topics_config = {"General": {"labels": [], "hierarchy": {}}}
-
-        redis_conn = AsyncRedisClient().get_client()
         
+        logger.info(f"Session Topics: {topics_config.keys()}")
+        session_id = session_id or str(uuid.uuid4())
+        redis_conn = AsyncRedisClient().get_client()
+
+        await redis_conn.hset(
+            f"session_config:{user_name}",
+            session_id,
+            json.dumps(topics_config)
+        )
+        logger.info(f"Session starting: session id {session_id}")
         instance = cls(user_name, topics_config, redis_conn)
         instance.llm = LLMService(trace_logger=get_trace_logger())
         
@@ -85,7 +94,7 @@ class Context:
             partial(NLPPipeline, llm=instance.llm, topics_config=topics_config)
         )
         
-        instance.ent_resolver = EntityResolver(store=instance.store, hierarchy_config=hierarchy_config)
+        instance.ent_resolver = EntityResolver(session_id=session_id, store=instance.store, hierarchy_config=hierarchy_config)
 
         raw_msgs = await redis_conn.hgetall(f"message_content:{user_name}")
         messages = {k: json.loads(v) for k, v in raw_msgs.items()}
@@ -102,6 +111,7 @@ class Context:
         await instance._get_or_create_user_entity(user_name)
 
         instance.batch_processor = BatchProcessor(
+            session_id=session_id,
             redis_client=redis_conn,
             llm=instance.llm,
             ent_resolver=instance.ent_resolver,
@@ -109,7 +119,6 @@ class Context:
             store=instance.store,
             cpu_executor=instance.executor,
             user_name=user_name,
-            topics_config=topics_config,
             get_next_ent_id=instance.get_next_ent_id
         )
 
@@ -127,18 +136,14 @@ class Context:
             resolver=instance.ent_resolver,
             store=instance.store,
             executor=instance.executor)
-        
-        instance.cleanup_job = EntityCleanupJob(
-            user_name=user_name,
-            store=instance.store,
-            ent_resolver=instance.ent_resolver)
 
         instance.merge_job = MergeDetectionJob(
             user_name, instance.ent_resolver, instance.store, instance.llm)
 
-        # Scheduler only gets DLQ
         instance.scheduler = Scheduler(user_name)
         instance.scheduler.register(DLQReplayJob())
+        instance.scheduler.register(EntityCleanupJob(user_name, instance.store, instance.ent_resolver))
+        instance.scheduler.register(FactArchivalJob(user_name, instance.store, instance.ent_resolver))
         # instance.scheduler.register(MoodCheckpointJob(user_name, instance.store))
         await instance.scheduler.start()
         
@@ -235,7 +240,7 @@ class Context:
 
         await loop.run_in_executor(
             self.executor,
-            partial(self.store.write_batch, [user_entity], [], False)
+            partial(self.store.write_batch, [user_entity], [])
         )
         
         logger.info(f"User entity {user_name} (ID: {new_id}) written to graph")
@@ -250,9 +255,6 @@ class Context:
 
         if await self.profile_job.should_run(ctx):
             await self.profile_job.execute(ctx)
-
-        if await self.cleanup_job.should_run(ctx):
-            await self.cleanup_job.execute(ctx)
 
         if await self.merge_job.should_run(ctx):
             await self.merge_job.execute(ctx)
@@ -363,7 +365,8 @@ class Context:
                     "confidence": 1.0,
                     "topic": profile.get("topic", "General"),
                     "embedding": self.ent_resolver.get_embedding_for_id(ent_id),
-                    "aliases": self.ent_resolver.get_mentions_for_id(ent_id)
+                    "aliases": self.ent_resolver.get_mentions_for_id(ent_id),
+                    "session_id": profile.get("session_id")
                 })
 
         relationships = []
@@ -387,7 +390,7 @@ class Context:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             self.executor,
-            partial(self.store.write_batch, entities, relationships, True)
+            partial(self.store.write_batch, entities, relationships)
         )
         
         if entity_ids:

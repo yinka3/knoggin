@@ -14,13 +14,14 @@ from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from main.prompts import (
     get_disambiguation_reasoning_prompt,
-    get_disambiguation_formatter_prompt,
     get_connection_reasoning_prompt,
     get_connection_formatter_prompt,
 )
+from main.utils import parse_disambiguation
 from schema.dtypes import (
     DisambiguationResult,
     ConnectionExtractionResponse,
+    ResolutionEntry,
 )
 
 
@@ -39,6 +40,7 @@ class BatchProcessor:
 
     def __init__(
             self,
+            session_id: str,
             redis_client: redis.Redis,
             llm: LLMService,
             ent_resolver: EntityResolver,
@@ -46,19 +48,17 @@ class BatchProcessor:
             store: MemGraphStore,
             cpu_executor: ThreadPoolExecutor,
             user_name: str,
-            topics_config: Dict,
             get_next_ent_id):
-        
-            self.redis = redis_client
-            self.llm = llm
-            self.ent_resolver = ent_resolver
-            self.nlp = nlp_pipe
-            self.store = store
-            self.executor = cpu_executor
-            self.user_name = user_name
-            self.topics_config = topics_config
-            self.active_topics = list(topics_config.keys())
-            self._get_next_ent_id = get_next_ent_id
+
+        self.session_id = session_id
+        self.redis = redis_client
+        self.llm = llm
+        self.ent_resolver = ent_resolver
+        self.nlp = nlp_pipe
+        self.store = store
+        self.executor = cpu_executor
+        self.user_name = user_name
+        self._get_next_ent_id = get_next_ent_id
         
     async def run(self, messages: List[Dict], session_text: str) -> BatchResult:
         """
@@ -103,6 +103,10 @@ class BatchProcessor:
             connections = await self._extract_connections(entity_ids, messages, session_text)
             if not connections:
                 logger.error("Connection extraction failed")
+                result.success = False
+                result.error = "Connection extraction failed (VP-04)"
+                return result
+            
             result.extraction_result = connections
             
             return result
@@ -139,24 +143,84 @@ class BatchProcessor:
         
         return unique_mentions, emotions
 
-    async def _build_known_entities(self, mentions: List[Tuple[str, str, str]]) -> List[Dict]:
-        mention_names = [name for name, _, _ in mentions]
-        candidate_ids = set()
-        for name in mention_names:
-            candidate_ids.update(self.ent_resolver.get_candidate_ids(name))
+    async def _build_known_entities(
+        self, 
+        mentions: List[Tuple[str, str, str]],
+        max_amount: int = 50
+    ) -> List[Dict]:
+                
+        candidate_scores = {}
+
+        for name, _, _ in mentions:
+            candidates = self.ent_resolver.get_candidate_ids(name)
+            
+            for rank, eid in enumerate(candidates):
+                score = 1.0 / (rank + 1)  # Higher rank = higher score
+                if eid not in candidate_scores or score > candidate_scores[eid]:
+                    candidate_scores[eid] = score
         
+
+        sorted_ids = sorted(candidate_scores.keys(), key=lambda x: candidate_scores[x], reverse=True)
         known = []
-        for eid in candidate_ids:
+        for eid in sorted_ids[:max_amount]:
             profile = self.ent_resolver.entity_profiles.get(eid)
             if profile:
+                connections = self.store.get_neighbor_names(eid, limit=5)
+                
                 known.append({
                     "canonical_name": profile["canonical_name"],
-                    "type": profile.get("type"),
-                    "aliases": self.ent_resolver.get_mentions_for_id(eid),
-                    "facts": profile.get("facts", [])
+                    "facts": profile.get("facts", []),
+                    "connected_to": connections
                 })
         
         return known
+    
+    def _try_fast_path(
+        self, 
+        mentions: List[Tuple[str, str, str]], 
+        known_entities: List[Dict]   
+    ) -> Optional[DisambiguationResult]:
+        
+        if not known_entities:
+            return DisambiguationResult(entries=[
+                ResolutionEntry(
+                    verdict="NEW_SINGLE",
+                    mentions=[name],
+                    entity_type=typ,
+                    topic=topic
+                )
+                for name, typ, topic in mentions
+            ])
+        
+        entries = []
+        
+        for name, typ, topic in mentions:
+            exact_id = self.ent_resolver.get_id(name)
+            
+            if exact_id is not None:
+                profile = self.ent_resolver.entity_profiles.get(exact_id)
+                entries.append(ResolutionEntry(
+                    verdict="EXISTING",
+                    canonical_name=profile["canonical_name"],
+                    mentions=[name],
+                    entity_type=typ,
+                    topic=topic
+                ))
+                continue
+            
+            fuzzy_candidates = self.ent_resolver.get_candidate_ids(name)
+            
+            if len(fuzzy_candidates) == 0:
+                entries.append(ResolutionEntry(
+                    verdict="NEW_SINGLE",
+                    mentions=[name],
+                    entity_type=typ,
+                    topic=topic
+                ))
+            else:
+                return None
+        
+        return DisambiguationResult(entries=entries)
 
     async def _disambiguate(
         self,
@@ -165,17 +229,20 @@ class BatchProcessor:
         known_entities: List[Dict],
         session_text: str
     ) -> DisambiguationResult:
-        """Two-phase disambiguation: reasoning → structuring."""
 
-        messages_text = "\n".join([f"{m['id']}: \"{m['message']}\"" for m in messages])
-        mentions_fmt = [{"name": m[0], "type": m[1], "topic": m[2]} for m in mentions]
+        fast_result = self._try_fast_path(mentions, known_entities)
+        if fast_result is not None:
+            return fast_result
         
-        system_02 = get_disambiguation_reasoning_prompt(self.user_name, messages_text)
+        mentions_fmt = [{"name": m[0], "type": m[1], "topic": m[2]} for m in mentions]
+
+        system_02 = get_disambiguation_reasoning_prompt(self.user_name)
         user_02 = json.dumps({
-            "mentions": mentions_fmt,
             "known_entities": known_entities,
+            "mentions": mentions_fmt,
+            "messages": [{"id": m["id"], "text": m["message"]} for m in messages],
             "session_context": session_text
-        }, indent=2)
+        })
         
         reasoning = await self.llm.call_reasoning(system_02, user_02)
         if not reasoning:
@@ -185,13 +252,7 @@ class BatchProcessor:
         if "<resolution>" not in reasoning:
             logger.warning("No <resolution> block in VEGAPUNK-02 output")
         
-        system_03 = get_disambiguation_formatter_prompt()
-        user_03 = json.dumps({
-            "mentions": mentions_fmt,
-            "reasoning_output": reasoning
-        }, indent=2)
-        
-        result = await self.llm.call_structured(system_03, user_03, DisambiguationResult)
+        result = parse_disambiguation(reasoning, mentions)
         return result or DisambiguationResult(entries=[])
 
     async def _resolve(self, disambiguation: DisambiguationResult) -> Tuple[List[int], Set[int], Set[int]]:
@@ -233,7 +294,7 @@ class BatchProcessor:
                     self.executor,
                     partial(
                         self.ent_resolver.register_entity,
-                        ent_id, canonical, entry.mentions, entry.entity_type, entry.topic
+                        ent_id, canonical, entry.mentions, entry.entity_type, entry.topic, self.session_id
                     )
                 )
                 new_ids.add(ent_id)
@@ -249,6 +310,9 @@ class BatchProcessor:
         session_text: str
     ) -> Optional[ConnectionExtractionResponse]:
         """Extract connections between entities."""
+
+        lines = session_text.split('\n')
+        session_text = '\n'.join(lines[-(len(lines) // 2):])
         candidates = []
         for ent_id in entity_ids:
             profile = self.ent_resolver.entity_profiles.get(ent_id)

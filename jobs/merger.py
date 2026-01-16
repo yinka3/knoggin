@@ -2,10 +2,11 @@ import asyncio
 import json
 from datetime import datetime, timezone
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import numpy as np
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult, JobNotifier
+from jobs.utils import cosine_similarity, has_sufficient_facts
 from main.prompts import get_merge_judgment_prompt
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
@@ -49,7 +50,7 @@ class MergeDetectionJob(BaseJob):
         
         merge_summary = await self._process_merges(ctx, merge_candidates)
         
-        hierarchy_summary = await self._process_hierarchy(ctx, hierarchy_candidates)
+        hierarchy_summary = await self._process_hierarchy(hierarchy_candidates)
         
         return JobResult(
             success=True,
@@ -61,7 +62,7 @@ class MergeDetectionJob(BaseJob):
         user_content = json.dumps({
             "entity_a": candidate["profile_a"],
             "entity_b": candidate["profile_b"]
-        }, indent=2)
+        })
         
         result = await self.llm.call_reasoning(system, user_content)
         
@@ -144,13 +145,37 @@ class MergeDetectionJob(BaseJob):
         except Exception as e:
             logger.warning(f"FAISS removal failed for {secondary_id}: {e}")
     
-    async def _process_merges(self, ctx: JobContext, candidates: list) -> str:
-        if not candidates:
-            return "0 merged"
-        
-        auto_merge, hitl = [], []
+    async def _judgement(self, candidates: List, auto_merge: List, hitl: List) -> Tuple[List, List]:
+
+        loop = asyncio.get_running_loop()
+        collisions = await loop.run_in_executor(None, self.store.find_alias_collisions)
+        collision_set = {tuple(sorted([a, b])) for a, b in collisions}
+
+        seen_collisions = set()
 
         for candidate in candidates:
+            pair_key = tuple(sorted([candidate["primary_id"], candidate["secondary_id"]]))
+            
+            if pair_key in collision_set:
+                logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | Exact alias collision")
+                auto_merge.append(candidate)
+                seen_collisions.add(pair_key)
+                continue
+
+            if has_sufficient_facts(candidate):
+                emb_a = self.ent_resolver.get_embedding_for_id(candidate["primary_id"])
+                emb_b = self.ent_resolver.get_embedding_for_id(candidate["secondary_id"])
+                cosine_score = cosine_similarity(emb_a, emb_b)
+
+                if cosine_score < 0.45:
+                    logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
+                    continue
+                
+                if cosine_score > 0.93:
+                    logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
+                    auto_merge.append(candidate)
+                    continue
+
             score = await self._get_merge_judgment(candidate)
             if score is None:
                 continue
@@ -163,6 +188,39 @@ class MergeDetectionJob(BaseJob):
                 hitl.append(candidate)
             else:
                 logger.info(f"Rejected merge ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
+        
+        for id_a, id_b in collisions:
+            pair_key = tuple(sorted([id_a, id_b]))
+            if pair_key in seen_collisions:
+                continue
+            
+            profile_a = self.ent_resolver.entity_profiles.get(id_a)
+            profile_b = self.ent_resolver.entity_profiles.get(id_b)
+            
+            if not profile_a or not profile_b:
+                logger.warning(f"Collision pair ({id_a}, {id_b}) missing profile(s), skipping")
+                continue
+            
+            collision_candidate = {
+                "primary_id": id_a,
+                "secondary_id": id_b,
+                "primary_name": profile_a.get("canonical_name", "Unknown"),
+                "secondary_name": profile_b.get("canonical_name", "Unknown"),
+                "profile_a": profile_a,
+                "profile_b": profile_b,
+            }
+        
+            logger.info(f"Auto-merge ({id_a}, {id_b}) | Exact alias collision (graph-only)")
+            auto_merge.append(collision_candidate)
+
+        
+        return auto_merge, hitl
+    
+    async def _process_merges(self, ctx: JobContext, candidates: list) -> str:
+        if not candidates:
+            return "0 merged"
+        
+        auto_merge, hitl = await self._judgement(candidates, [], [])
 
         logger.info(f"Merge split: {len(auto_merge)} auto, {len(hitl)} HITL")
         
@@ -238,16 +296,28 @@ class MergeDetectionJob(BaseJob):
 
         return f"{successful} merged, {failed} failed, {proposals_stored} HITL"
     
+
     async def _process_hierarchy(self, candidates: list) -> str:
         """Create PART_OF edges for parent/child relationships."""
         if not candidates:
             return "0 hierarchy edges"
         
-        # Deduplicate - don't create duplicate edges
+        # filter to same-session only
+        same_session = [
+            c for c in candidates 
+            if c.get("primary_session") == c.get("secondary_session")
+            and c.get("primary_session") is not None
+        ]
+        
+        skipped = len(candidates) - len(same_session)
+        if skipped:
+            logger.info(f"Skipped {skipped} cross-session hierarchy candidates")
+        
+        # dedupe
         seen_pairs = set()
         unique_candidates = []
         
-        for c in candidates:
+        for c in same_session:
             pair_key = (c["parent_id"], c["child_id"])
             if pair_key not in seen_pairs:
                 seen_pairs.add(pair_key)

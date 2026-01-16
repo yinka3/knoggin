@@ -157,6 +157,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         "get_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
         "find_path": lambda: tools.find_path(args.get("entity_a", ""), args.get("entity_b", "")),
         "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both")),
+        "get_entity_history": lambda: tools.get_entity_history(args.get("entity_id", ""))
     }
 
     logger.info(f"[TOOL CALL] {name}: {json.dumps(args)}")
@@ -324,7 +325,7 @@ async def run(
     user_name: str,
     conversation_history: List[Dict],
     hot_topics: List[str],
-    active_topics: List[str],
+    topics_config: dict,
     llm: LLMService,
     store: 'MemGraphStore',
     ent_resolver: 'EntityResolver',
@@ -352,6 +353,7 @@ async def run(
     config = AgentConfig()
     state = AgentState()
     evidence = RetrievedEvidence()
+    active_topics = list(topics_config.keys())
 
     ctx = AgentContext(
         config=config,
@@ -364,7 +366,7 @@ async def run(
         history=conversation_history
     )
 
-    tools = Tools(user_name, store, ent_resolver, redis_client, active_topics)
+    tools = Tools(user_name, store, ent_resolver, redis_client, topics_config)
 
     if hot_topics:
         ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=slim_hot_context)

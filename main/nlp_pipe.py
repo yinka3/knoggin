@@ -2,6 +2,7 @@ import re
 import torch
 from main.prompts import ner_reasoning_prompt
 from main.service import LLMService
+from main.utils import build_label_block
 from schema.dtypes import *
 from typing import List, Tuple
 from loguru import logger
@@ -28,7 +29,8 @@ class NLPPipeline:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.llm_client = llm
         self.topics_config = topics_config
-        self._label_block = self._build_label_block(topics_config)
+        self._label_block = build_label_block(topics_config)
+        logger.info(f"Session Labels: {self._label_block}")
         self._init_emotion(emotion_model)
         
     def _init_emotion(self, model_name: str):
@@ -40,26 +42,28 @@ class NLPPipeline:
             device=device_id
         )
     
-    def _build_label_block(self, topics_config: dict) -> str:
-        lines = []
-        for topic, config in topics_config.items():
-            labels = config.get("labels", [])
-            lines.append(f"  - **{topic}**: {', '.join(labels)}")
-        return "\n".join(lines)
-    
-    def _parse_entities(self, reasoning: str) -> Optional[ExtractionResponse]:
+    def parse_entities(self, reasoning: str) -> Optional[ExtractionResponse]:
         """Parse <entities> block and validate via Pydantic."""
         match = re.search(r"<entities>(.*?)</entities>", reasoning, re.DOTALL)
-        if not match:
+    
+        if match:
+            content = match.group(1).strip()
+        else:
+            content = reasoning.strip()
+        
+        if not content:
             return None
         
         entities = []
-        for line in match.group(1).strip().split("\n"):
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line or line.lower() == "name | label | topic":
+                continue
             parts = line.split("|")
             if len(parts) != 3:
                 continue
             name, label, topic = [p.strip() for p in parts]
-            if name:
+            if name and name.lower() != "name":
                 entities.append(EntityItem(name=name, label=label, topic=topic))
         
         if not entities:
@@ -81,7 +85,7 @@ class NLPPipeline:
             logger.warning("VEGAPUNK-01 returned no entities block")
             return []
 
-        response = self._parse_entities(reasoning)
+        response = self.parse_entities(reasoning)
     
         if not response:
             logger.warning("No entities parsed from VEGAPUNK-01")

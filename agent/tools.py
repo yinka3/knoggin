@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import List, Dict, Optional
 
@@ -10,12 +11,20 @@ from db.memgraph import MemGraphStore
 
 class Tools:
     
-    def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, redis_client: redis.Redis, active_topics: List[str] = None):
+    def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, redis_client: redis.Redis, topics_config: dict = None):
         self.store = store
         self.resolver = ent_resolver
         self.user_name = user_name
         self.redis = redis_client
-        self.active_topics = active_topics or []
+        self.active_topics = topics_config.keys() or []
+
+        self.alias_map = {} 
+        if topics_config:
+            for _, conf in topics_config.items():
+                aliases = conf.get("aliases", {})
+                for main_label, legacy_labels in aliases.items():
+                    for legacy in legacy_labels:
+                        self.alias_map[legacy] = main_label
     
     def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
@@ -61,6 +70,24 @@ class Tools:
                     "timestamp": data["timestamp"]
                 })
         return results
+    
+    def _normalize_output(self, entity_list: List[Dict]) -> List[Dict]:
+        """
+        Renames legacy types to the modern schema before showing the Agent.
+        Example: type="Library" -> type="Dependency"
+        """
+        if not entity_list:
+            return []
+            
+        for entity in entity_list:
+            raw_type = entity.get("type")
+            if raw_type in self.alias_map:
+                entity["type"] = self.alias_map[raw_type]
+            
+            if "top_connections" in entity:
+                self._normalize_output(entity["top_connections"])
+                
+        return entity_list
     
 
     async def _get_surrounding_context(self, msg_id: str, forward: int = 3, target_total: int = 10) -> List[Dict]:
@@ -224,6 +251,7 @@ class Tools:
         if not results:
             return []
         
+        results = self._normalize_output(results)
         for entity in results:
             for conn in entity.get("top_connections", []):
                 evidence_ids = conn.pop("evidence_ids", [])
@@ -246,8 +274,9 @@ class Tools:
         canonical = self._resolve_entity_name(entity_name)
         if not canonical:
             return []
+        
         results = self.store.get_related_entities([canonical], active_only=True) or []
-    
+        results = self._normalize_output(results)
         if results:
             for r in results:
                 r["evidence"] = await self._hydrate_evidence(r.pop("evidence_ids", []))
@@ -316,7 +345,21 @@ class Tools:
             return path
         
         if has_inactive_shortcut:
-            return [{"hidden": True, "message": "Connection exists through inactive topics"}]
+            full_path, _ = self.store._find_path_filtered(canonical_a, canonical_b, active_only=False)
+    
+            safe_path = []
+            for step in full_path:
+                if step['topic'] in self.active_topics:
+                    safe_path.append(step)
+                else:
+                    safe_path.append({
+                        "canonical_name": step['canonical_name'],
+                        "topic": step['topic'],
+                        "status": "LOCKED (Inactive Topic)",
+                        "summary": "[REDACTED]" 
+                    })
+                    
+            return safe_path
         
         return []
 
@@ -410,6 +453,26 @@ class Tools:
             result["children"] = children
         
         return result
+    
+    async def get_entity_history(self, entity_id: int) -> str:
+        """
+        Retrieves old/archived facts about an entity that have been removed 
+        from the main profile to save space. 
+        
+        Use this when:
+        1. The user asks about a specific past event not found in the main profile.
+        2. You need to verify details that might have been invalidated or archived.
+        
+        Args:
+            entity_id: The ID of the entity (found via search_entity).
+        """
+        history = self.store.get_archived_facts(entity_id)
+        
+        if not history:
+            return f"No archived history found for Entity ID {entity_id}."
+            
+        formatted_history = "\n".join([f"- {fact}" for fact in history])
+        return f"Archived History for Entity {entity_id}:\n{formatted_history}"
 
 
 
