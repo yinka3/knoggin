@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult, JobNotifier
-from jobs.utils import cosine_similarity, has_sufficient_facts
+from jobs.utils import cosine_similarity, find_duplicate_facts, has_sufficient_facts
 from main.prompts import get_merge_judgment_prompt
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
@@ -86,45 +86,46 @@ class MergeDetectionJob(BaseJob):
         logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']}): {result}")
         return None
     
-
-    def _merge_facts(self, facts_a: List[str], facts_b: List[str]) -> List[str]:
-        """Combine fact ledgers, deduplicate exact matches."""
-        combined = facts_a + facts_b
-        seen = set()
-        merged = []
-        for fact in combined:
-            if fact not in seen:
-                seen.add(fact)
-                merged.append(fact)
-        return merged
-    
         
-    async def _execute_merge_db_only(self, primary_id: int, secondary_id: int, merged_facts: List[str], max_retries: int = 2) -> bool:
-            """Execute DB merge with pre-computed facts."""
-            loop = asyncio.get_running_loop()
-            
-            for attempt in range(1, max_retries + 1):
-                try:
-                    success = await loop.run_in_executor(
-                        None,
-                        self.store.merge_entities,
-                        primary_id,
-                        secondary_id,
-                        merged_facts
-                    )
-                    
-                    if success:
-                        return True
-                    else:
-                        logger.warning(f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): store returned False")
-                        
-                except Exception as e:
-                    logger.error(f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): {type(e).__name__} - {e}")
+    async def _execute_merge_db_only(
+        self, 
+        primary_id: int, 
+        secondary_id: int,
+        duplicate_fact_ids: List[str],
+        max_retries: int = 2
+    ) -> bool:
+        """Execute DB merge then invalidate duplicate facts."""
+        loop = asyncio.get_running_loop()
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                success = await loop.run_in_executor(
+                    None,
+                    self.store.merge_entities,
+                    primary_id,
+                    secondary_id
+                )
                 
-                if attempt < max_retries:
-                    await asyncio.sleep(0.5 * attempt)
+                if success:
+                    now = datetime.now(timezone.utc)
+                    for fact_id in duplicate_fact_ids:
+                        await loop.run_in_executor(
+                            None,
+                            self.store.invalidate_fact,
+                            fact_id,
+                            now
+                        )
+                    return True
+                else:
+                    logger.warning(f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): store returned False")
+                    
+            except Exception as e:
+                logger.error(f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): {type(e).__name__} - {e}")
             
-            return False
+            if attempt < max_retries:
+                await asyncio.sleep(0.5 * attempt)
+        
+        return False
 
     
     def _sync_resolver(self, primary_id: int, secondary_id: int):
@@ -249,24 +250,24 @@ class MergeDetectionJob(BaseJob):
                 p_id = c["primary_id"]
                 s_id = c["secondary_id"]
                 
-                p_profile = self.ent_resolver.entity_profiles.get(p_id, {})
-                s_profile = self.ent_resolver.entity_profiles.get(s_id, {})
+                loop = asyncio.get_running_loop()
                 
-                try:
-                    merged_facts = self._merge_facts(
-                        p_profile.get("facts", []),
-                        s_profile.get("facts", [])
-                    )
-                    return {
-                        "primary_id": p_id,
-                        "secondary_id": s_id,
-                        "merged_facts": merged_facts,
-                        "primary_name": c["primary_name"],
-                        "secondary_name": c["secondary_name"]
-                    }
-                except Exception as e:
-                    logger.error(f"Fact merge failed for {p_id}/{s_id}: {e}")
-                    return None
+                facts_a = await loop.run_in_executor(
+                    None, self.store.get_facts_for_entity, p_id, False
+                )
+                facts_b = await loop.run_in_executor(
+                    None, self.store.get_facts_for_entity, s_id, False
+                )
+                
+                duplicate_ids = find_duplicate_facts(facts_a, facts_b)
+                
+                return {
+                    "primary_id": p_id,
+                    "secondary_id": s_id,
+                    "duplicate_fact_ids": duplicate_ids,
+                    "primary_name": c["primary_name"],
+                    "secondary_name": c["secondary_name"]
+                }
         
         tasks = [prepare_single_merge(c) for c in clean_batch]
         results = await asyncio.gather(*tasks)
@@ -282,7 +283,7 @@ class MergeDetectionJob(BaseJob):
                 success = await self._execute_merge_db_only(
                     item["primary_id"], 
                     item["secondary_id"], 
-                    item["merged_facts"]
+                    item["duplicate_fact_ids"]
                 )
                 
                 if success:

@@ -1,8 +1,10 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
 import json
-from typing import Dict, List
+from typing import Dict, List, Union
+import uuid
 from loguru import logger
 from db.memgraph import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobNotifier, JobResult
@@ -10,6 +12,7 @@ from main.service import LLMService
 from main.entity_resolve import EntityResolver
 from main.prompts import get_profile_extraction_prompt
 from jobs.utils import process_extracted_facts, parse_new_facts
+from schema.dtypes import Fact, FactMergeResult
 
 class ProfileRefinementJob(BaseJob):
     """
@@ -26,7 +29,7 @@ class ProfileRefinementJob(BaseJob):
     IDLE_THRESHOLD = 60
     PROFILE_BATCH_SIZE = 5
 
-    def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, executor):
+    def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, executor: ThreadPoolExecutor):
         self.llm = llm
         self.resolver = resolver
         self.store = store
@@ -164,7 +167,7 @@ class ProfileRefinementJob(BaseJob):
     
     async def _refine_user_profile(self, ctx: JobContext, user_id: int, profile: dict) -> bool:
         """Execute user profile refinement."""
-        conversation = await self._get_conversation_context(ctx, self.MSG_WINDOW)
+        conversation = await self._get_conversation_context(ctx, int(self.MSG_WINDOW * 1.5))
 
         if not conversation:
             logger.warning("User profile refinement: no conversation context")
@@ -176,15 +179,22 @@ class ProfileRefinementJob(BaseJob):
             logger.warning("User profile refinement: empty conversation text")
             return False
         
-        existing_facts = profile.get("facts", [])
+        # Fetch existing facts from DB
+        loop = asyncio.get_running_loop()
+        existing_facts = await loop.run_in_executor(
+            self.executor,
+            self.store.get_facts_for_entity,
+            user_id,
+            True  # active_only
+        )
         
         system_reasoning = get_profile_extraction_prompt(ctx.user_name)
         user_content = json.dumps({
             "entities": [{
                 "entity_name": ctx.user_name,
                 "entity_type": "person",
-                "existing_facts": existing_facts,
-                "known_aliases": [ctx.user_name]
+                "existing_facts": [f.content for f in existing_facts],
+                "known_aliases": [alias for alias in profile["aliases"]]
             }],
             "conversation": conversation_text
         })
@@ -209,47 +219,25 @@ class ProfileRefinementJob(BaseJob):
             return False
         
         new_facts = profile_out.facts
-    
+
         if not new_facts:
             logger.debug("No new facts extracted for user profile")
             return False
         
-        merged_facts = process_extracted_facts(
-            existing_facts=existing_facts,
-            new_facts=new_facts,
-            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        )
+        merge_result = process_extracted_facts(existing_facts, new_facts)
         
-        if merged_facts == existing_facts:
-            logger.debug("No fact changes after merge for user profile")
-            return False
+        await self._apply_fact_changes(ctx, user_id, merge_result)
         
-        logger.info(f"User profile: {len(existing_facts)} existing -> {len(merged_facts)} merged facts")
-        
-        resolution_text = f"{ctx.user_name}. " + " ".join(merged_facts)
-        
-        loop = asyncio.get_running_loop()
-        embedding = await loop.run_in_executor(
-            self.executor,
-            partial(self.resolver.update_profile_embedding, user_id, resolution_text)
-        )
-        
-        current_msg_id = await ctx.redis.get("global:next_msg_id")
-        current_msg_id = int(current_msg_id) if current_msg_id else 0
-        
+        embedding = await self._update_entity_embedding(ctx, user_id, ctx.user_name)
+
         await loop.run_in_executor(
-            self.executor,
-            partial(
+                self.executor,
                 self.store.update_entity_profile,
-                entity_id=user_id,
-                canonical_name=ctx.user_name,
-                facts=merged_facts,
-                embedding=embedding,
-                last_msg_id=current_msg_id
+                entity_id=update["id"],
+                canonical_name=update["canonical_name"],
+                embedding=update["embedding"],
+                last_msg_id=update["last_msg_id"]
             )
-        )
-        
-        self.resolver.entity_profiles[user_id]["facts"] = merged_facts
         
         logger.info(f"Refined user profile for {ctx.user_name}")
         return True
@@ -257,8 +245,9 @@ class ProfileRefinementJob(BaseJob):
     async def _process_single_batch(
         self, 
         ctx: JobContext,
-        batch: List[Dict], 
-        conversation_text: str, 
+        batch: List[Dict],
+        conversation_text: str,
+        ents_to_facts: Dict[int, Union[List[Fact], List]],
         current_msg_id: int
     ) -> List[Dict]:
         """Process one batch of entities. Returns list of updates."""
@@ -289,7 +278,6 @@ class ProfileRefinementJob(BaseJob):
                 return []
             
             updates = []
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
             profile_map = {p.canonical_name.lower(): p for p in response.profiles}
             for orig in batch:
 
@@ -300,33 +288,23 @@ class ProfileRefinementJob(BaseJob):
                 new_facts = profile_out.facts
                 
                 if not new_facts:
-                    continue
-            
-                merged_facts = process_extracted_facts(
-                    existing_facts=orig["existing_facts"],
-                    new_facts=new_facts,
-                    timestamp=timestamp
-                )
-                
-                if merged_facts == orig["existing_facts"]:
+                    logger.debug(f"No new facts extracted for {orig["entity_name"]}")
                     continue
                 
-                resolution_text = f"{orig['entity_name']}. " + " ".join(merged_facts)
+                existing_facts = ents_to_facts[orig["ent_id"]]
+
+                merge_result = process_extracted_facts(existing_facts, new_facts)
+    
+                await self._apply_fact_changes(ctx, orig["ent_id"], merge_result)
                 
-                loop = asyncio.get_running_loop()
-                embedding = await loop.run_in_executor(
-                    self.executor,
-                    partial(self.resolver.update_profile_embedding, orig["ent_id"], resolution_text)
-                )
+                # Update entity embedding (resolution text from active facts)
+                await self._update_entity_embedding(ctx, orig["ent_id"], ctx.user_name)
                 
-                self.resolver.entity_profiles[orig["ent_id"]]["facts"] = merged_facts
-                
-                logger.info(f"Refined facts for {orig['entity_name']}: {len(orig['existing_facts'])} -> {len(merged_facts)}")
+                logger.info(f"Refined user profile for {ctx.user_name}")
                 
                 updates.append({
                     "id": orig["ent_id"],
                     "canonical_name": orig["entity_name"],
-                    "facts": merged_facts,
                     "embedding": embedding,
                     "last_msg_id": current_msg_id
                 })
@@ -339,15 +317,20 @@ class ProfileRefinementJob(BaseJob):
         
         current_msg_id = await ctx.redis.get("global:next_msg_id")
         current_msg_id = int(current_msg_id) if current_msg_id else 0
-        
+        loop = asyncio.get_running_loop()
+
         entity_inputs = []
+        ents_to_facts = {}
         for ent_id in entity_ids:
             profile = self.resolver.entity_profiles.get(ent_id)
             if not profile:
                 continue
             
-            existing_facts = profile.get("facts", [])
+            existing_facts = await loop.run_in_executor(None,
+                                        self.store.get_facts_for_entity, ent_id, True)
             
+            ents_to_facts[ent_id] = existing_facts
+
             entity_inputs.append({
                 "ent_id": ent_id,
                 "entity_name": profile.get("canonical_name", "Unknown"),
@@ -367,12 +350,75 @@ class ProfileRefinementJob(BaseJob):
         ]
         
         tasks = [
-            self._process_single_batch(ctx, batch, conversation_text, current_msg_id)
+            self._process_single_batch(ctx, batch, conversation_text, ents_to_facts, current_msg_id)
             for batch in batches
         ]
         
         results = await asyncio.gather(*tasks)
         return [update for batch_updates in results for update in batch_updates]
+    
+
+    async def _apply_fact_changes(
+        self,
+        entity_id: int,
+        merge_result: FactMergeResult
+    ):
+        """Invalidate old facts and create new ones."""
+        loop = asyncio.get_running_loop()
+        now = datetime.now(timezone.utc)
+        
+        for fact_id in merge_result.to_invalidate:
+            await loop.run_in_executor(
+                self.executor,
+                self.store.invalidate_fact,
+                fact_id,
+                now
+            )
+        
+        for content in merge_result.new_contents:
+            embedding = await loop.run_in_executor(
+                self.executor,
+                self.resolver.embedding_model.encode,
+                [content]
+            )
+            
+            fact = Fact(
+                id=str(uuid.uuid4()),
+                content=content,
+                valid_at=now,
+                embedding=embedding[0].tolist()
+            )
+            
+            await loop.run_in_executor(
+                self.executor,
+                self.store.create_fact,
+                entity_id,
+                fact
+            )
+    
+    async def _update_entity_embedding(
+        self,
+        entity_id: int, 
+        canonical_name: str
+    ):
+        """Recompute entity embedding from current active facts."""
+        loop = asyncio.get_running_loop()
+        
+        active_facts = await loop.run_in_executor(
+            self.executor,
+            self.store.get_facts_for_entity,
+            entity_id,
+            True
+        )
+        
+        resolution_text = f"{canonical_name}. " + " ".join([f.content for f in active_facts])
+        
+        embedding = await loop.run_in_executor(
+            self.executor,
+            partial(self.resolver.update_profile_embedding, entity_id, resolution_text)
+        )
+
+        return embedding
 
     async def _write_updates(self, updates: List[Dict]):
         """Write profile updates to Memgraph sequentially."""
@@ -385,7 +431,6 @@ class ProfileRefinementJob(BaseJob):
                     self.store.update_entity_profile,
                     entity_id=update["id"],
                     canonical_name=update["canonical_name"],
-                    facts=update["facts"],
                     embedding=update["embedding"],
                     last_msg_id=update["last_msg_id"]
                 )
