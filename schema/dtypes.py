@@ -143,7 +143,6 @@ class Fact:
     content: str
     valid_at: datetime
     invalid_at: Optional[datetime] = None
-    archived_at: Optional[datetime] = None
     source_msg_id: Optional[str] = None
     confidence: float = 1.0
     embedding: List[float] = field(default_factory=list)

@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine  # Upgraded to AGPLv3 version
     container_name: vestige-redis
     ports:
       - "127.0.0.1:6379:6379"
@@ -8,7 +8,7 @@ services:
       - redis_data:/data
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
 
   memgraph:
-    image: memgraph/memgraph:latest
+    image: memgraph/memgraph-mage:latest
     container_name: vestige-memgraph
     ports:
       - "127.0.0.1:7687:7687"

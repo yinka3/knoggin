@@ -25,6 +25,7 @@ dependencies = [
     "transformers==4.41.2",
     "torch>=2.6.0,<2.7.0",
     "xformers>=0.0.29.post3",
+    "scikit-learn>=1.8.0",
 ]
 
 [tool.setuptools.package-data]

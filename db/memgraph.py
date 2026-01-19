@@ -1,7 +1,8 @@
 from datetime import datetime
+import re
 import time
 from loguru import logger
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 from neo4j import GraphDatabase, ManagedTransaction
 from dotenv import load_dotenv
 import os
@@ -31,7 +32,16 @@ class MemGraphStore:
             self.driver.close()
     
     def verify_conn(self):
-        self.driver.verify_connectivity()
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                self.driver.verify_connectivity()
+                return
+            except Exception as e:
+                if i == max_retries - 1:
+                    raise e
+                logger.warning(f"Waiting for Memgraph... ({e})")
+                time.sleep(2)
     
     def get_max_entity_id(self) -> int:
         """
@@ -45,26 +55,50 @@ class MemGraphStore:
     
     def _setup_schema(self):
         """
-        Create indices and constraints to ensure performance and data integrity.
+        Create indices and constraints using Memgraph syntax.
         """
-        queries = [
+        constraints = [
             "CREATE CONSTRAINT ON (e:Entity) ASSERT e.id IS UNIQUE;",
-            "CREATE CONSTRAINT ON (t:Topic) ASSERT t.name IS UNIQUE",
+            "CREATE CONSTRAINT ON (t:Topic) ASSERT t.name IS UNIQUE;",
             "CREATE CONSTRAINT ON (m:Message) ASSERT m.id IS UNIQUE;",
             "CREATE CONSTRAINT ON (f:Fact) ASSERT f.id IS UNIQUE;",
+        ]
+
+        indices = [
             "CREATE INDEX ON :Fact(invalid_at);",
             "CREATE INDEX ON :Fact(created_at);",
             "CREATE INDEX ON :Message(timestamp);",
             "CREATE INDEX ON :MoodCheckpoint(timestamp);",
-            "CREATE INDEX ON :Entity(canonical_name);"
+            "CREATE INDEX ON :Entity(canonical_name);",
+        ]
+
+        vector_indices = [
+            """
+            CREATE VECTOR INDEX entity_vec ON :Entity(embedding) 
+            WITH CONFIG {"dimension": 1024, "capacity": 500000, "metric": "cos"}
+            """,
+            """
+            CREATE VECTOR INDEX fact_vec ON :Fact(embedding) 
+            WITH CONFIG {"dimension": 1024, "capacity": 5000000, "metric": "cos"}
+            """,
+            """
+            CREATE VECTOR INDEX message_vec ON :Message(embedding) 
+            WITH CONFIG {"dimension": 1024, "capacity": 5000000, "metric": "cos"}
+            """
+        ]
+        
+        text_indices = [
+            "CREATE TEXT INDEX message_search ON :Message(content)",
+            "CREATE TEXT INDEX entity_search ON :Entity(canonical_name, aliases)"
         ]
         
         with self.driver.session() as session:
-            for q in queries:
+            for q in constraints + indices + vector_indices + text_indices:
                 try:
                     session.run(q)
                 except Exception as e:
                     logger.debug(f"Schema setup note: {e}")
+        
         logger.info("Memgraph schema indices verified.")
     
     def save_message_logs(self, messages: List[Dict]):
@@ -79,10 +113,64 @@ class MemGraphStore:
         MERGE (m:Message {id: msg.id})
         SET m.content = msg.content,
             m.role = msg.role,
-            m.timestamp = msg.timestamp
+            m.timestamp = msg.timestamp,
+            m.embedding = msg.embedding
+        """
+        
+        with self.driver.session() as session:
+            try:
+                session.run(query, {"batch": messages}).consume()
+            except Exception as e:
+                logger.error(f"Failed to save message logs: {e}")
+                return False
+        
+        logger.info(f"Saved {len(messages)} message logs to Memgraph.")
+        return True
+    
+    def get_entity_embedding(self, entity_id: int) -> List[float]:
+        query = "MATCH (e:Entity {id: $id}) RETURN e.embedding as embedding"
+        with self.driver.session() as session:
+            result = session.run(query, {"id": entity_id}).single()
+            return result["embedding"] if result else []
+    
+    def search_similar_entities(self, entity_id: int, limit: int = 50) -> List[Tuple[int, float]]:
+        query = """
+        MATCH (e:Entity {id: $id})
+        CALL vector_search.search('entity_vec', $limit, e.embedding)
+        YIELD node, similarity
+        WHERE node.id <> $id
+        RETURN node.id as id, similarity
         """
         with self.driver.session() as session:
-            session.run(query, {"batch": messages}).consume()
+            result = session.run(query, {"id": entity_id, "limit": limit})
+            return [(r["id"], r["similarity"]) for r in result]
+    
+    def search_messages_vector(self, query_embedding: List[float], limit: int = 50) -> List[Tuple[int, float]]:
+        query = """
+        CALL vector_search.search('message_vec', $limit, $embedding)
+        YIELD node, similarity
+        RETURN node.id as id, similarity
+        """
+        with self.driver.session() as session:
+            result = session.run(query, {"embedding": query_embedding, "limit": limit})
+            return [(r["id"], r["similarity"]) for r in result]
+    
+    def get_all_message_embeddings(self) -> Dict[int, List[float]]:
+        """
+        Fetch all message embeddings for rapid FAISS hydration.
+        """
+        query = """
+        MATCH (m:Message) 
+        WHERE m.embedding IS NOT NULL
+        RETURN m.id as id, m.embedding as embedding
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query)
+                return {record["id"]: record["embedding"] for record in result}
+        except Exception as e:
+            logger.error(f"Failed to fetch message embeddings: {e}")
+            return {}
 
     def get_message_text(self, message_id: int) -> str:
         """
@@ -106,49 +194,67 @@ class MemGraphStore:
             source_msg_id=record["source_msg_id"]
         )
 
-    def create_fact(self, entity_id: int, fact: Fact):
-        """Create a fact."""
-        query="""
-        MATCH (e:Entity {id: $entity_id})
-        CREATE (f:Fact {
-            id: $fact_id,
-            source_entity_id: $entity_id,
-            content: $content,
-            valid_at: $valid_at,
-            invalid_at: $invalid_at,
-            archived_at: $archived_at,
-            confidence: $confidence,
-            created_at: timestamp(),
-            embedding: $embedding
-        })
-        CREATE (e)-[:HAS_FACT]->(f)
-        WITH f
-        CALL {
-            WITH f
-            MATCH (m:Message {id: $msg_id})
-            WHERE $msg_id IS NOT NULL
-            CREATE (f)-[:EXTRACTED_FROM]->(m)
-        }
-        RETURN f.id as id
+    def create_facts_batch(self, entity_id: int, facts: List[Fact]) -> int:
         """
+        Atomically create multiple facts for an entity.
+        Returns number of facts created.
+        Raises Exception if ANY fact fails (All-or-Nothing).
+        """
+        if not facts:
+            return 0
+
+        fact_params = []
+        for f in facts:
+            fact_params.append({
+                "id": f.id,
+                "content": f.content,
+                "valid_at": f.valid_at.isoformat(),
+                "invalid_at": f.invalid_at.isoformat() if f.invalid_at else None,
+                "confidence": f.confidence,
+                "embedding": f.embedding,
+                "source_msg_id": f.source_msg_id
+            })
+        
+        def _execute_batch(tx: ManagedTransaction):
+            query = """
+            MATCH (e:Entity {id: $entity_id})
+            
+            UNWIND $batch AS item
+            
+            CREATE (f:Fact {
+                id: item.id,
+                source_entity_id: $entity_id,
+                content: item.content,
+                valid_at: item.valid_at,
+                invalid_at: item.invalid_at,
+                confidence: item.confidence,
+                created_at: timestamp(),
+                embedding: item.embedding
+            })
+            CREATE (e)-[:HAS_FACT]->(f)
+            
+            WITH f, item
+            FOREACH (_ IN CASE WHEN item.source_msg_id IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (m:Message {id: item.source_msg_id})
+                MERGE (f)-[:EXTRACTED_FROM]->(m)
+            )
+            
+            RETURN count(f) as created_count
+            """
+            
+            result = tx.run(query, {
+                "entity_id": entity_id,
+                "batch": fact_params
+            }).single()
+            
+            return result["created_count"] if result else 0
 
         try:
             with self.driver.session() as session:
-                result = session.run(query, {
-                        "entity_id": entity_id,
-                        "facts_id": fact.id,
-                        "content": fact.content,
-                        "valid_at": fact.valid_at.isoformat(),
-                        "invalid_at": fact.invalid_at.isoformat() if fact.invalid_at else None,
-                        "archived_at": fact.archived_at.isoformat() if fact.archived_at else None,
-                        "confidence": fact.confidence,
-                        "embedding": fact.embedding,
-                        "msg_id": fact.source_msg_id
-                        })
-                return result is not None
+                return session.execute_write(_execute_batch)
         except Exception as e:
-            logger.error(f"Failed to create fact {fact.id}: {e}")
-            return False
+            logger.error(f"Batch write failed for entity {entity_id}: {e}")
+            raise e
     
     def invalidate_fact(self, fact_id: str, invalid_at: datetime) -> bool:
         """Mark fact as invalid."""
@@ -169,15 +275,15 @@ class MemGraphStore:
             return False
     
 
-    def get_facts_for_entity(self, entity_id: int, active_only: bool = True):
+    def get_facts_for_entity(self, entity_id: int, valid_only: bool = True):
         """Get a fact from an entity."""
 
         query = """
         MATCH (e:Entity {id: $entity_id})-[:HAS_FACT]->(f:Fact)
-        """ + ("WHERE f.invalid_at IS NULL" if active_only else "") + """
+        """ + ("WHERE f.invalid_at IS NULL" if valid_only else "") + """
         OPTIONAL MATCH (f)-[:EXTRACTED_FROM]->(m:Message)
-        RETURN f.id as id, f.content as content, f.valid_at as valid_at,
-            f.invalid_at as invalid_at, f.confidence as confidence, f.embedding as embedding
+        RETURN f.id as id, f.source_entity_id as source_entity_id, f.content as content, f.valid_at as valid_at,
+            f.invalid_at as invalid_at, f.confidence as confidence, f.embedding as embedding,
             m.id as source_msg_id
         ORDER BY f.created_at DESC
         """
@@ -189,25 +295,6 @@ class MemGraphStore:
         except Exception as e:
             logger.error(f"Failed to get facts for entity {entity_id}: {e}")
             return []
-    
-
-    def invalidate_fact(self, fact_id: str, invalid_at: datetime) -> bool:
-        """Mark fact as invalid."""
-        query = """
-        MATCH (f:Fact {id: $fact_id})
-        SET f.invalid_at = $invalid_at
-        RETURN f.id as id
-        """
-        try:
-            with self.driver.session() as session:
-                result = session.run(query, {
-                    "fact_id": fact_id,
-                    "invalid_at": invalid_at.isoformat()
-                }).single()
-                return result is not None
-        except Exception as e:
-            logger.error(f"Failed to invalidate fact {fact_id}: {e}")
-            return False
 
 
     def get_facts_from_message(self, msg_id: str) -> List[Fact]:
@@ -225,6 +312,60 @@ class MemGraphStore:
         except Exception as e:
             logger.error(f"Failed to get facts from message {msg_id}: {e}")
             return []
+    
+    def delete_old_invalidated_facts(self, cutoff: datetime) -> int:
+        """Delete Fact nodes invalidated before cutoff date."""
+        query = """
+        MATCH (f:Fact)
+        WHERE f.invalid_at IS NOT NULL 
+        AND f.invalid_at < $cutoff
+        DETACH DELETE f
+        RETURN count(f) as deleted
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"cutoff": cutoff.isoformat()}).single()
+                deleted = result["deleted"] if result else 0
+                if deleted > 0:
+                    logger.info(f"Deleted {deleted} old invalidated facts")
+                return deleted
+        except Exception as e:
+            logger.error(f"Failed to delete old facts: {e}")
+            return 0
+    
+    def get_facts_for_entities(self, entity_ids: List[int], active_only: bool = True) -> Dict[int, List[Fact]]:
+        """Batch fetch facts for multiple entities. Returns {entity_id: [Fact, ...]}."""
+        if not entity_ids:
+            return {}
+        
+        query = """
+        MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
+        WHERE e.id IN $entity_ids
+        WHERE ($active_only = false OR f.invalid_at IS NULL)
+        OPTIONAL MATCH (f)-[:EXTRACTED_FROM]->(m:Message)
+        RETURN e.id as entity_id, f.id as id, f.content as content, 
+            f.valid_at as valid_at, f.invalid_at as invalid_at, 
+            f.confidence as confidence, f.embedding as embedding,
+            m.id as source_msg_id
+        ORDER BY e.id, f.created_at DESC
+        """
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"entity_ids": entity_ids, "active_only": active_only})
+                
+                facts_by_entity: Dict[int, List[Fact]] = {eid: [] for eid in entity_ids}
+                
+                for record in result:
+                    eid = record["entity_id"]
+                    fact = self._hydrate_fact(record)
+                    facts_by_entity[eid].append(fact)
+                
+                return facts_by_entity
+                
+        except Exception as e:
+            logger.error(f"Failed to batch fetch facts: {e}")
+            return {eid: [] for eid in entity_ids}
     
     def write_batch(self, entities: List[Dict], relationships: List[Dict]):
         entity_params = []
@@ -249,7 +390,6 @@ class MemGraphStore:
                         e.canonical_name = data.canonical_name,
                         e.aliases = data.aliases,
                         e.type = data.type,
-                        e.facts = [],
                         e.confidence = data.confidence,
                         e.last_updated = timestamp(),
                         e.last_mentioned = timestamp(),
@@ -317,65 +457,89 @@ class MemGraphStore:
             result = session.run(query)
             return [(r["id_a"], r["id_b"]) for r in result]
     
+    def validate_existing_ids(self, ids: List[int]) -> Set[int]:
+        """
+        Liveness Check: Returns the subset of IDs that actually exist in the DB.
+        Used to prevent 'Zombie Resurrection' of deleted entities during writes.
+        """
+        if not ids:
+            return set()
+            
+        query = """
+        MATCH (e:Entity)
+        WHERE e.id IN $ids
+        RETURN e.id as id
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"ids": list(ids)})
+                return {record["id"] for record in result}
+        except Exception as e:
+            logger.error(f"Liveness check failed: {e}")
+            return set()
+    
+    
     def get_all_entities_for_hydration(self) -> list[dict]:
         """
-        Fetch all entity data needed to hydrate EntityResolver.
-        Single query, single pass.
+        Fetch entity data needed to hydrate EntityResolver.
+        Facts are fetched separately via get_facts_for_entity.
         """
         query = """
         MATCH (e:Entity)
         WHERE e.id IS NOT NULL
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         WITH e, t
-        WHERE t IS NULL OR t.status IS NULL OR t.status <> 'inactive'
         RETURN e.id AS id,
             e.canonical_name AS canonical_name,
             e.aliases AS aliases,
             e.type AS type,
             t.name AS topic,
-            e.facts AS facts,
-            e.embedding AS embedding
+            e.embedding AS embedding,
+            e.session_id AS session_id
         """
         with self.driver.session() as session:
             result = session.run(query)
             return [dict(record) for record in result]
     
-
-    def update_entity_profile(self, entity_id: int, canonical_name: str, 
-                        facts: List[str], embedding: List[float], 
-                        last_msg_id: int):
+    def update_entity_profile(
+        self, 
+        entity_id: int, 
+        canonical_name: str,
+        embedding: List[float], 
+        last_msg_id: int
+    ):
         """
-        Update an existing entity's fact ledger.
+        Update entity metadata and embedding.
         """
         def _update(tx: 'ManagedTransaction'):
             tx.run("""
-                MERGE (e:Entity {id: $id})
-                
-                ON CREATE SET
-                    e.canonical_name = $canonical_name,
-                    e.facts = $facts,
-                    e.embedding = $embedding,
-                    e.last_profiled_msg_id = $last_msg_id,
-                    e.last_updated = timestamp(),
-                    e.created_by = 'profile_stream'
-
-                ON MATCH SET
-                    e.canonical_name = $canonical_name,
-                    e.facts = $facts,
+                MATCH (e:Entity {id: $id})
+                SET e.canonical_name = $canonical_name,
                     e.embedding = $embedding,
                     e.last_updated = timestamp(),
                     e.last_profiled_msg_id = $last_msg_id
             """, 
             id=entity_id, 
             canonical_name=canonical_name, 
-            facts=facts,
             embedding=embedding,
             last_msg_id=last_msg_id
             )
         
         with self.driver.session() as session:
             session.execute_write(_update)
-        logger.info(f"Updated entity {entity_id} ledger (checkpoint: msg_{last_msg_id})")
+        logger.info(f"Updated entity {entity_id} (checkpoint: msg_{last_msg_id})")
+    
+    def update_entity_embedding(self, entity_id: int, embedding: List[float]):
+        """
+        Persists a new embedding for an entity.
+        """
+        query = """
+        MATCH (e:Entity {id: $id})
+        SET e.embedding = $embedding,
+            e.last_updated = timestamp()
+        """
+        with self.driver.session() as session:
+            session.run(query, {"id": entity_id, "embedding": embedding}).consume()
 
     def cleanup_null_entities(self) -> int:
         """Remove entities with null type and their relationships."""
@@ -394,10 +558,11 @@ class MemGraphStore:
             return deleted
     
     def get_orphan_entities(self, protected_id: int = 1, cutoff_ms: int = 0) -> List[int]:
-        """Find entity IDs with no relationships, excluding protected (user)."""
+        """Find entity IDs with NO relationships AND NO facts."""
         query = """
         MATCH (e:Entity)
         WHERE NOT (e)-[:RELATED_TO]-() 
+        AND NOT (e)-[:HAS_FACT]->()
         AND e.id <> $protected_id
         AND e.last_mentioned < $cutoff
         RETURN e.id as id
@@ -457,13 +622,6 @@ class MemGraphStore:
         with self.driver.session() as session:
             result = session.run(query, {"names": lower_names})
             return [dict(record) for record in result]
-
-    def set_topic_status(self, topic_name: str, status: str):
-        """Handles Topic State (active/inactive/hot)"""
-
-        query = "MERGE (t:Topic {name: $name}) SET t.status = $status"
-        with self.driver.session() as session:
-            session.run(query, {"name": topic_name, "status": status}).consume()
     
     def log_mood_checkpoint(
         self,
@@ -496,11 +654,6 @@ class MemGraphStore:
                 "message_count": message_count
             }).consume()
     
-    def reset_all_topics_to_active(self):
-        """Set all topics to active status."""
-        query = "MATCH (t:Topic) SET t.status = NULL"
-        with self.driver.session() as session:
-            session.run(query).consume()
     
     def get_hot_topic_context_with_messages(self, hot_topic_names: List[str], msg_limit: int = 5, slim: bool = False) -> dict:
         """
@@ -550,44 +703,75 @@ class MemGraphStore:
             result = session.run(query, {"entity_id": entity_id, "limit": limit})
             return [record["name"] for record in result]
     
-    def search_entity(self, query: str, limit: int = 5, connections_limit: int = 5, evidence_limit: int = 5) -> list[dict]:
+    def search_messages_fts(self, query: str, limit: int = 50) -> List[Tuple[int, float]]:
+        """
+        Perform native Full-Text Search on Message nodes.
+        Returns list of (message_id, score).
+        """
+
+        cypher = """
+        CALL text_search.search('message_search', $q) YIELD node, score
+        RETURN node.id as id, score
+        ORDER BY score DESC LIMIT $limit
+        """
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(cypher, {"q": query, "limit": limit})
+                return [(record["id"], record["score"]) for record in result]
+        except Exception as e:
+            logger.error(f"FTS Message search failed: {e}")
+            return []
+    
+    def search_entity(self, query: str, active_topics: List[str] = None, limit: int = 5, connections_limit: int = 5, evidence_limit: int = 5) -> list[dict]:
         """
         Search for entities by name/alias with top connections included.
         """
+        clean_query = re.sub(r'[\W_]+', ' ', query).strip()
+        if not clean_query:
+             return []
+
         cypher = """
-        MATCH (e:Entity)
-        WHERE toLower(e.canonical_name) CONTAINS toLower($query)
-        OR ANY(alias IN e.aliases WHERE toLower(alias) CONTAINS toLower($query))
+        CALL text_search.search('entity_search', $q) YIELD node as e, score
+        
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
-        WITH e, t
-        WHERE t IS NULL OR t.status IS NULL OR t.status <> 'inactive'
-        WITH e, t
-        LIMIT $limit
-        OPTIONAL MATCH (e)-[r:RELATED_TO]-(conn:Entity)
+        WITH e, t, score
+        WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
+        
         OPTIONAL MATCH (e)-[:PART_OF]->(parent:Entity)
         OPTIONAL MATCH (child:Entity)-[:PART_OF]->(e)
-        WITH e, t, r, conn, parent,
-            count(DISTINCT child) as children_count
+        OPTIONAL MATCH (e)-[r:RELATED_TO]-(conn:Entity)
+        
+        WITH e, t, parent, count(DISTINCT child) as children_count, r, conn, score
+        ORDER BY score DESC, r.weight DESC
+        
         RETURN e.id AS id,
             e.canonical_name AS canonical_name,
             e.aliases AS aliases,
             e.type AS type,
-            e.facts AS facts,
             t.name AS topic,
             e.last_mentioned AS last_mentioned,
             e.last_updated AS last_updated,
+            [(e)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] AS facts,
             conn.canonical_name AS conn_name,
             conn.aliases AS conn_aliases,
-            conn.facts AS conn_facts,
             r.weight AS conn_weight,
             r.message_ids AS evidence_ids,
+            [(conn)-[:HAS_FACT]->(cf) WHERE cf.invalid_at IS NULL | cf.content] AS conn_facts,
             parent.canonical_name AS parent_name,
             children_count
-        ORDER BY e.last_mentioned DESC, conn_weight DESC
+        LIMIT $limit
         """
+
+        params = {
+            "q": clean_query, 
+            "limit": limit,
+            "active_topics": active_topics if active_topics is not None else [],
+            "filter_topics": active_topics is not None
+        }
         
         with self.driver.session() as session:
-            result = session.run(cypher, {"query": query, "limit": limit})
+            result = session.run(cypher, params)
             
             entities = {}
             for row in result:
@@ -599,7 +783,7 @@ class MemGraphStore:
                         "canonical_name": row["canonical_name"],
                         "aliases": row["aliases"] or [],
                         "type": row["type"],
-                        "facts": row["facts"],
+                        "facts": row["facts"] or [],
                         "topic": row["topic"],
                         "last_mentioned": row["last_mentioned"],
                         "last_updated": row["last_updated"],
@@ -620,7 +804,7 @@ class MemGraphStore:
                     })
             return list(entities.values())
 
-    def get_related_entities(self, entity_names: List[str], active_only: bool = True):
+    def get_related_entities(self, entity_names: List[str], active_topics: List[str] = None, limit: int = 50):
         """
         Find all entities connected to the given entities.
         Use this when the user asks about someone's connections, relationships, network, or "who/what is related to X".
@@ -634,10 +818,9 @@ class MemGraphStore:
         OPTIONAL MATCH (target)-[:BELONGS_TO]->(t:Topic)
         WITH source, r, target, t
         WHERE
-            ($active_only = false) OR
+            ($filter_topics = false) OR
             (t IS NULL) OR
-            (t.status IS NULL) OR
-            (t.status <> 'inactive')
+            (t.name IN $active_topics)
         RETURN
             source.canonical_name as source,
             target.canonical_name as target,
@@ -647,16 +830,22 @@ class MemGraphStore:
             r.confidence as confidence,
             r.last_seen as last_seen
         ORDER BY r.weight DESC, r.last_seen DESC
-        LIMIT 50
+        LIMIT $limit
         """
+        params = {
+            "names": entity_names, 
+            "active_topics": active_topics if active_topics is not None else [],
+            "filter_topics": active_topics is not None,
+            "limit": limit
+        }
         with self.driver.session() as session:
-            res = session.run(query, {"names": entity_names, "active_only": active_only})
+            res = session.run(query, params)
             return [record.data() for record in res]
         
     
-    def get_recent_activity(self, entity_name: str, hours: int = 24):
+    def get_recent_activity(self, entity_name: str, active_topics: List[str] = None, hours: int = 24):
         """
-        Get recent interactions involving an entity within a time window.
+        Get recent interactions. Filtered by active_topics if provided.
         """
         cutoff_ms = int((time.time() - (hours * 3600)) * 1000)
 
@@ -664,33 +853,43 @@ class MemGraphStore:
         MATCH (e:Entity {canonical_name: $name})-[r:RELATED_TO]-(target:Entity)
         OPTIONAL MATCH (target)-[:BELONGS_TO]->(t:Topic)
         WHERE r.last_seen > $cutoff
-        AND (t IS NULL OR t.status IS NULL OR t.status <> 'inactive')
+        AND (($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics))
         RETURN target.canonical_name as entity, r.message_ids as evidence_ids, r.last_seen as time
         ORDER BY r.last_seen DESC
         """
 
+        params = {
+            "name": entity_name, 
+            "cutoff": cutoff_ms,
+            "active_topics": active_topics if active_topics is not None else [],
+            "filter_topics": active_topics is not None
+        }
+
         with self.driver.session() as session:
-            result = session.run(query, {"name": entity_name, "cutoff": cutoff_ms})
+            result = session.run(query, params)
             return [record.data() for record in result]
     
-    
-    def _build_path_data(self, names: List[str], evidence: List[List[str]]) -> List[Dict]:
-        """Convert raw query results into path structure."""
+    def _build_path_data(self, names: List[str], topics: List[str], evidence: List[List[str]]) -> List[Dict]:
+        """
+        Convert raw query results into path structure.
+        """
         return [
             {
                 "step": i,
                 "entity_a": names[i],
                 "entity_b": names[i + 1],
+                "topic_a": topics[i] if i < len(topics) else None,
+                "topic_b": topics[i+1] if i+1 < len(topics) else None,
                 "evidence_refs": evidence[i]
             }
             for i in range(len(evidence))
         ]
 
 
-    def _find_shortest_path(self, start_name: str, end_name: str) -> tuple[List[str], List[List[str]], bool] | None:
+    def _find_shortest_path(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[str], List[str], List[List[str]], bool] | None:
         """
-        Find shortest path regardless of topic status.
-        Returns: (names, evidence_ids, has_inactive) or None if no path.
+        Find shortest path. Calculates 'has_inactive' dynamically based on passed active_topics list.
+        Returns: (names, topics, evidence_ids, has_inactive)
         """
         query = """
         MATCH (start:Entity {canonical_name: $start_name})
@@ -698,22 +897,32 @@ class MemGraphStore:
         MATCH p = (start)-[:RELATED_TO *BFS ..4]-(end)
         UNWIND nodes(p) AS n
         OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
-        WITH p, collect(COALESCE(t.status, 'active')) AS statuses,
+        WITH p, 
+            collect(COALESCE(t.name, 'General')) AS node_topics,
             [node IN nodes(p) | node.canonical_name] AS names,
             [r IN relationships(p) | r.message_ids] AS evidence_ids
-        RETURN names, evidence_ids,
-            ANY(s IN statuses WHERE s = 'inactive') AS has_inactive
+        WITH names, node_topics, evidence_ids,
+             ANY(topic IN node_topics WHERE NOT ($filter_topics = false OR topic IN $active_topics)) as has_inactive
+        
+        RETURN names, node_topics, evidence_ids, has_inactive
         LIMIT 1
         """
         
+        params = {
+            "start_name": start_name, 
+            "end_name": end_name,
+            "active_topics": active_topics if active_topics is not None else [],
+            "filter_topics": active_topics is not None
+        }
+        
         with self.driver.session() as session:
-            record = session.run(query, {"start_name": start_name, "end_name": end_name}).single()
+            record = session.run(query, params).single()
             if not record:
                 return None
-            return record["names"], record["evidence_ids"], record["has_inactive"]
+            return record["names"], record["node_topics"], record["evidence_ids"], record["has_inactive"]
 
 
-    def _find_active_only_path(self, start_name: str, end_name: str) -> tuple[List[str], List[List[str]]] | None:
+    def _find_active_only_path(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[str], List[List[str]]] | None:
         """
         Find shortest path excluding inactive-topic entities.
         Returns: (names, evidence_ids) or None if no path.
@@ -723,66 +932,59 @@ class MemGraphStore:
         MATCH (end:Entity {canonical_name: $end_name})
         MATCH p = (start)-[:RELATED_TO *BFS ..4]-(end)
         WHERE ALL(n IN nodes(p) WHERE
-            NOT EXISTS {
+            EXISTS {
                 MATCH (n)-[:BELONGS_TO]->(t:Topic)
-                WHERE t.status = 'inactive'
+                WHERE t.name IN $active_topics OR t IS NULL
             }
         )
+        UNWIND nodes(p) AS n
+        OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
+        WITH p, collect(COALESCE(t.name, 'General')) AS node_topics
+        
         RETURN [n IN nodes(p) | n.canonical_name] AS names,
+            node_topics,
             [r IN relationships(p) | r.message_ids] AS evidence_ids
         LIMIT 1
         """
         
+        params = {
+            "start_name": start_name, 
+            "end_name": end_name,
+            "active_topics": active_topics
+        }
+        
         with self.driver.session() as session:
-            record = session.run(query, {"start_name": start_name, "end_name": end_name}).single()
+            record = session.run(query, params).single()
             if not record:
                 return None
-            return record["names"], record["evidence_ids"]
+            return record["names"], record["node_topics"], record["evidence_ids"]
 
 
-    def _find_path_filtered(self, start_name: str, end_name: str, active_only: bool = True) -> tuple[List[Dict], bool]:
+    def _find_path_filtered(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[Dict], bool]:
         """
         Find path between entities with topic filtering.
-        
         Returns: (path_data, has_inactive_shortcut)
-        - path_data: usable path (empty if none found)
-        - has_inactive_shortcut: True if shorter path exists through inactive topics
         """
-        shortest = self._find_shortest_path(start_name, end_name)
+        
+        shortest = self._find_shortest_path(start_name, end_name, active_topics)
         
         if not shortest:
             return [], False
         
-        names, evidence, has_inactive = shortest
+        names, topics, evidence, has_inactive = shortest
         
         if not has_inactive:
-            return self._build_path_data(names, evidence), False
+            return self._build_path_data(names, topics, evidence), False
         
-        if not active_only:
-            return self._build_path_data(names, evidence), False
-        
-        active_path = self._find_active_only_path(start_name, end_name)
+        active_path = self._find_active_only_path(start_name, end_name, active_topics)
         
         if active_path:
-            active_names, active_evidence = active_path
-            return self._build_path_data(active_names, active_evidence), True
+            active_names, active_topics_list, active_evidence = active_path
+            return self._build_path_data(active_names, active_topics_list, active_evidence), True
         
-        # No active path, only inactive exists
+        # No active path exists, only the inactive one
         return [], True
     
-    def get_topics_by_status(self) -> dict:
-        query = """
-        MATCH (t:Topic)
-        RETURN t.name as name, coalesce(t.status, 'active') as status
-        """
-        with self.driver.session() as session:
-            result = session.run(query)
-            grouped = {"active": [], "hot": [], "inactive": []}
-            for record in result:
-                status = record["status"]
-                if status in grouped:
-                    grouped[status].append(record["name"])
-            return grouped
     
     def get_mood_history(self, user_name: str, limit: int = 10) -> list[dict]:
         query = """
@@ -866,56 +1068,6 @@ class MemGraphStore:
             logger.error(f"Failed to get children for entity {entity_id}: {e}")
             return []
     
-    def get_entities_with_invalidated_facts(self) -> List[Dict]:
-        """Find entities holding facts marked as [INVALIDATED: ...]"""
-        query = """
-        MATCH (e:Entity)
-        WHERE any(f IN e.facts WHERE f CONTAINS '[INVALIDATED:')
-        RETURN e.id as id, e.facts as facts
-        """
-        with self.driver.session() as session:
-            result = session.run(query)
-            return [dict(record) for record in result]
-
-
-    def commit_fact_archival(self, entity_id: int, active_facts: List[str], archived_facts: List[str]):
-        """
-        Move old facts to a linked History node and update the main entity.
-        """
-        query = """
-        MATCH (e:Entity {id: $id})
-        MERGE (e)-[:HAS_HISTORY]->(h:FactHistory)
-        ON CREATE SET 
-            h.facts = $archived_facts, 
-            h.last_archived = timestamp()
-        ON MATCH SET 
-            h.facts = h.facts + $archived_facts, 
-            h.last_archived = timestamp()
-        
-        SET e.facts = $active_facts, e.last_updated = timestamp()
-        """
-        with self.driver.session() as session:
-            session.run(query, {
-                "id": entity_id, 
-                "active_facts": active_facts, 
-                "archived_facts": archived_facts
-            }).consume()
-    
-    def get_archived_facts(self, entity_id: int) -> List[str]:
-        """
-        Retrieve the full history of archived facts for an entity.
-        Used by the 'get_entity_history' tool.
-        """
-        query = """
-        MATCH (e:Entity {id: $id})-[:HAS_HISTORY]->(h:FactHistory)
-        RETURN h.facts as facts
-        """
-        with self.driver.session() as session:
-            result = session.run(query, {"id": entity_id}).single()
-            if result and result["facts"]:
-                return result["facts"]
-            return []
-    
 
     def has_hierarchy_edge(self, id_a: int, id_b: int) -> bool:
         """Check if PART_OF relationship exists in either direction."""
@@ -928,19 +1080,14 @@ class MemGraphStore:
         with self.driver.session() as session:
             return session.run(query, {"id_a": id_a, "id_b": id_b}).single() is not None
     
-    def merge_entities(self, primary_id: int, secondary_id: int, merged_facts: List[str]) -> bool:
+    def merge_entities(self, primary_id: int, secondary_id: int) -> bool:
         """
         Merge secondary entity into primary (single transaction).
-        Primary survives with combined data, secondary is deleted.
-        
-        Args:
-            primary_id: Entity that survives
-            secondary_id: Entity that gets merged and deleted
-            merged_facts: Pre-computed facts
+        Transfers RELATED_TO and HAS_FACT edges, then deletes secondary.
         """
         
         def _execute_merge(tx):
-            # Step 1: Get both entities and validate they exist
+            # Step 1: Validate both exist
             check = tx.run("""
                 MATCH (p:Entity {id: $primary_id})
                 MATCH (s:Entity {id: $secondary_id})
@@ -956,7 +1103,7 @@ class MemGraphStore:
                 logger.error(f"Merge failed: one or both entities not found ({primary_id}, {secondary_id})")
                 return False
             
-            # Step 2: Update primary with merged data
+            # Step 2: Update primary with merged aliases
             combined_aliases = list(set(
                 (check["p_aliases"] or []) + 
                 (check["s_aliases"] or []) + 
@@ -965,21 +1112,18 @@ class MemGraphStore:
             
             tx.run("""
                 MATCH (p:Entity {id: $primary_id})
-                SET p.aliases = $aliases,
-                    p.facts = $facts,
-                    p.last_updated = timestamp()
-                WITH p
                 MATCH (s:Entity {id: $secondary_id})
-                SET p.confidence = CASE 
+                SET p.aliases = $aliases,
+                    p.last_updated = timestamp(),
+                    p.confidence = CASE 
                         WHEN coalesce(s.confidence, 0) > coalesce(p.confidence, 0) 
                         THEN s.confidence ELSE p.confidence END,
                     p.last_mentioned = CASE 
                         WHEN coalesce(s.last_mentioned, 0) > coalesce(p.last_mentioned, 0) 
                         THEN s.last_mentioned ELSE p.last_mentioned END
-            """, primary_id=primary_id, secondary_id=secondary_id, 
-                aliases=combined_aliases, facts=merged_facts)
+            """, primary_id=primary_id, secondary_id=secondary_id, aliases=combined_aliases)
             
-            # Step 3: Transfer relationships from secondary to primary
+            # Step 3: Transfer RELATED_TO edges
             tx.run("""
                 MATCH (s:Entity {id: $secondary_id})-[r_old:RELATED_TO]-(target:Entity)
                 WHERE target.id <> $primary_id
@@ -1001,10 +1145,46 @@ class MemGraphStore:
                     r_new.last_seen = CASE 
                         WHEN r_old.last_seen > r_new.last_seen 
                         THEN r_old.last_seen ELSE r_new.last_seen END,
-                    r_new.message_ids = r_new.message_ids + r_old.message_ids
+                    r_new.message_ids = coalesce(r_new.message_ids, []) + coalesce(r_old.message_ids, [])
             """, primary_id=primary_id, secondary_id=secondary_id)
             
-            # Step 4: Delete secondary entity
+            # Step 4: Transfer HAS_FACT edges
+            tx.run("""
+                MATCH (s:Entity {id: $secondary_id})-[r:HAS_FACT]->(f:Fact)
+                MATCH (p:Entity {id: $primary_id})
+                DELETE r
+                CREATE (p)-[:HAS_FACT]->(f)
+            """, primary_id=primary_id, secondary_id=secondary_id)
+
+             # Step 4a: Transfer Topic memberships (BELONGS_TO)
+            tx.run("""
+                MATCH (s:Entity {id: $secondary_id})-[r:BELONGS_TO]->(t:Topic)
+                MATCH (p:Entity {id: $primary_id})
+                MERGE (p)-[:BELONGS_TO]->(t)
+                DELETE r
+            """, primary_id=primary_id, secondary_id=secondary_id)
+
+            # Step 4b: Transfer Hierarchy Children (Entities that are PART_OF secondary)
+            # The children now become part of the primary
+            tx.run("""
+                MATCH (child:Entity)-[r:PART_OF]->(s:Entity {id: $secondary_id})
+                MATCH (p:Entity {id: $primary_id})
+                MERGE (child)-[:PART_OF]->(p)
+                ON CREATE SET r.transferred = true
+                DELETE r
+            """, primary_id=primary_id, secondary_id=secondary_id)
+
+            # Step 4c: Transfer Hierarchy Parent (Who the secondary is PART_OF)
+            # Only transfer if Primary doesn't already have a parent to avoid conflicts
+            tx.run("""
+                MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->(parent:Entity)
+                MATCH (p:Entity {id: $primary_id})
+                WHERE NOT (p)-[:PART_OF]->() 
+                MERGE (p)-[:PART_OF]->(parent)
+                DELETE r
+            """, primary_id=primary_id, secondary_id=secondary_id)
+            
+            # Step 5: Delete secondary entity
             result = tx.run("""
                 MATCH (s:Entity {id: $secondary_id})
                 DETACH DELETE s
@@ -1012,7 +1192,7 @@ class MemGraphStore:
             """, secondary_id=secondary_id).single()
             
             return result and result["deleted"] > 0
-    
+
         with self.driver.session() as session:
             try:
                 success = session.execute_write(_execute_merge)

@@ -95,23 +95,6 @@ TOOL_SCHEMAS = [
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_entity_history",
-            "description": "Fetches archived/historical facts for an entity that are no longer in the active profile. Use this to find old information.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                "entity_id": {
-                    "type": "integer",
-                    "description": "The unique ID of the entity (obtain this from search_entity first)"
-                    }
-                },
-                "required": ["entity_id"]
-            }
-        }
-    },
     # {
     #     "type": "function",
     #     "function": {

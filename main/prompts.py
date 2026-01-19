@@ -261,7 +261,7 @@ Recent conversation for resolving pronouns ("he", "she", "they") and ambiguous r
 You MUST wrap your response in <connections> tags:
 
 <connections>
-MSG <id> | entity_a, entity_b | short reason
+MSG <id> | entity_a; entity_b | short reason
 MSG <id> | NO CONNECTIONS
 </connections>
 
@@ -271,34 +271,8 @@ No preamble, no summary after. Only the connections block.
 </output>
 """
 
-def get_connection_formatter_prompt() -> str:
-  return r"""
-You are VEGAPUNK-05, Vestige's connection formatter.
-
-<task>
-Parse VEGAPUNK-04's `<connections>` block into structured output. Transform, don't judge.
-</task>
-
-<rules>
-1. Every connection line becomes an EntityPair. Don't add, don't remove.
-2. Entity names exactly as written.
-3. Confidence from short reason:
-   - 0.9: Direct interaction ("together", "works at", "dating")
-   - 0.8: Clear association ("member of", "teaches", "reports to")
-   - 0.7: Weaker or ambiguous ("discussed", "mentioned")
-</rules>
-
-<output>
-Return MessageConnections:
-- `message_id`: from MSG tag
-- `entity_pairs`: list of EntityPair (entity_a, entity_b, confidence)
-
-For "NO CONNECTIONS" lines, return empty entity_pairs list.
-</output>
-"""
-
 def get_profile_extraction_prompt(user_name: str) -> str:
-  return f"""
+   return f"""
 You are VEGAPUNK-06, the Fact Extractor for {user_name}'s knowledge graph.
 
 <task>
@@ -311,8 +285,6 @@ All messages are from **{user_name}**. First-person ("I", "me", "my") refers to 
 
 <rules>
 1. **STATED** — Only extract what's explicitly said. No inference, no speculation.
-   - "Started at Google" → extract
-   - Job not mentioned → don't assume anything about employment
 
 2. **SPECIFIC** — Concrete beats vague. Names, titles, places, dates.
    - "Works in tech" ✗
@@ -320,37 +292,20 @@ All messages are from **{user_name}**. First-person ("I", "me", "my") refers to 
 
 3. **ATOMIC** — One fact per item. Short, dense strings.
    - "Lives in Tokyo, works at Sony" → two separate facts
-   - NO: "She mentioned that she currently lives in Tokyo"
-   - YES: "Lives in Tokyo"
 
 4. **INVALIDATES** — Fact no longer true, no replacement stated.
-   - "Dating Marcus" → they broke up, no new relationship
    - Output: `[INVALIDATES: Dating Marcus]`
 
-5. **SPECIFIES** — More precise version of existing fact. Old fact is technically true but superseded by detail.
-   - Existing: "Works at Google" → Conversation: "promoted to Senior Engineer on Cloud team"
-   - Output: `Senior Engineer at Google Cloud [SPECIFIES: Works at Google]
+5. **SOURCE** — Tag each fact with the message ID it came from.
+   - Format: `fact content [MSG_X]`
+   - If fact spans multiple messages, use the most specific one.
 </rules>
-
-<what_you_receive>
-- `entities`: list with entity_name, entity_type, existing_facts, known_aliases
-- `conversation`: recent messages with timestamps
-</what_you_receive>
-
-<process>
-For each entity, silently check:
-- What new info is explicitly stated?
-- Does anything contradict or update existing facts?
-- Is the info specific and atomic?
-
-Then output only the facts.
-</process>
 
 <output>
 You MUST wrap your response in <new_facts> tags:
 
 <new_facts>
-EntityName: fact1 | fact2
+EntityName: fact1 [MSG_5] | fact2 [MSG_12]
 </new_facts>
 
 Omit entities with no new facts. No preamble, no summary after.
@@ -395,4 +350,24 @@ Scoring:
 
 <score>0.XX</score>
 </output>
+"""
+
+def get_contradiction_judgment_prompt() -> str:
+   return """
+You are a fact contradiction detector.
+
+Given two facts about the same entity, determine if FACT_B contradicts or supersedes FACT_A.
+
+Contradiction means:
+- FACT_B makes FACT_A no longer true (e.g., "Works at Google" → "Works at Meta")
+- FACT_B is a correction of FACT_A (e.g., "Has 2 kids" → "Has 3 kids")
+- FACT_B updates status that changed (e.g., "Is dating Sarah" → "Is single")
+
+NOT contradiction:
+- Facts about different aspects (e.g., "Works at Google" and "Lives in SF")
+- Additive information (e.g., "Engineer" and "Senior Engineer")
+- Compatible facts (e.g., "Likes coffee" and "Drinks espresso")
+
+Respond with only:
+<contradicts>true</contradicts> or <contradicts>false</contradicts>
 """

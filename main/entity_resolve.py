@@ -1,19 +1,18 @@
 from collections import defaultdict
-from datetime import datetime, timezone
 from loguru import logger
 import threading
-from rank_bm25 import BM25Okapi
 from typing import Dict, List, Optional, Tuple
-from rapidfuzz import fuzz
-import faiss
+from rapidfuzz import fuzz, process
 import numpy as np
 from sentence_transformers import SentenceTransformer, CrossEncoder
 import torch
 from db.memgraph import MemGraphStore
-
+from main.utils import is_substring_match
+from schema.dtypes import Fact
 
 
 class EntityResolver:
+    
 
     def __init__(self, store: 'MemGraphStore', session_id: str = None, hierarchy_config: dict = None, embedding_model='dunzhang/stella_en_400M_v5'):
         self.store = store
@@ -24,16 +23,9 @@ class EntityResolver:
         self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True, device=device, model_kwargs={"torch_dtype": torch.float16})
         self.cross_encoder = CrossEncoder('BAAI/bge-reranker-base', device=device)
         self.embedding_dim = 1024
-        self.index_id_map = faiss.IndexIDMap2(faiss.IndexFlatIP(self.embedding_dim))
         self.entity_profiles = {}
         self._name_to_id = {}
-        self.msg_index = faiss.IndexIDMap2(faiss.IndexScalarQuantizer(self.embedding_dim, faiss.ScalarQuantizer.QT_fp16, faiss.METRIC_INNER_PRODUCT))
-        self.msg_int_to_id: dict[int, str] = {}
         self._lock = threading.RLock()
-        self.bm25_index: Optional[BM25Okapi] = None
-        self.msg_corpus: list[list[str]] = []
-        self.msg_id_order: list[str] = []
-        self._bm25_dirty = True
     
         self._hydrate_from_store()
 
@@ -60,21 +52,17 @@ class EntityResolver:
                     for alias in aliases:
                         self._name_to_id[alias.lower()] = ent_id
                     
+                    # No facts in cache anymore
                     self.entity_profiles[ent_id] = {
                         "canonical_name": canonical,
                         "type": ent["type"],
-                        "facts": ent["facts"] or []
+                        "topic": ent.get("topic", "General"),
+                        "session_id": ent.get("session_id")
                     }
                     
                     if embedding and len(embedding) == self.embedding_dim:
                         ids.append(ent_id)
                         vectors.append(embedding)
-                
-                if ids:
-                    self.index_id_map.add_with_ids(
-                        np.array(vectors, dtype=np.float32),
-                        np.array(ids, dtype=np.int64)
-                    )
             
             logger.info(f"Hydrated {len(self.entity_profiles)} entities, {len(ids)} vectors from Memgraph")
             
@@ -91,14 +79,8 @@ class EntityResolver:
         return [mention for mention, eid in items if eid == entity_id]
     
     def get_embedding_for_id(self, entity_id: int) -> List[float]:
-        """Retrieve embedding from FAISS by ID."""
-        with self._lock:
-            try:
-                embedding = self.index_id_map.reconstruct(entity_id)
-                return embedding.tolist()
-            except Exception as e:
-                logger.warning(f"Could not retrieve embedding for {entity_id}: {e}")
-                return []
+        """Retrieve embedding from graph by ID."""
+        return self.store.get_entity_embedding(entity_id)
             
     def get_hierarchy_relationship(self, type_a: str, type_b: str, topic: str) -> Optional[str]:
         """
@@ -124,100 +106,57 @@ class EntityResolver:
         
         return None
     
-    def hydrate_messages(self, messages: dict[str, dict]):
-        if not messages:
-            return
-        
-        ids, tokens = [], []
-        for msg_key, data in messages.items():
-            prefix, num = msg_key.split("_")
-            num = int(num)
-            int_id = num if prefix == "msg" else num + 1_000_000
+
+    def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """
+        Compute embeddings for a batch of texts (used by Processor).
+        """
+        if not texts:
+            return []
             
-            text = data.get("message") or data.get("content", "")
-            self.msg_int_to_id[int_id] = msg_key
-            ids.append(int_id)
-            tokens.append(text.lower().split())
-            self.msg_id_order.append(msg_key)
+        embeddings = self.embedding_model.encode(texts).astype(np.float32)
+        return embeddings.tolist()
         
-        texts = [data.get("message") or data.get("content", "") for data in messages.values()]
-        embs = self.embedding_model.encode(texts).astype(np.float32)
-        faiss.normalize_L2(embs)
-        self.msg_index.add_with_ids(embs, np.array(ids, dtype=np.int64))
-        
-
-        self.msg_corpus.extend(tokens)
-        self.bm25_index = BM25Okapi(self.msg_corpus)
-
-    
-    def add_message(self, msg_key: str, text: str):
-        prefix, num = msg_key.split("_")
-        num = int(num)
-        
-        # hacky solution: offset to 1 mill
-        int_id = num if prefix == "msg" else num + 1_000_000
-        
-        self.msg_int_to_id[int_id] = msg_key
-
-        emb = self.embedding_model.encode([text]).astype(np.float32)
-        faiss.normalize_L2(emb)
-        self.msg_index.add_with_ids(emb, np.array([int_id], dtype=np.int64))
-        
-        self.msg_corpus.append(text.lower().split())
-        self.msg_id_order.append(msg_key)
-        self._bm25_dirty = True
 
     def _search_messages(self, query: str, k: int = 10) -> list[tuple[str, float]]:
-        if not self.msg_int_to_id:
-            return []
-        
-        if self._bm25_dirty:
-            self.bm25_index = BM25Okapi(self.msg_corpus)
-            self._bm25_dirty = False
-        
+
         results = {}
+        query_embedding = self.embedding_model.encode([query]).astype(np.float32)[0].tolist()
+        sem_results = self.store.search_messages_vector(query_embedding, limit=50)
+
+        for msg_id, score in sem_results:
+            msg_key = f"msg_{msg_id}" if msg_id < 1_000_000_000 else f"turn_{msg_id - 1_000_000_000}"
+            results[msg_key] = ("semantic", float(score))
         
-        q_emb = self.embedding_model.encode([query]).astype(np.float32)
-        faiss.normalize_L2(q_emb)
-        sem_scores, sem_ids = self.msg_index.search(q_emb, 50) #hardcoded for convienence
-        
-        for idx, score in zip(sem_ids[0], sem_scores[0]):
-            if idx >= 0:
-                if int(idx) not in self.msg_int_to_id:
-                    logger.warning(f"FAISS returned ID {idx} not in msg_int_to_id")
-                    continue
-                msg_key = self.msg_int_to_id[int(idx)]
-                results[msg_key] = ("semantic", float(score))
-        
-        if self.bm25_index:
-            tokens = query.lower().split()
-            bm25_scores = self.bm25_index.get_scores(tokens)
-            top_indices = np.argsort(bm25_scores)[::-1][:75] #hardcoded for convienence
-            max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1.0
+        fts_results = self.store.search_messages_fts(query, limit=50)
+        max_fts = max([s for _, s in fts_results]) if fts_results else 1.0
+
+        for msg_id, raw_score in fts_results:
+            msg_key = f"msg_{msg_id}"
             
-            for idx in top_indices:
-                if bm25_scores[idx] > 0:
-                    msg_key = self.msg_id_order[idx]
-                    norm_score = bm25_scores[idx] / max_bm25
-                    if msg_key in results:
-                        _, sem_score = results[msg_key]
-                        results[msg_key] = ("both", sem_score + norm_score)
-                    else:
-                        results[msg_key] = ("keyword", norm_score)
+            norm_score = raw_score / max_fts if max_fts > 0 else 0
+            
+            logger.debug(f"FTS result: {msg_key} score={norm_score:.3f}")
+
+            if msg_key in results:
+                _, sem_score = results[msg_key]
+                results[msg_key] = ("both", sem_score + norm_score)
+            else:
+                results[msg_key] = ("keyword", norm_score)
         
         if not results:
             return []
         
         if len(results) > 1:
-            candidate_keys = list(results.keys())[:45] #hardcoded for convienence
+            candidate_keys = list(results.keys())[:45]
             pairs = []
             for msg_key in candidate_keys:
-                msg_id = int(msg_key.split("_")[1]) 
+                msg_id = int(msg_key.split("_")[1])
                 text = self.store.get_message_text(msg_id)
                 pairs.append((query, text))
+            
             scores = self.cross_encoder.predict(pairs)
-            reranked = list(zip(candidate_keys, scores))
-            reranked.sort(key=lambda x: x[1], reverse=True)
+            reranked = sorted(zip(candidate_keys, scores), key=lambda x: x[1], reverse=True)
             return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
             
         # Fallback: single result
@@ -267,12 +206,24 @@ class EntityResolver:
 
         candidates = set()
         mention_lower = mention.lower()
-        
-        if mention_lower in self._name_to_id:
-            candidates.add(self._name_to_id[mention_lower])
-        
-        for alias, eid in self._name_to_id.items():
-            if fuzz.WRatio(mention_lower, alias) >= fuzzy_threshold:
+
+        with self._lock:
+            if mention_lower in self._name_to_id:
+                candidates.add(self._name_to_id[mention_lower])
+            
+            choices = list(self._name_to_id.keys())
+
+        results = process.extract(
+            mention_lower,
+            choices,
+            limit=50,
+            score_cutoff=fuzzy_threshold,
+            scorer=fuzz.WRatio
+        )
+
+        for alias, _, _ in results:
+            eid = self._name_to_id.get(alias)
+            if eid is not None:
                 candidates.add(eid)
         
         return list(candidates)
@@ -289,15 +240,17 @@ class EntityResolver:
         """
         Register new entity: update all indexes and return embedding.
         """
+
+        sessionID = session_id or self.session_id
         profile = {
             "canonical_name": canonical_name,
             "type": entity_type,
             "topic": topic,
             "facts": [],
-            "session_id": session_id or self.session_id
+            "session_id": sessionID
         }
         
-        embedding = self.add_entity(entity_id, profile)
+        embedding = self._add_entity(entity_id, profile, sessionID)
         
         with self._lock:
             self._name_to_id[canonical_name.lower()] = entity_id
@@ -311,35 +264,26 @@ class EntityResolver:
 
         return embedding
 
-    def add_entity(self, entity_id: int, profile: Dict) -> List[float]:
 
+    def _add_entity(self, entity_id: int, profile: Dict, session_id: str) -> List[float]:
         canonical_name = profile.get("canonical_name", "")
-        facts = profile.get("facts", [])
-
-        resolution_text = f"{canonical_name}. " + " ".join(facts)
+        
+        # Build resolution text without facts (new facts added on profile cycle)
+        resolution_text = canonical_name
         embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
-        faiss.normalize_L2(embedding_np.reshape(1, -1))
 
-        with self._lock:
-
-            #TODO: eventually need to make a better LRU system
-            if len(self.entity_profiles) >= 10000:
-                oldest_id = next(iter(self.entity_profiles))
-                del self.entity_profiles[oldest_id]
-                
+        with self._lock:                
             logger.info(f"Adding entity {entity_id}-{profile['canonical_name']} to resolver indexes.")
 
             profile.setdefault("topic", "General")
-            profile.setdefault("facts", [])
-            profile.setdefault("first_seen", datetime.now(timezone.utc).isoformat())
-            profile["last_seen"] = datetime.now(timezone.utc).isoformat()
-            
-            self.index_id_map.add_with_ids(
-                np.array([embedding_np]), 
-                np.array([entity_id], dtype=np.int64)
-            )
 
-            self.entity_profiles[entity_id] = profile
+            # Store profile without facts
+            self.entity_profiles[entity_id] = {
+                "canonical_name": profile["canonical_name"],
+                "type": profile.get("type"),
+                "topic": profile.get("topic", "General"),
+                "session_id": session_id
+            }
         
         return embedding_np.tolist()
     
@@ -355,156 +299,51 @@ class EntityResolver:
                 logger.warning(f"Cannot update profile for unknown entity {entity_id}")
                 return []
             
-            profile["last_seen"] = datetime.now(timezone.utc).isoformat()
+            logger.info(f"Updating embedding for entity {entity_id}-{profile['canonical_name']}")
             
             embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
-            faiss.normalize_L2(embedding_np.reshape(1, -1))
-
-            self.index_id_map.remove_ids(np.array([entity_id], dtype=np.int64))
-            self.index_id_map.add_with_ids(
-                np.array([embedding_np]),
-                np.array([entity_id], dtype=np.int64)
-            )
             
-            return embedding_np.tolist()
+        return embedding_np.tolist()
+        
+    def merge_into(self, primary_id: int, secondary_id: int):
+        """Transfer secondary entity's aliases to primary, remove secondary from indexes."""
+        with self._lock:
+            secondary_aliases = [
+                alias for alias, eid in self._name_to_id.items() 
+                if eid == secondary_id
+            ]
+            
+            for alias in secondary_aliases:
+                self._name_to_id[alias] = primary_id
+            
+            if secondary_id in self.entity_profiles:
+                del self.entity_profiles[secondary_id]
+            
 
     def detect_merge_candidates(self) -> list:
-        """Detect potential entity merges using name matching and facts similarity."""
-        
-        logger.info(f"Merge detection started, {len(self.entity_profiles)} entities to scan")
+        """Detect potential entity merges using vector search + fuzzy matching."""
+        logger.info(f"Merge detection started. Scanning {len(self.entity_profiles)} entities.")
 
-        generic = self._build_generic_tokens()
-        logger.debug(f"Generic tokens (10+ entities): {generic}")
-        
+        generic_tokens = self._build_generic_tokens()
+        candidate_pairs = self._collect_candidate_pairs(generic_tokens)
+
+        if not candidate_pairs:
+            return []
+
+        entity_ids = set()
+        for id_a, id_b in candidate_pairs.keys():
+            entity_ids.add(id_a)
+            entity_ids.add(id_b)
+
+        facts_by_entity = self.store.get_facts_for_entities(list(entity_ids), active_only=True)
+
         candidates = []
-        seen_pairs = {}
-        aliases = list(self._name_to_id.keys())
-        
-        for i in range(len(aliases)):
-            for j in range(i + 1, len(aliases)):
-                id_i = self._name_to_id[aliases[i]]
-                id_j = self._name_to_id[aliases[j]]
-                if id_i == id_j:
-                    continue
-                
-                score = fuzz.WRatio(aliases[i], aliases[j])
-                is_substring = aliases[i] in aliases[j] or aliases[j] in aliases[i]
-                
-                # Relaxed gate for substring matches
-                if is_substring and score >= 75:
-                    pass
-                elif score >= 85:
-                    pass
-                else:
-                    continue
-                
-                pair_key = tuple(sorted([id_i, id_j]))
-                tokens_i = set(aliases[i].lower().split()) - generic
-                tokens_j = set(aliases[j].lower().split()) - generic
-                
-                if not (tokens_i & tokens_j):
-                    logger.debug(f"Skipped ({id_i}, {id_j}): no meaningful token overlap")
-                    continue
-                
-                if pair_key not in seen_pairs or score > seen_pairs[pair_key]:
-                    seen_pairs[pair_key] = score
+        for (id_a, id_b), (fuzz_score, is_substring) in candidate_pairs.items():
+            result = self._classify_pair(id_a, id_b, fuzz_score, is_substring, facts_by_entity)
+            if result:
+                candidates.append(result)
 
-        for (id_a, id_b), fuzz_score in seen_pairs.items():
-            if self.store.has_direct_edge(id_a, id_b):
-                logger.debug(f"Blocked ({id_a}, {id_b}) | Direct edge exists")
-                continue
-
-            if self.store.has_hierarchy_edge(id_a, id_b):
-                logger.debug(f"Blocked ({id_a}, {id_b}) | Hierarchy edge exists")
-                continue
-
-            profile_a = self.entity_profiles.get(id_a, {})
-            profile_b = self.entity_profiles.get(id_b, {})
-            type_a = profile_a.get("type")
-            type_b = profile_b.get("type")
-            topic_a = profile_a.get("topic", "General")
-            topic_b = profile_b.get("topic", "General")
-
-            canonical_a = profile_a.get("canonical_name", "").lower()
-            canonical_b = profile_b.get("canonical_name", "").lower()
-            is_substring = canonical_a in canonical_b or canonical_b in canonical_a
-
-            relationship = "merge"
-            parent_id = None
-            child_id = None
-            
-            # Check hierarchy if same topic
-            if topic_a == topic_b and type_a and type_b:
-                hierarchy_rel = self.get_hierarchy_relationship(type_a, type_b, topic_a)
-                
-                if hierarchy_rel == "parent":
-                    relationship = "hierarchy"
-                    parent_id = id_a
-                    child_id = id_b
-                elif hierarchy_rel == "child":
-                    relationship = "hierarchy"
-                    parent_id = id_b
-                    child_id = id_a
-            
-            # Second gate: stricter thresholds before LLM
-            if relationship == "merge":                
-                if is_substring and fuzz_score >= 75:
-                    pass
-                elif fuzz_score < 91:
-                    continue
-            
-            if relationship == "hierarchy":
-                if is_substring and fuzz_score < 80:
-                    continue
-                if not is_substring and fuzz_score < 90:
-                    continue
-
-            neighbors_a = self.store.get_neighbor_ids(id_a)
-            neighbors_b = self.store.get_neighbor_ids(id_b)
-            neighbors_a.discard(1)  # user id - hardcoded for now
-            neighbors_b.discard(1)
-            
-            shared_neighbors = neighbors_a & neighbors_b
-            if shared_neighbors and relationship == "merge":
-                high_confidence = fuzz_score >= 95 and type_a and type_b and type_a == type_b
-            
-                if not high_confidence:
-                    logger.info(f"Blocked ({id_a}, {id_b}) | Shared neighbors: {shared_neighbors} (score={fuzz_score}, types={type_a}/{type_b})")
-                    continue
-                else:
-                    logger.info(f"Passed ({id_a}, {id_b}) | Shared neighbors as supporting evidence (score={fuzz_score}, type={type_a})")
-            
-            candidates.append({
-                "primary_id": id_a,
-                "secondary_id": id_b,
-                "primary_name": profile_a.get("canonical_name", "Unknown"),
-                "secondary_name": profile_b.get("canonical_name", "Unknown"),
-                "primary_type": type_a,
-                "secondary_type": type_b,
-                "primary_session": profile_a.get("session_id"),
-                "secondary_session": profile_b.get("session_id"),
-                "topic": topic_a,
-                "profile_a": {
-                    **profile_a,
-                    "aliases": self.get_mentions_for_id(id_a)
-                },
-                "profile_b": {
-                    **profile_b,
-                    "aliases": self.get_mentions_for_id(id_b)
-                },
-                "fuzz_score": fuzz_score,
-                "shared_neighbor_count": len(shared_neighbors),
-                "relationship": relationship,
-                "parent_id": parent_id,
-                "child_id": child_id,
-            })
-            
-            logger.info(f"Candidate ({id_a}, {id_b}) {profile_a.get('canonical_name')} <-> {profile_b.get('canonical_name')} | score={fuzz_score}")
-
-        merge_count = sum(1 for c in candidates if c["relationship"] == "merge")
-        hierarchy_count = sum(1 for c in candidates if c["relationship"] == "hierarchy")
-        logger.info(f"Detection complete: {merge_count} merge, {hierarchy_count} hierarchy candidates")
-        
+        logger.info(f"Detection complete: {len(candidates)} candidates found")
         return candidates
     
     def remove_entities(self, entity_ids: List[int]) -> int:
@@ -522,53 +361,157 @@ class EntityResolver:
                 to_remove = [alias for alias, id_ in self._name_to_id.items() if id_ == eid]
                 for alias in to_remove:
                     del self._name_to_id[alias]
-            
-            if removed > 0:
-                try:
-                    self.index_id_map.remove_ids(np.array(entity_ids, dtype=np.int64))
-                except Exception as e:
-                    logger.warning(f"FAISS removal failed: {e}")
         
         if removed > 0:
             logger.info(f"Removed {removed} entities from resolver")
         return removed
-    
-    def debug_search(self, query: str, target_msg_id: str, k: int = 20):
-        """Check if a specific message appears in search results and where."""
-        
-        # BM25
-        tokens = query.lower().split()
-        bm25_scores = self.bm25_index.get_scores(tokens)
-        bm25_ranked = sorted(enumerate(bm25_scores), key=lambda x: x[1], reverse=True)
-        bm25_position = None
-        for rank, (idx, score) in enumerate(bm25_ranked):
-            if self.msg_id_order[idx] == target_msg_id:
-                bm25_position = (rank, score)
-                break
-        
-        # Vector
-        q_emb = self.embedding_model.encode([query]).astype(np.float32)
-        faiss.normalize_L2(q_emb)
-        scores, ids = self.msg_index.search(q_emb, 100)
-        
-        vector_position = None
-        for rank, (idx, score) in enumerate(zip(ids[0], scores[0])):
-            if idx >= 0 and self.msg_int_to_id.get(int(idx)) == target_msg_id:
-                vector_position = (rank, score)
-                break
-        
-        # Full search result
-        results = self._search_messages(query, k)
-        final_position = None
-        for rank, (msg_id, score) in enumerate(results):
-            if msg_id == target_msg_id:
-                final_position = (rank, score)
-                break
-        
+
+
+    def _collect_candidate_pairs(
+        self, 
+        generic_tokens: set,
+        fuzzy_substring_threshold: int = 75,
+        fuzzy_non_substring_threshold: int = 91,
+    ) -> Dict[Tuple[int, int], Tuple[int, bool]]:
+        """
+        Vector search + fuzzy filter.
+        Returns {(id_a, id_b): (fuzz_score, is_substring)}
+        """
+        seen_pairs = {}
+
+        with self._lock:
+            snapshot_ids = list(self.entity_profiles.keys())
+
+        for primary_id in snapshot_ids:
+            primary_profile = self.entity_profiles.get(primary_id)
+            if not primary_profile:
+                continue
+
+            primary_name = primary_profile["canonical_name"]
+            neighbors = self.store.search_similar_entities(primary_id, limit=50)
+
+            for neighbor_id, _ in neighbors:
+                if neighbor_id == primary_id or neighbor_id < primary_id:
+                    continue
+
+                neighbor_profile = self.entity_profiles.get(neighbor_id)
+                if not neighbor_profile:
+                    continue
+
+                neighbor_name = neighbor_profile["canonical_name"]
+                score = fuzz.WRatio(primary_name, neighbor_name)
+                is_substring = is_substring_match(primary_name, neighbor_name)
+
+                if is_substring and score >= fuzzy_substring_threshold:
+                    pass
+                elif score >= fuzzy_non_substring_threshold:
+                    pass
+                else:
+                    continue
+
+                # generic token overlap check
+                tokens_i = set(primary_name.lower().split()) - generic_tokens
+                tokens_j = set(neighbor_name.lower().split()) - generic_tokens
+
+                if not (tokens_i & tokens_j):
+                    logger.warning(f"Skipping {primary_id}-{neighbor_id}: generic token overlap only")
+                    continue
+
+                pair_key = (primary_id, neighbor_id)
+                if pair_key not in seen_pairs or score > seen_pairs[pair_key][0]:
+                    seen_pairs[pair_key] = (score, is_substring)
+
+        return seen_pairs
+
+
+    def _classify_pair(
+        self,
+        id_a: int,
+        id_b: int,
+        fuzz_score: int,
+        is_substring: bool,
+        facts_by_entity: Dict[int, List[Fact]],
+        hierarchy_substring_threshold: int = 80,
+        hierarchy_non_substring_threshold: int = 91,
+    ) -> Optional[dict]:
+        """
+        Evaluate one pair for merge or hierarchy relationship.
+        Returns candidate dict or None to skip.
+        """
+        if self.store.has_direct_edge(id_a, id_b):
+            return None
+        if self.store.has_hierarchy_edge(id_a, id_b):
+            return None
+
+        profile_a = self.entity_profiles.get(id_a, {})
+        profile_b = self.entity_profiles.get(id_b, {})
+
+        type_a = profile_a.get("type")
+        type_b = profile_b.get("type")
+        topic_a = profile_a.get("topic", "General")
+        topic_b = profile_b.get("topic", "General")
+
+        is_cross_topic = topic_a != topic_b
+        if is_cross_topic:
+            if not (fuzz_score >= 96 and type_a == type_b):
+                return None
+
+        relationship = "merge"
+        parent_id = None
+        child_id = None
+
+        if topic_a == topic_b and type_a and type_b:
+            hierarchy_rel = self.get_hierarchy_relationship(type_a, type_b, topic_a)
+            if hierarchy_rel == "parent":
+                relationship = "hierarchy"
+                parent_id = id_a
+                child_id = id_b
+            elif hierarchy_rel == "child":
+                relationship = "hierarchy"
+                parent_id = id_b
+                child_id = id_a
+
+            
+        if relationship == "hierarchy":
+            if is_cross_topic:
+                return None
+            if is_substring and fuzz_score < hierarchy_substring_threshold:
+                return None
+            if not is_substring and fuzz_score < hierarchy_non_substring_threshold:
+                return None
+
+        # shared neighbor check
+        if relationship == "merge":
+            neighbors_a = self.store.get_neighbor_ids(id_a)
+            neighbors_b = self.store.get_neighbor_ids(id_b)
+            neighbors_a.discard(1) # ignore user node
+            neighbors_b.discard(1)
+
+            shared_neighbors = neighbors_a & neighbors_b
+            if shared_neighbors:
+                high_confidence = fuzz_score >= 95 and type_a and type_b and type_a == type_b
+                if not high_confidence:
+                    return None
+        else:
+            shared_neighbors = set()
+
+
         return {
-            "query": query,
-            "target": target_msg_id,
-            "bm25": bm25_position,      # (rank, score) or None
-            "vector": vector_position,   # (rank, score) or None
-            "final": final_position      # (rank, score) or None
+            "primary_id": id_a,
+            "secondary_id": id_b,
+            "primary_name": profile_a.get("canonical_name", "Unknown"),
+            "secondary_name": profile_b.get("canonical_name", "Unknown"),
+            "primary_type": type_a,
+            "secondary_type": type_b,
+            "primary_session": profile_a.get("session_id"),
+            "secondary_session": profile_b.get("session_id"),
+            "topic": topic_a,
+            "facts_a": facts_by_entity.get(id_a, []),
+            "facts_b": facts_by_entity.get(id_b, []),
+            "fuzz_score": fuzz_score,
+            "shared_neighbor_count": len(shared_neighbors),
+            "relationship": relationship,
+            "parent_id": parent_id,
+            "child_id": child_id,
         }
+    

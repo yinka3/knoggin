@@ -44,7 +44,9 @@ class NLPPipeline:
     
     def parse_entities(self, reasoning: str) -> Optional[ExtractionResponse]:
         """Parse <entities> block and validate via Pydantic."""
-        match = re.search(r"<entities>(.*?)</entities>", reasoning, re.DOTALL)
+        pattern = r"<\s*entities\s*>(.*?)(?:<\s*/\s*entities\s*>|$)"
+        
+        match = re.search(pattern, reasoning, re.DOTALL | re.IGNORECASE)
     
         if match:
             content = match.group(1).strip()

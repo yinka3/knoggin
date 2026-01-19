@@ -1,24 +1,25 @@
-from datetime import datetime, timezone
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from loguru import logger
 import numpy as np
 from rapidfuzz import fuzz
-
+from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 from schema.dtypes import BatchProfileResponse, FactMergeResult, ProfileUpdate, Fact
 
 
 def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
     if not vec_a or not vec_b:
         return 0.0
-    a = np.array(vec_a)
-    b = np.array(vec_b)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+    
+    a = np.array(vec_a).reshape(1, -1)
+    b = np.array(vec_b).reshape(1, -1)
+    
+    return float(sklearn_cosine_similarity(a, b)[0][0])
 
 def find_duplicate_facts(
     facts_a: List[Fact], 
     facts_b: List[Fact],
-    threshold: float = 0.85
+    threshold: float = 0.96
 ) -> List[str]:
     """
     Find facts in B that are semantic duplicates of facts in A.
@@ -33,27 +34,26 @@ def find_duplicate_facts(
     if not active_a or not active_b:
         return []
     
+    emb_a = [f.embedding for f in active_a]
+    emb_b = [f.embedding for f in active_b]
+    
+    similarity_matrix = sklearn_cosine_similarity(emb_b, emb_a)
+    
     to_invalidate = []
-    
-    emb_a = np.array([f.embedding for f in active_a])
-    emb_b = np.array([f.embedding for f in active_b])
-    
-    emb_a = emb_a / np.linalg.norm(emb_a, axis=1, keepdims=True)
-    emb_b = emb_b / np.linalg.norm(emb_b, axis=1, keepdims=True)
-    similarity_matrix = emb_b @ emb_a.T
     
     for i, fact_b in enumerate(active_b):
         max_sim = similarity_matrix[i].max()
+        
         if max_sim >= threshold:
             to_invalidate.append(fact_b.id)
-            logger.debug(f"Duplicate fact: '{fact_b.content[:50]}...' (sim={max_sim:.3f})")
+            logger.info(f"Marked duplicate fact for invalidation: '{fact_b.content[:50]}...' (sim={max_sim:.3f})")
     
     return to_invalidate
 
 
 def has_sufficient_facts(candidate: dict, min_facts: int = 2) -> bool:
-    facts_a = candidate["profile_a"].get("facts", [])
-    facts_b = candidate["profile_b"].get("facts", [])
+    facts_a = candidate.get("facts_a", [])
+    facts_b = candidate.get("facts_b", [])
     return len(facts_a) >= min_facts and len(facts_b) >= min_facts
 
 
@@ -76,7 +76,7 @@ def process_extracted_facts(
     for fact_str in new_facts:
         fact_str = fact_str.strip()
 
-        inv_match = re.match(r"^\[INVALIDATES:\s*(.+?)\]$", fact_str)
+        inv_match = re.search(r"^\[INVALIDATES:\s*(.+?)\]$", fact_str)
         if inv_match:
             old_text = inv_match.group(1).strip()
             matched_fact = _find_matching_fact(old_text, active_facts)
@@ -89,6 +89,16 @@ def process_extracted_facts(
 
     return FactMergeResult(to_invalidate=to_invalidate, new_contents=new_contents)
 
+def extract_fact_with_source(raw_fact: str) -> Tuple[str, Optional[str]]:
+    """
+    Parse fact string to extract content and source msg_id.
+    """
+    match = re.search(r"^(.*?)\[MSG_?(\d+)\]", raw_fact.strip())
+    if match:
+        content = match.group(1).strip()
+        msg_id = f"msg_{match.group(2)}"
+        return content, msg_id
+    return raw_fact.strip(), None
 
 
 def _find_matching_fact(text: str, facts: List[Fact], threshold: int = 92) -> Fact | None:
@@ -101,42 +111,87 @@ def _find_matching_fact(text: str, facts: List[Fact], threshold: int = 92) -> Fa
     
     return None
 
-
 def _is_duplicate(content: str, facts: List[Fact]) -> bool:
     """Check if content already exists in facts (exact match)."""
     content_lower = content.lower().strip()
     return any(f.content.lower().strip() == content_lower for f in facts)
 
 def parse_new_facts(reasoning: str) -> Optional[BatchProfileResponse]:
-    """Parse <new_facts> block and validate via Pydantic."""
-    match = re.search(r"<new_facts>(.*?)</new_facts>", reasoning, re.DOTALL)
+    """
+    Parse <new_facts> block.
+    Lenient on closing tag, strict on opening tag.
+    """
+    if not reasoning:
+        return None
+
+    start_match = re.search(r"(?i)<new_facts>", reasoning)
+    if not start_match:
+        return None
     
-    if match:
-        content = match.group(1).strip()
+    content_start = start_match.end()
+    remaining = reasoning[content_start:]
+    
+    end_match = re.search(r"(?i)</new_facts>", remaining)
+    if end_match:
+        content = remaining[:end_match.start()].strip()
     else:
-        lines = []
-        for line in reasoning.strip().split("\n"):
-            if ":" in line and "|" in line:
-                lines.append(line.strip())
-        content = "\n".join(lines)
+        logger.warning("Missing </new_facts> closing tag. Using truncated content.")
+        content = remaining.strip()
     
     if not content:
         return None
     
     profiles = []
     for line in content.split("\n"):
+        line = line.strip()
+        
         if ":" not in line:
             continue
-        entity_name, facts_part = line.split(":", 1)
-        facts = [f.strip() for f in facts_part.split("|") if f.strip()]
-        if facts:
-            profiles.append(ProfileUpdate(
-                canonical_name=entity_name.strip(),
-                facts=facts
-            ))
+        
+        try:
+            entity_name, facts_part = line.split(":", 1)
+            facts = [f.strip() for f in facts_part.split("|") if f.strip()]
+            
+            if facts:
+                profiles.append(ProfileUpdate(
+                    canonical_name=entity_name.strip(),
+                    facts=facts
+                ))
+        except ValueError:
+            continue
     
     if not profiles:
         return None
     
     return BatchProfileResponse(profiles=profiles)
+
+def parse_merge_score(reasoning: str) -> Optional[float]:
+    """
+    Parses <score>0.XX</score> from text. 
+    Lenient on closing tag. Strict on numeric bounds.
+    """
+    if not reasoning:
+        return None
+        
+    match = re.search(r"(?i)<score>\s*(.*?)(?:</score>|$)", reasoning, re.DOTALL)
+    
+    if not match:
+        return None
+        
+    score_str = match.group(1).strip()
+    
+    try:
+        # sanity check: "0.9.5" is invalid
+        if score_str.count('.') > 1:
+            return None
+            
+        score = float(score_str)
+        
+        if 0.0 <= score <= 1.0:
+            return score
+            
+    except ValueError:
+        pass
+        
+    return None
 

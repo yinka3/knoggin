@@ -453,26 +453,6 @@ class Tools:
             result["children"] = children
         
         return result
-    
-    async def get_entity_history(self, entity_id: int) -> str:
-        """
-        Retrieves old/archived facts about an entity that have been removed 
-        from the main profile to save space. 
-        
-        Use this when:
-        1. The user asks about a specific past event not found in the main profile.
-        2. You need to verify details that might have been invalidated or archived.
-        
-        Args:
-            entity_id: The ID of the entity (found via search_entity).
-        """
-        history = self.store.get_archived_facts(entity_id)
-        
-        if not history:
-            return f"No archived history found for Entity ID {entity_id}."
-            
-        formatted_history = "\n".join([f"- {fact}" for fact in history])
-        return f"Archived History for Entity {entity_id}:\n{formatted_history}"
 
 
 

@@ -3,15 +3,17 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
 import json
-from typing import Dict, List, Union
+import re
+from typing import Dict, List, Optional, Union
 import uuid
 from loguru import logger
+import numpy as np
 from db.memgraph import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobNotifier, JobResult
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
-from main.prompts import get_profile_extraction_prompt
-from jobs.utils import process_extracted_facts, parse_new_facts
+from main.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
+from jobs.jobs_utils import extract_fact_with_source, process_extracted_facts, parse_new_facts
 from schema.dtypes import Fact, FactMergeResult
 
 class ProfileRefinementJob(BaseJob):
@@ -92,16 +94,22 @@ class ProfileRefinementJob(BaseJob):
             parsed = json.loads(data)
             ts = datetime.fromisoformat(parsed['timestamp'])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
-            
             role_label = "User" if parsed["role"] == "user" else "STELLA"
+            
+            if parsed["role"] == "user" and parsed.get("user_msg_id") is not None:
+                formatted = f"[MSG_{parsed['user_msg_id']}] [{date_str}] [{role_label}]: {parsed['content']}"
+            else:
+                formatted = f"[{date_str}] [{role_label}]: {parsed['content']}"
+            
             turn = {
                 "turn_id": turn_id,
                 "role": parsed["role"],
                 "role_label": role_label,
                 "content": parsed["content"],
-                "formatted": f"[{date_str}] [{role_label}]: {parsed['content']}",
+                "formatted": formatted,
                 "raw": parsed["content"],
-                "timestamp": parsed["timestamp"]
+                "timestamp": parsed["timestamp"],
+                "user_msg_id": parsed.get("user_msg_id")
             }
             
             if parsed["role"] == "user":
@@ -179,6 +187,10 @@ class ProfileRefinementJob(BaseJob):
             logger.warning("User profile refinement: empty conversation text")
             return False
         
+        # Get current message ID for checkpoint
+        current_msg_id = await ctx.redis.get(f"last_processed_msg:{ctx.user_name}")
+        current_msg_id = int(current_msg_id) if current_msg_id else 0
+        
         # Fetch existing facts from DB
         loop = asyncio.get_running_loop()
         existing_facts = await loop.run_in_executor(
@@ -194,7 +206,7 @@ class ProfileRefinementJob(BaseJob):
                 "entity_name": ctx.user_name,
                 "entity_type": "person",
                 "existing_facts": [f.content for f in existing_facts],
-                "known_aliases": [alias for alias in profile["aliases"]]
+                "known_aliases": [alias for alias in profile.get("aliases", [ctx.user_name])]
             }],
             "conversation": conversation_text
         })
@@ -226,18 +238,22 @@ class ProfileRefinementJob(BaseJob):
         
         merge_result = process_extracted_facts(existing_facts, new_facts)
         
-        await self._apply_fact_changes(ctx, user_id, merge_result)
+        valid_msg_ids = {f"msg_{turn.get('user_msg_id')}" for turn in conversation if turn.get('user_msg_id')}
+        await self._apply_fact_changes(user_id, merge_result, existing_facts, valid_msg_ids)
         
-        embedding = await self._update_entity_embedding(ctx, user_id, ctx.user_name)
-
+        embedding = await self._update_entity_embedding(user_id, ctx.user_name)
+        
+        # Update entity profile in graph
         await loop.run_in_executor(
-                self.executor,
+            self.executor,
+            partial(
                 self.store.update_entity_profile,
-                entity_id=update["id"],
-                canonical_name=update["canonical_name"],
-                embedding=update["embedding"],
-                last_msg_id=update["last_msg_id"]
+                entity_id=user_id,
+                canonical_name=ctx.user_name,
+                embedding=embedding,
+                last_msg_id=current_msg_id
             )
+        )
         
         logger.info(f"Refined user profile for {ctx.user_name}")
         return True
@@ -247,15 +263,16 @@ class ProfileRefinementJob(BaseJob):
         ctx: JobContext,
         batch: List[Dict],
         conversation_text: str,
-        ents_to_facts: Dict[int, Union[List[Fact], List]],
-        current_msg_id: int
+        ents_to_facts: Dict[int, List[Fact]],
+        current_msg_id: int,
+        valid_msg_ids: set
     ) -> List[Dict]:
         """Process one batch of entities. Returns list of updates."""
         async with self.batch_semaphore:
             llm_input = [{
                 "entity_name": e["entity_name"],
                 "entity_type": e["entity_type"],
-                "existing_facts": e["existing_facts"],
+                "existing_facts": [f.content for f in e["existing_facts"]],
                 "known_aliases": e["known_aliases"]
             } for e in batch]
             
@@ -279,8 +296,8 @@ class ProfileRefinementJob(BaseJob):
             
             updates = []
             profile_map = {p.canonical_name.lower(): p for p in response.profiles}
+            
             for orig in batch:
-
                 profile_out = profile_map.get(orig["entity_name"].lower())
                 if not profile_out:
                     continue
@@ -288,19 +305,16 @@ class ProfileRefinementJob(BaseJob):
                 new_facts = profile_out.facts
                 
                 if not new_facts:
-                    logger.debug(f"No new facts extracted for {orig["entity_name"]}")
+                    logger.debug(f"No new facts extracted for {orig['entity_name']}")
                     continue
                 
                 existing_facts = ents_to_facts[orig["ent_id"]]
-
                 merge_result = process_extracted_facts(existing_facts, new_facts)
-    
-                await self._apply_fact_changes(ctx, orig["ent_id"], merge_result)
                 
-                # Update entity embedding (resolution text from active facts)
-                await self._update_entity_embedding(ctx, orig["ent_id"], ctx.user_name)
+                await self._apply_fact_changes(orig["ent_id"], merge_result, existing_facts, valid_msg_ids)
                 
-                logger.info(f"Refined user profile for {ctx.user_name}")
+                # Update entity embedding
+                embedding = await self._update_entity_embedding(orig["ent_id"], orig["entity_name"])
                 
                 updates.append({
                     "id": orig["ent_id"],
@@ -308,15 +322,18 @@ class ProfileRefinementJob(BaseJob):
                     "embedding": embedding,
                     "last_msg_id": current_msg_id
                 })
-    
+
             return updates
     
 
     async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]):
         """Process entities in batches instead of individually."""
         
-        current_msg_id = await ctx.redis.get("global:next_msg_id")
+        current_msg_id = await ctx.redis.get(f"last_processed_msg:{ctx.user_name}")
         current_msg_id = int(current_msg_id) if current_msg_id else 0
+        conversation_text = "\n".join([turn["formatted"] for turn in conversation])
+        valid_msg_ids = {f"msg_{turn['user_msg_id']}" for turn in conversation if turn.get('user_msg_id') is not None}
+
         loop = asyncio.get_running_loop()
 
         entity_inputs = []
@@ -350,7 +367,7 @@ class ProfileRefinementJob(BaseJob):
         ]
         
         tasks = [
-            self._process_single_batch(ctx, batch, conversation_text, ents_to_facts, current_msg_id)
+            self._process_single_batch(ctx, batch, conversation_text, ents_to_facts, current_msg_id, valid_msg_ids)
             for batch in batches
         ]
         
@@ -361,7 +378,9 @@ class ProfileRefinementJob(BaseJob):
     async def _apply_fact_changes(
         self,
         entity_id: int,
-        merge_result: FactMergeResult
+        merge_result: FactMergeResult,
+        existing_facts: List[Fact],
+        valid_msg_ids: Optional[set] = None
     ):
         """Invalidate old facts and create new ones."""
         loop = asyncio.get_running_loop()
@@ -375,32 +394,130 @@ class ProfileRefinementJob(BaseJob):
                 now
             )
         
-        for content in merge_result.new_contents:
+        invalidated_ids = set(merge_result.to_invalidate)
+        active_existing = [f for f in existing_facts if f.invalid_at is None and f.id not in invalidated_ids]
+        
+        facts_to_create = []
+
+        for raw_content in merge_result.new_contents:
+            content, msg_id = extract_fact_with_source(raw_content)
+            
+            if msg_id and valid_msg_ids and msg_id not in valid_msg_ids:
+                logger.warning(f"Invalid msg_id {msg_id} for fact, setting to None")
+                msg_id = None
+            
             embedding = await loop.run_in_executor(
                 self.executor,
                 self.resolver.embedding_model.encode,
                 [content]
             )
+            embedding = embedding[0].tolist()
+            
+            contradicted_id = await self._detect_contradictions(content, embedding, active_existing)
+            if contradicted_id:
+                await loop.run_in_executor(
+                    self.executor,
+                    self.store.invalidate_fact,
+                    contradicted_id,
+                    now
+                )
+                active_existing = [f for f in active_existing if f.id != contradicted_id]
             
             fact = Fact(
                 id=str(uuid.uuid4()),
                 content=content,
                 valid_at=now,
-                embedding=embedding[0].tolist()
+                source_msg_id=msg_id,
+                embedding=embedding
             )
+            facts_to_create.append(fact)
             
-            await loop.run_in_executor(
-                self.executor,
-                self.store.create_fact,
-                entity_id,
-                fact
-            )
+            active_existing.append(fact)
+
+        if facts_to_create:
+            try:
+                count = await loop.run_in_executor(
+                    self.executor,
+                    self.store.create_facts_batch,
+                    entity_id,
+                    facts_to_create
+                )
+                logger.debug(f"Batched created {count} facts for entity {entity_id}")
+            except Exception as e:
+                logger.error(f"Failed to write facts for {entity_id}, dropping {len(facts_to_create)} facts. Error: {e}")
+    
+    async def _detect_contradictions(
+        self,
+        new_content: str,
+        new_embedding: List[float],
+        existing_facts: List[Fact],
+        similarity_low: float = 0.65,
+        similarity_high: float = 0.95
+    ) -> Optional[str]:
+        """
+        Find existing fact that new fact contradicts.
+        Uses embedding filter + LLM judgment.
+        Returns fact ID to invalidate, or None.
+        """
+        if not existing_facts:
+            return None
+        
+        new_emb = np.array(new_embedding)
+        new_emb = new_emb / np.linalg.norm(new_emb)
+        
+        candidates = []
+        
+        for fact in existing_facts:
+            if not fact.embedding:
+                continue
+            
+            existing_emb = np.array(fact.embedding)
+            existing_emb = existing_emb / np.linalg.norm(existing_emb)
+            
+            similarity = float(np.dot(new_emb, existing_emb))
+            
+            if similarity_low <= similarity < similarity_high:
+                if new_content.lower().strip() != fact.content.lower().strip():
+                    candidates.append((fact, similarity))
+        
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        
+        for fact, sim in candidates:
+            is_contradiction = await self._llm_judge_contradiction(fact.content, new_content)
+            if is_contradiction:
+                logger.info(f"LLM confirmed contradiction: '{new_content[:50]}' supersedes '{fact.content[:50]}' (sim={sim:.3f})")
+                return fact.id
+        
+        return None
+
+
+    async def _llm_judge_contradiction(self, fact_a: str, fact_b: str) -> bool:
+        """Ask LLM if fact_b contradicts fact_a."""
+        system = get_contradiction_judgment_prompt()
+        user = f"FACT_A: {fact_a}\nFACT_B: {fact_b}"
+        
+        result = await self.llm.call_reasoning(system, user)
+        
+        if not result:
+            return False
+        
+        match = re.search(r"<contradicts>\s*(true|false)\s*</contradicts>", result.lower())
+        if match:
+            return match.group(1) == "true"
+        
+        if "true" in result.lower():
+            return True
+        
+        return False
     
     async def _update_entity_embedding(
         self,
         entity_id: int, 
         canonical_name: str
-    ):
+    ) -> List[float]:
         """Recompute entity embedding from current active facts."""
         loop = asyncio.get_running_loop()
         

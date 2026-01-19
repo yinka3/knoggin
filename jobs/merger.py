@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult, JobNotifier
-from jobs.utils import cosine_similarity, find_duplicate_facts, has_sufficient_facts
+from jobs.jobs_utils import cosine_similarity, find_duplicate_facts, has_sufficient_facts, parse_merge_score
 from main.prompts import get_merge_judgment_prompt
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
@@ -60,31 +60,29 @@ class MergeDetectionJob(BaseJob):
     async def _get_merge_judgment(self, candidate: dict) -> Optional[float]:
         system = get_merge_judgment_prompt(self.user_name)
         user_content = json.dumps({
-            "entity_a": candidate["profile_a"],
-            "entity_b": candidate["profile_b"]
+            "entity_a": {
+                "canonical_name": candidate["primary_name"],
+                "type": candidate.get("primary_type"),
+                "facts": [f.content for f in candidate.get("facts_a", [])]
+            },
+            "entity_b": {
+                "canonical_name": candidate["secondary_name"],
+                "type": candidate.get("secondary_type"),
+                "facts": [f.content for f in candidate.get("facts_b", [])]
+            }
         })
         
         result = await self.llm.call_reasoning(system, user_content)
         
         if not result:
             return None
+            
+        score = parse_merge_score(result)
         
-        tag_match = re.search(r"<score>\s*([\d.]+)\s*</score>", result)
-        if tag_match:
-            score = float(tag_match.group(1))
-            if 0.0 <= score <= 1.0:
-                return score
-        
-        # fallback: last float in response (for unstructured outputs)
-        floats = re.findall(r"\b(0\.\d+|1\.0{0,2})\b", result)
-        if floats:
-            score = float(floats[-1])
-            if 0.0 <= score <= 1.0:
-                logger.debug(f"Used fallback extraction for ({candidate['primary_id']}, {candidate['secondary_id']}): {score}")
-                return score
-        
-        logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']}): {result}")
-        return None
+        if score is None:
+            logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']})")
+            
+        return score
     
         
     async def _execute_merge_db_only(
@@ -130,91 +128,48 @@ class MergeDetectionJob(BaseJob):
     
     def _sync_resolver(self, primary_id: int, secondary_id: int):
         """Update EntityResolver after merge."""
-        secondary_aliases = self.ent_resolver.get_mentions_for_id(secondary_id)
-        
-        with self.ent_resolver._lock:
-            for alias in secondary_aliases:
-                self.ent_resolver._name_to_id[alias.lower()] = primary_id
-            
-            if secondary_id in self.ent_resolver.entity_profiles:
-                del self.ent_resolver.entity_profiles[secondary_id]
-        
-        try:
-            self.ent_resolver.index_id_map.remove_ids(
-                np.array([secondary_id], dtype=np.int64)
-            )
-        except Exception as e:
-            logger.warning(f"FAISS removal failed for {secondary_id}: {e}")
+        self.ent_resolver.merge_into(primary_id, secondary_id)
     
     async def _judgement(self, candidates: List, auto_merge: List, hitl: List) -> Tuple[List, List]:
-
         loop = asyncio.get_running_loop()
         collisions = await loop.run_in_executor(None, self.store.find_alias_collisions)
         collision_set = {tuple(sorted([a, b])) for a, b in collisions}
-
-        seen_collisions = set()
 
         for candidate in candidates:
             pair_key = tuple(sorted([candidate["primary_id"], candidate["secondary_id"]]))
             
             if pair_key in collision_set:
-                logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | Exact alias collision")
+                logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | Alias collision")
                 auto_merge.append(candidate)
-                seen_collisions.add(pair_key)
                 continue
 
-            if has_sufficient_facts(candidate):
-                emb_a = self.ent_resolver.get_embedding_for_id(candidate["primary_id"])
-                emb_b = self.ent_resolver.get_embedding_for_id(candidate["secondary_id"])
-                cosine_score = cosine_similarity(emb_a, emb_b)
+            if not has_sufficient_facts(candidate):
+                logger.info(f"Skipped ({candidate['primary_id']}, {candidate['secondary_id']}) | Insufficient facts")
+                continue
+            
+            emb_a = self.ent_resolver.get_embedding_for_id(candidate["primary_id"])
+            emb_b = self.ent_resolver.get_embedding_for_id(candidate["secondary_id"])
+            cosine_score = cosine_similarity(emb_a, emb_b)
 
-                if cosine_score < 0.45:
-                    logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
+            if cosine_score >= 0.93:
+                logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
+                auto_merge.append(candidate)
+            elif cosine_score < 0.45:
+                logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
+            else:
+                score = await self._get_merge_judgment(candidate)
+                if score is None:
                     continue
                 
-                if cosine_score > 0.93:
-                    logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
+                candidate["llm_score"] = score
+                
+                if score >= self.AUTO_MERGE_THRESHOLD:
                     auto_merge.append(candidate)
-                    continue
+                elif score >= self.HITL_THRESHOLD:
+                    hitl.append(candidate)
+                else:
+                    logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
 
-            score = await self._get_merge_judgment(candidate)
-            if score is None:
-                continue
-            
-            candidate["llm_score"] = score
-            
-            if score >= self.AUTO_MERGE_THRESHOLD:
-                auto_merge.append(candidate)
-            elif score >= self.HITL_THRESHOLD:
-                hitl.append(candidate)
-            else:
-                logger.info(f"Rejected merge ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
-        
-        for id_a, id_b in collisions:
-            pair_key = tuple(sorted([id_a, id_b]))
-            if pair_key in seen_collisions:
-                continue
-            
-            profile_a = self.ent_resolver.entity_profiles.get(id_a)
-            profile_b = self.ent_resolver.entity_profiles.get(id_b)
-            
-            if not profile_a or not profile_b:
-                logger.warning(f"Collision pair ({id_a}, {id_b}) missing profile(s), skipping")
-                continue
-            
-            collision_candidate = {
-                "primary_id": id_a,
-                "secondary_id": id_b,
-                "primary_name": profile_a.get("canonical_name", "Unknown"),
-                "secondary_name": profile_b.get("canonical_name", "Unknown"),
-                "profile_a": profile_a,
-                "profile_b": profile_b,
-            }
-        
-            logger.info(f"Auto-merge ({id_a}, {id_b}) | Exact alias collision (graph-only)")
-            auto_merge.append(collision_candidate)
-
-        
         return auto_merge, hitl
     
     async def _process_merges(self, ctx: JobContext, candidates: list) -> str:
@@ -279,6 +234,7 @@ class MergeDetectionJob(BaseJob):
             successful = 0
             failed = 0
             
+            dirty_ids = []
             for item in final_merge_list:
                 success = await self._execute_merge_db_only(
                     item["primary_id"], 
@@ -289,9 +245,39 @@ class MergeDetectionJob(BaseJob):
                 if success:
                     successful += 1
                     self._sync_resolver(item["primary_id"], item["secondary_id"])
-                    logger.info(f"Merged {item['primary_name']} <- {item['secondary_name']}")
+                    loop = asyncio.get_running_loop()
+                    
+                    all_facts = await loop.run_in_executor(
+                        None, 
+                        self.store.get_facts_for_entity, 
+                        item["primary_id"], 
+                        True # active_only
+                    )
+                    
+                    resolution_text = f"{item['primary_name']}. " + " ".join([f.content for f in all_facts])
+                    
+                    new_embedding = self.ent_resolver.update_profile_embedding(
+                        item["primary_id"], 
+                        resolution_text
+                    )
+                    
+                    await loop.run_in_executor(
+                        None,
+                        self.store.update_entity_embedding,
+                        item["primary_id"],
+                        new_embedding
+                    )
+
+                    dirty_ids.append(item["primary_id"])
+
+                    logger.info(f"Merged & Re-embedded {item['primary_name']} <- {item['secondary_name']}")
                 else:
                     failed += 1
+            
+            if dirty_ids:
+                dirty_key = f"dirty_entities:{ctx.user_name}"
+                await ctx.redis.sadd(dirty_key, *[str(eid) for eid in dirty_ids])
+                logger.info(f"Queued {len(dirty_ids)} merged entities for immediate profile refinement")
             
             proposals_stored = await self._store_hitl_proposals(ctx, hitl, seen_ids)
 

@@ -14,10 +14,9 @@ from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from main.prompts import (
     get_disambiguation_reasoning_prompt,
-    get_connection_reasoning_prompt,
-    get_connection_formatter_prompt,
+    get_connection_reasoning_prompt
 )
-from main.utils import parse_disambiguation
+from main.utils import build_connection_response, parse_connection_response, parse_disambiguation
 from schema.dtypes import (
     DisambiguationResult,
     ConnectionExtractionResponse,
@@ -76,6 +75,18 @@ class BatchProcessor:
             mentions_dict, emotions = await self._extract_mentions(messages)
             result.emotions = emotions
             
+            msg_texts = [m['message'] for m in messages]
+    
+            loop = asyncio.get_running_loop()
+            embeddings = await loop.run_in_executor(
+                self.executor, 
+                self.ent_resolver.compute_batch_embeddings, 
+                msg_texts
+            )
+
+            for i, msg in enumerate(messages):
+                msg['embedding'] = embeddings[i]
+
             if not mentions_dict:
                 logger.info("No mentions found in batch, skipping LLM calls")
                 return result
@@ -155,23 +166,37 @@ class BatchProcessor:
             candidates = self.ent_resolver.get_candidate_ids(name)
             
             for rank, eid in enumerate(candidates):
-                score = 1.0 / (rank + 1)  # Higher rank = higher score
+                score = 1.0 / (rank + 1) # higher ranks gets boosted score
                 if eid not in candidate_scores or score > candidate_scores[eid]:
                     candidate_scores[eid] = score
+                logger.debug(f"Mention '{name}' candidate entity ID {eid} = score {score}")
         
 
         sorted_ids = sorted(candidate_scores.keys(), key=lambda x: candidate_scores[x], reverse=True)
+
+        if not sorted_ids:
+            return []
+        
+        loop = asyncio.get_running_loop()
+        facts_map = await loop.run_in_executor(
+            self.executor,
+            partial(self.store.get_facts_for_entities, sorted_ids, active_only=True)
+        )
+        
         known = []
         for eid in sorted_ids[:max_amount]:
             profile = self.ent_resolver.entity_profiles.get(eid)
             if profile:
                 connections = self.store.get_neighbor_names(eid, limit=5)
                 
+                entity_facts = [f.content for f in facts_map.get(eid, [])]
+
                 known.append({
                     "canonical_name": profile["canonical_name"],
-                    "facts": profile.get("facts", []),
+                    "facts": entity_facts,
                     "connected_to": connections
                 })
+                logger.debug(f"Known entity added: {known[-1]["canonical_name"]} with {len(connections)} connections.")
         
         return known
     
@@ -255,9 +280,8 @@ class BatchProcessor:
         result = parse_disambiguation(reasoning, mentions)
         return result or DisambiguationResult(entries=[])
 
+
     async def _resolve(self, disambiguation: DisambiguationResult) -> Tuple[List[int], Set[int], Set[int]]:
-        """Validate disambiguation, update resolver. Returns (all_ids, new_ids, alias_updated_ids)."""
-        
         loop = asyncio.get_running_loop()
         
         entity_ids = []
@@ -266,12 +290,26 @@ class BatchProcessor:
         
         for entry in disambiguation.entries:
             if entry.verdict == "EXISTING":
+
                 ent_id, aliases_added = self.ent_resolver.validate_existing(
                     entry.canonical_name, entry.mentions
                 )
+                
+                if ent_id is not None:
+                    valid_ids = await loop.run_in_executor(
+                        self.executor,
+                        self.store.validate_existing_ids, 
+                        [ent_id]
+                    )
+                    
+                    if not valid_ids:
+                        logger.warning(f"Zombie Entity Detected: Resolver has ID {ent_id} for '{entry.canonical_name}', but DB does not. Treating as NEW.")
+                        ent_id = None 
+
                 if ent_id is None:
-                    logger.warning(f"EXISTING '{entry.canonical_name}' not found, demoting to NEW")
-                    canonical = entry.mentions[0]
+                    logger.info(f"Creating replacement entity for '{entry.canonical_name}'")
+                    canonical = entry.canonical_name if entry.canonical_name else entry.mentions[0]
+                    
                     ent_id = await self._get_next_ent_id()
                     await loop.run_in_executor(
                         self.executor,
@@ -283,6 +321,7 @@ class BatchProcessor:
                     new_ids.add(ent_id)
                 elif aliases_added:
                     alias_ids.add(ent_id)
+            
             else:
                 canonical = (
                     max(entry.mentions, key=lambda m: (len(m), m))
@@ -299,7 +338,8 @@ class BatchProcessor:
                 )
                 new_ids.add(ent_id)
             
-            entity_ids.append(ent_id)
+            if ent_id is not None:
+                entity_ids.append(ent_id)
         
         return entity_ids, new_ids, alias_ids
 
@@ -311,8 +351,8 @@ class BatchProcessor:
     ) -> Optional[ConnectionExtractionResponse]:
         """Extract connections between entities."""
 
-        lines = session_text.split('\n')
-        session_text = '\n'.join(lines[-(len(lines) // 2):])
+        # lines = session_text.split('\n')
+        # session_text = '\n'.join(lines[-(len(lines) // 2):])
         candidates = []
         for ent_id in entity_ids:
             profile = self.ent_resolver.entity_profiles.get(ent_id)
@@ -332,8 +372,8 @@ class BatchProcessor:
         if not reasoning:
             return None
         
-        system_05 = get_connection_formatter_prompt()
-        return await self.llm.call_structured(system_05, reasoning, ConnectionExtractionResponse)
+        parsed = parse_connection_response(reasoning)
+        return build_connection_response(parsed)
 
 
     async def move_to_dead_letter(self, messages: List[Dict], error: str):
