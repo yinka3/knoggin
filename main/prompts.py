@@ -1,75 +1,93 @@
 def ner_reasoning_prompt(user_name: str, label_block: str) -> str:
    return f"""
-You are VEGAPUNK-01, the entity extractor for {user_name}'s knowledge graph.
+You are VEGAPUNK-01, the entity consolidator for {user_name}'s knowledge graph.
 
-<context>
-All messages are from {user_name}. First-person ("I", "me", "my") always refers to them.
-Never extract {user_name} as an entity.
-</context>
+<role>
+You receive upstream results from:
+- **PhraseMatcher**: Known entities already in the graph (high confidence, skip these)
+- **GLiNER**: Zero-shot extractions with labels from the schema (good but incomplete)
 
-<extraction_rules>
-1. **Proper nouns only** — People, places, organizations, products, named events, specific things.
-2. **Atomic over composite** — Prefer smaller, distinct entities over long phrases.
-   - "Mom's birthday party" → extract "Mom" only (birthday party is generic)
-   - "Dr. Williams at Stanford" → extract "Dr. Williams" and "Stanford" separately
-   - "October 10K run" → extract as single unit (it's a named event)
+Your job:
+1. Resolve **ambiguous** GLiNER extractions (labeled but maps to multiple topics)
+2. Discover **missed entities** that GLiNER failed to catch
+</role>
 
-3. **Anchored chunks** — Multi-word spans require a proper noun OR specific modifier.
-   - YES: "dentist appointment", "orgo exam", "Series A funding"
-   - NO: "the meeting", "my project", "his apartment"
-
-4. **Resolve simple coreference** — When the referent is unambiguous within the same message, extract the resolved name, not the pronoun.
-   - "Talked to Sarah. She's moving to Austin." → extract "Sarah", "Austin" (skip "She")
-   - "He mentioned the deadline" (no antecedent) → extract nothing
-
-5. **Skip generics** — Common nouns without specific anchors.
-   - NO: "laptop", "the store", "my phone", "some book", "a restaurant"
-
-6. **Skip vocabulary words** — If it belongs in a dictionary definition, it's not an entity.
-   - NO: name, question, idea, reason, problem, meeting, project
-   - YES: "Project Aurora", "The Grind", "Marcus"
-
-7. **Extract verbatim** — No normalization. Downstream handles disambiguation.
-</extraction_rules>
+<speaker_context>
+All messages are from {user_name}. First-person ("I", "me", "my") refers to them.
+Never extract {user_name} as an entity—they are the implicit root node.
+</speaker_context>
 
 <labels>
-Assign each entity ONE topic and ONE label from that topic's set.
-If no label fits, do not extract the entity.
-
 {label_block}
 </labels>
 
+<task_1_ambiguous>
+GLiNER found these but couldn't determine the topic (label maps to multiple topics).
+Pick the correct topic based on message context.
+You may override the label if context strongly contradicts it.
+</task_1_ambiguous>
+
+<task_2_discovery>
+GLiNER misses entities. Scan the messages for:
+- Proper nouns (people, places, organizations) not yet captured
+- Specific named things (projects, events, products) with identity
+
+Do NOT extract:
+- Generic nouns ("the meeting", "a project", "my friend")
+- Pronouns or references ("he", "that place", "it")
+- {user_name} or first-person references
+- Anything already listed in "Already Resolved"
+</task_2_discovery>
+
 <output_format>
-Wrap your response in <entities> tags. One entity per line: name | label | topic
+Think through each item in <scratchpad>:
+- What does message context suggest?
+- Is this a proper entity or generic noun?
+- If ambiguous: which topic fits? Override label?
+- Confidence level and reasoning
+
+Then output decisions in <entities>:
+Format: name | label | topic | confidence
+
+Confidence scale:
+- 0.9+: Unambiguous, clear from context
+- 0.7–0.9: Likely correct, minor ambiguity  
+- 0.5–0.7: Best guess, limited context
+- Below 0.5: Omit instead
+
+<scratchpad>
+(your reasoning for each item)
+</scratchpad>
 
 <entities>
-Sarah | person | Personal
-Stanford | university | Career
-October 10K run | event | Health
-</entities>
-
-If no valid entities exist, return an empty block:
-<entities>
+(one per line: name | label | topic | confidence)
+(empty if nothing qualifies)
 </entities>
 </output_format>
 
 <examples>
-Input: "Grabbed coffee with Marcus at Blue Bottle before my dentist appointment"
-<entities>
-Marcus | person | Personal
-Blue Bottle | cafe | Personal
-dentist appointment | appointment | Health
-</entities>
+**Example 1: Ambiguous topic resolution**
+Ambiguous: "Stanford" (university) → topics: [Education, Career]
+Message: "I'm applying to Stanford's CS program"
+Reasoning: Application context = Education
+Output: Stanford | university | Education | 0.95
 
-Input: "Need to finish the report and send it to someone"
-<entities>
-</entities>
+**Example 2: Discovery - GLiNER missed a person**
+Message: "Had coffee with Derek yesterday"
+Already Resolved: (none mentioning Derek)
+Reasoning: "Derek" is a proper noun, person, not captured
+Output: Derek | person | Personal | 0.9
 
-Input: "Dr. Chen referred me to a specialist at UCSF. She said it's routine."
-<entities>
-Dr. Chen | doctor | Health
-UCSF | hospital | Health
-</entities>
+**Example 3: Generic noun - do not extract**
+Message: "The project is going well"
+Reasoning: "the project" is generic, no specific identity
+Output: (omit)
+
+**Example 4: Override incorrect label**
+Ambiguous: "Python" (animal) → topics: [Nature, Pets]
+Message: "Learning Python for data science"
+Reasoning: Context is programming, not animals. Override label.
+Output: Python | programming_language | Career | 0.95
 </examples>
 """
 
@@ -286,26 +304,38 @@ All messages are from **{user_name}**. First-person ("I", "me", "my") refers to 
 <rules>
 1. **STATED** — Only extract what's explicitly said. No inference, no speculation.
 
-2. **SPECIFIC** — Concrete beats vague. Names, titles, places, dates.
+2. **SPECIFIC** — Concrete beats vague. Prefer measurable or identifiable details.
+   - Names, counts, dates, locations, states, stages
    - "Works in tech" ✗
    - "Engineer at Google" ✓
+   - "Three pigeons now" ✓
 
 3. **ATOMIC** — One fact per item. Short, dense strings.
    - "Lives in Tokyo, works at Sony" → two separate facts
 
-4. **INVALIDATES** — Fact no longer true, no replacement stated.
-   - Output: `[INVALIDATES: Dating Marcus]`
+4. **SUPERSEDES** — Fact replaces a previous value (counts, grades, stages, status).
+   - Output: `[SUPERSEDES: <exact text from existing_facts>] new fact [MSG_X]`
+   - Copy the old fact text exactly as shown in existing_facts.
 
-5. **SOURCE** — Tag each fact with the message ID it came from.
+5. **INVALIDATES** — Fact no longer true, no replacement stated.
+   - Output: `[INVALIDATES: <exact text from existing_facts>] [MSG_X]`
+
+6. **SOURCE** — Tag each fact with the message ID it came from.
    - Format: `fact content [MSG_X]`
    - If fact spans multiple messages, use the most specific one.
 </rules>
 
+<guidance>
+- Entities that recur across conversations matter to the user. Don't filter by "seriousness."
+- Running jokes, personal markers, and informal tracking are valid if the user mentions them.
+- When in doubt about SUPERSEDES vs new fact, prefer SUPERSEDES if the attribute is the same.
+</guidance>
+
 <output>
-You MUST wrap your response in <new_facts> tags:
+Wrap your response in <new_facts> tags. One entity per line, pipe-delimited facts.
 
 <new_facts>
-EntityName: fact1 [MSG_5] | fact2 [MSG_12]
+EntityName: fact1 [MSG_5] | [SUPERSEDES: old value] new value [MSG_12]
 </new_facts>
 
 Omit entities with no new facts. No preamble, no summary after.

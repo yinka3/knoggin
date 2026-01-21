@@ -77,57 +77,7 @@ class LLMService:
         """Model used for agent"""
         return self._agent_model
 
-    async def call_structured(
-        self,
-        system: str,
-        user: str,
-        response_model: Type[T],
-        model: Optional[str] = None,
-        temperature: float = 0.0,
-        max_retries: int = 2,
-    ) -> Optional[T]:
-        """Structured output parsed into Pydantic model. Returns None on failure."""
-        model = model or self._structured_model
-        
-        if self._trace:
-            self._trace.debug(
-                f"[STRUCTURED] Model: {model}\n"
-                f"Response Model: {response_model.__name__}\n"
-                f"SYSTEM:\n{system}\n\n"
-            )
-        
-        try:
-            response = await self._client_instruct.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user}
-                ],
-                response_model=response_model,
-                max_retries=max_retries,
-                temperature=temperature,
-                extra_body={
-                    "provider": {
-                        "allow_fallbacks": True,
-                        "data_collection": "deny"
-                    },
-                    "plugins": [{"id": "response-healing"}]
-                }
-            )
-            
-            if self._trace:
-                self._trace.debug(f"[STRUCTURED] Response:\n{response.model_dump_json(indent=2)}")
-            
-            return response
-            
-        except Exception as e:
-            if self._trace:
-                self._trace.error(f"[STRUCTURED] Failed: {e}")
-            logger.error(f"Structured LLM call failed ({response_model.__name__}): {e}")
-            return None
-
-
-    async def call_reasoning(
+    async def call_llm(
         self,
         system: str,
         user: str,
@@ -190,7 +140,7 @@ class LLMService:
                         self._trace.error(f"[REASONING] Failed: {e}")
                     return None
     
-    async def call_with_tools(
+    async def call_llm_with_tools(
         self,
         system: str,
         user: str,

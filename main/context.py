@@ -18,6 +18,7 @@ from main.service import LLMService
 from main.redisclient import AsyncRedisClient
 from typing import List
 from functools import partial
+from main.topics_config import TopicConfig
 from schema.dtypes import *
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
@@ -38,6 +39,8 @@ class Context:
         self.store: MemGraphStore = None
         self.nlp_pipe: NLPPipeline = None
         self.ent_resolver: EntityResolver = None
+        self.session_id: str = None
+        self.topic_config: TopicConfig = None
 
         self.executor: ThreadPoolExecutor = None
         self.batch_processor: BatchProcessor = None
@@ -56,50 +59,61 @@ class Context:
         session_id: str = None
     ) -> "Context":
         
+
         if topics_config is None:
             topics_config = {"General": {"labels": [], "hierarchy": {}}}
         
-        logger.info(f"Session Topics: {topics_config.keys()}")
-        session_id = session_id or str(uuid.uuid4())
+
         redis_conn = AsyncRedisClient().get_client()
+        instance = cls(user_name, list(topics_config.keys()), redis_conn)
+        
+
+        instance.session_id = session_id or str(uuid.uuid4())
+        instance.store = store
+        instance.executor = cpu_executor
+        instance.llm = LLMService(trace_logger=get_trace_logger())
+        
 
         await redis_conn.hset(
             f"session_config:{user_name}",
-            session_id,
+            instance.session_id,
             json.dumps(topics_config)
         )
-        logger.info(f"Session starting: session id {session_id}")
-        instance = cls(user_name, topics_config, redis_conn)
-        instance.llm = LLMService(trace_logger=get_trace_logger())
+        instance.topic_config = await TopicConfig.load(redis_conn, user_name, instance.session_id)
+        await instance.topic_config.save(redis_conn, user_name, instance.session_id)
         
-        instance.store = store
-        instance.executor = cpu_executor
-        
-        loop = asyncio.get_running_loop()
 
+        loop = asyncio.get_running_loop()
         max_id = await loop.run_in_executor(None, instance.store.get_max_entity_id)
-    
         current_redis = await redis_conn.get("global:next_ent_id")
         if not current_redis or int(current_redis) < max_id:
             await redis_conn.set("global:next_ent_id", max_id)
-            logger.info(f"Startup Sync: Reset global:next_ent_id to {max_id} from Memgraph")
         
-        hierarchy_config = {
-            topic: config.get("hierarchy", {})
-            for topic, config in topics_config.items()
-        }
-            
-        instance.nlp_pipe = await loop.run_in_executor(
-            instance.executor, 
-            partial(NLPPipeline, llm=instance.llm, topics_config=topics_config)
+
+        instance.ent_resolver = EntityResolver(
+            session_id=instance.session_id,
+            store=instance.store,
+            hierarchy_config=instance.topic_config.hierarchy
         )
         
-        instance.ent_resolver = EntityResolver(session_id=session_id, store=instance.store, hierarchy_config=hierarchy_config)
 
         await instance._get_or_create_user_entity(user_name)
+        
+
+        instance.nlp_pipe = await loop.run_in_executor(
+            instance.executor,
+            partial(
+                NLPPipeline,
+                llm=instance.llm,
+                topic_config=instance.topic_config,
+                get_known_aliases=lambda: instance.ent_resolver._name_to_id,
+                get_profiles=lambda: instance.ent_resolver.entity_profiles
+            )
+        )
+        
 
         instance.batch_processor = BatchProcessor(
-            session_id=session_id,
+            session_id=instance.session_id,
             redis_client=redis_conn,
             llm=instance.llm,
             ent_resolver=instance.ent_resolver,
@@ -107,8 +121,10 @@ class Context:
             store=instance.store,
             cpu_executor=instance.executor,
             user_name=user_name,
+            topic_config=instance.topic_config,
             get_next_ent_id=instance.get_next_ent_id
         )
+        
 
         instance.consumer = BatchConsumer(
             user_name=user_name,
@@ -119,25 +135,31 @@ class Context:
             write_to_graph=instance._write_to_graph_callback,
         )
         instance.consumer.start()
+        
 
         instance.profile_job = ProfileRefinementJob(
             llm=instance.llm,
             resolver=instance.ent_resolver,
             store=instance.store,
-            executor=instance.executor)
-
+            executor=instance.executor
+        )
         instance.merge_job = MergeDetectionJob(
-            user_name, instance.ent_resolver, instance.store, instance.llm)
+            user_name, instance.ent_resolver, 
+            instance.store, instance.llm,
+            instance.topic_config
+        )
+        
 
         instance.scheduler = Scheduler(user_name)
         instance.scheduler.register(DLQReplayJob())
         instance.scheduler.register(EntityCleanupJob(user_name, instance.store, instance.ent_resolver))
-        instance.scheduler.register(FactArchivalJob(user_name, instance.store, instance.ent_resolver))
+        instance.scheduler.register(FactArchivalJob(user_name, instance.store))
         # instance.scheduler.register(MoodCheckpointJob(user_name, instance.store))
         await instance.scheduler.start()
         
+        logger.info(f"Session started: {instance.session_id}")
         return instance
-    
+        
 
     async def get_next_msg_id(self) -> int:
         return await self.redis_client.incr("global:next_msg_id")
@@ -147,6 +169,11 @@ class Context:
     
     async def get_next_turn_id(self) -> int:
         return await self.redis_client.incr(f"global:next_turn_id:{self.user_name}")
+    
+    async def update_topics_config(self, new_config: dict):
+        self.topic_config.update(new_config)
+        await self.topic_config.save(self.redis_client, self.user_name, self.session_id)
+        self.ent_resolver.hierarchy_config = self.topic_config.hierarchy
     
     async def _get_or_create_user_entity(self, user_name: str):
         loop = asyncio.get_running_loop()
@@ -176,7 +203,8 @@ class Context:
             id=str(uuid.uuid4()),
             content=initial_fact_content,
             valid_at=datetime.now(timezone.utc),
-            embedding=fact_embedding
+            embedding=fact_embedding,
+            source_entity_id=new_id
         ))
         
         await loop.run_in_executor(
@@ -217,6 +245,7 @@ class Context:
 
         if await self.merge_job.should_run(ctx):
             await self.merge_job.execute(ctx)
+            
     
     async def add(self, msg: MessageData) -> None:
         msg.id = await self.get_next_msg_id()
@@ -248,8 +277,8 @@ class Context:
         conv_key = f"conversation:{self.user_name}"
         sorted_key = f"recent_conversation:{self.user_name}"
         
-        self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
-        self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
+        await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
+        await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
         return turn_id
     
     async def add_to_redis(self, msg: MessageData):
@@ -303,20 +332,40 @@ class Context:
         )
 
     
-    async def get_conversation_context(self, num_turns: int) -> List[Dict]:
+    async def get_conversation_context(self, num_turns: int, up_to_msg_id: int = None) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
         sorted_key = f"recent_conversation:{self.user_name}"
         conv_key = f"conversation:{self.user_name}"
         
-        turn_ids = await self.redis_client.zrevrange(sorted_key, 0, num_turns - 1)
+        if up_to_msg_id:
+            turn_key = await self.redis_client.hget(
+                f"lookup:msg_to_turn:{self.user_name}", 
+                f"msg_{up_to_msg_id}"
+            )
+            if turn_key:
+                turn_score = await self.redis_client.zscore(sorted_key, turn_key)
+                turn_ids = await self.redis_client.zrevrangebyscore(
+                    sorted_key,
+                    f"({turn_score}",
+                    "-inf",
+                    start=0,
+                    num=num_turns
+                )
+                turn_ids = list(reversed(turn_ids))
+            else:
+                turn_ids = await self.redis_client.zrevrange(sorted_key, 0, num_turns - 1)
+                turn_ids = list(turn_ids)
+                turn_ids.reverse()
+        else:
+            turn_ids = await self.redis_client.zrevrange(sorted_key, 0, num_turns - 1)
+            turn_ids = list(turn_ids)
+            turn_ids.reverse()
         
         if not turn_ids:
             return []
         
-        turn_ids = list(turn_ids)
-        turn_ids.reverse()
         logger.debug(f"Fetching conversation context for turns: {turn_ids}")
-
+        
         turn_data = await self.redis_client.hmget(conv_key, *turn_ids)
         
         results = []

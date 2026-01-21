@@ -11,6 +11,7 @@ from main.prompts import get_merge_judgment_prompt
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
 from db.memgraph import MemGraphStore
+from main.topics_config import TopicConfig
 
 
 class MergeDetectionJob(BaseJob):
@@ -22,11 +23,12 @@ class MergeDetectionJob(BaseJob):
     HITL_THRESHOLD = 0.65
     HIERARCHY_FUZZ_THRESHOLD = 70
 
-    def __init__(self, user_name: str, ent_resolver: EntityResolver, store: MemGraphStore, llm_client: LLMService):
+    def __init__(self, user_name: str, ent_resolver: EntityResolver, store: MemGraphStore, llm_client: LLMService, topic_config: TopicConfig):
         self.user_name = user_name
         self.ent_resolver = ent_resolver
         self.store = store
         self.llm = llm_client
+        self.topic_config = topic_config
     
     @property
     def name(self) -> str:
@@ -36,6 +38,12 @@ class MergeDetectionJob(BaseJob):
         profile_complete = await ctx.redis.get(f"profile_complete:{ctx.user_name}")
         return profile_complete is not None
     
+    def _same_topic(self, topic_a: str, topic_b: str) -> bool:
+        """Check if topics are the same after alias normalization."""
+        canonical_a = self.topic_config.normalize_topic(topic_a or "General")
+        canonical_b = self.topic_config.normalize_topic(topic_b or "General")
+        return canonical_a == canonical_b
+
     async def execute(self, ctx: JobContext) -> JobResult:
         await ctx.redis.set(f"merge_ran:{ctx.user_name}", "true")
     
@@ -63,16 +71,18 @@ class MergeDetectionJob(BaseJob):
             "entity_a": {
                 "canonical_name": candidate["primary_name"],
                 "type": candidate.get("primary_type"),
+                "aliases": self.ent_resolver.get_mentions_for_id(candidate["primary_id"]),
                 "facts": [f.content for f in candidate.get("facts_a", [])]
             },
             "entity_b": {
                 "canonical_name": candidate["secondary_name"],
                 "type": candidate.get("secondary_type"),
+                "aliases": self.ent_resolver.get_mentions_for_id(candidate["secondary_id"]),
                 "facts": [f.content for f in candidate.get("facts_b", [])]
             }
         })
         
-        result = await self.llm.call_reasoning(system, user_content)
+        result = await self.llm.call_llm(system, user_content)
         
         if not result:
             return None
@@ -137,10 +147,24 @@ class MergeDetectionJob(BaseJob):
 
         for candidate in candidates:
             pair_key = tuple(sorted([candidate["primary_id"], candidate["secondary_id"]]))
+            topic_a = candidate.get("topic_a", "General")
+            topic_b = candidate.get("topic_b", "General")
+            same_topic = self._same_topic(topic_a, topic_b)
             
+            # alias collision path
             if pair_key in collision_set:
-                logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | Alias collision")
-                auto_merge.append(candidate)
+                if same_topic:
+                    logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | Alias collision, same topic")
+                    auto_merge.append(candidate)
+                else:
+                    logger.info(f"Cross-topic alias collision ({candidate['primary_id']}, {candidate['secondary_id']}) | Sending to LLM")
+                    score = await self._get_merge_judgment(candidate)
+                    if score is not None:
+                        candidate["llm_score"] = score
+                        if score >= self.AUTO_MERGE_THRESHOLD:
+                            auto_merge.append(candidate)
+                        elif score >= self.HITL_THRESHOLD:
+                            hitl.append(candidate)
                 continue
 
             if not has_sufficient_facts(candidate):
@@ -152,23 +176,36 @@ class MergeDetectionJob(BaseJob):
             cosine_score = cosine_similarity(emb_a, emb_b)
 
             if cosine_score >= 0.93:
-                logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
-                auto_merge.append(candidate)
-            elif cosine_score < 0.45:
-                logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
-            else:
-                score = await self._get_merge_judgment(candidate)
-                if score is None:
-                    continue
-                
-                candidate["llm_score"] = score
-                
-                if score >= self.AUTO_MERGE_THRESHOLD:
+                if same_topic:
+                    logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}, same topic")
                     auto_merge.append(candidate)
-                elif score >= self.HITL_THRESHOLD:
-                    hitl.append(candidate)
                 else:
-                    logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
+                    logger.info(f"High cosine but cross-topic ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}, sending to LLM")
+                    score = await self._get_merge_judgment(candidate)
+                    if score is not None:
+                        candidate["llm_score"] = score
+                        if score >= self.AUTO_MERGE_THRESHOLD:
+                            auto_merge.append(candidate)
+                        elif score >= self.HITL_THRESHOLD:
+                            hitl.append(candidate)
+                continue
+
+            if cosine_score < 0.45:
+                logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
+                continue
+            
+            score = await self._get_merge_judgment(candidate)
+            if score is None:
+                continue
+            
+            candidate["llm_score"] = score
+            
+            if score >= self.AUTO_MERGE_THRESHOLD:
+                auto_merge.append(candidate)
+            elif score >= self.HITL_THRESHOLD:
+                hitl.append(candidate)
+            else:
+                logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
 
         return auto_merge, hitl
     
@@ -256,7 +293,7 @@ class MergeDetectionJob(BaseJob):
                     
                     resolution_text = f"{item['primary_name']}. " + " ".join([f.content for f in all_facts])
                     
-                    new_embedding = self.ent_resolver.update_profile_embedding(
+                    new_embedding = self.ent_resolver.compute_embedding(
                         item["primary_id"], 
                         resolution_text
                     )

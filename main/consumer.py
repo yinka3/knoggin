@@ -10,7 +10,7 @@ from main.processor import BatchProcessor, BatchResult
 class BatchConsumer:
 
     def __init__(self, user_name: str, store: MemGraphStore, processor: BatchProcessor, 
-                get_session_context: Callable[[int], Awaitable[List[Dict]]],
+                get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
                 run_session_jobs: Callable[[], Awaitable[None]],
                 write_to_graph: Callable[[BatchResult], Awaitable[None]],
                 batch_size: int = 7, batch_timeout: float =  15.0, 
@@ -114,7 +114,7 @@ class BatchConsumer:
 
             messages = [json.loads(m) for m in raw]
             
-            conversation = await self.get_session_ctx(self.session_window)
+            conversation = await self.get_session_ctx(self.session_window, messages[0]['id'])
             session_text = self._format_session_text(conversation)
 
             result = await self.processor.run(messages, session_text)

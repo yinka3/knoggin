@@ -129,21 +129,30 @@ class MemGraphStore:
     
     def get_entity_embedding(self, entity_id: int) -> List[float]:
         query = "MATCH (e:Entity {id: $id}) RETURN e.embedding as embedding"
-        with self.driver.session() as session:
-            result = session.run(query, {"id": entity_id}).single()
-            return result["embedding"] if result else []
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"id": entity_id}).single()
+                return result["embedding"] if result else []
+        except Exception as e:
+            logger.error(f"Failed to get embedding for entity {entity_id}: {e}")
+            return []
     
     def search_similar_entities(self, entity_id: int, limit: int = 50) -> List[Tuple[int, float]]:
         query = """
         MATCH (e:Entity {id: $id})
         CALL vector_search.search('entity_vec', $limit, e.embedding)
         YIELD node, similarity
+        WITH node, similarity
         WHERE node.id <> $id
         RETURN node.id as id, similarity
         """
-        with self.driver.session() as session:
-            result = session.run(query, {"id": entity_id, "limit": limit})
-            return [(r["id"], r["similarity"]) for r in result]
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"id": entity_id, "limit": limit})
+                return [(r["id"], r["similarity"]) for r in result]
+        except Exception as e:
+            logger.error(f"Failed to search similar entities for {entity_id}: {e}")
+            return []
     
     def search_messages_vector(self, query_embedding: List[float], limit: int = 50) -> List[Tuple[int, float]]:
         query = """
@@ -151,9 +160,14 @@ class MemGraphStore:
         YIELD node, similarity
         RETURN node.id as id, similarity
         """
-        with self.driver.session() as session:
-            result = session.run(query, {"embedding": query_embedding, "limit": limit})
-            return [(r["id"], r["similarity"]) for r in result]
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"embedding": query_embedding, "limit": limit})
+                return [(r["id"], r["similarity"]) for r in result]
+        except Exception as e:
+            logger.error(f"Failed to search messages by vector: {e}")
+            return []
     
     def get_all_message_embeddings(self) -> Dict[int, List[float]]:
         """
@@ -177,9 +191,14 @@ class MemGraphStore:
         Fetch message text on demand.
         """
         query = "MATCH (m:Message {id: $id}) RETURN m.content as content"
-        with self.driver.session() as session:
-            result = session.run(query, {"id": int(message_id)}).single()
-            return result["content"] if result else ""
+
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"id": int(message_id)}).single()
+                return result["content"] if result else ""
+        except Exception as e:
+            logger.error(f"Failed to get message text for {message_id}: {e}")
+            return ""
     
     def _hydrate_fact(self, record) -> Fact:
         """Convert DB record to Fact dataclass."""
@@ -275,22 +294,27 @@ class MemGraphStore:
             return False
     
 
-    def get_facts_for_entity(self, entity_id: int, valid_only: bool = True):
-        """Get a fact from an entity."""
-
-        query = """
+    def get_facts_for_entity(self, entity_id: int, active_only: bool = True):
+        """Get facts from an entity."""
+        base = """
         MATCH (e:Entity {id: $entity_id})-[:HAS_FACT]->(f:Fact)
-        """ + ("WHERE f.invalid_at IS NULL" if valid_only else "") + """
+        """
+        
+        where = "WHERE f.invalid_at IS NULL" if active_only else ""
+        
+        tail = """
         OPTIONAL MATCH (f)-[:EXTRACTED_FROM]->(m:Message)
-        RETURN f.id as id, f.source_entity_id as source_entity_id, f.content as content, f.valid_at as valid_at,
-            f.invalid_at as invalid_at, f.confidence as confidence, f.embedding as embedding,
-            m.id as source_msg_id
+        RETURN f.id as id, f.source_entity_id as source_entity_id, f.content as content, 
+            f.valid_at as valid_at, f.invalid_at as invalid_at, f.confidence as confidence, 
+            f.embedding as embedding, m.id as source_msg_id
         ORDER BY f.created_at DESC
         """
+        
+        query = base + where + tail
 
         try:
             with self.driver.session() as session:
-                result= session.run(query, {"entity_id": entity_id})
+                result = session.run(query, {"entity_id": entity_id, "active_only": active_only})
                 return [self._hydrate_fact(record) for record in result]
         except Exception as e:
             logger.error(f"Failed to get facts for entity {entity_id}: {e}")
@@ -301,9 +325,14 @@ class MemGraphStore:
         """Fetch all facts extracted from a message."""
         query = """
         MATCH (f:Fact)-[:EXTRACTED_FROM]->(m:Message {id: $msg_id})
-        RETURN f.id as id, f.content as content, f.valid_at as valid_at,
-            f.invalid_at as invalid_at, f.confidence as confidence,
-            f.embedding as embedding, $msg_id as source_msg_id
+        RETURN f.id as id, 
+            f.source_entity_id as source_entity_id,
+            f.content as content, 
+            f.valid_at as valid_at,
+            f.invalid_at as invalid_at, 
+            f.confidence as confidence,
+            f.embedding as embedding, 
+            $msg_id as source_msg_id
         """
         try:
             with self.driver.session() as session:
@@ -338,13 +367,15 @@ class MemGraphStore:
         if not entity_ids:
             return {}
         
-        query = """
+        where_clause = "AND f.invalid_at IS NULL" if active_only else ""
+    
+        query = f"""
         MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
         WHERE e.id IN $entity_ids
-        WHERE ($active_only = false OR f.invalid_at IS NULL)
+        {where_clause}
         OPTIONAL MATCH (f)-[:EXTRACTED_FROM]->(m:Message)
-        RETURN e.id as entity_id, f.id as id, f.content as content, 
-            f.valid_at as valid_at, f.invalid_at as invalid_at, 
+        RETURN e.id as entity_id, f.id as id, f.source_entity_id as source_entity_id,
+            f.content as content, f.valid_at as valid_at, f.invalid_at as invalid_at, 
             f.confidence as confidence, f.embedding as embedding,
             m.id as source_msg_id
         ORDER BY e.id, f.created_at DESC
@@ -352,7 +383,7 @@ class MemGraphStore:
         
         try:
             with self.driver.session() as session:
-                result = session.run(query, {"entity_ids": entity_ids, "active_only": active_only})
+                result = session.run(query, {"entity_ids": entity_ids})
                 
                 facts_by_entity: Dict[int, List[Fact]] = {eid: [] for eid in entity_ids}
                 
@@ -538,8 +569,12 @@ class MemGraphStore:
         SET e.embedding = $embedding,
             e.last_updated = timestamp()
         """
-        with self.driver.session() as session:
-            session.run(query, {"id": entity_id, "embedding": embedding}).consume()
+        try:
+            with self.driver.session() as session:
+                session.run(query, {"id": entity_id, "embedding": embedding}).consume()
+        except Exception as e:
+            logger.error(f"Failed to update embedding for entity {entity_id}: {e}")
+            return
 
     def cleanup_null_entities(self) -> int:
         """Remove entities with null type and their relationships."""
@@ -617,7 +652,8 @@ class MemGraphStore:
         WHERE toLower(e.canonical_name) IN $names
             OR any(alias IN e.aliases WHERE toLower(alias) IN $names)
         RETURN e.id as id, e.canonical_name as canonical_name, 
-            e.type as type, e.aliases as aliases, e.facts as facts
+            e.type as type, e.aliases as aliases,
+            [(e)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as facts
         """
         with self.driver.session() as session:
             result = session.run(query, {"names": lower_names})
@@ -664,7 +700,7 @@ class MemGraphStore:
             entity_projection = "{name: e.canonical_name, aliases: e.aliases}"
             msg_limit = 20
         else:
-            entity_projection = "{name: e.canonical_name, facts: e.facts}"
+            entity_projection = "{name: e.canonical_name, facts: [(e)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content]}"
         
         query = f"""
         MATCH (t:Topic) WHERE t.name IN $hot_topics
@@ -710,7 +746,7 @@ class MemGraphStore:
         """
 
         cypher = """
-        CALL text_search.search('message_search', $q) YIELD node, score
+        CALL text_search.search_all('message_search', $q, $limit) YIELD node, score
         RETURN node.id as id, score
         ORDER BY score DESC LIMIT $limit
         """
@@ -727,12 +763,12 @@ class MemGraphStore:
         """
         Search for entities by name/alias with top connections included.
         """
-        clean_query = re.sub(r'[\W_]+', ' ', query).strip()
+        clean_query = re.sub(r"[^\w\s.\-']", '', query).strip()
         if not clean_query:
              return []
 
         cypher = """
-        CALL text_search.search('entity_search', $q) YIELD node as e, score
+        CALL text_search.search_all('entity_search', $q) YIELD node as e, score
         
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         WITH e, t, score
@@ -824,7 +860,7 @@ class MemGraphStore:
         RETURN
             source.canonical_name as source,
             target.canonical_name as target,
-            target.facts as target_facts,
+            [(target)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as target_facts,
             r.weight as connection_strength,
             r.message_ids as evidence_ids,
             r.confidence as confidence,
@@ -851,9 +887,10 @@ class MemGraphStore:
 
         query = """
         MATCH (e:Entity {canonical_name: $name})-[r:RELATED_TO]-(target:Entity)
-        OPTIONAL MATCH (target)-[:BELONGS_TO]->(t:Topic)
         WHERE r.last_seen > $cutoff
-        AND (($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics))
+        OPTIONAL MATCH (target)-[:BELONGS_TO]->(t:Topic)
+        WITH e, r, target, t
+        WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
         RETURN target.canonical_name as entity, r.message_ids as evidence_ids, r.last_seen as time
         ORDER BY r.last_seen DESC
         """
@@ -931,20 +968,24 @@ class MemGraphStore:
         MATCH (start:Entity {canonical_name: $start_name})
         MATCH (end:Entity {canonical_name: $end_name})
         MATCH p = (start)-[:RELATED_TO *BFS ..4]-(end)
-        WHERE ALL(n IN nodes(p) WHERE
-            EXISTS {
-                MATCH (n)-[:BELONGS_TO]->(t:Topic)
-                WHERE t.name IN $active_topics OR t IS NULL
-            }
-        )
+        
         UNWIND nodes(p) AS n
         OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
-        WITH p, collect(COALESCE(t.name, 'General')) AS node_topics
         
+        WITH p, n, t
+        WHERE t IS NULL OR t.name IN $active_topics
+        
+        WITH p, collect(n) AS valid_nodes
+        WHERE size(valid_nodes) = size(nodes(p))
+        
+        WITH p LIMIT 1
+        UNWIND nodes(p) AS n
+        OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
+        
+        WITH p, collect(COALESCE(t.name, 'General')) AS node_topics
         RETURN [n IN nodes(p) | n.canonical_name] AS names,
             node_topics,
             [r IN relationships(p) | r.message_ids] AS evidence_ids
-        LIMIT 1
         """
         
         params = {
@@ -953,11 +994,15 @@ class MemGraphStore:
             "active_topics": active_topics
         }
         
-        with self.driver.session() as session:
-            record = session.run(query, params).single()
-            if not record:
-                return None
-            return record["names"], record["node_topics"], record["evidence_ids"]
+        try:
+            with self.driver.session() as session:
+                record = session.run(query, params).single()
+                if not record:
+                    return None
+                return record["names"], record["node_topics"], record["evidence_ids"]
+        except Exception as e:
+            logger.error(f"Failed to find active-only path: {e}")
+            return None
 
 
     def _find_path_filtered(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[Dict], bool]:
@@ -1036,7 +1081,7 @@ class MemGraphStore:
         RETURN parent.id as id,
             parent.canonical_name as canonical_name,
             parent.type as type,
-            parent.facts as facts
+           [(parent)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as facts
         """
         
         try:
@@ -1056,7 +1101,7 @@ class MemGraphStore:
         RETURN child.id as id,
             child.canonical_name as canonical_name,
             child.type as type,
-            child.facts as facts
+            [(child)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as facts
         """
         
         try:
@@ -1193,14 +1238,14 @@ class MemGraphStore:
             
             return result and result["deleted"] > 0
 
-        with self.driver.session() as session:
-            try:
+        try:
+            with self.driver.session() as session:
                 success = session.execute_write(_execute_merge)
                 if success:
                     logger.info(f"Merged entity {secondary_id} into {primary_id}")
                 return success
-            except Exception as e:
-                logger.error(f"Merge transaction failed: {e}")
-                return False
+        except Exception as e:
+            logger.error(f"Merge transaction failed: {e}")
+            return False
     
     

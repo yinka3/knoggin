@@ -25,7 +25,7 @@ class FactArchivalJob(BaseJob):
         profile_complete = await ctx.redis.get(f"profile_complete:{ctx.user_name}")
         return profile_complete is not None
 
-    async def execute(self) -> JobResult:
+    async def execute(self, ctx: JobContext) -> JobResult:
         loop = asyncio.get_running_loop()
         
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.RETENTION_DAYS)

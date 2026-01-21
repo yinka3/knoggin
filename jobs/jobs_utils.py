@@ -51,7 +51,7 @@ def find_duplicate_facts(
     return to_invalidate
 
 
-def has_sufficient_facts(candidate: dict, min_facts: int = 2) -> bool:
+def has_sufficient_facts(candidate: dict, min_facts: int = 1) -> bool:
     facts_a = candidate.get("facts_a", [])
     facts_b = candidate.get("facts_b", [])
     return len(facts_a) >= min_facts and len(facts_b) >= min_facts
@@ -76,12 +76,31 @@ def process_extracted_facts(
     for fact_str in new_facts:
         fact_str = fact_str.strip()
 
-        inv_match = re.search(r"^\[INVALIDATES:\s*(.+?)\]$", fact_str)
+        sup_match = re.search(r"^\[SUPERSEDES:\s*(.+?)\]\s*(.+)$", fact_str)
+        if sup_match:
+            old_text = sup_match.group(1).strip()
+            new_text = sup_match.group(2).strip()
+            
+            new_text_clean = re.sub(r"\s*\[MSG_?\d+\]\s*$", "", new_text).strip()
+            
+            matched_fact = _find_matching_fact(old_text, active_facts)
+            if matched_fact:
+                to_invalidate.append(matched_fact.id)
+                active_facts = [f for f in active_facts if f.id != matched_fact.id]
+            else:
+                logger.warning(f"SUPERSEDES target not found: '{old_text}' — adding new fact anyway")
+            
+            if not _is_duplicate(new_text_clean, active_facts):
+                new_contents.append(new_text)
+            continue
+
+        inv_match = re.search(r"^\[INVALIDATES:\s*(.+?)\](?:\s*\[MSG_?\d+\])?\s*$", fact_str)
         if inv_match:
             old_text = inv_match.group(1).strip()
             matched_fact = _find_matching_fact(old_text, active_facts)
             if matched_fact:
                 to_invalidate.append(matched_fact.id)
+                active_facts = [f for f in active_facts if f.id != matched_fact.id]
             continue
 
         if not _is_duplicate(fact_str, active_facts):
@@ -93,12 +112,14 @@ def extract_fact_with_source(raw_fact: str) -> Tuple[str, Optional[str]]:
     """
     Parse fact string to extract content and source msg_id.
     """
-    match = re.search(r"^(.*?)\[MSG_?(\d+)\]", raw_fact.strip())
+    cleaned = re.sub(r"^\[(?:SUPERSEDES|INVALIDATES):\s*[^\]]+\]\s*", "", raw_fact.strip())
+    
+    match = re.search(r"^(.*?)\[MSG_?(\d+)\]", cleaned)
     if match:
         content = match.group(1).strip()
         msg_id = f"msg_{match.group(2)}"
         return content, msg_id
-    return raw_fact.strip(), None
+    return cleaned, None
 
 
 def _find_matching_fact(text: str, facts: List[Fact], threshold: int = 92) -> Fact | None:

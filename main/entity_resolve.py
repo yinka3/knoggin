@@ -52,7 +52,7 @@ class EntityResolver:
                     for alias in aliases:
                         self._name_to_id[alias.lower()] = ent_id
                     
-                    # No facts in cache anymore
+                    # no facts in cache anymore
                     self.entity_profiles[ent_id] = {
                         "canonical_name": canonical,
                         "type": ent["type"],
@@ -73,6 +73,9 @@ class EntityResolver:
     def get_id(self, name: str) -> Optional[int]:
         return self._name_to_id.get(name.lower())
     
+    def get_profiles(self) -> Dict[int, Dict]:
+        return self.entity_profiles
+    
     def get_mentions_for_id(self, entity_id: int) -> List[str]:
         with self._lock:
             items = list(self._name_to_id.items())
@@ -80,6 +83,9 @@ class EntityResolver:
     
     def get_embedding_for_id(self, entity_id: int) -> List[float]:
         """Retrieve embedding from graph by ID."""
+        profile = self.entity_profiles.get(entity_id)
+        if profile and profile.get("embedding"):
+            return profile["embedding"]
         return self.store.get_entity_embedding(entity_id)
             
     def get_hierarchy_relationship(self, type_a: str, type_b: str, topic: str) -> Optional[str]:
@@ -282,13 +288,14 @@ class EntityResolver:
                 "canonical_name": profile["canonical_name"],
                 "type": profile.get("type"),
                 "topic": profile.get("topic", "General"),
-                "session_id": session_id
+                "session_id": session_id,
+                "embedding": embedding_np.tolist()
             }
         
         return embedding_np.tolist()
     
 
-    def update_profile_embedding(self, entity_id: int, resolution_text: str) -> List[float]:
+    def compute_embedding(self, entity_id: int, resolution_text: str) -> List[float]:
         """
         Update entity facts and recompute embedding.
         Returns new embedding.
@@ -318,6 +325,18 @@ class EntityResolver:
             
             if secondary_id in self.entity_profiles:
                 del self.entity_profiles[secondary_id]
+    
+    def resolve_entity_name(self, entity: str) -> Optional[str]:
+        """Resolve user input to canonical entity name via exact or fuzzy match."""
+        candidates = self.get_candidate_ids(entity, fuzzy_threshold=85)
+        
+        if not candidates:
+            return None
+        
+        with self._lock:
+            profile = self.entity_profiles.get(candidates[0])
+        
+        return profile["canonical_name"] if profile else None
             
 
     def detect_merge_candidates(self) -> list:
@@ -402,11 +421,13 @@ class EntityResolver:
                 score = fuzz.WRatio(primary_name, neighbor_name)
                 is_substring = is_substring_match(primary_name, neighbor_name)
 
-                if is_substring and score >= fuzzy_substring_threshold:
-                    pass
-                elif score >= fuzzy_non_substring_threshold:
-                    pass
-                else:
+                # threshold check
+                passes_threshold = (
+                    (is_substring and score >= fuzzy_substring_threshold) or
+                    score >= fuzzy_non_substring_threshold
+                )
+
+                if not passes_threshold:
                     continue
 
                 # generic token overlap check
@@ -459,7 +480,8 @@ class EntityResolver:
         relationship = "merge"
         parent_id = None
         child_id = None
-
+        
+        # only consider hierarchy if same topic and both types known
         if topic_a == topic_b and type_a and type_b:
             hierarchy_rel = self.get_hierarchy_relationship(type_a, type_b, topic_a)
             if hierarchy_rel == "parent":
@@ -505,7 +527,8 @@ class EntityResolver:
             "secondary_type": type_b,
             "primary_session": profile_a.get("session_id"),
             "secondary_session": profile_b.get("session_id"),
-            "topic": topic_a,
+            "topic_a": topic_a,
+            "topic_b": topic_b,
             "facts_a": facts_by_entity.get(id_a, []),
             "facts_b": facts_by_entity.get(id_b, []),
             "fuzz_score": fuzz_score,

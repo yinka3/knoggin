@@ -11,11 +11,12 @@ class AgentConfig:
     max_history_turns: int = 7
     max_accumulated_messages: int = 30
     tool_limits: Tuple[Tuple[str, int], ...] = (
-        ("search_messages", 3),
-        ("get_connections", 3),
+        ("search_messages", 4),
+        ("get_connections", 4),
         ("search_entity", 4),
         ("get_activity", 5),
         ("find_path", 5),
+        ("get_hierarchy", 5),
     )
     
     def get_tool_limit(self, tool_name: str, default: int = 6) -> int:

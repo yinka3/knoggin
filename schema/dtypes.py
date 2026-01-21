@@ -139,7 +139,7 @@ class QueryTrace:
 @dataclass
 class Fact:
     id: str
-    source_entity_id: int = None
+    source_entity_id: int
     content: str
     valid_at: datetime
     invalid_at: Optional[datetime] = None
@@ -151,3 +151,12 @@ class Fact:
 class FactMergeResult:
     to_invalidate: List[str]
     new_contents: List[str]
+
+class EntityItem(BaseModel):
+    name: str
+    label: str
+    topic: str
+    confidence: float
+
+class ExtractionResponse(BaseModel):
+    entities: List[EntityItem]

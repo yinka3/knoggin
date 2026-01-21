@@ -26,6 +26,9 @@ dependencies = [
     "torch>=2.6.0,<2.7.0",
     "xformers>=0.0.29.post3",
     "scikit-learn>=1.8.0",
+    "gliner>=0.2.22",
+    "spacy>=3.8.11",
+    "wordfreq>=3.1.1",
 ]
 
 [tool.setuptools.package-data]

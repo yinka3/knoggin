@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from functools import partial
 import json
 import re
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 import uuid
 from loguru import logger
 import numpy as np
@@ -211,7 +211,7 @@ class ProfileRefinementJob(BaseJob):
             "conversation": conversation_text
         })
         
-        reasoning = await self.llm.call_reasoning(system_reasoning, user_content)
+        reasoning = await self.llm.call_llm(system_reasoning, user_content)
 
         if not reasoning:
             logger.warning("VEGAPUNK-06 returned None for user profile")
@@ -282,7 +282,7 @@ class ProfileRefinementJob(BaseJob):
                 "conversation": conversation_text
             })
             
-            reasoning = await self.llm.call_reasoning(system_reasoning, user_content)
+            reasoning = await self.llm.call_llm(system_reasoning, user_content)
             
             if not reasoning:
                 logger.warning(f"VEGAPUNK-06 returned None for: {[e['entity_name'] for e in batch]}")
@@ -428,7 +428,8 @@ class ProfileRefinementJob(BaseJob):
                 content=content,
                 valid_at=now,
                 source_msg_id=msg_id,
-                embedding=embedding
+                embedding=embedding,
+                source_entity_id=entity_id
             )
             facts_to_create.append(fact)
             
@@ -499,7 +500,7 @@ class ProfileRefinementJob(BaseJob):
         system = get_contradiction_judgment_prompt()
         user = f"FACT_A: {fact_a}\nFACT_B: {fact_b}"
         
-        result = await self.llm.call_reasoning(system, user)
+        result = await self.llm.call_llm(system, user)
         
         if not result:
             return False
@@ -532,7 +533,7 @@ class ProfileRefinementJob(BaseJob):
         
         embedding = await loop.run_in_executor(
             self.executor,
-            partial(self.resolver.update_profile_embedding, entity_id, resolution_text)
+            partial(self.resolver.compute_embedding, entity_id, resolution_text)
         )
 
         return embedding

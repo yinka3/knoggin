@@ -16,6 +16,7 @@ from main.prompts import (
     get_disambiguation_reasoning_prompt,
     get_connection_reasoning_prompt
 )
+from main.topics_config import TopicConfig
 from main.utils import build_connection_response, parse_connection_response, parse_disambiguation
 from schema.dtypes import (
     DisambiguationResult,
@@ -47,6 +48,7 @@ class BatchProcessor:
             store: MemGraphStore,
             cpu_executor: ThreadPoolExecutor,
             user_name: str,
+            topic_config: TopicConfig,
             get_next_ent_id):
 
         self.session_id = session_id
@@ -57,6 +59,7 @@ class BatchProcessor:
         self.store = store
         self.executor = cpu_executor
         self.user_name = user_name
+        self.topic_config = topic_config
         self._get_next_ent_id = get_next_ent_id
         
     async def run(self, messages: List[Dict], session_text: str) -> BatchResult:
@@ -127,18 +130,19 @@ class BatchProcessor:
             result.success = False
             result.error = str(e)
             return result
+
     
     async def _extract_mentions(self, messages: List[Dict]) -> Tuple[Dict[str, Dict], List[str]]:
         """Run NER and emotion detection across all messages."""
         # loop = asyncio.get_running_loop()
         
-        combined_text = "\n".join([f"[MSG {m['id']}]: {m['message']}" for m in messages])
-        mentions = await self.nlp.extract_mentions(self.user_name, combined_text)
-        
+        mentions = await self.nlp.extract_mentions(self.user_name, messages)
+
         unique_mentions: Dict[str, Dict] = {}
         for text, typ, topic in mentions:
             if text not in unique_mentions:
-                unique_mentions[text] = {"type": typ, "topic": topic}
+                normalized_topic = self.topic_config.normalize_topic(topic)
+                unique_mentions[text] = {"type": typ, "topic": normalized_topic}
         
         # emotion_tasks = [
         #     loop.run_in_executor(self.executor, self.nlp.analyze_emotion, m["message"])
@@ -269,7 +273,7 @@ class BatchProcessor:
             "session_context": session_text
         })
         
-        reasoning = await self.llm.call_reasoning(system_02, user_02)
+        reasoning = await self.llm.call_llm(system_02, user_02)
         if not reasoning:
             logger.error("VEGAPUNK-02 failed")
             return DisambiguationResult(entries=[])
@@ -323,11 +327,7 @@ class BatchProcessor:
                     alias_ids.add(ent_id)
             
             else:
-                canonical = (
-                    max(entry.mentions, key=lambda m: (len(m), m))
-                    if entry.verdict == "NEW_GROUP"
-                    else entry.mentions[0]
-                )
+                canonical = entry.mentions[0]
                 ent_id = await self._get_next_ent_id()
                 await loop.run_in_executor(
                     self.executor,
@@ -358,7 +358,7 @@ class BatchProcessor:
             profile = self.ent_resolver.entity_profiles.get(ent_id)
             if profile:
                 candidates.append({
-                    "name": profile["canonical_name"],
+                    "canonical_name": profile["canonical_name"],
                     "type": profile["type"],
                     "mentions": self.ent_resolver.get_mentions_for_id(ent_id)
                 })
@@ -366,9 +366,9 @@ class BatchProcessor:
         messages_text = "\n".join([f"{m['id']}: \"{m['message']}\"" for m in messages])
         
         system_04 = get_connection_reasoning_prompt(self.user_name, messages_text, session_text)
-        user_04 = json.dumps({"candidate_entities": candidates, "messages": messages})
+        user_04 = json.dumps({"candidate_entities": candidates})
         
-        reasoning = await self.llm.call_reasoning(system_04, user_04)
+        reasoning = await self.llm.call_llm(system_04, user_04)
         if not reasoning:
             return None
         

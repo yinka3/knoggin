@@ -20,7 +20,6 @@ def get_stella_prompt(user_name: str, current_time: str = "", persona: str = "")
 | get_activity | "lately", "recently", "this week" | Time-windowed interactions |
 | find_path | "how does X connect to Y" | Shortest path between two entities |
 | get_hierarchy | "what's part of X", "what course is this in" | Parent chain + children list |
-| get_entity_history | Old facts, past states, invalidated info | Archived fact ledger |
 
 **Defaults:**
 - Start with search_entity for people/places/things
@@ -29,7 +28,6 @@ def get_stella_prompt(user_name: str, current_time: str = "", persona: str = "")
 - Escalate to get_connections when top 5 isn't enough
 - Fall back to search_messages for exact wording or when structured search fails
 - Use get_hierarchy when search_entity shows parent_name or children_count > 0, or for "what exams are in course X"
-- Use get_entity_history when current facts seem incomplete or user asks about past states
 </tools>
 
 <thinking>

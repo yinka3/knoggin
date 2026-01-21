@@ -9,6 +9,7 @@ import redis
 from agent.tools import Tools
 from main.service import LLMService
 from agent.system_prompt import get_fallback_summary_prompt, get_stella_prompt
+from main.topics_config import TopicConfig
 from schema.dtypes import (
     ClarificationRequest,
     ClarificationResult,
@@ -119,7 +120,7 @@ async def call_the_doctor(
     system_prompt = get_stella_prompt(user_name, date, persona)
     user_message = build_user_message(ctx, last_result)
 
-    response = await llm.call_with_tools(
+    response = await llm.call_llm_with_tools(
         system=system_prompt,
         user=user_message,
         tools=TOOL_SCHEMAS
@@ -325,7 +326,7 @@ async def run(
     user_name: str,
     conversation_history: List[Dict],
     hot_topics: List[str],
-    topics_config: dict,
+    topic_config: TopicConfig,
     llm: LLMService,
     store: 'MemGraphStore',
     ent_resolver: 'EntityResolver',
@@ -353,20 +354,20 @@ async def run(
     config = AgentConfig()
     state = AgentState()
     evidence = RetrievedEvidence()
-    active_topics = list(topics_config.keys())
+    valid_hot_topics = topic_config.validate_hot_topics(hot_topics)
 
     ctx = AgentContext(
         config=config,
         state=state,
         evidence=evidence,
         user_query=user_query,
-        hot_topics=hot_topics,
-        active_topics=active_topics,
+        hot_topics=valid_hot_topics,
+        active_topics=topic_config.active_topics,
         trace_id=trace.trace_id,
         history=conversation_history
     )
 
-    tools = Tools(user_name, store, ent_resolver, redis_client, topics_config)
+    tools = Tools(user_name, store, ent_resolver, redis_client, topic_config)
 
     if hot_topics:
         ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=slim_hot_context)
@@ -424,7 +425,7 @@ async def run(
         if ctx.evidence.graph:
             evidence_ctx += f"Connections:\n{format_graph_results(ctx.evidence.graph)}\n\n"
         
-        summary = await llm.call_reasoning(
+        summary = await llm.call_llm(
             system=get_fallback_summary_prompt(user_name),
             user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
         )
