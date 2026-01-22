@@ -1,8 +1,9 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 from datetime import datetime, timezone
 import re
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult, JobNotifier
@@ -12,6 +13,7 @@ from main.service import LLMService
 from main.entity_resolve import EntityResolver
 from db.memgraph import MemGraphStore
 from main.topics_config import TopicConfig
+from schema.dtypes import Fact
 
 
 class MergeDetectionJob(BaseJob):
@@ -23,12 +25,14 @@ class MergeDetectionJob(BaseJob):
     HITL_THRESHOLD = 0.65
     HIERARCHY_FUZZ_THRESHOLD = 70
 
-    def __init__(self, user_name: str, ent_resolver: EntityResolver, store: MemGraphStore, llm_client: LLMService, topic_config: TopicConfig):
+    def __init__(self, user_name: str, ent_resolver: EntityResolver, store: MemGraphStore, 
+                    llm_client: LLMService, topic_config: TopicConfig, executor: ThreadPoolExecutor):
         self.user_name = user_name
         self.ent_resolver = ent_resolver
         self.store = store
         self.llm = llm_client
         self.topic_config = topic_config
+        self.executor = executor
     
     @property
     def name(self) -> str:
@@ -65,20 +69,53 @@ class MergeDetectionJob(BaseJob):
             summary=f"{merge_summary}; {hierarchy_summary}"
         )
     
+    async def _enrich_facts_with_sources(self, facts: List[Fact]) -> List[Dict]:
+        """Enrich facts with timestamps and source message content."""
+        loop = asyncio.get_running_loop()
+        enriched = []
+        
+        for fact in facts:
+            entry = {
+                "content": fact.content,
+                "recorded_at": fact.valid_at.isoformat() if fact.valid_at else None,
+                "source_message": None
+            }
+            
+            if fact.source_msg_id:
+                try:
+                    msg_id = int(fact.source_msg_id.replace("msg_", ""))
+                    text = await loop.run_in_executor(
+                        self.executor,
+                        self.store.get_message_text,
+                        msg_id
+                    )
+                    if text:
+                        entry["source_message"] = text
+                except (ValueError, Exception) as e:
+                    logger.debug(f"Could not fetch source for {fact.source_msg_id}: {e}")
+            
+            enriched.append(entry)
+        
+        return enriched
+    
     async def _get_merge_judgment(self, candidate: dict) -> Optional[float]:
         system = get_merge_judgment_prompt(self.user_name)
+        
+        enriched_facts_a = await self._enrich_facts_with_sources(candidate.get("facts_a", []))
+        enriched_facts_b = await self._enrich_facts_with_sources(candidate.get("facts_b", []))
+        
         user_content = json.dumps({
             "entity_a": {
                 "canonical_name": candidate["primary_name"],
                 "type": candidate.get("primary_type"),
                 "aliases": self.ent_resolver.get_mentions_for_id(candidate["primary_id"]),
-                "facts": [f.content for f in candidate.get("facts_a", [])]
+                "facts": enriched_facts_a
             },
             "entity_b": {
                 "canonical_name": candidate["secondary_name"],
                 "type": candidate.get("secondary_type"),
                 "aliases": self.ent_resolver.get_mentions_for_id(candidate["secondary_id"]),
-                "facts": [f.content for f in candidate.get("facts_b", [])]
+                "facts": enriched_facts_b
             }
         })
         

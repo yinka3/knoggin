@@ -201,11 +201,12 @@ class ProfileRefinementJob(BaseJob):
         )
         
         system_reasoning = get_profile_extraction_prompt(ctx.user_name)
+        enriched_facts = await self._enrich_facts_with_sources(existing_facts, loop)
         user_content = json.dumps({
             "entities": [{
                 "entity_name": ctx.user_name,
                 "entity_type": "person",
-                "existing_facts": [f.content for f in existing_facts],
+                "existing_facts": enriched_facts,
                 "known_aliases": [alias for alias in profile.get("aliases", [ctx.user_name])]
             }],
             "conversation": conversation_text
@@ -269,12 +270,15 @@ class ProfileRefinementJob(BaseJob):
     ) -> List[Dict]:
         """Process one batch of entities. Returns list of updates."""
         async with self.batch_semaphore:
-            llm_input = [{
-                "entity_name": e["entity_name"],
-                "entity_type": e["entity_type"],
-                "existing_facts": [f.content for f in e["existing_facts"]],
-                "known_aliases": e["known_aliases"]
-            } for e in batch]
+            llm_input = []
+            for e in batch:
+                enriched_facts = await self._enrich_facts_with_sources(e["existing_facts"])
+                llm_input.append({
+                    "entity_name": e["entity_name"],
+                    "entity_type": e["entity_type"],
+                    "existing_facts": enriched_facts,
+                    "known_aliases": e["known_aliases"]
+                })
             
             system_reasoning = get_profile_extraction_prompt(ctx.user_name)
             user_content = json.dumps({
@@ -324,6 +328,35 @@ class ProfileRefinementJob(BaseJob):
                 })
 
             return updates
+
+    async def _enrich_facts_with_sources(self, facts: List[Fact]) -> List[Dict]:
+        """Enrich facts with timestamps and source message content."""
+        loop = asyncio.get_running_loop()
+        enriched = []
+        
+        for fact in facts:
+            entry = {
+                "content": fact.content,
+                "recorded_at": fact.valid_at.isoformat() if fact.valid_at else None,
+                "source_message": None
+            }
+            
+            if fact.source_msg_id:
+                try:
+                    msg_id = int(fact.source_msg_id.replace("msg_", ""))
+                    text = await loop.run_in_executor(
+                        self.executor,
+                        self.store.get_message_text,
+                        msg_id
+                    )
+                    if text:
+                        entry["source_message"] = text
+                except (ValueError, Exception) as e:
+                    logger.debug(f"Could not fetch source for {fact.source_msg_id}: {e}")
+            
+            enriched.append(entry)
+        
+        return enriched
     
 
     async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]):

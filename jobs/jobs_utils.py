@@ -122,7 +122,7 @@ def extract_fact_with_source(raw_fact: str) -> Tuple[str, Optional[str]]:
     return cleaned, None
 
 
-def _find_matching_fact(text: str, facts: List[Fact], threshold: int = 92) -> Fact | None:
+def _find_matching_fact(text: str, facts: List[Fact], threshold: int = 90) -> Fact | None:
     """Find existing fact matching the text via fuzzy match."""
     text_lower = text.lower().strip()
     

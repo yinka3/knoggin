@@ -101,8 +101,55 @@ def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
     
     return True
 
+def format_vp01_input(
+    messages: List[Dict],
+    known_ents: List[Tuple[str, int]],
+    gliner_ents: List[Tuple[int, str, str]],
+    ambiguous: List[Tuple[int, str, str, List[str]]],
+    covered_texts: Dict[int, set],
+    label_block: str
+) -> str:
+    
+    lines.append("## Label Schema")
+    lines.append(label_block)
+
+    lines = ["## Messages"]
+    for msg in messages:
+        lines.append(f"[MSG {msg['id']}]: \"{msg['message']}\"")
+    
+    lines.append("\n## Known Entities (from graph - do not override)")
+    if known_ents:
+        for span_text, eid in known_ents:
+            lines.append(f"- \"{span_text}\" -> entity_id={eid}")
+    else:
+        lines.append("(none)")
+    
+    lines.append("\n## GLiNER Extractions (can override if wrong)")
+    gliner_resolved = []
+    for msg_id, span, label in gliner_ents:
+        if span.lower() in covered_texts.get(msg_id, set()):
+            if not any(span == a[1] for a in ambiguous):
+                gliner_resolved.append((msg_id, span, label))
+    
+    if gliner_resolved:
+        for msg_id, span, label in gliner_resolved:
+            lines.append(f"- MSG {msg_id}: \"{span}\" -> {label}")
+    else:
+        lines.append("(none)")
+    
+    if ambiguous:
+        lines.append("\n## Ambiguous (Task 1: assign topic)")
+        for span_text, label, topics in ambiguous:
+            lines.append(f"- \"{span_text}\" ({label}) -> choose from: {topics}")
+    
+    lines.append("\n## Discovery (Task 2: find missed entities)")
+    lines.append("Scan messages above for proper nouns not listed in Already Resolved.")
+    lines.append("Include the MSG id where you found each entity.")
+    
+    return "\n".join(lines)
+
 def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[ExtractionResponse]:
-    """Parse <entities> block from VP-01 output."""
+    """Parse <entities> block from VP-01 output. Expects: msg_id | name | label | topic | confidence"""
     content = extract_xml_content(reasoning, "entities")
     
     if not content:
@@ -113,21 +160,22 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[Extr
     
     for line in content.split("\n"):
         line = line.strip()
-        if not line or line.lower().startswith("name"):
+        if not line or line.lower().startswith("msg_id"):
             continue
         
         parts = line.split("|")
-        if len(parts) != 4:
+        if len(parts) != 5:
             malformed += 1
             continue
         
-        name, label, topic, conf_str = [p.strip() for p in parts]
+        msg_id_str, name, label, topic, conf_str = [p.strip() for p in parts]
         
         if not name:
             malformed += 1
             continue
         
         try:
+            msg_id = int(msg_id_str.replace("MSG", "").replace("msg", "").strip())
             confidence = float(conf_str)
         except ValueError:
             malformed += 1
@@ -137,6 +185,7 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[Extr
             continue
         
         entities.append(EntityItem(
+            msg_id=msg_id,
             name=name,
             label=label,
             topic=topic,
@@ -151,6 +200,41 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[Extr
     
     return ExtractionResponse(entities=entities)
 
+def format_vp02_input(
+    known_entities: List[Dict],
+    mentions: List[Tuple[int, str, str, str]],
+    messages: List[Dict],
+    session_context: str
+) -> str:
+    lines = []
+    
+    if known_entities:
+        lines.append("## Known Entities")
+        for ent in known_entities:
+            lines.append(f"{ent['canonical_name']}")
+            if ent.get('facts'):
+                lines.append(f"  Facts: {' | '.join(ent['facts'])}")
+            if ent.get('connected_to'):
+                lines.append(f"  Connected to: {', '.join(ent['connected_to'])}")
+    else:
+        lines.append("(none)")
+    
+    if mentions:
+        lines.append("\n## Mentions")
+        for msg_id, name, typ, topic in mentions:
+            lines.append(f"MSG {msg_id} | {name} | {typ} | {topic}")
+    
+    if messages:
+        lines.append("\n## Messages")
+        for msg in messages:
+            lines.append(f"[MSG {msg['id']}]: \"{msg['text']}\"")
+    
+    if session_context:
+        lines.append("\n## Session Context")
+        lines.append(session_context)
+    
+    return "\n".join(lines)
+
 def parse_disambiguation(
     reasoning: str, 
     mentions: List[Tuple[str, str, str]]
@@ -164,8 +248,11 @@ def parse_disambiguation(
     
     logger.debug(f"Disambiguation content:\n{content}")
     
-    # Build lookup: mention_name -> (type, topic)
-    mention_lookup = {m[0].lower(): (m[1], m[2]) for m in mentions}
+    # Build lookup: (msg_id, name_lower) -> (type, topic)
+    mention_lookup = {
+        (m[0], m[1].lower()): (m[2], m[3]) 
+        for m in mentions
+    }
     
     entries = []
     for line in content.split("\n"):
@@ -178,44 +265,104 @@ def parse_disambiguation(
         
         if verdict == "EXISTING" and len(parts) >= 3:
             canonical = parts[1]
-            mention = parts[2]
-            typ, topic = mention_lookup.get(mention.lower(), ("unknown", "General"))
+            mention_raw = parts[2]
+            mention, msg_id = _parse_mention_with_msg_id(mention_raw)
+            typ, topic = mention_lookup.get((msg_id, mention.lower()), ("unknown", "General"))
             
             entries.append(ResolutionEntry(
                 verdict="EXISTING",
                 canonical_name=canonical,
                 mentions=[mention],
                 entity_type=typ,
-                topic=topic
+                topic=topic,
+                msg_ids=[msg_id] if msg_id else []
             ))
         
         elif verdict == "NEW_GROUP" and len(parts) >= 2:
-            mention_list = [m.strip() for m in parts[1].split(",")]
-            canonical = max(mention_list, key=lambda m: (len(m), m))
-            typ, topic = mention_lookup.get(mention_list[0].lower(), ("unknown", "General"))
+            mention_list = []
+            msg_ids = []
+            first_type, first_topic = None, None
+            
+            for raw in [m.strip() for m in parts[1].split(",")]:
+                mention, msg_id = _parse_mention_with_msg_id(raw)
+                mention_list.append(mention)
+                if msg_id:
+                    msg_ids.append(msg_id)
+                if first_type is None:
+                    first_type, first_topic = mention_lookup.get((msg_id, mention.lower()), ("unknown", "General"))
             
             entries.append(ResolutionEntry(
                 verdict="NEW_GROUP",
-                canonical_name=canonical,
+                canonical_name=max(mention_list, key=lambda m: (len(m), m)),
                 mentions=mention_list,
-                entity_type=typ,
-                topic=topic
+                entity_type=first_type or "unknown",
+                topic=first_topic or "General",
+                msg_ids=msg_ids
             ))
         
         elif verdict == "NEW_SINGLE" and len(parts) >= 2:
-            mention = parts[1]
-            typ, topic = mention_lookup.get(mention.lower(), ("unknown", "General"))
+            mention_raw = parts[1]
+            mention, msg_id = _parse_mention_with_msg_id(mention_raw)
+            typ, topic = mention_lookup.get((msg_id, mention.lower()), ("unknown", "General"))
             
             entries.append(ResolutionEntry(
                 verdict="NEW_SINGLE",
                 canonical_name=mention,
                 mentions=[mention],
                 entity_type=typ,
-                topic=topic
+                topic=topic,
+                msg_ids=[msg_id] if msg_id else []
             ))
     
     return DisambiguationResult(entries=entries)
 
+def _parse_mention_with_msg_id(raw: str) -> Tuple[str, int]:
+    """
+    Parse 'X (MSG_3)' -> ('X', 3)
+    Falls back to msg_id=0 if not found.
+    """
+    match = re.search(r"^(.+?)\s*\(MSG[_]?(\d+)\)$", raw.strip(), re.IGNORECASE)
+    if match:
+        return match.group(1).strip(), int(match.group(2))
+    
+    # Fallback: no msg_id in output
+    return raw.strip(), 0
+
+def format_vp03_input(
+    candidates: List[Dict],
+    messages: List[Dict],
+    session_context: str
+) -> str:
+    lines = []
+    
+    lines.append("## Candidate Entities")
+    if candidates:
+        for c in candidates:
+            msg_ids = c.get('source_msgs', [])
+            if msg_ids:
+                source = f" (from MSG {', '.join(str(m) for m in msg_ids)})"
+            else:
+                source = ""
+            lines.append(f"{c['canonical_name']} [{c['type']}]{source}")
+            if c.get('mentions'):
+                lines.append(f"  Mentions: {', '.join(c['mentions'])}")
+    else:
+        lines.append("(none)")
+    
+    lines.append("\n## Messages")
+    if messages:
+        for msg in messages:
+            lines.append(f"[MSG {msg['id']}]: \"{msg['message']}\"")
+    else:
+        lines.append("(none)")
+    
+    lines.append("\n## Session Context (for pronoun resolution only)")
+    if session_context:
+        lines.append(session_context)
+    else:
+        lines.append("(none)")
+    
+    return "\n".join(lines)
 
 def parse_connection_response(text: str) -> List[dict]:
     """
@@ -293,33 +440,5 @@ def build_connection_response(parsed: List[dict]) -> ConnectionExtractionRespons
     
     return ConnectionExtractionResponse(message_results=message_results)
 
-def format_vp01_input(
-    messages: List[Dict],
-    known_ents: List[Tuple[str, int]],
-    gliner_ents: List[Tuple[str, str]],
-    ambiguous: List[Tuple[str, str, List[str]]],
-    covered_texts: set[str]
-) -> str:
-    lines = ["## Messages"]
-    for msg in messages:
-        lines.append(f"[MSG {msg['id']}]: \"{msg['message']}\"")
-    
-    lines.append("\n## Already Resolved (skip these)")
-    for span_text, eid in known_ents:
-        lines.append(f"- \"{span_text}\" → entity_id={eid}")
-    for span_text, label in gliner_ents:
-        if span_text.lower() in covered_texts and not any(
-            span_text == a[0] for a in ambiguous
-        ):
-            lines.append(f"- \"{span_text}\" → {label}")
-    
-    if ambiguous:
-        lines.append("\n## Ambiguous (Task 1: assign topic)")
-        for span_text, label, topics in ambiguous:
-            lines.append(f"- \"{span_text}\" ({label}) → choose from: {topics}")
-    
-    lines.append("\n## Discovery (Task 2: find missed entities)")
-    lines.append("Scan messages above for proper nouns not listed in Already Resolved.")
-    
-    return "\n".join(lines)
+
 

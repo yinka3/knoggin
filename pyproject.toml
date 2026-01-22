@@ -5,10 +5,8 @@ description = "A transparent, self-hosted knowledge graph for personal AI memory
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "faiss-cpu>=1.13.1",
     "fastapi[standard]>=0.128.0",
     "httpx>=0.28.1",
-    "instructor>=1.13.0",
     "loguru>=0.7.3",
     "neo4j>=6.0.3",
     "numpy>=2.3.5",
@@ -17,7 +15,6 @@ dependencies = [
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "python-statemachine>=2.5.0",
-    "rank-bm25>=0.2.2",
     "rapidfuzz>=3.14.3",
     "redis>=7.1.0",
     "redis-tools>=0.0.2",
@@ -29,6 +26,7 @@ dependencies = [
     "gliner>=0.2.22",
     "spacy>=3.8.11",
     "wordfreq>=3.1.1",
+    "en-core-web-lg",
 ]
 
 [tool.setuptools.package-data]
@@ -36,3 +34,6 @@ vestige = ["setup.sh", "docker-compose.yml", ".env.example"]
 
 [tool.uvicorn]
 reload-exclude = ["redis_data", "memgraph_data", "*.log"]
+
+[tool.uv.sources]
+en-core-web-lg = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl" }

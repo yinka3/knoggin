@@ -12,7 +12,6 @@ from config import (
     validate_openrouter_key,
     get_default_config,
     generate_password,
-    DEFAULT_STRUCTURED_MODEL,
     DEFAULT_REASONING_MODEL,
     DEFAULT_AGENT_MODEL,
     DEFAULT_TOPICS
@@ -90,7 +89,6 @@ class SetupRequest(BaseModel):
     memgraph_user: Optional[str] = None
     memgraph_password: Optional[str] = None
     
-    structured_model: str = DEFAULT_STRUCTURED_MODEL
     reasoning_model: str = DEFAULT_REASONING_MODEL
     agent_model: str = DEFAULT_AGENT_MODEL
     
@@ -110,7 +108,6 @@ class ConfigUpdateRequest(BaseModel):
     redis_password: Optional[str] = None
     memgraph_user: Optional[str] = None
     memgraph_password: Optional[str] = None
-    structured_model: Optional[str] = None
     reasoning_model: Optional[str] = None
     agent_model: Optional[str] = None
     topics: Optional[List[str]] = None
@@ -150,7 +147,6 @@ async def setup(request: SetupRequest):
         "redis_password": request.redis_password or defaults["redis_password"],
         "memgraph_user": request.memgraph_user or defaults["memgraph_user"],
         "memgraph_password": request.memgraph_password or defaults["memgraph_password"],
-        "structured_model": request.structured_model,
         "reasoning_model": request.reasoning_model,
         "agent_model": request.agent_model,
         "topics": request.topics if request.topics else DEFAULT_TOPICS,

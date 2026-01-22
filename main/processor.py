@@ -17,7 +17,7 @@ from main.prompts import (
     get_connection_reasoning_prompt
 )
 from main.topics_config import TopicConfig
-from main.utils import build_connection_response, parse_connection_response, parse_disambiguation
+from main.utils import build_connection_response, format_vp02_input, format_vp03_input, parse_connection_response, parse_disambiguation
 from schema.dtypes import (
     DisambiguationResult,
     ConnectionExtractionResponse,
@@ -138,11 +138,10 @@ class BatchProcessor:
         
         mentions = await self.nlp.extract_mentions(self.user_name, messages)
 
-        unique_mentions: Dict[str, Dict] = {}
-        for text, typ, topic in mentions:
-            if text not in unique_mentions:
-                normalized_topic = self.topic_config.normalize_topic(topic)
-                unique_mentions[text] = {"type": typ, "topic": normalized_topic}
+        normalized_mentions = []
+        for msg_id, text, typ, topic in mentions:
+            norm_topic = self.topic_config.normalize_topic(topic)
+            normalized_mentions.append((msg_id, text, typ, norm_topic))
         
         # emotion_tasks = [
         #     loop.run_in_executor(self.executor, self.nlp.analyze_emotion, m["message"])
@@ -156,24 +155,24 @@ class BatchProcessor:
         #         dominant = max(emotion_list, key=lambda x: x["score"])
         #         emotions.append(dominant["label"])
         
-        return unique_mentions, emotions
+        return normalized_mentions, emotions
 
     async def _build_known_entities(
         self, 
-        mentions: List[Tuple[str, str, str]],
+        mentions: List[Tuple[int, str, str, str]],
         max_amount: int = 50
     ) -> List[Dict]:
                 
         candidate_scores = {}
 
-        for name, _, _ in mentions:
+        for msg_id, name, _, _ in mentions:
             candidates = self.ent_resolver.get_candidate_ids(name)
             
             for rank, eid in enumerate(candidates):
                 score = 1.0 / (rank + 1) # higher ranks gets boosted score
                 if eid not in candidate_scores or score > candidate_scores[eid]:
                     candidate_scores[eid] = score
-                logger.debug(f"Mention '{name}' candidate entity ID {eid} = score {score}")
+                logger.debug(f"Mention '{name}' (MSG {msg_id}) candidate entity ID {eid} = score {score}")
         
 
         sorted_ids = sorted(candidate_scores.keys(), key=lambda x: candidate_scores[x], reverse=True)
@@ -192,7 +191,6 @@ class BatchProcessor:
             profile = self.ent_resolver.entity_profiles.get(eid)
             if profile:
                 connections = self.store.get_neighbor_names(eid, limit=5)
-                
                 entity_facts = [f.content for f in facts_map.get(eid, [])]
 
                 known.append({
@@ -206,7 +204,7 @@ class BatchProcessor:
     
     def _try_fast_path(
         self, 
-        mentions: List[Tuple[str, str, str]], 
+        mentions: List[Tuple[int, str, str, str]], 
         known_entities: List[Dict]   
     ) -> Optional[DisambiguationResult]:
         
@@ -218,7 +216,7 @@ class BatchProcessor:
                     entity_type=typ,
                     topic=topic
                 )
-                for name, typ, topic in mentions
+                for _, name, typ, topic in mentions
             ])
         
         entries = []
@@ -253,7 +251,7 @@ class BatchProcessor:
 
     async def _disambiguate(
         self,
-        mentions: List[Tuple[str, str, str]],
+        mentions: List[Tuple[int, str, str, str]],
         messages: List[Dict],
         known_entities: List[Dict],
         session_text: str
@@ -262,16 +260,14 @@ class BatchProcessor:
         fast_result = self._try_fast_path(mentions, known_entities)
         if fast_result is not None:
             return fast_result
-        
-        mentions_fmt = [{"name": m[0], "type": m[1], "topic": m[2]} for m in mentions]
 
         system_02 = get_disambiguation_reasoning_prompt(self.user_name)
-        user_02 = json.dumps({
-            "known_entities": known_entities,
-            "mentions": mentions_fmt,
-            "messages": [{"id": m["id"], "text": m["message"]} for m in messages],
-            "session_context": session_text
-        })
+        user_02 = format_vp02_input(
+            known_entities,
+            mentions,
+            [{"id": m["id"], "text": m["message"]} for m in messages],
+            session_text
+        )
         
         reasoning = await self.llm.call_llm(system_02, user_02)
         if not reasoning:
@@ -291,7 +287,8 @@ class BatchProcessor:
         entity_ids = []
         new_ids = set()
         alias_ids = set()
-        
+        entity_msg_map: Dict[int, List[int]] = {}
+
         for entry in disambiguation.entries:
             if entry.verdict == "EXISTING":
 
@@ -327,7 +324,7 @@ class BatchProcessor:
                     alias_ids.add(ent_id)
             
             else:
-                canonical = entry.mentions[0]
+                canonical = entry.canonical_name or entry.mentions[0]
                 ent_id = await self._get_next_ent_id()
                 await loop.run_in_executor(
                     self.executor,
@@ -340,19 +337,23 @@ class BatchProcessor:
             
             if ent_id is not None:
                 entity_ids.append(ent_id)
+                if entry.msg_ids:
+                    entity_msg_map[ent_id] = entry.msg_ids
         
         return entity_ids, new_ids, alias_ids
 
     async def _extract_connections(
         self,
         entity_ids: List[int],
+        entity_msg_map: Dict[int, List[int]],
         messages: List[Dict],
         session_text: str
     ) -> Optional[ConnectionExtractionResponse]:
         """Extract connections between entities."""
-
-        # lines = session_text.split('\n')
-        # session_text = '\n'.join(lines[-(len(lines) // 2):])
+        
+        if not entity_ids:
+            return None
+        
         candidates = []
         for ent_id in entity_ids:
             profile = self.ent_resolver.entity_profiles.get(ent_id)
@@ -360,15 +361,15 @@ class BatchProcessor:
                 candidates.append({
                     "canonical_name": profile["canonical_name"],
                     "type": profile["type"],
-                    "mentions": self.ent_resolver.get_mentions_for_id(ent_id)
+                    "mentions": self.ent_resolver.get_mentions_for_id(ent_id),
+                    "source_msgs": entity_msg_map.get(ent_id, [])
                 })
+                
+        system_03 = get_connection_reasoning_prompt(self.user_name)
+        user_03 = format_vp03_input(candidates, messages, session_text)
         
-        messages_text = "\n".join([f"{m['id']}: \"{m['message']}\"" for m in messages])
-        
-        system_04 = get_connection_reasoning_prompt(self.user_name, messages_text, session_text)
-        user_04 = json.dumps({"candidate_entities": candidates})
-        
-        reasoning = await self.llm.call_llm(system_04, user_04)
+        logger.debug(f"VEGAPUNK-03 Input:\n{user_03}")
+        reasoning = await self.llm.call_llm(system_03, user_03)
         if not reasoning:
             return None
         

@@ -1,18 +1,14 @@
 import asyncio
-import json
 import os
-import re
-from typing import Dict, List, Optional, Type, TypeVar
-from openai import AsyncOpenAI, OpenAI
-import instructor
+from typing import Dict, List, Optional, TypeVar
+from openai import AsyncOpenAI
 from loguru import logger
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
 
-STRUCTURED_MODEL = os.environ.get("STRUCTURED_MODEL", "google/gemini-2.5-flash-lite")
-REASONING_MODEL = os.environ.get("REASONING_MODEL", "google/gemini-2.5-flash")
+REASONING_MODEL = os.environ.get("REASONING_MODEL", "google/gemini-3-flash-preview")
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "google/gemini-3-flash-preview")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
@@ -24,7 +20,6 @@ class LLMService:
         self,
         api_key: Optional[str] = None,
         trace_logger=None,
-        structured_model: Optional[str] = None,
         reasoning_model: Optional[str] = None,
         agent_model: Optional[str] = None
     ):
@@ -33,39 +28,19 @@ class LLMService:
             raise ValueError("OpenRouter API key required, this aint free")
         
         self._trace = trace_logger
-        self._structured_model = structured_model or STRUCTURED_MODEL
         self._reasoning_model = reasoning_model or REASONING_MODEL
         self._agent_model = agent_model or AGENT_MODEL
-
-        self._client_sync = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=self._api_key
-        )
         
         self._client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=self._api_key
         )
         
-        self._client_instruct = instructor.from_openai(
-            AsyncOpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=self._api_key
-            ),
-            mode=instructor.Mode.JSON
-        )
-        
         logger.info(
             f"LLMService initialized | "
-            f"structured={self._structured_model} | "
             f"reasoning={self._reasoning_model} | "
             f"agent={self._agent_model}" 
         )
-
-    @property
-    def structured_model(self) -> str:
-        """Model used for structuring or non-reasoning tasks"""
-        return self._structured_model
     
     @property
     def reasoning_model(self) -> str:

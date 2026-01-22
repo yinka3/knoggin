@@ -146,7 +146,8 @@ class Context:
         instance.merge_job = MergeDetectionJob(
             user_name, instance.ent_resolver, 
             instance.store, instance.llm,
-            instance.topic_config
+            instance.topic_config,
+            instance.executor
         )
         
 

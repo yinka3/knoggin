@@ -13,9 +13,8 @@ load_dotenv()
 CONFIG_DIR = Path(os.getenv("VESTIGE_CONFIG_DIR", "./config"))
 CONFIG_FILE = CONFIG_DIR / "vestige.json"
 
-DEFAULT_STRUCTURED_MODEL = "google/gemini-2.5-flash"
 DEFAULT_REASONING_MODEL = "google/gemini-3-flash-preview"
-DEFAULT_AGENT_MODEL = "anthropic/claude-sonnet-4.5"
+DEFAULT_AGENT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_TOPICS = ["General"]
 
 
@@ -32,7 +31,6 @@ def get_default_config() -> dict:
         "redis_password": generate_password(),
         "memgraph_user": "vestige",
         "memgraph_password": generate_password(),
-        "structured_model": DEFAULT_STRUCTURED_MODEL,
         "reasoning_model": DEFAULT_REASONING_MODEL,
         "agent_model": DEFAULT_AGENT_MODEL,
         "topics": DEFAULT_TOPICS,

@@ -157,8 +157,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         "get_connections": lambda: tools.get_connections(args.get("entity_name", "")),
         "get_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
         "find_path": lambda: tools.find_path(args.get("entity_a", ""), args.get("entity_b", "")),
-        "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both")),
-        "get_entity_history": lambda: tools.get_entity_history(args.get("entity_id", ""))
+        "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both"))
     }
 
     logger.info(f"[TOOL CALL] {name}: {json.dumps(args)}")

@@ -13,7 +13,7 @@ class BatchConsumer:
                 get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
                 run_session_jobs: Callable[[], Awaitable[None]],
                 write_to_graph: Callable[[BatchResult], Awaitable[None]],
-                batch_size: int = 7, batch_timeout: float =  15.0, 
+                batch_size: int = 10, batch_timeout: float =  30.0, 
                 checkpoint_interval: int = 30, session_window: int = 30):
         
         self.user_name = user_name

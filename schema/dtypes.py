@@ -69,6 +69,7 @@ class ResolutionEntry(BaseModel):
         description="The topic category this entity belongs to, from the original mention's topic. "
         "If grouped mentions have different topics, use the topic of the canonical mention."
     )
+    msg_ids: List[int] = field(default_factory=list)
 
 
 class DisambiguationResult(BaseModel):
@@ -153,10 +154,12 @@ class FactMergeResult:
     new_contents: List[str]
 
 class EntityItem(BaseModel):
+    msg_id: int
     name: str
     label: str
     topic: str
     confidence: float
+    msg_id: Optional[int] = None
 
 class ExtractionResponse(BaseModel):
     entities: List[EntityItem]

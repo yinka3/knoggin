@@ -53,7 +53,7 @@ class NLPPipeline:
         return nlp
     
     def _load_gliner(self) -> GLiNER:
-        model = GLiNER.from_pretrained("urchade/gliner_large-v2.1")
+        model = GLiNER.from_pretrained("numind/NuNER_Zero")
         model.to(self.device)
         logger.info("Loaded GLiNER large-v2.1")
         return model
@@ -94,7 +94,7 @@ class NLPPipeline:
     
 
     
-    def run_gliner(self, text: str, threshold: float = 0.85) -> List[Tuple[str, str, int, int]]:
+    def run_gliner(self, text: str, threshold: float = 0.85) -> List[Tuple[str, str]]:
         all_labels = list(self._label_to_topics.keys())
         if not all_labels:
             return []
@@ -123,7 +123,7 @@ class NLPPipeline:
             
             filtered.append(e)
         
-        return [(e["text"], e["label"], e["start"], e["end"]) for e in filtered]
+        return [(e["text"], e["label"]) for e in filtered]
     
     def _assign_topic(self, label: str) -> Tuple[Optional[str], bool]:
         """
@@ -160,51 +160,52 @@ class NLPPipeline:
             if eid:
                 known_ents.append((span_text, eid))
         
-        msg_only = " ".join([m["message"] for m in messages])
-        gliner_raw = self.run_gliner(msg_only)
-        gliner_ents: List[Tuple[str, str]] = [(span, label) for span, label, _, _ in gliner_raw]
+        gliner_ents: List[Tuple[int, str, str]] = []
+        for msg in messages:
+            msg_id = msg['id']
+            extractions = self.run_gliner(msg['message'])
+            for span, label in extractions:
+                gliner_ents.append((msg_id, span, label))
         
-        covered_texts: set[str] = set()
-        resolved: List[Tuple[str, str, str, int | None]] = []  # (text, label, topic, eid)
-        ambiguous: List[Tuple[str, str, List[str]]] = []  # (text, label, candidate_topics)
+        covered_texts: Dict[int, set] = {m['id']: set() for m in messages}
+        resolved: List[Tuple[int, str, str, str, int | None]] = []  # (text, label, topic, eid)
+        ambiguous: List[Tuple[int, str, str, List[str]]] = []  # (text, label, candidate_topics)
         
         # process known entities first (highest priority)
         for span_text, eid in known_ents:
             profile = self.get_profiles().get(eid, {})
-            covered_texts.add(span_text.lower())
-            resolved.append((
-                span_text,
-                profile.get("type", "unknown"),
-                profile.get("topic", "General"),
-                eid
-            ))
+            for msg in messages:
+                if span_text.lower() in msg['message'].lower():
+                    covered_texts[msg['id']].add(span_text.lower())
+                    resolved.append((
+                        msg['id'],
+                        span_text,
+                        profile.get("type", "unknown"),
+                        profile.get("topic", "General")
+                    ))
         
         gliner_filtered = set()
         # process GLiNER entities second
-        for span_text, label in gliner_ents:
-            if is_covered(span_text, covered_texts):
+        for msg_id, span_text, label in gliner_ents:
+            if is_covered(span_text, covered_texts[msg_id]):
                 continue
 
             if not validate_entity(span_text, "General", self.topic_config):
                 logger.debug(f"Filtered invalid GLiNER entity: '{span_text}'")
                 continue
             
-            covered_texts.add(span_text.lower())
+            covered_texts[msg_id].add(span_text.lower())
             topic, is_ambiguous = self._assign_topic(label)
             
             if is_ambiguous:
                 topics = self._label_to_topics.get(label.lower(), [])
-                ambiguous.append((span_text, label, topics))
+                ambiguous.append((msg_id, span_text, label, topics))
             else:
-                resolved.append((span_text, label, topic, None))
+                resolved.append((msg_id, span_text, label, topic, None))
         
-        output: List[Tuple[str, str, str]] = []
+        output: List[Tuple[int, str, str, str]] = list(resolved)
         
-        # add already-resolved to output
-        for span_text, label, topic, _ in resolved:
-            output.append((span_text, label, topic))
-        
-        user_content = format_vp01_input(messages, known_ents, gliner_ents, ambiguous, covered_texts)
+        user_content = format_vp01_input(messages, known_ents, gliner_ents, ambiguous, covered_texts, self.topic_config.label_block)
         
         system_prompt = ner_reasoning_prompt(user_name, self.topic_config.label_block)
         reasoning = await self.llm_client.call_llm(system_prompt, user_content)
