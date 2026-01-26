@@ -6,9 +6,10 @@ from typing import Dict
 
 from wordfreq import word_frequency
 from main.topics_config import TopicConfig
-from schema.dtypes import ConnectionExtractionResponse, DisambiguationResult, EntityItem, EntityPair, ExtractionResponse, MessageConnections, ResolutionEntry
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
+
+from schema.dtypes import EntityItem, EntityPair, MessageConnections, ResolutionEntry
 
 def is_substring_match(name_a: str, name_b: str) -> bool:
     """Case-insensitive substring check."""
@@ -101,6 +102,36 @@ def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
     
     return True
 
+
+def dedupe_entries( entries: List[ResolutionEntry]) -> List[ResolutionEntry]:
+    """Merge NEW entries with identical canonical_name and type."""
+    existing = []
+    new_entries: Dict[str, ResolutionEntry] = {}
+    
+    for entry in entries:
+        if entry.verdict == "EXISTING":
+            existing.append(entry)
+            continue
+        
+        c_name = entry.canonical_name
+        if not c_name:
+            if entry.mentions and entry.mentions[0]:
+                c_name = entry.mentions[0]
+            else:
+                logger.warning(f"Skipping entry with no name: {entry}")
+                continue
+
+        key = c_name.strip().lower()
+        if key in new_entries:
+            new_entries[key].msg_ids.extend(entry.msg_ids)
+            for m in entry.mentions:
+                if m not in new_entries[key].mentions:
+                    new_entries[key].mentions.append(m)
+        else:
+            new_entries[key] = entry
+    
+    return existing + list(new_entries.values())
+
 def format_vp01_input(
     messages: List[Dict],
     known_ents: List[Tuple[str, int]],
@@ -110,6 +141,7 @@ def format_vp01_input(
     label_block: str
 ) -> str:
     
+    lines = []
     lines.append("## Label Schema")
     lines.append(label_block)
 
@@ -139,8 +171,8 @@ def format_vp01_input(
     
     if ambiguous:
         lines.append("\n## Ambiguous (Task 1: assign topic)")
-        for span_text, label, topics in ambiguous:
-            lines.append(f"- \"{span_text}\" ({label}) -> choose from: {topics}")
+        for msg_id, span_text, label, topics in ambiguous:
+            lines.append(f"- MSG {msg_id}: \"{span_text}\" ({label}) -> choose from: {topics}")
     
     lines.append("\n## Discovery (Task 2: find missed entities)")
     lines.append("Scan messages above for proper nouns not listed in Already Resolved.")
@@ -148,8 +180,9 @@ def format_vp01_input(
     
     return "\n".join(lines)
 
-def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[ExtractionResponse]:
-    """Parse <entities> block from VP-01 output. Expects: msg_id | name | label | topic | confidence"""
+def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[List[EntityItem]]:
+    """Parse <entities> block from VP-01 output. Expects: msg_id | name | label | topic | confidence
+    Falls back to: msg_id | name | label | confidence (topic defaults to General)"""
     content = extract_xml_content(reasoning, "entities")
     
     if not content:
@@ -164,11 +197,16 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[Extr
             continue
         
         parts = line.split("|")
-        if len(parts) != 5:
+        
+        if len(parts) == 5:
+            msg_id_str, name, label, topic, conf_str = [p.strip() for p in parts]
+        elif len(parts) == 4:
+            msg_id_str, name, label, conf_str = [p.strip() for p in parts]
+            topic = "General"  # Default when missing
+            logger.warning(f"VP-01 missing topic field, defaulting to General: {name}")
+        else:
             malformed += 1
             continue
-        
-        msg_id_str, name, label, topic, conf_str = [p.strip() for p in parts]
         
         if not name:
             malformed += 1
@@ -198,7 +236,7 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[Extr
     if not entities:
         return None
     
-    return ExtractionResponse(entities=entities)
+    return entities
 
 def format_vp02_input(
     known_entities: List[Dict],
@@ -237,14 +275,23 @@ def format_vp02_input(
 
 def parse_disambiguation(
     reasoning: str, 
-    mentions: List[Tuple[str, str, str]]
-) -> DisambiguationResult:
+    mentions: List[Tuple[int, str, str, str]]
+) -> List[ResolutionEntry]:
     """
-    Parse VP-02 <resolution> block into DisambiguationResult.
+    Parse VP-02 <resolution> block into list of Resolution Entry.
     """
     content = extract_xml_content(reasoning, "resolution")
     if not content:
-        return DisambiguationResult(entries=[])
+        lines = reasoning.strip().split("\n")
+        resolution_lines = [
+            l.strip() for l in lines 
+            if l.strip().startswith(("EXISTING", "NEW_SINGLE", "NEW_GROUP"))
+        ]
+        if resolution_lines:
+            content = "\n".join(resolution_lines)
+    
+    if not content:
+        return []
     
     logger.debug(f"Disambiguation content:\n{content}")
     
@@ -254,7 +301,7 @@ def parse_disambiguation(
         for m in mentions
     }
     
-    entries = []
+    entries: List[ResolutionEntry] = []
     for line in content.split("\n"):
         line = line.strip()
         if not line or "|" not in line:
@@ -303,7 +350,18 @@ def parse_disambiguation(
         elif verdict == "NEW_SINGLE" and len(parts) >= 2:
             mention_raw = parts[1]
             mention, msg_id = _parse_mention_with_msg_id(mention_raw)
-            typ, topic = mention_lookup.get((msg_id, mention.lower()), ("unknown", "General"))
+            if msg_id is not None:
+                typ, topic = mention_lookup.get((msg_id, mention.lower()), (None, None))
+            else:
+                typ, topic = None, None
+            
+            if typ is None:
+                for (_, mname), (mtyp, mtopic) in mention_lookup.items():
+                    if mname == mention.lower():
+                        typ, topic = mtyp, mtopic
+                        break
+                else:
+                    typ, topic = "unknown", "General"
             
             entries.append(ResolutionEntry(
                 verdict="NEW_SINGLE",
@@ -314,19 +372,21 @@ def parse_disambiguation(
                 msg_ids=[msg_id] if msg_id else []
             ))
     
-    return DisambiguationResult(entries=entries)
+    return entries
 
-def _parse_mention_with_msg_id(raw: str) -> Tuple[str, int]:
+def _parse_mention_with_msg_id(raw: str) -> Tuple[str, Optional[int]]:
     """
     Parse 'X (MSG_3)' -> ('X', 3)
     Falls back to msg_id=0 if not found.
     """
-    match = re.search(r"^(.+?)\s*\(MSG[_]?(\d+)\)$", raw.strip(), re.IGNORECASE)
+    if not raw:
+        return "", None
+    match = re.search(r"^(.+?)\s*\(MSG[_\s]?(\d+)\)$", raw.strip(), re.IGNORECASE)
     if match:
         return match.group(1).strip(), int(match.group(2))
     
     # Fallback: no msg_id in output
-    return raw.strip(), 0
+    return raw.strip(), None
 
 def format_vp03_input(
     candidates: List[Dict],
@@ -364,9 +424,10 @@ def format_vp03_input(
     
     return "\n".join(lines)
 
-def parse_connection_response(text: str) -> List[dict]:
+def parse_connection_response(text: str) -> List[MessageConnections]:
     """
     Parses <connections> block.
+    Format: MSG <id> | entity_a; entity_b | confidence | reason
     """
     content = extract_xml_content(text, "connections")
     if not content:
@@ -392,35 +453,32 @@ def parse_connection_response(text: str) -> List[dict]:
         if mid_part.upper() == "NO CONNECTIONS":
             continue
             
-        if len(parts) < 3:
+        if len(parts) < 4:
             continue
+        
+        try:
+            confidence = float(parts[2].strip())
+            confidence = max(0.0, min(1.0, confidence))
+        except ValueError:
+            confidence = 0.8
+        
+        reason = parts[3].strip()
             
         if ";" in mid_part:
             ents = [e.strip() for e in mid_part.split(';')]
-            reason = parts[2].strip()
-            
             if len(ents) >= 2:
                 connections.append({
                     "msg_id": msg_id,
                     "entity_a": ents[0],
                     "entity_b": ents[1],
+                    "confidence": confidence,
                     "reason": reason
                 })
-        else:
-            if "," in mid_part:
-                ents = [e.strip() for e in mid_part.split(',')]
-                if len(ents) >= 2:
-                     connections.append({
-                        "msg_id": msg_id,
-                        "entity_a": ents[0],
-                        "entity_b": ents[1],
-                        "reason": parts[2].strip()
-                    })
 
-    return connections
+    return build_connection_response(connections)
 
 
-def build_connection_response(parsed: List[dict]) -> ConnectionExtractionResponse:
+def build_connection_response(parsed: List[dict]) -> List[MessageConnections]:
     from collections import defaultdict
     
     grouped = defaultdict(list)
@@ -429,7 +487,7 @@ def build_connection_response(parsed: List[dict]) -> ConnectionExtractionRespons
             EntityPair(
                 entity_a=item["entity_a"],
                 entity_b=item["entity_b"],
-                confidence=0.8
+                confidence=item["confidence"]
             )
         )
     
@@ -438,7 +496,7 @@ def build_connection_response(parsed: List[dict]) -> ConnectionExtractionRespons
         for msg_id, pairs in grouped.items()
     ]
     
-    return ConnectionExtractionResponse(message_results=message_results)
+    return message_results
 
 
 

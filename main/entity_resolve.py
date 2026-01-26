@@ -6,7 +6,7 @@ from rapidfuzz import fuzz, process
 import numpy as np
 from sentence_transformers import SentenceTransformer, CrossEncoder
 import torch
-from db.memgraph import MemGraphStore
+from db.store import MemGraphStore
 from main.utils import is_substring_match
 from schema.dtypes import Fact
 
@@ -71,6 +71,8 @@ class EntityResolver:
             raise
     
     def get_id(self, name: str) -> Optional[int]:
+        if not name:
+            return None
         return self._name_to_id.get(name.lower())
     
     def get_profiles(self) -> Dict[int, Dict]:
@@ -174,6 +176,10 @@ class EntityResolver:
         Check if canonical_name exists. If yes, register mention aliases and return ID.
         If no, return None (caller handles demotion).
         """
+
+        if not canonical_name:
+            return None, False
+        
         with self._lock:
             entity_id = self.get_id(canonical_name)
             logger.debug(f"validate_existing: '{canonical_name}' -> id={entity_id}")
@@ -208,7 +214,11 @@ class EntityResolver:
         self, 
         mention: str,
         fuzzy_threshold: int = 75,
-    ) -> List[int]:
+        vector_threshold: float = 0.85
+    ) -> List[Tuple[int, float]]:
+        
+        if not mention:
+            return []
 
         candidates = set()
         mention_lower = mention.lower()
@@ -219,20 +229,37 @@ class EntityResolver:
             
             choices = list(self._name_to_id.keys())
 
-        results = process.extract(
-            mention_lower,
-            choices,
-            limit=50,
-            score_cutoff=fuzzy_threshold,
-            scorer=fuzz.WRatio
-        )
+            results = process.extract(
+                mention_lower,
+                choices,
+                limit=50,
+                score_cutoff=fuzzy_threshold,
+                scorer=fuzz.WRatio
+            )
 
-        for alias, _, _ in results:
-            eid = self._name_to_id.get(alias)
-            if eid is not None:
-                candidates.add(eid)
-        
-        return list(candidates)
+            for alias, _, _ in results:
+                eid = self._name_to_id.get(alias)
+                if eid is not None:
+                    candidates.add(eid)
+            
+            try:
+                vector = self.embedding_model.encode([mention]).astype(np.float32)[0].tolist()
+                vector_results = self.store.search_entities_by_embedding(
+                    vector, 
+                    limit=5, 
+                    score_threshold=vector_threshold
+                )
+                
+                for eid, score in vector_results:
+                    with self._lock:
+                        if eid:
+                            candidates.add(eid)
+                            logger.debug(f"Vector search found entity ID'{eid}' for '{mention}' (score={score:.2f})")
+
+            except Exception as e:
+                logger.warning(f"Vector candidate search failed: {e}")
+            
+            return list(candidates)
     
     def register_entity(
         self, 
@@ -357,8 +384,8 @@ class EntityResolver:
         facts_by_entity = self.store.get_facts_for_entities(list(entity_ids), active_only=True)
 
         candidates = []
-        for (id_a, id_b), (fuzz_score, is_substring) in candidate_pairs.items():
-            result = self._classify_pair(id_a, id_b, fuzz_score, is_substring, facts_by_entity)
+        for (id_a, id_b), fuzz_score in candidate_pairs.items():
+            result = self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity)
             if result:
                 candidates.append(result)
 
@@ -391,7 +418,7 @@ class EntityResolver:
         generic_tokens: set,
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
-    ) -> Dict[Tuple[int, int], Tuple[int, bool]]:
+    ) -> Dict[Tuple[int, int], int]:
         """
         Vector search + fuzzy filter.
         Returns {(id_a, id_b): (fuzz_score, is_substring)}
@@ -440,7 +467,7 @@ class EntityResolver:
 
                 pair_key = (primary_id, neighbor_id)
                 if pair_key not in seen_pairs or score > seen_pairs[pair_key][0]:
-                    seen_pairs[pair_key] = (score, is_substring)
+                    seen_pairs[pair_key] = score
 
         return seen_pairs
 
@@ -450,10 +477,7 @@ class EntityResolver:
         id_a: int,
         id_b: int,
         fuzz_score: int,
-        is_substring: bool,
-        facts_by_entity: Dict[int, List[Fact]],
-        hierarchy_substring_threshold: int = 80,
-        hierarchy_non_substring_threshold: int = 91,
+        facts_by_entity: Dict[int, List[Fact]]
     ) -> Optional[dict]:
         """
         Evaluate one pair for merge or hierarchy relationship.
@@ -474,49 +498,19 @@ class EntityResolver:
 
         is_cross_topic = topic_a != topic_b
         if is_cross_topic:
-            if not (fuzz_score >= 96 and type_a == type_b):
+            if not (fuzz_score >= 85 and type_a == type_b):
                 return None
 
-        relationship = "merge"
-        parent_id = None
-        child_id = None
-        
-        # only consider hierarchy if same topic and both types known
-        if topic_a == topic_b and type_a and type_b:
-            hierarchy_rel = self.get_hierarchy_relationship(type_a, type_b, topic_a)
-            if hierarchy_rel == "parent":
-                relationship = "hierarchy"
-                parent_id = id_a
-                child_id = id_b
-            elif hierarchy_rel == "child":
-                relationship = "hierarchy"
-                parent_id = id_b
-                child_id = id_a
+        neighbors_a = self.store.get_neighbor_ids(id_a)
+        neighbors_b = self.store.get_neighbor_ids(id_b)
+        neighbors_a.discard(1) # ignore user node
+        neighbors_b.discard(1)
 
-            
-        if relationship == "hierarchy":
-            if is_cross_topic:
+        shared_neighbors = neighbors_a & neighbors_b
+        if shared_neighbors:
+            high_confidence = fuzz_score >= 95 and type_a and type_b and type_a == type_b
+            if not high_confidence:
                 return None
-            if is_substring and fuzz_score < hierarchy_substring_threshold:
-                return None
-            if not is_substring and fuzz_score < hierarchy_non_substring_threshold:
-                return None
-
-        # shared neighbor check
-        if relationship == "merge":
-            neighbors_a = self.store.get_neighbor_ids(id_a)
-            neighbors_b = self.store.get_neighbor_ids(id_b)
-            neighbors_a.discard(1) # ignore user node
-            neighbors_b.discard(1)
-
-            shared_neighbors = neighbors_a & neighbors_b
-            if shared_neighbors:
-                high_confidence = fuzz_score >= 95 and type_a and type_b and type_a == type_b
-                if not high_confidence:
-                    return None
-        else:
-            shared_neighbors = set()
-
 
         return {
             "primary_id": id_a,
@@ -532,9 +526,6 @@ class EntityResolver:
             "facts_a": facts_by_entity.get(id_a, []),
             "facts_b": facts_by_entity.get(id_b, []),
             "fuzz_score": fuzz_score,
-            "shared_neighbor_count": len(shared_neighbors),
-            "relationship": relationship,
-            "parent_id": parent_id,
-            "child_id": child_id,
+            "shared_neighbor_count": len(shared_neighbors)
         }
     

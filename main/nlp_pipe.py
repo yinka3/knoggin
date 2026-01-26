@@ -3,7 +3,6 @@ from main.prompts import ner_reasoning_prompt
 from main.service import LLMService
 from main.topics_config import TopicConfig
 from main.utils import format_vp01_input, is_covered, is_generic_phrase, parse_entities, validate_entity
-from schema.dtypes import *
 from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
 from transformers import pipeline
@@ -53,7 +52,7 @@ class NLPPipeline:
         return nlp
     
     def _load_gliner(self) -> GLiNER:
-        model = GLiNER.from_pretrained("numind/NuNER_Zero")
+        model = GLiNER.from_pretrained("urchade/gliner_large-v2.1")
         model.to(self.device)
         logger.info("Loaded GLiNER large-v2.1")
         return model
@@ -80,6 +79,27 @@ class NLPPipeline:
         
         logger.debug(f"Built label to topics map: {label_to_topics}")
         return label_to_topics
+    
+    def _normalize_label(self, label: str) -> Tuple[str, Optional[str], bool]:
+        """
+        Normalize extracted label via alias lookup.
+        
+        Returns: (canonical_label, topic_or_none, is_ambiguous)
+        """
+        if not label:
+            return label, None, False
+        
+        label_lower = label.lower()
+        mappings = self.topic_config.label_alias_lookup.get(label_lower, [])
+        
+        if not mappings:
+            return label, None, False
+        
+        if len(mappings) == 1:
+            canonical, topic = mappings[0]
+            return canonical, topic, False
+        
+        return label, None, True
 
     def _build_phrase_matcher(self) -> Tuple[PhraseMatcher, Dict[str, int]]:
         """Build PhraseMatcher from current known aliases."""
@@ -100,10 +120,12 @@ class NLPPipeline:
             return []
         
         entities = self._gliner.predict_entities(text, all_labels, threshold=threshold)
-        
+
         filtered = []
         for e in entities:
             span = e["text"]
+            if not span:
+                continue
             score = e.get("score", 0)
             
             logger.debug(f"GLiNER: '{span}' | label={e['label']} | score={score:.3f}")
@@ -130,6 +152,9 @@ class NLPPipeline:
         Assign topic from label.
         Returns: (topic or None, is_ambiguous)
         """
+        if not label:
+            return "General", False
+        
         label_lower = label.lower()
         topics = self._label_to_topics.get(label_lower, [])
         
@@ -139,6 +164,7 @@ class NLPPipeline:
             return None, True
         else:
             return "General", False
+        
     
     
     async def extract_mentions(self, user_name: str, messages: List[Dict]) -> List[Tuple[str, str, str]]:
@@ -168,21 +194,25 @@ class NLPPipeline:
                 gliner_ents.append((msg_id, span, label))
         
         covered_texts: Dict[int, set] = {m['id']: set() for m in messages}
-        resolved: List[Tuple[int, str, str, str, int | None]] = []  # (text, label, topic, eid)
-        ambiguous: List[Tuple[int, str, str, List[str]]] = []  # (text, label, candidate_topics)
+        resolved: List[Tuple[int, str, str, str]] = []
+        ambiguous: List[Tuple[int, str, str, List[str]]] = []
         
         # process known entities first (highest priority)
         for span_text, eid in known_ents:
             profile = self.get_profiles().get(eid, {})
+            matched_msg_ids = set()
+
             for msg in messages:
                 if span_text.lower() in msg['message'].lower():
-                    covered_texts[msg['id']].add(span_text.lower())
-                    resolved.append((
-                        msg['id'],
-                        span_text,
-                        profile.get("type", "unknown"),
-                        profile.get("topic", "General")
-                    ))
+                    if msg['id'] not in matched_msg_ids:
+                        matched_msg_ids.add(msg['id'])
+                        covered_texts[msg['id']].add(span_text.lower())
+                        resolved.append((
+                            msg['id'],
+                            span_text,
+                            profile.get("type", "unknown"),
+                            profile.get("topic") or "General"
+                        ))
         
         gliner_filtered = set()
         # process GLiNER entities second
@@ -195,30 +225,39 @@ class NLPPipeline:
                 continue
             
             covered_texts[msg_id].add(span_text.lower())
-            topic, is_ambiguous = self._assign_topic(label)
+
+            canonical_label, resolved_topic, is_alias_ambiguous = self._normalize_label(label)
             
-            if is_ambiguous:
-                topics = self._label_to_topics.get(label.lower(), [])
-                ambiguous.append((msg_id, span_text, label, topics))
+            if resolved_topic:
+                resolved.append((msg_id, span_text, canonical_label, resolved_topic))
+            elif is_alias_ambiguous:
+                topics = [t for _, t in self.topic_config.label_alias_lookup.get(label.lower(), [])]
+                ambiguous.append((msg_id, span_text, canonical_label, topics))
             else:
-                resolved.append((msg_id, span_text, label, topic, None))
+                topic, is_ambiguous = self._assign_topic(canonical_label)
+                
+                if is_ambiguous:
+                    topics = self._label_to_topics.get(canonical_label.lower(), [])
+                    ambiguous.append((msg_id, span_text, canonical_label, topics))
+                else:
+                    resolved.append((msg_id, span_text, canonical_label, topic))
         
         output: List[Tuple[int, str, str, str]] = list(resolved)
         
         user_content = format_vp01_input(messages, known_ents, gliner_ents, ambiguous, covered_texts, self.topic_config.label_block)
         
-        system_prompt = ner_reasoning_prompt(user_name, self.topic_config.label_block)
+        system_prompt = ner_reasoning_prompt(user_name)
         reasoning = await self.llm_client.call_llm(system_prompt, user_content)
         
         vp01_count = 0
         if reasoning and "<entities>" in reasoning:
             response = parse_entities(reasoning, min_confidence=0.8)
             if response:
-                for entity in response.entities:
+                for entity in response:
                     if validate_entity(entity.name, entity.topic, self.topic_config):
                         if entity.name.lower() in gliner_filtered:
                             logger.info(f"VP-01 recovered GLiNER-filtered entity: '{entity.name}'")
-                        output.append((entity.name, entity.label, entity.topic))
+                        output.append((entity.msg_id, entity.name, entity.label, entity.topic))
                         vp01_count += 1
                     else:
                         logger.debug(f"Filtered invalid VP-01 entity: '{entity.name}'")

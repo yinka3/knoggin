@@ -11,7 +11,7 @@ class AgentConfig:
     max_history_turns: int = 7
     max_accumulated_messages: int = 30
     tool_limits: Tuple[Tuple[str, int], ...] = (
-        ("search_messages", 4),
+        ("search_messages", 2),
         ("get_connections", 4),
         ("search_entity", 4),
         ("get_activity", 5),
@@ -60,9 +60,10 @@ class RetrievedEvidence:
     profiles: List[Dict] = field(default_factory=list)
     graph: List[Dict] = field(default_factory=list)
     paths: List[Dict] = field(default_factory=list)
+    hierarchy: List[Dict] = field(default_factory=list)
     
     def has_any(self) -> bool:
-        return bool(self.profiles or self.messages or self.graph or self.paths)
+        return bool(self.profiles or self.messages or self.graph or self.paths or self.hierarchy)
 
 
 @dataclass

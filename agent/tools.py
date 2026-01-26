@@ -3,7 +3,7 @@ from typing import List, Dict, Optional
 
 import redis
 from main.entity_resolve import EntityResolver
-from db.memgraph import MemGraphStore
+from db.store import MemGraphStore
 from main.topics_config import TopicConfig
 
 
@@ -312,7 +312,7 @@ class Tools:
         if not canonical_a or not canonical_b:
             return []
 
-        path, has_inactive_shortcut = self.store._find_path_filtered(canonical_a, canonical_b, active_topics=self.active_topics)
+        path, has_inactive_shortcut = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=self.active_topics)
         
         if path:
             for step in path:
@@ -322,7 +322,7 @@ class Tools:
             return path
         
         if has_inactive_shortcut:
-            full_path, _ = self.store._find_path_filtered(canonical_a, canonical_b, active_topics=None)
+            full_path, _ = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=None)
     
             safe_path = []
             for step in full_path:

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import redis.asyncio as redis
 from loguru import logger
 from typing import Dict, List, Set, Tuple, Optional
-from db.memgraph import MemGraphStore
+from db.store import MemGraphStore
 from main.service import LLMService
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
@@ -17,10 +17,15 @@ from main.prompts import (
     get_connection_reasoning_prompt
 )
 from main.topics_config import TopicConfig
-from main.utils import build_connection_response, format_vp02_input, format_vp03_input, parse_connection_response, parse_disambiguation
+from main.utils import (
+    dedupe_entries, 
+    format_vp02_input, 
+    format_vp03_input, 
+    parse_connection_response, 
+    parse_disambiguation
+)
 from schema.dtypes import (
-    DisambiguationResult,
-    ConnectionExtractionResponse,
+    MessageConnections,
     ResolutionEntry,
 )
 
@@ -31,7 +36,7 @@ class BatchResult:
     entity_ids: List[int] = field(default_factory=list)
     new_entity_ids: Set[int] = field(default_factory=set)
     alias_updated_ids: Set[int] = field(default_factory=set)
-    extraction_result: Optional[ConnectionExtractionResponse] = None
+    extraction_result: Optional[List[MessageConnections]] = None
     emotions: List[str] = field(default_factory=list)
     success: bool = True
     error: Optional[str] = None
@@ -75,8 +80,19 @@ class BatchProcessor:
         logger.debug(f"Processing batch of {len(messages)} messages: {[m['id'] for m in messages]}")
         
         try:
-            mentions_dict, emotions = await self._extract_mentions(messages)
+            mentions, emotions = await self._extract_mentions(messages)
             result.emotions = emotions
+
+            valid_mentions = []
+            for msg_id, text, typ, topic in mentions:
+                if not text: 
+                    continue # Skip empty names
+                
+                safe_topic = topic if topic else "General"
+                norm_topic = self.topic_config.normalize_topic(safe_topic)
+                valid_mentions.append((msg_id, text, typ, norm_topic))
+            
+            mentions = valid_mentions
             
             msg_texts = [m['message'] for m in messages]
     
@@ -90,22 +106,20 @@ class BatchProcessor:
             for i, msg in enumerate(messages):
                 msg['embedding'] = embeddings[i]
 
-            if not mentions_dict:
+            if not mentions:
                 logger.info("No mentions found in batch, skipping LLM calls")
                 return result
-            
-            mentions = [(name, data["type"], data["topic"]) for name, data in mentions_dict.items()]
             
             known_entities = await self._build_known_entities(mentions)
             
             disambiguation = await self._disambiguate(mentions, messages, known_entities, session_text)
-            if not disambiguation.entries:
+            if disambiguation is None:
                 logger.error("Disambiguation failed - no results returned")
                 result.success = False
                 result.error = "VEGAPUNK-02 returned empty disambiguation"
                 return result
             
-            entity_ids, new_ids, alias_ids = await self._resolve(disambiguation)
+            entity_ids, new_ids, alias_ids, entity_msg_map = await self._resolve(disambiguation)
             result.entity_ids = entity_ids
             result.new_entity_ids = new_ids
             result.alias_updated_ids = alias_ids
@@ -114,8 +128,8 @@ class BatchProcessor:
             if user_id and user_id not in entity_ids:
                 entity_ids.append(user_id)
             
-            connections = await self._extract_connections(entity_ids, messages, session_text)
-            if not connections:
+            connections = await self._extract_connections(entity_ids, entity_msg_map, messages, session_text)
+            if connections is None:
                 logger.error("Connection extraction failed")
                 result.success = False
                 result.error = "Connection extraction failed (VP-04)"
@@ -132,7 +146,7 @@ class BatchProcessor:
             return result
 
     
-    async def _extract_mentions(self, messages: List[Dict]) -> Tuple[Dict[str, Dict], List[str]]:
+    async def _extract_mentions(self, messages: List[Dict]) -> Tuple[List[Tuple[int, str, str, str]], List[str]]:
         """Run NER and emotion detection across all messages."""
         # loop = asyncio.get_running_loop()
         
@@ -155,6 +169,7 @@ class BatchProcessor:
         #         dominant = max(emotion_list, key=lambda x: x["score"])
         #         emotions.append(dominant["label"])
         
+        logger.debug(f"Extracted {normalized_mentions} mentions and emotions {emotions}")
         return normalized_mentions, emotions
 
     async def _build_known_entities(
@@ -166,6 +181,8 @@ class BatchProcessor:
         candidate_scores = {}
 
         for msg_id, name, _, _ in mentions:
+            if not name:
+                continue
             candidates = self.ent_resolver.get_candidate_ids(name)
             
             for rank, eid in enumerate(candidates):
@@ -190,7 +207,7 @@ class BatchProcessor:
         for eid in sorted_ids[:max_amount]:
             profile = self.ent_resolver.entity_profiles.get(eid)
             if profile:
-                connections = self.store.get_neighbor_names(eid, limit=5)
+                connections = self.store.get_neighbor_entities(eid, limit=5)
                 entity_facts = [f.content for f in facts_map.get(eid, [])]
 
                 known.append({
@@ -206,22 +223,24 @@ class BatchProcessor:
         self, 
         mentions: List[Tuple[int, str, str, str]], 
         known_entities: List[Dict]   
-    ) -> Optional[DisambiguationResult]:
+    ) -> Optional[List[ResolutionEntry]]:
         
         if not known_entities:
-            return DisambiguationResult(entries=[
+            return [
                 ResolutionEntry(
                     verdict="NEW_SINGLE",
+                    canonical_name=name,
                     mentions=[name],
                     entity_type=typ,
-                    topic=topic
+                    topic=topic,
+                    msg_ids=[msg_id]
                 )
-                for _, name, typ, topic in mentions
-            ])
+                for msg_id, name, typ, topic in mentions
+            ]
         
-        entries = []
+        entries: List[ResolutionEntry] = []
         
-        for name, typ, topic in mentions:
+        for msg_id, name, typ, topic in mentions:
             exact_id = self.ent_resolver.get_id(name)
             
             if exact_id is not None:
@@ -231,7 +250,8 @@ class BatchProcessor:
                     canonical_name=profile["canonical_name"],
                     mentions=[name],
                     entity_type=typ,
-                    topic=topic
+                    topic=topic,
+                    msg_ids=[msg_id]
                 ))
                 continue
             
@@ -240,14 +260,16 @@ class BatchProcessor:
             if len(fuzzy_candidates) == 0:
                 entries.append(ResolutionEntry(
                     verdict="NEW_SINGLE",
+                    canonical_name=name,
                     mentions=[name],
                     entity_type=typ,
-                    topic=topic
+                    topic=topic,
+                    msg_ids=[msg_id]
                 ))
             else:
                 return None
         
-        return DisambiguationResult(entries=entries)
+        return entries
 
     async def _disambiguate(
         self,
@@ -255,7 +277,7 @@ class BatchProcessor:
         messages: List[Dict],
         known_entities: List[Dict],
         session_text: str
-    ) -> DisambiguationResult:
+    ) -> Optional[List[ResolutionEntry]]:
 
         fast_result = self._try_fast_path(mentions, known_entities)
         if fast_result is not None:
@@ -272,24 +294,42 @@ class BatchProcessor:
         reasoning = await self.llm.call_llm(system_02, user_02)
         if not reasoning:
             logger.error("VEGAPUNK-02 failed")
-            return DisambiguationResult(entries=[])
+            return None
         
         if "<resolution>" not in reasoning:
             logger.warning("No <resolution> block in VEGAPUNK-02 output")
         
         result = parse_disambiguation(reasoning, mentions)
-        return result or DisambiguationResult(entries=[])
+        return result if result else None
 
 
-    async def _resolve(self, disambiguation: DisambiguationResult) -> Tuple[List[int], Set[int], Set[int]]:
+    async def _resolve(self, disambiguation: List[ResolutionEntry]) -> Tuple[List[int], Set[int], Set[int], Dict[int, List[int]]]:
         loop = asyncio.get_running_loop()
         
         entity_ids = []
         new_ids = set()
         alias_ids = set()
         entity_msg_map: Dict[int, List[int]] = {}
+        created_in_batch: Dict[str, int] = {} 
 
-        for entry in disambiguation.entries:
+        entries = dedupe_entries(disambiguation)
+        for entry in entries:
+            if not entry.canonical_name:
+                continue
+                
+            canonical_clean = entry.canonical_name.strip()
+            canonical_lower = canonical_clean.lower()
+
+            if canonical_lower in created_in_batch:
+                ent_id = created_in_batch[canonical_lower]
+                entity_ids.append(ent_id)
+                if entry.msg_ids:
+                    if ent_id not in entity_msg_map:
+                        entity_msg_map[ent_id] = []
+                    entity_msg_map[ent_id].extend(entry.msg_ids)
+                logger.debug(f"Reusing entity ID {ent_id} for '{canonical_clean}' created earlier in batch")
+                continue
+
             if entry.verdict == "EXISTING":
 
                 ent_id, aliases_added = self.ent_resolver.validate_existing(
@@ -320,27 +360,28 @@ class BatchProcessor:
                         )
                     )
                     new_ids.add(ent_id)
+                    created_in_batch[canonical_lower] = ent_id
                 elif aliases_added:
                     alias_ids.add(ent_id)
             
             else:
-                canonical = entry.canonical_name or entry.mentions[0]
                 ent_id = await self._get_next_ent_id()
                 await loop.run_in_executor(
                     self.executor,
                     partial(
                         self.ent_resolver.register_entity,
-                        ent_id, canonical, entry.mentions, entry.entity_type, entry.topic, self.session_id
+                        ent_id, canonical_clean, entry.mentions, entry.entity_type, entry.topic, self.session_id
                     )
                 )
                 new_ids.add(ent_id)
+                created_in_batch[canonical_lower] = ent_id
             
             if ent_id is not None:
                 entity_ids.append(ent_id)
                 if entry.msg_ids:
                     entity_msg_map[ent_id] = entry.msg_ids
         
-        return entity_ids, new_ids, alias_ids
+        return entity_ids, new_ids, alias_ids, entity_msg_map
 
     async def _extract_connections(
         self,
@@ -348,9 +389,9 @@ class BatchProcessor:
         entity_msg_map: Dict[int, List[int]],
         messages: List[Dict],
         session_text: str
-    ) -> Optional[ConnectionExtractionResponse]:
+    ) -> Optional[List[MessageConnections]]:
         """Extract connections between entities."""
-        
+
         if not entity_ids:
             return None
         
@@ -368,22 +409,22 @@ class BatchProcessor:
         system_03 = get_connection_reasoning_prompt(self.user_name)
         user_03 = format_vp03_input(candidates, messages, session_text)
         
-        logger.debug(f"VEGAPUNK-03 Input:\n{user_03}")
+        # logger.debug(f"VEGAPUNK-03 Input:\n{user_03}")
         reasoning = await self.llm.call_llm(system_03, user_03)
         if not reasoning:
             return None
         
-        parsed = parse_connection_response(reasoning)
-        return build_connection_response(parsed)
+        return parse_connection_response(reasoning)
 
 
-    async def move_to_dead_letter(self, messages: List[Dict], error: str):
+    async def move_to_dead_letter(self, messages: List[Dict], error: str, attempt: int = 1):
         """Store failed batch in DLQ."""
         
         dlq_key = f"dlq:{self.user_name}"
         entry = {
             "timestamp": time.time(),
             "error": error,
+            "attempt": attempt,
             "batch_size": len(messages),
             "messages": messages
         }

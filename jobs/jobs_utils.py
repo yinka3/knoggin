@@ -4,7 +4,9 @@ from loguru import logger
 import numpy as np
 from rapidfuzz import fuzz
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
-from schema.dtypes import BatchProfileResponse, FactMergeResult, ProfileUpdate, Fact
+
+from schema.dtypes import Fact, FactMergeResult, ProfileUpdate
+
 
 
 def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
@@ -82,6 +84,12 @@ def process_extracted_facts(
             new_text = sup_match.group(2).strip()
             
             new_text_clean = re.sub(r"\s*\[MSG_?\d+\]\s*$", "", new_text).strip()
+
+            if not old_text:
+                logger.warning(f"SUPERSEDES with empty target, treating as new fact: {new_text_clean}")
+                if not _is_duplicate(new_text_clean, active_facts):
+                    new_contents.append(new_text)
+                continue
             
             matched_fact = _find_matching_fact(old_text, active_facts)
             if matched_fact:
@@ -97,6 +105,9 @@ def process_extracted_facts(
         inv_match = re.search(r"^\[INVALIDATES:\s*(.+?)\](?:\s*\[MSG_?\d+\])?\s*$", fact_str)
         if inv_match:
             old_text = inv_match.group(1).strip()
+            if not old_text:
+                logger.warning(f"INVALIDATES with empty target, skipping")
+                continue
             matched_fact = _find_matching_fact(old_text, active_facts)
             if matched_fact:
                 to_invalidate.append(matched_fact.id)
@@ -105,19 +116,21 @@ def process_extracted_facts(
 
         if not _is_duplicate(fact_str, active_facts):
             new_contents.append(fact_str)
+            logger.debug(f"Adding new conent of fact: {fact_str}")
 
     return FactMergeResult(to_invalidate=to_invalidate, new_contents=new_contents)
 
-def extract_fact_with_source(raw_fact: str) -> Tuple[str, Optional[str]]:
+def extract_fact_with_source(raw_fact: str) -> Tuple[str, Optional[int]]:
     """
     Parse fact string to extract content and source msg_id.
+    Returns: (content, msg_id as int or None)
     """
     cleaned = re.sub(r"^\[(?:SUPERSEDES|INVALIDATES):\s*[^\]]+\]\s*", "", raw_fact.strip())
     
     match = re.search(r"^(.*?)\[MSG_?(\d+)\]", cleaned)
     if match:
         content = match.group(1).strip()
-        msg_id = f"msg_{match.group(2)}"
+        msg_id = int(match.group(2))
         return content, msg_id
     return cleaned, None
 
@@ -137,7 +150,7 @@ def _is_duplicate(content: str, facts: List[Fact]) -> bool:
     content_lower = content.lower().strip()
     return any(f.content.lower().strip() == content_lower for f in facts)
 
-def parse_new_facts(reasoning: str) -> Optional[BatchProfileResponse]:
+def parse_new_facts(reasoning: str) -> Optional[List[ProfileUpdate]]:
     """
     Parse <new_facts> block.
     Lenient on closing tag, strict on opening tag.
@@ -184,7 +197,7 @@ def parse_new_facts(reasoning: str) -> Optional[BatchProfileResponse]:
     if not profiles:
         return None
     
-    return BatchProfileResponse(profiles=profiles)
+    return profiles
 
 def parse_merge_score(reasoning: str) -> Optional[float]:
     """

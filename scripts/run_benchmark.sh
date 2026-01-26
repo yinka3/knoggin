@@ -21,19 +21,20 @@ timings_file=$(mktemp)
 echo "Running $dataset dataset, instances $start to $end"
 echo ""
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 for i in $(seq $start $end); do
     echo "=========================================="
     echo "Instance $i / $end ($dataset)"
     echo "=========================================="
     
-    ./clean.sh
+    "$SCRIPT_DIR/clean.sh"
     sleep 7
     
     start_time=$(date +%s)
     
-    cd benchmark
+    cd "$SCRIPT_DIR/../benchmark"
     uv run test/run_eval.py $dataset $i
-    cd ..
     
     end_time=$(date +%s)
     duration=$((end_time - start_time))

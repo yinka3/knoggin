@@ -10,6 +10,13 @@ You receive upstream results from:
 - **Ambiguous**: GLiNER found these but the label maps to multiple topics. You assign the correct topic.
 </role>
 
+<valid_topics>
+Use ONLY topic names from the Label Schema provided in the input.
+Do NOT invent topic names.
+If a label appears in multiple topics, pick based on message context.
+When uncertain, use "General".
+</valid_topics>
+
 <speaker_context>
 All messages are from {user_name}. First-person ("I", "me", "my") refers to them.
 Never extract {user_name} as an entity—they are the implicit root node.
@@ -47,8 +54,17 @@ Keep concise.
 msg_id | name | label | topic | confidence
 </entities>
 
-Confidence: 0.9+ unambiguous, 0.7-0.9 likely correct, below 0.7 omit.
-Empty if nothing qualifies.
+Rules:
+- One entity per line, pipe-separated
+- No markdown tables, no header rows, no dashes (---), no extra formatting
+- Confidence: 0.9+ unambiguous, 0.7-0.9 likely correct, below 0.7 omit
+- Empty block if nothing qualifies
+
+Example:
+<entities>
+4 | Bella | person | Gym | 0.92
+4 | Blue Bottle | restaurant | Food & Dining | 0.88
+</entities>
 </output_format>
 """
 
@@ -76,22 +92,29 @@ Note: The same name may appear multiple times with different msg_ids. Evaluate e
 <rules>
 1. **Type filter**: Only consider known entities with matching type. A "person" mention cannot match a "company" entity.
 
-2. **Name matching**: Look for exact match, alias match, or clear nickname pattern (Mike → Michael).
+2. **Name matching**: Look for exact match, alias match, or clear nickname pattern (Mike -> Michael).
 
 3. **Context validation**: If name matches, check if facts and connections support or contradict.
    - Supporting: context aligns with known facts
-   - Contradicting: context conflicts → treat as NEW
-   - Neutral: no overlap → lean toward NEW unless name is exact
+   - Contradicting: context conflicts -> treat as NEW
+   - Neutral: no overlap -> lean toward NEW unless name is exact
 
 4. **NEW_GROUP requirements**: Only group mentions if explicitly linked—coreference, apposition, or same-sentence equivalence.
-   - "Met Jake. He's an engineer." → Jake and He are NEW_GROUP
-   - "Saw Jake and Jake" → NOT automatically grouped unless stated to be same person
+   - "Met Jake. He's an engineer." -> Jake and He are NEW_GROUP
+   - "Saw Jake and Jake" -> NOT automatically grouped unless stated to be same person
 
 5. **When uncertain, choose NEW**: False merges are expensive to fix. Duplicates are cheaper to resolve later.
 
 6. **Distinguish same-name entities**: When creating multiple NEW_SINGLE entries for the same name, add contextual qualifier to the canonical name.
-   - "Jake" (lunch) and "Jake" (brother) → "Jake" and "Jake (brother)"
+   - "Jake" (lunch) and "Jake" (brother) -> "Jake" and "Jake (brother)"
    - Use context from the message: role, relationship, location, etc.
+
+7. **No speculation in qualifiers**: Only use context EXPLICITLY stated in the message.
+   - GOOD "Sarah (roommate)" — user said "my roommate Sarah"
+   - GOOD "Mike (from accounting)" — user said "Mike from accounting called"
+   - BAD "Tom (coworker?)" — inferred because mentioned near work context
+   - BAD "Lisa (gym friend)" — assumed from fitness topic, not stated
+   - When uncertain, use the bare name without qualifier
 </rules>
 
 <scratchpad>
@@ -105,16 +128,26 @@ Keep concise—2-3 sentences per mention.
 </scratchpad>
 
 <output_format>
-Wrap decisions in <resolution> tags. One decision per line. Include MSG_X to identify which occurrence.
-
-When the same name resolves to different NEW entities, add a qualifier to distinguish:
-- NEW_SINGLE | Jake (MSG_1)
-- NEW_SINGLE | Jake (brother) (MSG_3)
-
 <resolution>
-EXISTING | canonical_name | mention (MSG_X)
-NEW_GROUP | mention1 (MSG_X), mention2 (MSG_Y)
-NEW_SINGLE | mention (MSG_X)
+VERDICT | canonical_name | mention (MSG_X)
+</resolution>
+
+Verdicts:
+- EXISTING | canonical_name | mention (MSG_X)
+- NEW_SINGLE | mention (MSG_X)
+- NEW_GROUP | mention1 (MSG_X), mention2 (MSG_Y)
+
+Rules:
+- One decision per line, pipe-separated
+- No markdown, no dashes, no extra formatting
+- Include MSG_X to identify which message occurrence
+- For same-name NEW entities, add qualifier: "Jake (brother)" vs "Jake"
+
+Example:
+<resolution>
+EXISTING | Marcus Chen | Marcus (MSG_2)
+NEW_SINGLE | Blue Bottle (MSG_3)
+NEW_GROUP | Dr. Smith (MSG_1), the professor (MSG_2)
 </resolution>
 </output_format>
 """
@@ -137,13 +170,13 @@ When the same mention (e.g., "Jake") appears in multiple messages, use source_ms
 </input_schema>
 
 <rules>
-1. **Explicit over implied**: "Marcus and I worked out" → connection. "Talked to Marcus. Later saw Priya." → Marcus and Priya NOT connected.
+1. **Explicit over implied**: "Marcus and I worked out" -> connection. "Talked to Marcus. Later saw Priya." -> Marcus and Priya NOT connected.
 
-2. **Peer interactions count**: Not everything flows through {user_name}. "Derek's girlfriend Sophie" → Derek ↔ Sophie.
+2. **Peer interactions count**: Not everything flows through {user_name}. "Derek's girlfriend Sophie" -> Derek <-> Sophie.
 
-3. **Same event = connected**: "Des, Ty, and I did a workout" → Des ↔ Ty, Des ↔ {user_name}, Ty ↔ {user_name}.
+3. **Same event = connected**: "Des, Ty, and I did a workout" -> Des <-> Ty, Des <-> {user_name}, Ty <-> {user_name}.
 
-4. **Different events = not connected**: "Had coffee with Cal, then went to IronWorks" → Cal and IronWorks NOT connected.
+4. **Different events = not connected**: "Had coffee with Cal, then went to IronWorks" -> Cal and IronWorks NOT connected.
 
 5. **Use canonical names**: Match mentions to canonical_name from candidates. Use source_msgs to disambiguate same-name entities.
 </rules>
@@ -163,11 +196,23 @@ Keep concise—1-2 sentences per message.
 
 <output_format>
 <connections>
-MSG <id> | entity_a; entity_b | short reason
-MSG <id> | NO CONNECTIONS
+MSG <id> | entity_a; entity_b | confidence | short reason
 </connections>
 
-Use canonical names. Short reason = 2-5 words.
+Rules:
+- One line per connection, pipe-separated
+- Use canonical names from Candidate Entities
+- Confidence: 0.8+ explicit relationship stated, 0.5-0.8 strong implication or co-participation
+- Short reason = 2-5 words
+- If no connections in a message, write: MSG <id> | NO CONNECTIONS
+- No markdown, no dashes, no extra formatting
+
+Example:
+<connections>
+MSG 5 | Marcus Chen; Blue Bottle | 0.85 | works there
+MSG 5 | Marcus Chen; Sofia | 0.72 | coworkers
+MSG 6 | NO CONNECTIONS
+</connections>
 </output_format>
 """
 
@@ -196,8 +241,8 @@ Each entity includes:
 
 2. **SPECIFIC** - Concrete beats vague. Prefer measurable or identifiable details.
    - Names, counts, dates, locations, states, stages
-   - "Works in tech" ✗
-   - "Engineer at Google" ✓
+   - "Works in tech" BAD
+   - "Engineer at Google" GOOD
 
 3. **ATOMIC** - One fact per item. Short, dense strings.
 
@@ -237,10 +282,22 @@ Keep concise.
 
 <output>
 <new_facts>
-EntityName: fact1 [MSG_5] | [SUPERSEDES: old] new [MSG_12]
+EntityName: fact [MSG_X] | [SUPERSEDES: old content] new content [MSG_X]
 </new_facts>
 
-Omit entities with no changes. No preamble, no summary.
+Rules:
+- One entity per line, facts separated by |
+- Tag message source: [MSG_X]
+- SUPERSEDES: copy old fact content exactly, then new fact
+- INVALIDATES: [INVALIDATES: old content] [MSG_X]
+- Omit entities with no changes
+- No markdown, no preamble, no summary
+
+Example:
+<new_facts>
+Marcus Chen: Works morning shifts at Blue Bottle [MSG_5] | [SUPERSEDES: Barista] Senior barista [MSG_8]
+Sofia: Studies architecture [MSG_6]
+</new_facts>
 </output>
 """
 
@@ -286,13 +343,20 @@ Work through these in order(Be concise):
 </scratchpad>
 
 <output>
-Return a single float 0.0-1.0 inside score tags.
+<score>X.XX</score>
 
+Rules:
+- Single float between 0.0 and 1.0
+- No text outside the score tags
+- No explanation after the score
+
+Thresholds:
 - 0.85+: Confident same entity
-- 0.4-0.84: Uncertain
-- <0.4: Likely distinct
+- 0.40-0.84: Uncertain
+- Below 0.40: Likely distinct
 
-<score>0.XX</score>
+Example:
+<score>0.72</score>
 </output>
 """
 
@@ -300,18 +364,41 @@ def get_contradiction_judgment_prompt() -> str:
    return """
 You are a fact contradiction detector.
 
-Given two facts about the same entity, determine if FACT_B contradicts or supersedes FACT_A.
+You will receive numbered pairs of facts about the same entity. For each pair, determine if FACT_B contradicts or supersedes FACT_A.
 
-Contradiction means:
-- FACT_B makes FACT_A no longer true (e.g., "Works at Google" → "Works at Meta")
-- FACT_B is a correction of FACT_A (e.g., "Has 2 kids" → "Has 3 kids")
-- FACT_B updates status that changed (e.g., "Is dating Sarah" → "Is single")
+<contradiction>
+FACT_B replaces or invalidates the same quality/state that FACT_A describes:
+- "Works at Google" → "Works at Meta" (employer changed)
+- "Has 2 kids" → "Has 3 kids" (count updated)
+- "Is dating Sarah" → "Is single" (status changed)
+- "Exam grade pending" → "Got a B+" (result now known)
+</contradiction>
 
-NOT contradiction:
-- Facts about different aspects (e.g., "Works at Google" and "Lives in SF")
-- Additive information (e.g., "Engineer" and "Senior Engineer")
-- Compatible facts (e.g., "Likes coffee" and "Drinks espresso")
+<not_contradiction>
+Sequential events — FACT_B is a later event, not a correction:
+- "Saw tryout flyer" → "Played in the game"
+- "Midterm is tomorrow" → "Midterm is done"
+- "Nervous about interview" → "Interview went well"
 
-Respond ONLY with:
-<contradicts>true</contradicts> or <contradicts>false</contradicts>
+Different aspects — facts describe unrelated things:
+- "Works at Google" → "Lives in SF"
+- "Likes coffee" → "Drinks espresso"
+
+Additive — FACT_B builds on FACT_A:
+- "Engineer" → "Senior Engineer"
+</not_contradiction>
+
+<input_format>
+1. FACT_A: "existing fact" | FACT_B: "new fact"
+2. FACT_A: "existing fact" | FACT_B: "new fact"
+</input_format>
+
+<output_format>
+<results>
+1:true
+2:false
+</results>
+</output_format>
+
+Respond ONLY with the results block. One judgment per line. No explanation.
 """

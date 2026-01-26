@@ -2,16 +2,14 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
 from datetime import datetime, timezone
-import re
 from typing import Dict, List, Optional, Tuple
-import numpy as np
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult, JobNotifier
 from jobs.jobs_utils import cosine_similarity, find_duplicate_facts, has_sufficient_facts, parse_merge_score
 from main.prompts import get_merge_judgment_prompt
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
-from db.memgraph import MemGraphStore
+from db.store import MemGraphStore
 from main.topics_config import TopicConfig
 from schema.dtypes import Fact
 
@@ -55,14 +53,10 @@ class MergeDetectionJob(BaseJob):
         if not candidates:
             return JobResult(success=True, summary="No candidates found")
         
-        merge_candidates = [c for c in candidates if c["relationship"] == "merge"]
-        hierarchy_candidates = [c for c in candidates if c["relationship"] == "hierarchy"]
-        
-        logger.info(f"Processing {len(merge_candidates)} merge, {len(hierarchy_candidates)} hierarchy candidates")
-        
-        merge_summary = await self._process_merges(ctx, merge_candidates)
-        
-        hierarchy_summary = await self._process_hierarchy(hierarchy_candidates)
+        logger.info(f"Processing {len(candidates)} merge candidates")
+    
+        merge_summary = await self._process_merges(ctx, candidates)
+        hierarchy_summary = await self._detect_hierarchy()
         
         return JobResult(
             success=True,
@@ -119,7 +113,7 @@ class MergeDetectionJob(BaseJob):
             }
         })
         
-        result = await self.llm.call_llm(system, user_content)
+        result = await self.llm.call_llm(system, user_content, reasoning="medium")
         
         if not result:
             return None
@@ -358,61 +352,62 @@ class MergeDetectionJob(BaseJob):
         return f"{successful} merged, {failed} failed, {proposals_stored} HITL"
     
 
-    async def _process_hierarchy(self, candidates: list) -> str:
-        """Create PART_OF edges for parent/child relationships."""
-        if not candidates:
+    async def _detect_hierarchy(self) -> str:
+        """
+        Post-merge hierarchy detection.
+        Uses RELATED_TO edges + type matching from hierarchy_config.
+        """
+        if not self.topic_config.hierarchy:
             return "0 hierarchy edges"
-        
-        # filter to same-session only
-        same_session = [
-            c for c in candidates 
-            if c.get("primary_session") == c.get("secondary_session")
-            and c.get("primary_session") is not None
-        ]
-        
-        skipped = len(candidates) - len(same_session)
-        if skipped:
-            logger.info(f"Skipped {skipped} cross-session hierarchy candidates")
-        
-        # dedupe
-        seen_pairs = set()
-        unique_candidates = []
-        
-        for c in same_session:
-            pair_key = (c["parent_id"], c["child_id"])
-            if pair_key not in seen_pairs:
-                seen_pairs.add(pair_key)
-                unique_candidates.append(c)
         
         loop = asyncio.get_running_loop()
         created = 0
-        failed = 0
         
-        for c in unique_candidates:
-            parent_id = c["parent_id"]
-            child_id = c["child_id"]
-            parent_name = c["primary_name"] if c["primary_id"] == parent_id else c["secondary_name"]
-            child_name = c["secondary_name"] if c["secondary_id"] == child_id else c["primary_name"]
-            
-            try:
-                success = await loop.run_in_executor(
-                    None,
-                    self.store.create_hierarchy_edge,
-                    parent_id,
-                    child_id
+        for topic, type_rules in self.topic_config.hierarchy.items():
+            if not type_rules:
+                continue
+                
+            for parent_type, child_types in type_rules.items():
+                candidates = await loop.run_in_executor(
+                    self.executor,
+                    self.store.get_hierarchy_candidates,
+                    topic,
+                    parent_type,
+                    child_types,
+                    2  # min_weight
                 )
                 
-                if success:
-                    created += 1
-                    logger.info(f"Hierarchy: {child_name} -[:PART_OF]-> {parent_name}")
-                else:
-                    failed += 1
+                for c in candidates:
+                    parent_emb = c.get("parent_embedding", [])
+                    child_emb = c.get("child_embedding", [])
                     
-            except Exception as e:
-                logger.error(f"Hierarchy edge failed ({parent_id}, {child_id}): {e}")
-                failed += 1
+                    if not parent_emb or not child_emb:
+                        continue
+                    
+                    similarity = cosine_similarity(parent_emb, child_emb)
+                    
+                    if similarity < 0.65:
+                        logger.debug(
+                            f"Hierarchy rejected: {c['child_name']} -> {c['parent_name']} "
+                            f"(similarity={similarity:.3f})"
+                        )
+                        continue
+                    
+                    success = await loop.run_in_executor(
+                        self.executor,
+                        self.store.create_hierarchy_edge,
+                        c["parent_id"],
+                        c["child_id"]
+                    )
+                    
+                    if success:
+                        created += 1
+                        logger.info(
+                            f"Hierarchy: {c['child_name']} -[:PART_OF]-> {c['parent_name']} "
+                            f"(similarity={similarity:.3f})"
+                        )
         
-        return f"{created} hierarchy edges, {failed} failed"
+        return f"{created} hierarchy edges"
     
     async def _store_hitl_proposals(self, ctx: JobContext, proposals: list, merged_ids: set) -> int:
         stored = 0

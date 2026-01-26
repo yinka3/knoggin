@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import redis.asyncio as redis
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
@@ -16,16 +17,16 @@ from main.consumer import BatchConsumer
 from main.processor import BatchProcessor, BatchResult
 from main.service import LLMService
 from main.redisclient import AsyncRedisClient
-from typing import List
+from typing import Dict, List
 from functools import partial
 from main.topics_config import TopicConfig
-from schema.dtypes import *
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
-from db.memgraph import MemGraphStore
-from main.prompts import *
+from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
 import uuid
+
+from schema.dtypes import Fact, MessageConnections, MessageData
 
 class Context:
 
@@ -154,7 +155,7 @@ class Context:
         instance.scheduler = Scheduler(user_name)
         instance.scheduler.register(DLQReplayJob())
         instance.scheduler.register(EntityCleanupJob(user_name, instance.store, instance.ent_resolver))
-        instance.scheduler.register(FactArchivalJob(user_name, instance.store))
+        # instance.scheduler.register(FactArchivalJob(user_name, instance.store))
         # instance.scheduler.register(MoodCheckpointJob(user_name, instance.store))
         await instance.scheduler.start()
         
@@ -395,7 +396,7 @@ class Context:
         entity_ids: list[int],
         new_entity_ids: set[int],
         alias_updated_ids: set[int],
-        extraction_result: ConnectionExtractionResponse
+        extraction_result: List[MessageConnections]
     ):
 
         existing_candidates = list(set(entity_ids) - new_entity_ids)
@@ -457,22 +458,21 @@ class Context:
 
 
         for ent_id in safe_ids:
-            if ent_id in entity_ids:
-                profile = self.ent_resolver.entity_profiles.get(ent_id)
-                if profile:
-                    canonical = profile["canonical_name"]
-                    entry = {
-                        "id": ent_id,
-                        "canonical_name": canonical,
-                        "type": profile.get("type"),
-                        "topic": profile.get("topic", "General")
-                    }
-                    entity_lookup[canonical.lower()] = entry
-                    for mention in self.ent_resolver.get_mentions_for_id(ent_id):
-                        entity_lookup[mention.lower()] = entry
+            profile = self.ent_resolver.entity_profiles.get(ent_id)
+            if profile:
+                canonical = profile["canonical_name"]
+                entry = {
+                    "id": ent_id,
+                    "canonical_name": canonical,
+                    "type": profile.get("type"),
+                    "topic": profile.get("topic", "General")
+                }
+                entity_lookup[canonical.lower()] = entry
+                for mention in self.ent_resolver.get_mentions_for_id(ent_id):
+                    entity_lookup[mention.lower()] = entry
 
         relationships = []
-        for msg_result in extraction_result.message_results:
+        for msg_result in extraction_result:
             msg_id = msg_result.message_id
             
             for pair in msg_result.entity_pairs:

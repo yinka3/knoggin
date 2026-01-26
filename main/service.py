@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import re
 from typing import Dict, List, Optional, TypeVar
 from openai import AsyncOpenAI
 from loguru import logger
@@ -58,7 +60,8 @@ class LLMService:
         user: str,
         model: Optional[str] = None,
         temperature: float = 1.0,
-        max_retries: int = 5
+        max_retries: int = 5,
+        reasoning: str = "low"
     ) -> Optional[str]:
         """Free-form reasoning, returns raw text. Returns None on failure."""
         model = model or self._reasoning_model
@@ -86,7 +89,7 @@ class LLMService:
                             "data_collection": "deny",
                             # "zdr": True # zero data rentention(can uncomment if you want, might increase latency tho)
                         }, 
-                        "reasoning": {"effort": "medium"}
+                        "reasoning": {"effort": reasoning}
                     }
                 )
                 
@@ -122,7 +125,8 @@ class LLMService:
         tools: List[Dict],
         model: Optional[str] = None,
         temperature: float = 0.0,
-        max_retries: int = 3
+        max_retries: int = 3,
+        xml_helper: bool = False
     ) -> Optional[Dict]:
         """Call with function tools. Returns parsed tool call."""
         model = model or self._agent_model
@@ -177,11 +181,12 @@ class LLMService:
                     logger.info(f"[STELLA THOUGHT]: {message.content[:200]}")
                     print(f"\n=== SCRATCHPAD ===\n{message.content}\n==================\n")
                 
-                # if not has_tools and has_content and "<invoke" in message.content:
-                #     parsed = self._parse_xml_tool_calls(message.content)
-                #     if parsed:
-                #         tool_calls = parsed
-                #         logger.info(f"Parsed {len(parsed)} tool calls from XML fallback")
+                if xml_helper:
+                    if not has_tools and has_content and "<invoke" in message.content:
+                        parsed = self._parse_xml_tool_calls(message.content)
+                        if parsed:
+                            tool_calls = parsed
+                            logger.info(f"Parsed {len(parsed)} tool calls from XML fallback")
                 
                 if self._trace:
                     self._trace.info(f"[TOOLS SYNC] Response: {tool_calls} | Content: {message.content}")
@@ -201,27 +206,27 @@ class LLMService:
                         self._trace.error(f"[TOOLS SYNC] Failed: {e}")
                     return None
     
-    # def _parse_xml_tool_calls(self, content: str) -> list:
-    #     """Fallback parser for DeepSeek XML tool calls.(Or any model with xml tool calls)"""
-    #     tools = []
-    #     pattern = r'<invoke name="([^"]+)">(.*?)</invoke>'
-    #     matches = re.findall(pattern, content, re.DOTALL)
+    def _parse_xml_tool_calls(self, content: str) -> list:
+        """Fallback parser for DeepSeek XML tool calls.(Or any model with xml tool calls)"""
+        tools = []
+        pattern = r'<invoke name="([^"]+)">(.*?)</invoke>'
+        matches = re.findall(pattern, content, re.DOTALL)
         
-    #     for name, params_block in matches:
-    #         args = {}
-    #         param_pattern = r'<parameter name="([^"]+)"[^>]*>([^<]*)</parameter>'
-    #         for param_name, param_value in re.findall(param_pattern, params_block):
-    #             param_value = param_value.strip()
+        for name, params_block in matches:
+            args = {}
+            param_pattern = r'<parameter name="([^"]+)"[^>]*>([^<]*)</parameter>'
+            for param_name, param_value in re.findall(param_pattern, params_block):
+                param_value = param_value.strip()
                 
-    #             # Type conversion
-    #             if param_value.isdigit():
-    #                 args[param_name] = int(param_value)
-    #             elif param_value.lower() in ('true', 'false'):
-    #                 args[param_name] = param_value.lower() == 'true'
-    #             else:
-    #                 args[param_name] = param_value
+                # Type conversion
+                if param_value.isdigit():
+                    args[param_name] = int(param_value)
+                elif param_value.lower() in ('true', 'false'):
+                    args[param_name] = param_value.lower() == 'true'
+                else:
+                    args[param_name] = param_value
                     
-    #         tools.append({"name": name, "arguments": json.dumps(args)})
+            tools.append({"name": name, "arguments": json.dumps(args)})
         
-    #     return tools
+        return tools
     

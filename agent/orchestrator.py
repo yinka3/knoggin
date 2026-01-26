@@ -8,7 +8,7 @@ import redis
 
 from agent.tools import Tools
 from main.service import LLMService
-from agent.system_prompt import get_fallback_summary_prompt, get_stella_prompt
+from agent.system_prompt import get_benchmark_fallback_prompt, get_benchmark_prompt
 from main.topics_config import TopicConfig
 from schema.dtypes import (
     ClarificationRequest,
@@ -21,11 +21,12 @@ from schema.dtypes import (
     ToolCall,
     TraceEntry,
 )
-from agent.context import (
+from agent.internals import (
     AgentConfig, AgentState, 
     RetrievedEvidence, AgentContext)
 
 from agent.formatters import (
+    format_hierarchy_results,
     format_retrieved_messages,
     format_entity_results,
     format_graph_results,
@@ -36,7 +37,7 @@ from schema.tool_schema import TOOL_SCHEMAS
 import time
 
 if TYPE_CHECKING:
-    from db.memgraph import MemGraphStore
+    from db.store import MemGraphStore
     from main.entity_resolve import EntityResolver
 
 
@@ -103,6 +104,9 @@ def build_user_message(ctx: AgentContext, last_result: Optional[Dict] = None) ->
 
     if ctx.evidence.messages:
         msg += f"\n**Accumulated messages ({len(ctx.evidence.messages)}):**\n{format_retrieved_messages(ctx.evidence.messages)}\n"
+    
+    if ctx.evidence.hierarchy:
+        msg += f"\n**Hierarchy results ({len(ctx.evidence.hierarchy)}):**\n{format_hierarchy_results(ctx.evidence.hierarchy)}\n"
 
     return msg
 
@@ -117,7 +121,7 @@ async def call_the_doctor(
 ) -> StellaResponse:
     
     # current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    system_prompt = get_stella_prompt(user_name, date, persona)
+    system_prompt = get_benchmark_prompt(user_name, date, persona)
     user_message = build_user_message(ctx, last_result)
 
     response = await llm.call_llm_with_tools(
@@ -425,7 +429,7 @@ async def run(
             evidence_ctx += f"Connections:\n{format_graph_results(ctx.evidence.graph)}\n\n"
         
         summary = await llm.call_llm(
-            system=get_fallback_summary_prompt(user_name),
+            system=get_benchmark_fallback_prompt(user_name),
             user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
         )
         

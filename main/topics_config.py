@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from loguru import logger
 import redis.asyncio as redis
 
@@ -14,6 +14,17 @@ def build_label_block(topics_config: dict) -> str:
             lines.append(f"  Labels: {', '.join(labels)}")
             lines.append("")
     return "\n".join(lines)
+
+def build_label_alias_lookup(topics_config: dict) -> Dict[str, List[Tuple[str, str]]]:
+    """Builds reverse lookup: label alias → [(canonical_label, topic), ...]"""
+    lookup = {}
+    for topic_name, config in topics_config.items():
+        for alias, canonical in config.get("label_aliases", {}).items():
+            alias_lower = alias.lower()
+            if alias_lower not in lookup:
+                lookup[alias_lower] = []
+            lookup[alias_lower].append((canonical, topic_name))
+    return lookup
 
 
 def build_topic_alias_lookup(topics_config: dict) -> Dict[str, str]:
@@ -57,6 +68,7 @@ class TopicConfig:
         self._label_block: Optional[str] = None
         self._hierarchy: Optional[Dict[str, dict]] = None
         self._active_topics: Optional[List[str]] = None
+        self._label_alias_lookup: Optional[Dict[str, List[Tuple[str, str]]]] = None
     
     @classmethod
     async def load(
@@ -87,12 +99,20 @@ class TopicConfig:
         )
         logger.debug(f"TopicConfig saved for session {session_id}")
     
-    def _invalidate_cache(self):
+    @property
+    def label_alias_lookup(self) -> Dict[str, List[Tuple[str, str]]]:
+        """Lazy-built label alias → [(canonical, topic), ...] mapping."""
+        if self._label_alias_lookup is None:
+            self._label_alias_lookup = build_label_alias_lookup(self._config)
+        return self._label_alias_lookup
+    
+    def _clear_cache(self):
         """Clear all cached derived values."""
         self._alias_lookup = None
         self._label_block = None
         self._hierarchy = None
         self._active_topics = None
+        self._label_alias_lookup = None
     
     @property
     def raw(self) -> dict:
@@ -132,6 +152,8 @@ class TopicConfig:
     
     def normalize_topic(self, topic: str) -> str:
         """Normalize extracted topic to canonical name."""
+        if not topic:
+            return None
         return self.alias_lookup.get(topic.lower(), "General")
     
     def get_labels_for_topic(self, topic: str) -> List[str]:
@@ -159,7 +181,7 @@ class TopicConfig:
                     )
         
         self._config = new_config
-        self._invalidate_cache()
+        self._clear_cache()
         logger.info(f"TopicConfig updated: {list(new_config.keys())}")
     
     def add_topic(self, topic_name: str, config: dict):
@@ -169,7 +191,7 @@ class TopicConfig:
             return
         
         self._config[topic_name] = config
-        self._invalidate_cache()
+        self._clear_cache()
         logger.info(f"Topic added: {topic_name}")
     
     def toggle_active(self, topic_name: str, active: bool):

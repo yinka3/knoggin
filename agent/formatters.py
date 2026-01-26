@@ -3,47 +3,41 @@ from typing import Dict, List
 
 # Timestamp bounds (Unix seconds)
 TS_MIN = 946684800    # 2000-01-01 00:00:00 UTC
-TS_MAX = 4102444800   # 2100-01-01 00:00:00 UTC
+TS_MAX = 2524608000   # 2050-01-01 00:00:00 UTC
+
+
+def _normalize_timestamp(ts: float) -> float | None:
+    """Normalize timestamp to seconds. Returns None if out of bounds."""
+    divisors = [1, 1_000, 1_000_000, 1_000_000_000]
+    
+    for divisor in divisors:
+        normalized = ts / divisor
+        if TS_MIN <= normalized <= TS_MAX:
+            return normalized
+    
+    return None
 
 
 def _format_timestamp(ts) -> str:
-    """Convert timestamp to readable date string. Handles s, ms, us, ns."""
+    """Convert timestamp to readable datetime string. Handles s, ms, us, ns."""
     if not ts:
         return "unknown"
     
     try:
         if isinstance(ts, str):
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d")
+            return dt.strftime("%Y-%m-%d %H:%M")
         
         if isinstance(ts, (int, float)):
             ts_normalized = _normalize_timestamp(ts)
             if ts_normalized is None:
                 return "unknown"
-            return datetime.fromtimestamp(ts_normalized).strftime("%Y-%m-%d")
+            return datetime.fromtimestamp(ts_normalized).strftime("%Y-%m-%d %H:%M")
             
     except (ValueError, OSError, OverflowError):
         pass
     
     return "unknown"
-
-
-def _normalize_timestamp(ts: float) -> float | None:
-    """Normalize timestamp to seconds. Returns None if out of bounds."""
-    # Try progressively smaller units until value falls in valid range
-    divisors = [
-        (1, "seconds"),
-        (1_000, "milliseconds"),
-        (1_000_000, "microseconds"),
-        (1_000_000_000, "nanoseconds"),
-    ]
-    
-    for divisor, _ in divisors:
-        normalized = ts / divisor
-        if TS_MIN <= normalized <= TS_MAX:
-            return normalized
-    
-    return None
 
 
 def format_retrieved_messages(messages: List[Dict]) -> str:
@@ -224,6 +218,37 @@ def format_hot_topic_context(context: Dict[str, Dict]) -> str:
                         block += f"  - {name}: {' | '.join(facts[:3])}\n"
                     else:
                         block += f"  - {name}\n"
+        
+        blocks.append(block)
+    
+    return "\n".join(blocks)
+
+
+def format_hierarchy_results(results: List[Dict]) -> str:
+    if not results:
+        return "No hierarchy found."
+    
+    blocks = []
+    for h in results:
+        entity = h.get("entity", "Unknown")
+        block = f"=== {entity} ===\n"
+        
+        if h.get("ancestry"):
+            block += f"Ancestry: {' → '.join(h['ancestry'])}\n"
+        
+        if h.get("parents"):
+            block += "Parents:\n"
+            for p in h["parents"]:
+                facts = p.get("facts", [])
+                fact_str = f" ({', '.join(facts[:2])})" if facts else ""
+                block += f"  ↑ {p.get('canonical_name', '?')}{fact_str}\n"
+        
+        if h.get("children"):
+            block += "Children:\n"
+            for c in h["children"]:
+                facts = c.get("facts", [])
+                fact_str = f" ({', '.join(facts[:2])})" if facts else ""
+                block += f"  ↓ {c.get('canonical_name', '?')}{fact_str}\n"
         
         blocks.append(block)
     

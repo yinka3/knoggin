@@ -1,98 +1,106 @@
 from dataclasses import dataclass, field
-from pydantic import BaseModel, Field
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, Optional, TypedDict, Union
+from typing import Dict, List, Literal, Optional, Union
 
 
-class MessageData(BaseModel):
-    id: int = -1
+@dataclass
+class MessageData:
     message: str
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
+    id: int = -1
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-class EntityPair(BaseModel):
-    entity_a: str = Field(..., description="First entity canonical_name (alphabetically first).")
-    entity_b: str = Field(..., description="Second entity canonical_name (alphabetically second).")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score 0.0-1.0")
 
-class MessageConnections(BaseModel):
-    message_id: int = Field(..., description="Copy exactly from input.")
-    entity_pairs: List[EntityPair] = Field(default_factory=list, description="Pairs of entities with meaningful connections in this message.")
+@dataclass
+class EntityPair:
+    entity_a: str
+    entity_b: str
+    confidence: float
 
-class ConnectionExtractionResponse(BaseModel):
-    message_results: List[MessageConnections] = Field(..., description="Per-message entity connections.")
+@dataclass
+class MessageConnections:
+    message_id: int
+    entity_pairs: List[EntityPair] = field(default_factory=list)
 
-class ProfileUpdate(BaseModel):
+
+@dataclass
+class EntityItem:
+    msg_id: int
+    name: str
+    label: str
+    topic: str
+    confidence: float
+
+
+@dataclass
+class ProfileUpdate:
     canonical_name: str
-    facts: List[str] = Field(
-        ..., 
-        description="List of atomic facts. "
-                    "Maintain existing facts. "
-                    "Append new ones. "
-                    "Mark invalid ones with ' [INVALIDATED: <date>]'."
-    )
+    facts: List[str]
 
-
-class BatchProfileResponse(BaseModel):
-    profiles: List[ProfileUpdate] = Field(
-        ..., 
-        description="One ProfileUpdate per input entity, in same order as input."
-    )
-
-class ResolutionEntry(BaseModel):
-    verdict: Literal["EXISTING", "NEW_GROUP", "NEW_SINGLE"] = Field(
-        ..., 
-        description="EXISTING: mention(s) map to an entity already in known_entities. "
-                    "NEW_GROUP: multiple mentions in this batch refer to the same NEW entity. "
-                    "NEW_SINGLE: a single mention representing a new entity."
-    )
-    mentions: List[str] = Field(
-        ..., 
-        description="All text spans from the input that refer to this entity. "
-                    "For EXISTING, includes the mention(s) that matched. "
-                    "For NEW_GROUP, all grouped mentions. "
-                    "For NEW_SINGLE, the single mention."
-    )
-    entity_type: str = Field(
-        ..., 
-        description="Semantic type of the entity (e.g., person, professor, organization, place, gym). "
-                    "Use the type from the original mention. If grouped mentions have mixed types, "
-                    "use the type of the mention selected as canonical_name."
-    )
-    canonical_name: Optional[str] = Field(
-        default=None, 
-        description="For EXISTING: the exact canonical_name from known_entities. "
-                    "For NEW_GROUP: the longest or most complete mention. "
-                    "For NEW_SINGLE: the mention text verbatim."
-    )
-    topic: str = Field(
-        default="General",
-        description="The topic category this entity belongs to, from the original mention's topic. "
-        "If grouped mentions have different topics, use the topic of the canonical mention."
-    )
+@dataclass
+class ResolutionEntry:
+    verdict: Literal["EXISTING", "NEW_GROUP", "NEW_SINGLE"]
+    mentions: List[str]
+    entity_type: str
+    canonical_name: Optional[str] = None
+    topic: str = "General"
     msg_ids: List[int] = field(default_factory=list)
 
 
-class DisambiguationResult(BaseModel):
-    entries: List[ResolutionEntry] = Field(
-        ..., 
-        description="One entry per distinct entity. Every input mention must appear "
-                    "in exactly one entry. No mention left behind, no mention duplicated."
-    )
+@dataclass
+class Fact:
+    id: str
+    source_entity_id: int
+    content: str
+    valid_at: datetime
+    invalid_at: Optional[datetime] = None
+    source_msg_id: Optional[int] = None 
+    confidence: float = 1.0
+    embedding: List[float] = field(default_factory=list)
 
-class BaseResult(TypedDict):
+    @classmethod
+    def from_record(cls, record: dict) -> "Fact":
+        return cls(
+            id=record["id"],
+            source_entity_id=record["source_entity_id"],
+            content=record["content"],
+            valid_at=cls._parse_dt(record["valid_at"]),
+            invalid_at=cls._parse_dt(record["invalid_at"]) if record.get("invalid_at") else None,
+            confidence=record.get("confidence", 1.0),
+            embedding=record.get("embedding") or [],
+            source_msg_id=record.get("source_msg_id")
+        )
+
+    @staticmethod
+    def _parse_dt(val) -> datetime:
+        if isinstance(val, str):
+            return datetime.fromisoformat(val)
+        return val
+
+@dataclass
+class FactMergeResult:
+    to_invalidate: List[str]
+    new_contents: List[str]
+
+
+
+# ===== AGENT RESPONSE/RESULT TYPES =====
+
+@dataclass
+class BaseResult:
     status: str
     state: str
     tools_used: List[str]
 
 
+@dataclass
 class CompleteResult(BaseResult):
     response: str
     messages: List[Dict]
     profiles: List[Dict]
     graph: List[Dict]
-    # web: List[Dict]
 
 
+@dataclass
 class ClarificationResult(BaseResult):
     question: str
 
@@ -136,30 +144,3 @@ class QueryTrace:
     started_at: datetime
     entries: List[TraceEntry] = field(default_factory=list)
 
-
-@dataclass
-class Fact:
-    id: str
-    source_entity_id: int
-    content: str
-    valid_at: datetime
-    invalid_at: Optional[datetime] = None
-    source_msg_id: Optional[str] = None
-    confidence: float = 1.0
-    embedding: List[float] = field(default_factory=list)
-
-@dataclass
-class FactMergeResult:
-    to_invalidate: List[str]
-    new_contents: List[str]
-
-class EntityItem(BaseModel):
-    msg_id: int
-    name: str
-    label: str
-    topic: str
-    confidence: float
-    msg_id: Optional[int] = None
-
-class ExtractionResponse(BaseModel):
-    entities: List[EntityItem]

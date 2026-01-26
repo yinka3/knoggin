@@ -2,7 +2,7 @@ import asyncio
 import time
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
-from db.memgraph import MemGraphStore
+from db.store import MemGraphStore
 from main.entity_resolve import EntityResolver
 
 

@@ -2,7 +2,7 @@ import asyncio
 import json
 from typing import Awaitable, Callable, Dict, List, Optional
 from loguru import logger
-from db.memgraph import MemGraphStore
+from db.store import MemGraphStore
 from main.redisclient import AsyncRedisClient
 from main.processor import BatchProcessor, BatchResult
 
@@ -13,15 +13,15 @@ class BatchConsumer:
                 get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
                 run_session_jobs: Callable[[], Awaitable[None]],
                 write_to_graph: Callable[[BatchResult], Awaitable[None]],
-                batch_size: int = 10, batch_timeout: float =  30.0, 
-                checkpoint_interval: int = 30, session_window: int = 30):
+                batch_size: int = 8, batch_timeout: float =  360.0, 
+                checkpoint_interval: int = 24, session_window: int = 16):
         
         self.user_name = user_name
         self.store = store
         self.processor = processor
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
-        self.checkpoint_interval = checkpoint_interval
+        self.checkpoint_interval = checkpoint_interval * batch_size
         self.session_window = session_window
         self.redis = AsyncRedisClient().get_client()
 
