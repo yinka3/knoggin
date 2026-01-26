@@ -20,6 +20,7 @@ class Scheduler:
         self.redis = AsyncRedisClient().get_client()
         self._jobs: Dict[str, BaseJob] = {}
         self._last_runs: Dict[str, datetime] = {}
+        self._running_tasks: Dict[str, asyncio.Task] = {}
         self._monitor_task: Optional[asyncio.Task] = None
         self._is_running = False
     
@@ -104,8 +105,16 @@ class Scheduler:
                 ctx.last_run = self._last_runs.get(job_name)
                 
                 try:
+                    current_task = self._running_tasks.get(job_name)
+                    if current_task and not current_task.done():
+                        logger.debug(f"Skipping {job_name}: previous run still active.")
+                        continue
+
                     if await job.should_run(ctx):
-                        await self._execute_job(job, ctx)
+                        task = asyncio.create_task(self._execute_job(job, ctx))
+                        self._running_tasks[job_name] = task
+                        task.add_done_callback(lambda t, name=job_name: self._cleanup_task(name))
+
                 except Exception as e:
                     logger.error(f"Job {job_name} check failed: {e}")
     
@@ -132,3 +141,8 @@ class Scheduler:
         if self._is_running:
             ctx = await self._build_context()
             await self._execute_job(job, ctx)
+    
+    def _cleanup_task(self, job_name: str):
+        """Remove finished task from tracking."""
+        if job_name in self._running_tasks:
+            del self._running_tasks[job_name]

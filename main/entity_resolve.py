@@ -1,36 +1,31 @@
-from datetime import datetime, timezone
+from collections import defaultdict
 from loguru import logger
 import threading
-from rank_bm25 import BM25Okapi
 from typing import Dict, List, Optional, Tuple
-from rapidfuzz import fuzz
-import faiss
+from rapidfuzz import fuzz, process
 import numpy as np
 from sentence_transformers import SentenceTransformer, CrossEncoder
 import torch
-from db.memgraph import MemGraphStore
-
+from db.store import MemGraphStore
+from main.utils import is_substring_match
+from schema.dtypes import Fact
 
 
 class EntityResolver:
+    
 
-    def __init__(self, store: 'MemGraphStore', embedding_model='dunzhang/stella_en_400M_v5'):
+    def __init__(self, store: 'MemGraphStore', session_id: str = None, hierarchy_config: dict = None, embedding_model='dunzhang/stella_en_400M_v5'):
         self.store = store
+        self.hierarchy_config = hierarchy_config or {}
+        self.session_id = session_id
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger.info(f"EntityResolver using device: {device}")
         self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True, device=device, model_kwargs={"torch_dtype": torch.float16})
         self.cross_encoder = CrossEncoder('BAAI/bge-reranker-base', device=device)
         self.embedding_dim = 1024
-        self.index_id_map = faiss.IndexIDMap2(faiss.IndexFlatIP(self.embedding_dim))
         self.entity_profiles = {}
         self._name_to_id = {}
-        self.msg_index = faiss.IndexIDMap2(faiss.IndexScalarQuantizer(self.embedding_dim, faiss.ScalarQuantizer.QT_fp16, faiss.METRIC_INNER_PRODUCT))
-        self.msg_int_to_id: dict[int, str] = {}
-        self._message_texts = {}
         self._lock = threading.RLock()
-        self.bm25_index: Optional[BM25Okapi] = None
-        self.msg_corpus: list[list[str]] = []
-        self.msg_id_order: list[str] = []
     
         self._hydrate_from_store()
 
@@ -57,140 +52,120 @@ class EntityResolver:
                     for alias in aliases:
                         self._name_to_id[alias.lower()] = ent_id
                     
+                    # no facts in cache anymore
                     self.entity_profiles[ent_id] = {
                         "canonical_name": canonical,
                         "type": ent["type"],
-                        "topic": ent["topic"] or "General",
-                        "summary": ent["summary"] or ""
+                        "topic": ent.get("topic", "General"),
+                        "session_id": ent.get("session_id")
                     }
                     
                     if embedding and len(embedding) == self.embedding_dim:
                         ids.append(ent_id)
                         vectors.append(embedding)
-                
-                if ids:
-                    self.index_id_map.add_with_ids(
-                        np.array(vectors, dtype=np.float32),
-                        np.array(ids, dtype=np.int64)
-                    )
             
             logger.info(f"Hydrated {len(self.entity_profiles)} entities, {len(ids)} vectors from Memgraph")
             
         except Exception as e:
             logger.error(f"Hydration failed: {e}")
             raise
-
-    def get_mentions(self) -> Dict[str, int]:
-        """Get copy of _name_to_id for persistence."""
-        with self._lock:
-            return self._name_to_id.copy()
     
     def get_id(self, name: str) -> Optional[int]:
+        if not name:
+            return None
         return self._name_to_id.get(name.lower())
     
+    def get_profiles(self) -> Dict[int, Dict]:
+        return self.entity_profiles
+    
     def get_mentions_for_id(self, entity_id: int) -> List[str]:
-        return [mention for mention, eid in self._name_to_id.items() if eid == entity_id]
+        with self._lock:
+            items = list(self._name_to_id.items())
+        return [mention for mention, eid in items if eid == entity_id]
     
     def get_embedding_for_id(self, entity_id: int) -> List[float]:
-        """Retrieve embedding from FAISS by ID."""
-        with self._lock:
-            try:
-                embedding = self.index_id_map.reconstruct(entity_id)
-                return embedding.tolist()
-            except Exception as e:
-                logger.warning(f"Could not retrieve embedding for {entity_id}: {e}")
-                return []
-    
-    def hydrate_messages(self, messages: dict[str, dict]):
-        if not messages:
-            return
-        
-        ids, texts, tokens = [], [], []
-        for msg_key, data in messages.items():
-            prefix, num = msg_key.split("_")
-            num = int(num)
-            int_id = num if prefix == "msg" else num + 1_000_000
+        """Retrieve embedding from graph by ID."""
+        profile = self.entity_profiles.get(entity_id)
+        if profile and profile.get("embedding"):
+            return profile["embedding"]
+        return self.store.get_entity_embedding(entity_id)
             
-            text = data.get("message") or data.get("content", "")
-            self._message_texts[msg_key] = text
-            self.msg_int_to_id[int_id] = msg_key
-            ids.append(int_id)
-            texts.append(text)
-            tokens.append(text.lower().split())
-            self.msg_id_order.append(msg_key)
+    def get_hierarchy_relationship(self, type_a: str, type_b: str, topic: str) -> Optional[str]:
+        """
+        Check if two types have a parent/child relationship within a topic.
         
-
-        embs = self.embedding_model.encode(texts).astype(np.float32)
-        faiss.normalize_L2(embs)
-        self.msg_index.add_with_ids(embs, np.array(ids, dtype=np.int64))
+        Returns:
+            "parent" if type_a is parent of type_b
+            "child" if type_a is child of type_b
+            None if no hierarchy relationship
+        """
+        topic_hierarchy = self.hierarchy_config.get(topic, {})
         
-
-        self.msg_corpus = tokens
-        self.bm25_index = BM25Okapi(tokens)
-
+        if not topic_hierarchy:
+            return None
+        
+        if type_a in topic_hierarchy:
+            if type_b in topic_hierarchy[type_a]:
+                return "parent"
+        
+        if type_b in topic_hierarchy:
+            if type_a in topic_hierarchy[type_b]:
+                return "child"
+        
+        return None
     
-    def add_message(self, msg_key: str, text: str):
-        prefix, num = msg_key.split("_")
-        num = int(num)
-        
-        # hacky solution: offset to 1 mill
-        int_id = num if prefix == "msg" else num + 1_000_000
-        
-        self.msg_int_to_id[int_id] = msg_key
-        self._message_texts[msg_key] = text
 
-        emb = self.embedding_model.encode([text]).astype(np.float32)
-        faiss.normalize_L2(emb)
-        self.msg_index.add_with_ids(emb, np.array([int_id], dtype=np.int64))
+    def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """
+        Compute embeddings for a batch of texts (used by Processor).
+        """
+        if not texts:
+            return []
+            
+        embeddings = self.embedding_model.encode(texts).astype(np.float32)
+        return embeddings.tolist()
         
-        self.msg_corpus.append(text.lower().split())
-        self.msg_id_order.append(msg_key)
-        self.bm25_index = BM25Okapi(self.msg_corpus)
 
     def _search_messages(self, query: str, k: int = 10) -> list[tuple[str, float]]:
-        if not self.msg_int_to_id:
-            return []
-        
+
         results = {}
+        query_embedding = self.embedding_model.encode([query]).astype(np.float32)[0].tolist()
+        sem_results = self.store.search_messages_vector(query_embedding, limit=50)
+
+        for msg_id, score in sem_results:
+            msg_key = f"msg_{msg_id}" if msg_id < 1_000_000_000 else f"turn_{msg_id - 1_000_000_000}"
+            results[msg_key] = ("semantic", float(score))
         
-        q_emb = self.embedding_model.encode([query]).astype(np.float32)
-        faiss.normalize_L2(q_emb)
-        sem_scores, sem_ids = self.msg_index.search(q_emb, 50) #hardcoded for convienence
-        
-        for idx, score in zip(sem_ids[0], sem_scores[0]):
-            if idx >= 0:
-                if int(idx) not in self.msg_int_to_id:
-                    logger.warning(f"FAISS returned ID {idx} not in msg_int_to_id")
-                    continue
-                msg_key = self.msg_int_to_id[int(idx)]
-                results[msg_key] = ("semantic", float(score))
-        
-        if self.bm25_index:
-            tokens = query.lower().split()
-            bm25_scores = self.bm25_index.get_scores(tokens)
-            top_indices = np.argsort(bm25_scores)[::-1][:75] #hardcoded for convienence
-            max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1.0
+        fts_results = self.store.search_messages_fts(query, limit=50)
+        max_fts = max([s for _, s in fts_results]) if fts_results else 1.0
+
+        for msg_id, raw_score in fts_results:
+            msg_key = f"msg_{msg_id}"
             
-            for idx in top_indices:
-                if bm25_scores[idx] > 0:
-                    msg_key = self.msg_id_order[idx]
-                    norm_score = bm25_scores[idx] / max_bm25
-                    if msg_key in results:
-                        _, sem_score = results[msg_key]
-                        results[msg_key] = ("both", sem_score + norm_score)
-                    else:
-                        results[msg_key] = ("keyword", norm_score)
+            norm_score = raw_score / max_fts if max_fts > 0 else 0
+            
+            logger.debug(f"FTS result: {msg_key} score={norm_score:.3f}")
+
+            if msg_key in results:
+                _, sem_score = results[msg_key]
+                results[msg_key] = ("both", sem_score + norm_score)
+            else:
+                results[msg_key] = ("keyword", norm_score)
         
         if not results:
             return []
         
         if len(results) > 1:
-                candidate_keys = list(results.keys())[:45]
-                pairs = [(query, self._message_texts[msg_key]) for msg_key in candidate_keys]
-                scores = self.cross_encoder.predict(pairs)
-                reranked = list(zip(candidate_keys, scores))
-                reranked.sort(key=lambda x: x[1], reverse=True)
-                return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
+            candidate_keys = list(results.keys())[:45]
+            pairs = []
+            for msg_key in candidate_keys:
+                msg_id = int(msg_key.split("_")[1])
+                text = self.store.get_message_text(msg_id)
+                pairs.append((query, text))
+            
+            scores = self.cross_encoder.predict(pairs)
+            reranked = sorted(zip(candidate_keys, scores), key=lambda x: x[1], reverse=True)
+            return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
             
         # Fallback: single result
         sorted_results = sorted(results.items(), key=lambda x: x[1][1], reverse=True)[:k]
@@ -201,6 +176,10 @@ class EntityResolver:
         Check if canonical_name exists. If yes, register mention aliases and return ID.
         If no, return None (caller handles demotion).
         """
+
+        if not canonical_name:
+            return None, False
+        
         with self._lock:
             entity_id = self.get_id(canonical_name)
             logger.debug(f"validate_existing: '{canonical_name}' -> id={entity_id}")
@@ -215,69 +194,137 @@ class EntityResolver:
 
             return entity_id, len(new_aliases) > 0
     
+    def _build_generic_tokens(self, min_entity_freq: int = 10) -> set:
+        """Tokens appearing in N+ distinct entities are generic."""
+        token_to_entities = defaultdict(set)
+        
+        for ent_id, profile in self.entity_profiles.items():
+            canonical = profile.get("canonical_name", "").lower()
+            for token in canonical.split():
+                token_to_entities[token].add(ent_id)
+            
+            for alias in self.get_mentions_for_id(ent_id):
+                for token in alias.lower().split():
+                    token_to_entities[token].add(ent_id)
+        
+        return {token for token, ent_ids in token_to_entities.items() 
+                if len(ent_ids) >= min_entity_freq}
+    
+    def get_candidate_ids(
+        self, 
+        mention: str,
+        fuzzy_threshold: int = 75,
+        vector_threshold: float = 0.85
+    ) -> List[Tuple[int, float]]:
+        
+        if not mention:
+            return []
+
+        candidates = set()
+        mention_lower = mention.lower()
+
+        with self._lock:
+            if mention_lower in self._name_to_id:
+                candidates.add(self._name_to_id[mention_lower])
+            
+            choices = list(self._name_to_id.keys())
+
+            results = process.extract(
+                mention_lower,
+                choices,
+                limit=50,
+                score_cutoff=fuzzy_threshold,
+                scorer=fuzz.WRatio
+            )
+
+            for alias, _, _ in results:
+                eid = self._name_to_id.get(alias)
+                if eid is not None:
+                    candidates.add(eid)
+            
+            try:
+                vector = self.embedding_model.encode([mention]).astype(np.float32)[0].tolist()
+                vector_results = self.store.search_entities_by_embedding(
+                    vector, 
+                    limit=5, 
+                    score_threshold=vector_threshold
+                )
+                
+                for eid, score in vector_results:
+                    with self._lock:
+                        if eid:
+                            candidates.add(eid)
+                            logger.debug(f"Vector search found entity ID'{eid}' for '{mention}' (score={score:.2f})")
+
+            except Exception as e:
+                logger.warning(f"Vector candidate search failed: {e}")
+            
+            return list(candidates)
+    
     def register_entity(
         self, 
         entity_id: int, 
         canonical_name: str, 
         mentions: List[str], 
         entity_type: str, 
-        topic: str
+        topic: str,
+        session_id: str = None
     ) -> List[float]:
         """
         Register new entity: update all indexes and return embedding.
         """
+
+        sessionID = session_id or self.session_id
         profile = {
             "canonical_name": canonical_name,
             "type": entity_type,
             "topic": topic,
-            "summary": ""
+            "facts": [],
+            "session_id": sessionID
         }
         
-        embedding = self.add_entity(entity_id, profile)
+        embedding = self._add_entity(entity_id, profile, sessionID)
         
         with self._lock:
             self._name_to_id[canonical_name.lower()] = entity_id
             for mention in mentions:
-                self._name_to_id[mention.lower()] = entity_id
+                mention_lower = mention.lower()
+                existing_id = self._name_to_id.get(mention_lower)
+                if existing_id and existing_id != entity_id:
+                    logger.warning(f"Alias collision: '{mention}' belongs to {existing_id}, skipping for {entity_id}")
+                    continue
+                self._name_to_id[mention_lower] = entity_id
 
         return embedding
 
-    def add_entity(self, entity_id: int, profile: Dict) -> List[float]:
 
+    def _add_entity(self, entity_id: int, profile: Dict, session_id: str) -> List[float]:
         canonical_name = profile.get("canonical_name", "")
-        summary = profile.get("summary", "") or ""
-
-        resolution_text = f"{canonical_name}. {summary}"
+        
+        # Build resolution text without facts (new facts added on profile cycle)
+        resolution_text = canonical_name
         embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
-        faiss.normalize_L2(embedding_np.reshape(1, -1))
 
-
-        with self._lock:
-
-            #TODO: eventually need to make a better LRU system
-            if len(self.entity_profiles) >= 10000:
-                oldest_id = next(iter(self.entity_profiles))
-                del self.entity_profiles[oldest_id]
-                
-            logger.info(f"Adding entity {entity_id}-{profile["canonical_name"]} to resolver indexes.")
+        with self._lock:                
+            logger.info(f"Adding entity {entity_id}-{profile['canonical_name']} to resolver indexes.")
 
             profile.setdefault("topic", "General")
-            profile.setdefault("first_seen", datetime.now(timezone.utc).isoformat())
-            profile["last_seen"] = datetime.now(timezone.utc).isoformat()
-            
-            self.index_id_map.add_with_ids(
-                np.array([embedding_np]), 
-                np.array([entity_id], dtype=np.int64)
-            )
 
-            self.entity_profiles[entity_id] = profile
+            # Store profile without facts
+            self.entity_profiles[entity_id] = {
+                "canonical_name": profile["canonical_name"],
+                "type": profile.get("type"),
+                "topic": profile.get("topic", "General"),
+                "session_id": session_id,
+                "embedding": embedding_np.tolist()
+            }
         
         return embedding_np.tolist()
     
 
-    def update_profile_summary(self, entity_id: int, new_summary: str) -> List[float]:
+    def compute_embedding(self, entity_id: int, resolution_text: str) -> List[float]:
         """
-        Update entity summary and recompute embedding.
+        Update entity facts and recompute embedding.
         Returns new embedding.
         """
         with self._lock:
@@ -286,82 +333,63 @@ class EntityResolver:
                 logger.warning(f"Cannot update profile for unknown entity {entity_id}")
                 return []
             
-            canonical_name = profile.get("canonical_name", "")
-            profile["summary"] = new_summary
-            profile["last_seen"] = datetime.now(timezone.utc).isoformat()
+            logger.info(f"Updating embedding for entity {entity_id}-{profile['canonical_name']}")
             
-            resolution_text = f"{canonical_name}. {new_summary[:200]}"
             embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
-            faiss.normalize_L2(embedding_np.reshape(1, -1))
-
-            self.index_id_map.remove_ids(np.array([entity_id], dtype=np.int64))
-            self.index_id_map.add_with_ids(
-                np.array([embedding_np]),
-                np.array([entity_id], dtype=np.int64)
-            )
             
-            return embedding_np.tolist()
+        return embedding_np.tolist()
+        
+    def merge_into(self, primary_id: int, secondary_id: int):
+        """Transfer secondary entity's aliases to primary, remove secondary from indexes."""
+        with self._lock:
+            secondary_aliases = [
+                alias for alias, eid in self._name_to_id.items() 
+                if eid == secondary_id
+            ]
+            
+            for alias in secondary_aliases:
+                self._name_to_id[alias] = primary_id
+            
+            if secondary_id in self.entity_profiles:
+                del self.entity_profiles[secondary_id]
+    
+    def resolve_entity_name(self, entity: str) -> Optional[str]:
+        """Resolve user input to canonical entity name via exact or fuzzy match."""
+        candidates = self.get_candidate_ids(entity, fuzzy_threshold=85)
+        
+        if not candidates:
+            return None
+        
+        with self._lock:
+            profile = self.entity_profiles.get(candidates[0])
+        
+        return profile["canonical_name"] if profile else None
+            
 
     def detect_merge_candidates(self) -> list:
-        """Detect potential entity merges using name matching and summary similarity."""
-        
-        logger.info(f"Merge detection started, {len(self.entity_profiles)} entities to scan")
-        
+        """Detect potential entity merges using vector search + fuzzy matching."""
+        logger.info(f"Merge detection started. Scanning {len(self.entity_profiles)} entities.")
+
+        generic_tokens = self._build_generic_tokens()
+        candidate_pairs = self._collect_candidate_pairs(generic_tokens)
+
+        if not candidate_pairs:
+            return []
+
+        entity_ids = set()
+        for id_a, id_b in candidate_pairs.keys():
+            entity_ids.add(id_a)
+            entity_ids.add(id_b)
+
+        facts_by_entity = self.store.get_facts_for_entities(list(entity_ids), active_only=True)
+
         candidates = []
-        seen_pairs = {}
-        aliases = list(self._name_to_id.keys())
-        for i in range(len(aliases)):
-            for j in range(i + 1, len(aliases)):
-                id_i = self._name_to_id[aliases[i]]
-                id_j = self._name_to_id[aliases[j]]
-                if id_i == id_j:
-                    continue
-                score = fuzz.WRatio(aliases[i], aliases[j])
-                if score >= 91:
-                    pair_key = tuple(sorted([id_i, id_j]))
-                    if pair_key not in seen_pairs or score > seen_pairs[pair_key]:
-                        seen_pairs[pair_key] = score
-                    
+        for (id_a, id_b), fuzz_score in candidate_pairs.items():
+            result = self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity)
+            if result:
+                candidates.append(result)
 
-        
-        for (id_a, id_b), fuzz_score in seen_pairs.items():
-            if self.store.has_direct_edge(id_a, id_b):
-                logger.debug(f"Blocked ({id_a}, {id_b}) | Direct edge exists")
-                continue
-            profile_a = self.entity_profiles.get(id_a, {})
-            profile_b = self.entity_profiles.get(id_b, {})
-            type_a = profile_a.get("type")
-            type_b = profile_b.get("type")
-
-            neighbors_a = self.store.get_neighbor_ids(id_a)
-            neighbors_b = self.store.get_neighbor_ids(id_b)
-            neighbors_a.discard(1) # user id - hardcoded for now
-            neighbors_b.discard(1)
-            
-            shared_neighbors = neighbors_a & neighbors_b
-            if shared_neighbors:
-                high_confidence = fuzz_score >= 95 and type_a and type_b and type_a == type_b
-            
-                if not high_confidence:
-                    logger.debug(f"Blocked ({id_a}, {id_b}) | Shared neighbors: {shared_neighbors} (score={fuzz_score}, types={type_a}/{type_b})")
-                    continue
-                else:
-                    logger.info(f"Passed ({id_a}, {id_b}) | Shared neighbors as supporting evidence (score={fuzz_score}, type={type_a})")
-            
-            candidates.append({
-                "primary_id": id_a,
-                "secondary_id": id_b,
-                "primary_name": profile_a.get("canonical_name", "Unknown"),
-                "secondary_name": profile_b.get("canonical_name", "Unknown"),
-                "profile_a": profile_a,
-                "profile_b": profile_b,
-                "fuzz_score": fuzz_score,
-                "shared_neighbor_count": len(shared_neighbors)
-            })
-            
-            logger.info(f"Candidate ({id_a}, {id_b}) {profile_a.get('canonical_name')} <-> {profile_b.get('canonical_name')} | score={fuzz_score}")
-    
-        logger.info(f"Merge detection complete: {len(candidates)} candidates found")
+        logger.info(f"Detection complete: {len(candidates)} candidates found")
         return candidates
     
     def remove_entities(self, entity_ids: List[int]) -> int:
@@ -376,18 +404,128 @@ class EntityResolver:
                     del self.entity_profiles[eid]
                     removed += 1
                 
-                # Remove aliases pointing to this ID
                 to_remove = [alias for alias, id_ in self._name_to_id.items() if id_ == eid]
                 for alias in to_remove:
                     del self._name_to_id[alias]
-            
-            # Remove from FAISS
-            if removed > 0:
-                try:
-                    self.index_id_map.remove_ids(np.array(entity_ids, dtype=np.int64))
-                except Exception as e:
-                    logger.warning(f"FAISS removal failed: {e}")
         
         if removed > 0:
             logger.info(f"Removed {removed} entities from resolver")
         return removed
+
+
+    def _collect_candidate_pairs(
+        self, 
+        generic_tokens: set,
+        fuzzy_substring_threshold: int = 75,
+        fuzzy_non_substring_threshold: int = 91,
+    ) -> Dict[Tuple[int, int], int]:
+        """
+        Vector search + fuzzy filter.
+        Returns {(id_a, id_b): (fuzz_score, is_substring)}
+        """
+        seen_pairs = {}
+
+        with self._lock:
+            snapshot_ids = list(self.entity_profiles.keys())
+
+        for primary_id in snapshot_ids:
+            primary_profile = self.entity_profiles.get(primary_id)
+            if not primary_profile:
+                continue
+
+            primary_name = primary_profile["canonical_name"]
+            neighbors = self.store.search_similar_entities(primary_id, limit=50)
+
+            for neighbor_id, _ in neighbors:
+                if neighbor_id == primary_id or neighbor_id < primary_id:
+                    continue
+
+                neighbor_profile = self.entity_profiles.get(neighbor_id)
+                if not neighbor_profile:
+                    continue
+
+                neighbor_name = neighbor_profile["canonical_name"]
+                score = fuzz.WRatio(primary_name, neighbor_name)
+                is_substring = is_substring_match(primary_name, neighbor_name)
+
+                # threshold check
+                passes_threshold = (
+                    (is_substring and score >= fuzzy_substring_threshold) or
+                    score >= fuzzy_non_substring_threshold
+                )
+
+                if not passes_threshold:
+                    continue
+
+                # generic token overlap check
+                tokens_i = set(primary_name.lower().split()) - generic_tokens
+                tokens_j = set(neighbor_name.lower().split()) - generic_tokens
+
+                if not (tokens_i & tokens_j):
+                    logger.warning(f"Skipping {primary_id}-{neighbor_id}: generic token overlap only")
+                    continue
+
+                pair_key = (primary_id, neighbor_id)
+                if pair_key not in seen_pairs or score > seen_pairs[pair_key][0]:
+                    seen_pairs[pair_key] = score
+
+        return seen_pairs
+
+
+    def _classify_pair(
+        self,
+        id_a: int,
+        id_b: int,
+        fuzz_score: int,
+        facts_by_entity: Dict[int, List[Fact]]
+    ) -> Optional[dict]:
+        """
+        Evaluate one pair for merge or hierarchy relationship.
+        Returns candidate dict or None to skip.
+        """
+        if self.store.has_direct_edge(id_a, id_b):
+            return None
+        if self.store.has_hierarchy_edge(id_a, id_b):
+            return None
+
+        profile_a = self.entity_profiles.get(id_a, {})
+        profile_b = self.entity_profiles.get(id_b, {})
+
+        type_a = profile_a.get("type")
+        type_b = profile_b.get("type")
+        topic_a = profile_a.get("topic", "General")
+        topic_b = profile_b.get("topic", "General")
+
+        is_cross_topic = topic_a != topic_b
+        if is_cross_topic:
+            if not (fuzz_score >= 85 and type_a == type_b):
+                return None
+
+        neighbors_a = self.store.get_neighbor_ids(id_a)
+        neighbors_b = self.store.get_neighbor_ids(id_b)
+        neighbors_a.discard(1) # ignore user node
+        neighbors_b.discard(1)
+
+        shared_neighbors = neighbors_a & neighbors_b
+        if shared_neighbors:
+            high_confidence = fuzz_score >= 95 and type_a and type_b and type_a == type_b
+            if not high_confidence:
+                return None
+
+        return {
+            "primary_id": id_a,
+            "secondary_id": id_b,
+            "primary_name": profile_a.get("canonical_name", "Unknown"),
+            "secondary_name": profile_b.get("canonical_name", "Unknown"),
+            "primary_type": type_a,
+            "secondary_type": type_b,
+            "primary_session": profile_a.get("session_id"),
+            "secondary_session": profile_b.get("session_id"),
+            "topic_a": topic_a,
+            "topic_b": topic_b,
+            "facts_a": facts_by_entity.get(id_a, []),
+            "facts_b": facts_by_entity.get(id_b, []),
+            "fuzz_score": fuzz_score,
+            "shared_neighbor_count": len(shared_neighbors)
+        }
+    

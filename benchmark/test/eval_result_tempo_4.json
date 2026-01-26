@@ -1,0 +1,16 @@
+{
+  "index": 4,
+  "dataset": "tempo",
+  "type": "temporal-reasoning",
+  "question": "How many days passed between the day I started playing along to my favorite songs on my old keyboard and the day I discovered a bluegrass band?",
+  "question_date": "2023/04/05 (Wed) 09:11",
+  "expected": "6 days. 7 days (including the last day) is also acceptable.",
+  "response": "6 days passed between the two events.\n\n*   **Start playing keyboard:** March 25, 2023 (\"I started playing along to my favorite songs on my old keyboard today\")\n*   **Discovered bluegrass band:** March 31, 2023 (\"I recently discovered a bluegrass band... and started enjoying their music today\")",
+  "tools_used": [
+    "search_entity",
+    "search_entity",
+    "search_entity",
+    "search_entity",
+    "search_messages"
+  ]
+}

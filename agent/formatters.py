@@ -1,31 +1,46 @@
 from datetime import datetime
 from typing import Dict, List
 
+# Timestamp bounds (Unix seconds)
+TS_MIN = 946684800    # 2000-01-01 00:00:00 UTC
+TS_MAX = 2524608000   # 2050-01-01 00:00:00 UTC
+
+
+def _normalize_timestamp(ts: float) -> float | None:
+    """Normalize timestamp to seconds. Returns None if out of bounds."""
+    divisors = [1, 1_000, 1_000_000, 1_000_000_000]
+    
+    for divisor in divisors:
+        normalized = ts / divisor
+        if TS_MIN <= normalized <= TS_MAX:
+            return normalized
+    
+    return None
+
 
 def _format_timestamp(ts) -> str:
-    """Convert timestamp to readable date string."""
+    """Convert timestamp to readable datetime string. Handles s, ms, us, ns."""
     if not ts:
         return "unknown"
     
     try:
-        if isinstance(ts, (int, float)):
-            if ts > 1e14:  # microseconds
-                ts = ts / 1_000_000
-            elif ts > 1e11:  # milliseconds
-                ts = ts / 1000
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-        
         if isinstance(ts, str):
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d")
+            return dt.strftime("%Y-%m-%d %H:%M")
+        
+        if isinstance(ts, (int, float)):
+            ts_normalized = _normalize_timestamp(ts)
+            if ts_normalized is None:
+                return "unknown"
+            return datetime.fromtimestamp(ts_normalized).strftime("%Y-%m-%d %H:%M")
+            
     except (ValueError, OSError, OverflowError):
-        return str(ts) if ts else "unknown"
+        pass
     
-    return str(ts)
+    return "unknown"
 
 
 def format_retrieved_messages(messages: List[Dict]) -> str:
-
     if not messages:
         return "No messages found."
 
@@ -44,8 +59,8 @@ def format_retrieved_messages(messages: List[Dict]) -> str:
                 if "T" in ts_str:
                     dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                     ts_display = dt.strftime("%Y-%m-%d %H:%M")
-            except:
-                pass # Fallback to raw string if parsing fails
+            except (ValueError, TypeError):
+                pass
             
             role = "User" if msg['role'] == 'user' else "Stella"
             content = msg.get('content', '')
@@ -58,7 +73,8 @@ def format_retrieved_messages(messages: List[Dict]) -> str:
 
     return "\n".join(output)
 
-def format_entity_results(entities: List[Dict], k: int = 5) -> str:
+
+def format_entity_results(entities: List[Dict], evidence_limit: int = 5) -> str:
     """Format search_entity output."""
     if not entities:
         return "No entities found."
@@ -70,7 +86,7 @@ def format_entity_results(entities: List[Dict], k: int = 5) -> str:
         aliases = ent.get("aliases", [])
         topic = ent.get("topic", "General")
         last_mentioned = _format_timestamp(ent.get("last_mentioned"))
-        summary = ent.get("summary", "No summary available.")
+        facts = ent.get("facts", [])
         
         block = f"=== {name} ({ent_type}) ===\n"
         
@@ -79,7 +95,13 @@ def format_entity_results(entities: List[Dict], k: int = 5) -> str:
         
         block += f"Topic: {topic}\n"
         block += f"Last talked about: {last_mentioned}\n"
-        block += f"Summary: {summary}\n"
+        
+        if facts:
+            block += "Facts:\n"
+            for fact in facts:
+                block += f"  - {fact}\n"
+        else:
+            block += "Facts: None recorded\n"
         
         connections = ent.get("top_connections", [])
         if connections:
@@ -90,9 +112,9 @@ def format_entity_results(entities: List[Dict], k: int = 5) -> str:
                 weight = conn.get("weight", 0)
                 
                 alias_str = f" (aka {', '.join(conn_aliases)})" if conn_aliases else ""
-                block += f"  → {conn_name}{alias_str} | weight: {weight}\n"
+                block += f"  -> {conn_name}{alias_str} | weight: {weight}\n"
                 
-                for ev in conn.get("evidence", [])[:k]:
+                for ev in conn.get("evidence", [])[:evidence_limit]:
                     msg = ev.get("message", "")
                     ts = _format_timestamp(ev.get("timestamp"))
                     block += f"    \"{msg}\" [{ts}]\n"
@@ -115,7 +137,10 @@ def format_graph_results(results: List[Dict]) -> str:
             strength = r.get("connection_strength", 0)
             last_seen = _format_timestamp(r.get("last_seen"))
             
-            block = f"--- {source} → {target} ---\n"
+            block = f"--- {source} -> {target} ---\n"
+            target_facts = r.get("target_facts", [])
+            if target_facts:
+                block += f"Facts: {' | '.join(target_facts[:3])}\n"
             block += f"Strength: {strength} | Last talked about: {last_seen}\n"
         
         elif "entity" in r:
@@ -151,7 +176,7 @@ def format_path_results(path: List[Dict]) -> str:
         entities.append(step.get("entity_b", "?"))
     
     hops = len(path)
-    header = f"Path: {' → '.join(entities)} ({hops} hop{'s' if hops != 1 else ''})\n"
+    header = f"Path: {' -> '.join(entities)} ({hops} hop{'s' if hops != 1 else ''})\n"
     
     steps = []
     for step in path:
@@ -159,7 +184,7 @@ def format_path_results(path: List[Dict]) -> str:
         ent_a = step.get("entity_a", "?")
         ent_b = step.get("entity_b", "?")
         
-        step_block = f"  [{step_num}] {ent_a} → {ent_b}\n"
+        step_block = f"  [{step_num}] {ent_a} -> {ent_b}\n"
         
         for ev in step.get("evidence", []):
             msg = ev.get("message", "")
@@ -179,24 +204,51 @@ def format_hot_topic_context(context: Dict[str, Dict]) -> str:
     blocks = []
     for topic, data in context.items():
         entities = data.get("entities", [])
-        messages = data.get("messages", [])
-        
-        entity_names = []
-        for ent in entities:
-            name = ent.get("name", "")
-            if name:
-                entity_names.append(name)
         
         block = f"[HOT: {topic}]\n"
+
+        if entities:
+            block += "Entities:\n"
+            for ent in entities:
+                name = ent.get("name", "")
+                facts = ent.get("facts", [])
+                
+                if name:
+                    if facts:
+                        block += f"  - {name}: {' | '.join(facts[:3])}\n"
+                    else:
+                        block += f"  - {name}\n"
         
-        if entity_names:
-            block += f"Entities: {', '.join(entity_names)}\n"
+        blocks.append(block)
+    
+    return "\n".join(blocks)
+
+
+def format_hierarchy_results(results: List[Dict]) -> str:
+    if not results:
+        return "No hierarchy found."
+    
+    blocks = []
+    for h in results:
+        entity = h.get("entity", "Unknown")
+        block = f"=== {entity} ===\n"
         
-        if messages:
-            block += "Recent:\n"
-            for msg in messages[:5]:
-                text = msg.get("message", "")
-                block += f"  \"{text}\"\n"
+        if h.get("ancestry"):
+            block += f"Ancestry: {' → '.join(h['ancestry'])}\n"
+        
+        if h.get("parents"):
+            block += "Parents:\n"
+            for p in h["parents"]:
+                facts = p.get("facts", [])
+                fact_str = f" ({', '.join(facts[:2])})" if facts else ""
+                block += f"  ↑ {p.get('canonical_name', '?')}{fact_str}\n"
+        
+        if h.get("children"):
+            block += "Children:\n"
+            for c in h["children"]:
+                facts = c.get("facts", [])
+                fact_str = f" ({', '.join(facts[:2])})" if facts else ""
+                block += f"  ↓ {c.get('canonical_name', '?')}{fact_str}\n"
         
         blocks.append(block)
     

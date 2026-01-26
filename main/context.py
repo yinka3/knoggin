@@ -1,10 +1,10 @@
 import asyncio
-from datetime import timezone
-from dotenv import load_dotenv
+from datetime import datetime, timezone
 import redis.asyncio as redis
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 import json
+from jobs.archive import FactArchivalJob
 from jobs.base import BaseJob, JobContext
 from jobs.dlq import DLQReplayJob
 from jobs.mood import MoodCheckpointJob
@@ -13,24 +13,20 @@ from jobs.scheduler import Scheduler
 from jobs.merger import MergeDetectionJob
 from jobs.cleaner import EntityCleanupJob
 from config import get_config_value
-from main.processor import BatchProcessor
+from main.consumer import BatchConsumer
+from main.processor import BatchProcessor, BatchResult
 from main.service import LLMService
 from main.redisclient import AsyncRedisClient
-from typing import List, Set
+from typing import Dict, List
 from functools import partial
-from schema.dtypes import *
+from main.topics_config import TopicConfig
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
-from db.memgraph import MemGraphStore
-from main.prompts import *
+from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
+import uuid
 
-
-load_dotenv()
-
-BATCH_SIZE = 10
-SESSION_WINDOW = 60
-BATCH_TIMEOUT_SECONDS = 15
+from schema.dtypes import Fact, MessageConnections, MessageData
 
 class Context:
 
@@ -41,19 +37,17 @@ class Context:
         self.redis_client: redis.Redis = redis_client
         self.llm: LLMService = None
         
-        self.store: 'MemGraphStore' = None
-        self.nlp_pipe: 'NLPPipeline' = None
-        self.ent_resolver: 'EntityResolver' = None
+        self.store: MemGraphStore = None
+        self.nlp_pipe: NLPPipeline = None
+        self.ent_resolver: EntityResolver = None
+        self.session_id: str = None
+        self.topic_config: TopicConfig = None
 
         self.executor: ThreadPoolExecutor = None
-        self._background_tasks: Set[asyncio.Task] = set()
-        self._batch_timer_task: asyncio.Task = None
-        self._batch_processing_lock = asyncio.Lock()
         self.batch_processor: BatchProcessor = None
-        self._batch_in_progress = False
+        self.consumer: BatchConsumer = None
         self.profile_job: BaseJob = None
         self.merge_job: BaseJob = None
-        self.cleanup_job: BaseJob = None
         self.trace_logger = get_trace_logger()
 
     @classmethod
@@ -62,47 +56,65 @@ class Context:
         user_name: str,
         store: MemGraphStore,
         cpu_executor: ThreadPoolExecutor,
-        topics: List[str] = ["General"]
+        topics_config: dict = None,
+        session_id: str = None
     ) -> "Context":
+        
+
+        if topics_config is None:
+            topics_config = {"General": {"labels": [], "hierarchy": {}}}
+        
+
         redis_conn = AsyncRedisClient().get_client()
+        instance = cls(user_name, list(topics_config.keys()), redis_conn)
         
-        instance = cls(user_name, topics, redis_conn)
-        instance.llm = LLMService(trace_logger=get_trace_logger())
-        
+
+        instance.session_id = session_id or str(uuid.uuid4())
         instance.store = store
         instance.executor = cpu_executor
+        instance.llm = LLMService(trace_logger=get_trace_logger())
         
-        loop = asyncio.get_running_loop()
 
+        await redis_conn.hset(
+            f"session_config:{user_name}",
+            instance.session_id,
+            json.dumps(topics_config)
+        )
+        instance.topic_config = await TopicConfig.load(redis_conn, user_name, instance.session_id)
+        await instance.topic_config.save(redis_conn, user_name, instance.session_id)
+        
+
+        loop = asyncio.get_running_loop()
         max_id = await loop.run_in_executor(None, instance.store.get_max_entity_id)
-    
         current_redis = await redis_conn.get("global:next_ent_id")
         if not current_redis or int(current_redis) < max_id:
             await redis_conn.set("global:next_ent_id", max_id)
-            logger.info(f"Startup Sync: Reset global:next_ent_id to {max_id} from Memgraph")
-            
-        instance.nlp_pipe = await loop.run_in_executor(
-            instance.executor, 
-            partial(NLPPipeline, llm=instance.llm)
+        
+
+        instance.ent_resolver = EntityResolver(
+            session_id=instance.session_id,
+            store=instance.store,
+            hierarchy_config=instance.topic_config.hierarchy
         )
         
-        instance.ent_resolver = EntityResolver(store=instance.store)
-
-        raw_msgs = await redis_conn.hgetall(f"message_content:{user_name}")
-        messages = {k: json.loads(v) for k, v in raw_msgs.items()}
-        instance.ent_resolver.hydrate_messages(messages)
-
-        raw_turns = await redis_conn.hgetall(f"conversation:{user_name}")
-        stella_turns = {}
-        for turn_key, data in raw_turns.items():
-            parsed = json.loads(data)
-            if parsed["role"] == "assistant":
-                stella_turns[turn_key] = {"content": parsed["content"]}
-        instance.ent_resolver.hydrate_messages(stella_turns)
 
         await instance._get_or_create_user_entity(user_name)
+        
+
+        instance.nlp_pipe = await loop.run_in_executor(
+            instance.executor,
+            partial(
+                NLPPipeline,
+                llm=instance.llm,
+                topic_config=instance.topic_config,
+                get_known_aliases=lambda: instance.ent_resolver._name_to_id,
+                get_profiles=lambda: instance.ent_resolver.entity_profiles
+            )
+        )
+        
 
         instance.batch_processor = BatchProcessor(
+            session_id=instance.session_id,
             redis_client=redis_conn,
             llm=instance.llm,
             ent_resolver=instance.ent_resolver,
@@ -110,57 +122,46 @@ class Context:
             store=instance.store,
             cpu_executor=instance.executor,
             user_name=user_name,
-            active_topics=topics,
-            get_next_ent_id=instance.get_next_ent_id)
+            topic_config=instance.topic_config,
+            get_next_ent_id=instance.get_next_ent_id
+        )
+        
+
+        instance.consumer = BatchConsumer(
+            user_name=user_name,
+            store=instance.store,
+            processor=instance.batch_processor,
+            get_session_context=instance.get_conversation_context,
+            run_session_jobs=instance._run_session_jobs,
+            write_to_graph=instance._write_to_graph_callback,
+        )
+        instance.consumer.start()
+        
 
         instance.profile_job = ProfileRefinementJob(
             llm=instance.llm,
             resolver=instance.ent_resolver,
             store=instance.store,
-            executor=instance.executor)
-        
-        instance.cleanup_job = EntityCleanupJob(
-            user_name=user_name,
-            store=instance.store,
-            ent_resolver=instance.ent_resolver)
-
+            executor=instance.executor
+        )
         instance.merge_job = MergeDetectionJob(
-            user_name, instance.ent_resolver, instance.store, instance.llm)
+            user_name, instance.ent_resolver, 
+            instance.store, instance.llm,
+            instance.topic_config,
+            instance.executor
+        )
+        
 
-        # Scheduler only gets DLQ
         instance.scheduler = Scheduler(user_name)
         instance.scheduler.register(DLQReplayJob())
+        instance.scheduler.register(EntityCleanupJob(user_name, instance.store, instance.ent_resolver))
+        # instance.scheduler.register(FactArchivalJob(user_name, instance.store))
         # instance.scheduler.register(MoodCheckpointJob(user_name, instance.store))
         await instance.scheduler.start()
         
+        logger.info(f"Session started: {instance.session_id}")
         return instance
-
-    @staticmethod
-    def _log_task_exception(task):
-        if task.cancelled():
-            return
-        if exc := task.exception():
-            import traceback
-            logger.error(f"Background task failed: {exc}")
-            logger.error("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
-    
-    def _fire_and_forget(self, coroutine):
-        task = asyncio.create_task(coroutine)
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-        task.add_done_callback(self._log_task_exception)
-    
-    async def _flush_batch_timeout(self):
-        try:
-            await asyncio.sleep(BATCH_TIMEOUT_SECONDS)
-            buffer_len = await self.redis_client.llen(f"buffer:{self.user_name}")
-            if buffer_len > 0:
-                logger.info("Batch timeout reached")
-                self._fire_and_forget(self.process_batch())
-        except asyncio.CancelledError:
-            pass
-        finally:
-            self._batch_timer_task = None
+        
 
     async def get_next_msg_id(self) -> int:
         return await self.redis_client.incr("global:next_msg_id")
@@ -170,6 +171,97 @@ class Context:
     
     async def get_next_turn_id(self) -> int:
         return await self.redis_client.incr(f"global:next_turn_id:{self.user_name}")
+    
+    async def update_topics_config(self, new_config: dict):
+        self.topic_config.update(new_config)
+        await self.topic_config.save(self.redis_client, self.user_name, self.session_id)
+        self.ent_resolver.hierarchy_config = self.topic_config.hierarchy
+    
+    async def _get_or_create_user_entity(self, user_name: str):
+        loop = asyncio.get_running_loop()
+        entity_id = self.ent_resolver.get_id(user_name)
+
+        if entity_id and entity_id == 1:
+            logger.info(f"User {user_name} recognized.")
+            return entity_id
+        
+        logger.info(f"Creating new USER entity for {user_name}")
+        
+        new_id = await self.get_next_ent_id()
+        
+        initial_fact_content = get_config_value("user_summary") or f"The primary user named {user_name}"
+
+        embedding = await loop.run_in_executor(
+            self.executor,
+            partial(self.ent_resolver.register_entity, new_id, user_name, [user_name], "person", "Identity")
+        )
+
+        # Create initial fact as Fact node
+        fact_embedding = self.ent_resolver.embedding_model.encode([initial_fact_content])[0].tolist()
+        
+        facts: List[Fact] = []
+
+        facts.append(Fact(
+            id=str(uuid.uuid4()),
+            content=initial_fact_content,
+            valid_at=datetime.now(timezone.utc),
+            embedding=fact_embedding,
+            source_entity_id=new_id
+        ))
+        
+        await loop.run_in_executor(
+            self.executor,
+            partial(self.store.create_facts_batch, new_id, facts)
+        )
+
+        user_entity = {
+            "id": new_id,
+            "canonical_name": user_name,
+            "type": "person",
+            "confidence": 1.0,
+            "topic": "Identity",
+            "embedding": embedding,
+            "aliases": [user_name]
+        }
+
+        await loop.run_in_executor(
+            self.executor,
+            partial(self.store.write_batch, [user_entity], [])
+        )
+        
+        logger.info(f"User entity {user_name} (ID: {new_id}) written to graph")
+        return new_id
+    
+    async def _run_session_jobs(self):
+        ctx = JobContext(
+            user_name=self.user_name,
+            redis=self.redis_client,
+            idle_seconds=0
+        )
+
+        if await self.profile_job.should_run(ctx):
+            await self.profile_job.execute(ctx)
+        
+        logger.info("Profile refinement done, waiting then moving on to merge detection...")
+        await asyncio.sleep(0.5)
+
+        if await self.merge_job.should_run(ctx):
+            await self.merge_job.execute(ctx)
+            
+    
+    async def add(self, msg: MessageData) -> None:
+        msg.id = await self.get_next_msg_id()
+        await self.add_to_redis(msg)
+
+        buffer_key = f"buffer:{self.user_name}"
+        await self.redis_client.rpush(buffer_key, json.dumps({
+            "id": msg.id,
+            "message": msg.message.strip(),
+            "timestamp": msg.timestamp.isoformat()
+        }))
+
+        await self.scheduler.record_activity()
+        self.consumer.signal()
 
     async def add_to_conversation_log(self, role: str, content: str, timestamp: datetime, user_msg_id: int = None):
         """Add a turn to the unified conversation log."""
@@ -187,11 +279,8 @@ class Context:
         conv_key = f"conversation:{self.user_name}"
         sorted_key = f"recent_conversation:{self.user_name}"
         
-        pipe = self.redis_client.pipeline()
-        pipe.hset(conv_key, turn_key, json.dumps(payload))
-        pipe.zadd(sorted_key, {turn_key: timestamp.timestamp()})
-        await pipe.execute()
-        
+        await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
+        await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
         return turn_id
     
     async def add_to_redis(self, msg: MessageData):
@@ -214,95 +303,6 @@ class Context:
             msg_key, 
             f"turn_{turn_id}"
         )
-
-        self.ent_resolver.add_message(msg_key, msg.message.strip())
-    
-
-    async def _get_or_create_user_entity(self, user_name: str):
-        loop = asyncio.get_running_loop()
-
-        entity_id = self.ent_resolver.get_id(user_name)
-
-        if entity_id:
-            logger.info(f"User {user_name} recognized.")
-            return entity_id
-        
-        logger.info(f"Creating new USER entity for {user_name}")
-        new_id = await self.get_next_ent_id()
-        
-        summary = get_config_value("user_summary") or f"The primary user named {user_name}"
-
-        embedding = await loop.run_in_executor(
-            self.executor,
-            partial(self.ent_resolver.register_entity, new_id, user_name, [user_name], "person", "Personal")
-        )
-        
-        self.ent_resolver.entity_profiles[new_id]["summary"] = summary
-
-        user_entity = {
-            "id": new_id,
-            "canonical_name": user_name,
-            "type": "person",
-            "confidence": 1.0,
-            "summary": summary,
-            "topic": "Personal",
-            "embedding": embedding,
-            "aliases": [user_name]
-        }
-
-        await loop.run_in_executor(
-            self.executor,
-            partial(self.store.write_batch, [user_entity], [], False)
-        )
-        
-        logger.info(f"User entity {user_name} (ID: {new_id}) written to graph")
-        return new_id
-
-    async def _run_session_jobs(self):
-        async with self._batch_processing_lock:
-            ctx = JobContext(
-                user_name=self.user_name,
-                redis=self.redis_client,
-                idle_seconds=0
-            )
-            
-            if await self.profile_job.should_run(ctx):
-                await self.profile_job.execute(ctx)
-            
-            if await self.cleanup_job.should_run(ctx):
-                await self.cleanup_job.execute(ctx)
-            
-            if await self.merge_job.should_run(ctx):
-                await self.merge_job.execute(ctx)
-
-    async def add(self, msg: MessageData):
-        msg.id = await self.get_next_msg_id()
-        await self.add_to_redis(msg)
-
-        buffer_key = f"buffer:{self.user_name}"
-        await self.redis_client.rpush(buffer_key, json.dumps({
-            "id": msg.id,
-            "message": msg.message.strip(),
-            "timestamp": msg.timestamp.isoformat()
-        }))
-
-        buffer_len = await self.redis_client.llen(buffer_key)
-        await self.scheduler.record_activity()
-        
-        if buffer_len >= BATCH_SIZE and not self._batch_in_progress:
-            if self._batch_timer_task:
-                self._batch_timer_task.cancel()
-                self._batch_timer_task = None
-            self._fire_and_forget(self.process_batch())
-        elif buffer_len == 1:
-            self._batch_timer_task = asyncio.create_task(self._flush_batch_timeout())
-        
-        checkpoint_key = f"checkpoint_count:{self.user_name}"
-        count = await self.redis_client.incr(checkpoint_key)
-
-        if count >= SESSION_WINDOW // 2:
-            await self.redis_client.set(checkpoint_key, 0)
-            self._fire_and_forget(self._run_session_jobs())
     
     async def add_assistant_turn(self, content: str, timestamp: datetime):
         turn_id = await self.add_to_conversation_log(
@@ -310,31 +310,74 @@ class Context:
             content=content,
             timestamp=timestamp
         )
-        self.ent_resolver.add_message(f"turn_{turn_id}", content)
+        
+        loop = asyncio.get_running_loop()
+        embedding_list = await loop.run_in_executor(
+            self.executor,
+            partial(self.ent_resolver.compute_batch_embeddings, [content])
+        )
+        embedding_vector = embedding_list[0]
+
+        graph_id = turn_id + 1_000_000_000
+        
+        agent_msg_batch = [{
+            "id": graph_id,
+            "content": content,
+            "role": "assistant",
+            "timestamp": timestamp.timestamp() * 1000,
+            "embedding": embedding_vector
+        }]
+        
+        await loop.run_in_executor(
+            self.executor,
+            partial(self.store.save_message_logs, agent_msg_batch)
+        )
+
     
-    async def get_conversation_context(self, num_turns: int) -> List[Dict]:
+    async def get_conversation_context(self, num_turns: int, up_to_msg_id: int = None) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
         sorted_key = f"recent_conversation:{self.user_name}"
         conv_key = f"conversation:{self.user_name}"
         
-        turn_ids = await self.redis_client.zrevrange(sorted_key, 0, num_turns - 1)
+        if up_to_msg_id:
+            turn_key = await self.redis_client.hget(
+                f"lookup:msg_to_turn:{self.user_name}", 
+                f"msg_{up_to_msg_id}"
+            )
+            if turn_key:
+                turn_score = await self.redis_client.zscore(sorted_key, turn_key)
+                turn_ids = await self.redis_client.zrevrangebyscore(
+                    sorted_key,
+                    f"({turn_score}",
+                    "-inf",
+                    start=0,
+                    num=num_turns
+                )
+                turn_ids = list(reversed(turn_ids))
+            else:
+                turn_ids = await self.redis_client.zrevrange(sorted_key, 0, num_turns - 1)
+                turn_ids = list(turn_ids)
+                turn_ids.reverse()
+        else:
+            turn_ids = await self.redis_client.zrevrange(sorted_key, 0, num_turns - 1)
+            turn_ids = list(turn_ids)
+            turn_ids.reverse()
         
         if not turn_ids:
             return []
         
-        turn_ids.reverse()
-
+        logger.debug(f"Fetching conversation context for turns: {turn_ids}")
+        
         turn_data = await self.redis_client.hmget(conv_key, *turn_ids)
         
         results = []
-        now = datetime.now(timezone.utc)
         
         for turn_id, data in zip(turn_ids, turn_data):
             if data:
                 parsed = json.loads(data)
                 role_label = "User" if parsed["role"] == "user" else "STELLA"
                 ts = datetime.fromisoformat(parsed['timestamp'])
-                date_str = ts.strftime("%Y-%m-%d")
+                date_str = ts.strftime("%Y-%m-%d %H:%M")
                 results.append({
                     "turn_id": turn_id,
                     "role": parsed["role"],
@@ -346,92 +389,75 @@ class Context:
                 })
         
         return results
-
-
-    async def process_batch(self):
-        while await self.redis_client.exists("system:maintenance_lock"):
-            logger.warning("Maintenance Lock Active: Pausing Batch Processing...")
-            await asyncio.sleep(2)
-        
-        async with self._batch_processing_lock:
-            if self._batch_in_progress:
-                logger.info("process_batch: already in progress, returning")
-                return
-            self._batch_in_progress = True
-            logger.info("process_batch: flag set, starting processing")
-
-        try:  
-            while True:
-                async with self._batch_processing_lock:
-                    if await self.redis_client.exists("system:maintenance_lock"):
-                        logger.info("Maintenance lock detected during loop. Pausing...")
-                        await asyncio.sleep(2)
-                        continue
-
-                    logger.info("Starting batch processing...")
-                    logger.info(f"I have {BATCH_SIZE}")
-                    buffer_key = f"buffer:{self.user_name}"
-
-                    q_len = await self.redis_client.llen(buffer_key)
-                    if q_len == 0:
-                        logger.debug("Buffer empty, consumer loop exiting.")
-                        break
-
-                    raw = await self.redis_client.lrange(buffer_key, 0, BATCH_SIZE - 1)
-                    messages = [json.loads(m) for m in raw] if raw else []
-                    if not messages:
-                        return
-                    
-                    conversation = await self.get_conversation_context(SESSION_WINDOW)
-                    lines = []
-                    for turn in conversation:
-                        content = turn['content']
-                        if turn['role'] == 'assistant' and len(content) > 200:
-                            content = content[:200] + "..."
-                        lines.append(f"[{turn['role_label']}]: {content}")
-
-                    session_text = "\n".join(lines)
-                    
-                    result = await self.batch_processor.run(messages, session_text)
-                    
-                    if not result.success:
-                        await self.batch_processor.move_to_dead_letter(messages, result.error)
-                    else:
-                        if result.emotions:
-                            await self.redis_client.rpush(f"emotions:{self.user_name}", *result.emotions)
-                        
-                        if result.extraction_result:
-                            await self._write_to_graph(
-                                result.entity_ids,
-                                result.new_entity_ids,
-                                result.alias_updated_ids,
-                                result.extraction_result
-                            )
-                    
-                    await self.redis_client.ltrim(buffer_key, len(messages), -1)
-
-                await asyncio.sleep(0.5)
-                    
-            if self._batch_timer_task:
-                self._batch_timer_task.cancel()
-                self._batch_timer_task = None
-                
-        finally:
-            async with self._batch_processing_lock:
-                self._batch_in_progress = False
-
     
+
     async def _write_to_graph(
         self,
         entity_ids: list[int],
         new_entity_ids: set[int],
         alias_updated_ids: set[int],
-        extraction_result: ConnectionExtractionResponse
+        extraction_result: List[MessageConnections]
     ):
 
-   
+        existing_candidates = list(set(entity_ids) - new_entity_ids)
+        
+        loop = asyncio.get_running_loop()
+        
+        valid_existing_ids = set()
+        if existing_candidates:
+            valid_existing_ids = await loop.run_in_executor(
+                self.executor,
+                self.store.validate_existing_ids,
+                existing_candidates
+            )
+            
+
+            missing = set(existing_candidates) - valid_existing_ids
+            if missing:
+                logger.critical(f"SPLIT BRAIN DETECTED: Resolver thinks IDs {missing} exist, but Graph does not. Dropping writes for these IDs to prevent Zombie Resurrection.")
+                self.ent_resolver.remove_entities(list(missing))
+
+        safe_ids = valid_existing_ids.union(new_entity_ids)
+
         entity_lookup = {}
-        for ent_id in entity_ids:
+        entities_to_write = []
+
+        for ent_id in new_entity_ids:
+            profile = self.ent_resolver.entity_profiles.get(ent_id)
+            if profile:
+                entities_to_write.append({
+                    "id": ent_id,
+                    "canonical_name": profile["canonical_name"],
+                    "type": profile.get("type", ""),
+                    "confidence": 1.0,
+                    "topic": profile.get("topic", "General"),
+                    "embedding": self.ent_resolver.get_embedding_for_id(ent_id),
+                    "aliases": self.ent_resolver.get_mentions_for_id(ent_id),
+                    "session_id": profile.get("session_id")
+                })
+
+        for ent_id in alias_updated_ids:
+            if ent_id in new_entity_ids: continue
+            
+            if ent_id not in safe_ids:
+                logger.warning(f"Skipping alias update for Zombie ID {ent_id}")
+                continue
+                
+            profile = self.ent_resolver.entity_profiles.get(ent_id)
+            if profile:
+                entities_to_write.append({
+                    "id": ent_id,
+                    "canonical_name": profile["canonical_name"],
+                    "type": profile.get("type", ""),
+                    "confidence": 1.0,
+                    "topic": profile.get("topic", "General"),
+                    "embedding": self.ent_resolver.get_embedding_for_id(ent_id),
+                    "aliases": self.ent_resolver.get_mentions_for_id(ent_id),
+                    "session_id": profile.get("session_id")
+                })
+
+
+        for ent_id in safe_ids:
             profile = self.ent_resolver.entity_profiles.get(ent_id)
             if profile:
                 canonical = profile["canonical_name"]
@@ -445,39 +471,8 @@ class Context:
                 for mention in self.ent_resolver.get_mentions_for_id(ent_id):
                     entity_lookup[mention.lower()] = entry
 
-        entities = []
-        for ent_id in new_entity_ids:
-            profile = self.ent_resolver.entity_profiles.get(ent_id)
-            if profile:
-                entities.append({
-                    "id": ent_id,
-                    "canonical_name": profile["canonical_name"],
-                    "type": profile.get("type", ""),
-                    "confidence": 1.0,
-                    "summary": "",
-                    "topic": profile.get("topic", "General"),
-                    "embedding": self.ent_resolver.get_embedding_for_id(ent_id),
-                    "aliases": self.ent_resolver.get_mentions_for_id(ent_id)
-                })
-        
-        for ent_id in alias_updated_ids:
-            if ent_id in new_entity_ids:
-                continue
-            profile = self.ent_resolver.entity_profiles.get(ent_id)
-            if profile:
-                entities.append({
-                    "id": ent_id,
-                    "canonical_name": profile["canonical_name"],
-                    "type": profile.get("type", ""),
-                    "confidence": 1.0,
-                    "summary": "",
-                    "topic": profile.get("topic", "General"),
-                    "embedding": [],
-                    "aliases": self.ent_resolver.get_mentions_for_id(ent_id)
-                })
-
         relationships = []
-        for msg_result in extraction_result.message_results:
+        for msg_result in extraction_result:
             msg_id = msg_result.message_id
             
             for pair in msg_result.entity_pairs:
@@ -492,49 +487,33 @@ class Context:
                         "confidence": pair.confidence
                     })
                 else:
-                    logger.warning(f"Skipping pair: {pair.entity_a} - {pair.entity_b}")
+                    logger.warning(f"Skipping pair: {pair.entity_a} - {pair.entity_b} (Entity missing or Zombie)")
 
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            self.executor,
-            partial(self.store.write_batch, entities, relationships, True)
-        )
+        if entities_to_write or relationships:
+            await loop.run_in_executor(
+                self.executor,
+                partial(self.store.write_batch, entities_to_write, relationships)
+            )
         
-        if new_entity_ids:
+        if safe_ids:
             dirty_key = f"dirty_entities:{self.user_name}"
-            await self.redis_client.sadd(dirty_key, *[str(eid) for eid in new_entity_ids])
+            await self.redis_client.sadd(dirty_key, *[str(eid) for eid in safe_ids])
             await self.redis_client.delete(f"profile_complete:{self.user_name}")
         
-        logger.info(f"Wrote {len(entities)} entities, {len(relationships)} relationships to graph")
+        logger.info(f"Wrote {len(entities_to_write)} entities, {len(relationships)} relationships (Filtered {len(existing_candidates) - len(valid_existing_ids)} Zombies)")
     
-
-    async def _flush_batch_shutdown(self):
-        logger.info("Initiating graceful shutdown...")
-        
-        if self._batch_timer_task:
-            self._batch_timer_task.cancel()
-        
-        if self._background_tasks:
-            logger.info(f"Waiting for {len(self._background_tasks)} background tasks...")
-            await asyncio.wait(self._background_tasks, timeout=120)
-
-        buffer_key = f"buffer:{self.user_name}"
-        if await self.redis_client.llen(buffer_key) > 0:
-            await self.process_batch()
-        
-        logger.info("Running Last job sequence before shutdown")
-        await self._run_session_jobs()
-        
-        logger.info("Shutdown complete")
+    async def _write_to_graph_callback(self, result: BatchResult):
+        if result.extraction_result:
+            await self._write_to_graph(
+                result.entity_ids,
+                result.new_entity_ids,
+                result.alias_updated_ids,
+                result.extraction_result
+            )
+    
         
     async def shutdown(self):
-
-        await self._flush_batch_shutdown()
-
-        if self._background_tasks:
-            logger.info(f"Waiting for {len(self._background_tasks)} background tasks...")
-            await asyncio.wait(self._background_tasks, timeout=60)
-        
+        await self.consumer.stop()
         await self.scheduler.stop()
 
         if self.executor:

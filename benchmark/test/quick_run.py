@@ -6,8 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from agent.loop import run
-from db.memgraph import MemGraphStore
+from agent.orchestrator import run
+from db.store import MemGraphStore
 from main.context import Context
 
 USER_NAME = "TestUser"

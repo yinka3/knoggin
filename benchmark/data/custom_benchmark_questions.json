@@ -4,125 +4,153 @@
     "category": "Entity Disambiguation",
     "natural_query": "Hey, which Frankie was in that group project with me—was it the guy I work with at the coffee shop?",
     "ground_truth": "No. The Frankie in the group project is 'Class Frankie'. The Frankie you work with at The Grind is 'Work Frankie'.",
-    "evidence_turns": [828, 829, 936]
+    "evidence_turns": [25, 342, 343]
   },
   {
     "test_case": "Disambiguation_Marcus",
     "category": "Entity Disambiguation",
     "natural_query": "Is the Marcus on the volleyball team the same guy Cameron was talking about?",
     "ground_truth": "No. You noted they are different people with overlapping names. Volleyball Marcus is a new player Reggie is mentoring.",
-    "evidence_turns": [808, 810]
+    "evidence_turns": [333, 334]
   },
   {
     "test_case": "Temporal_Theo_Major",
     "category": "Temporal Reasoning",
     "natural_query": "I remember Theo always joking about being an 'undeclared' major, but what did he actually graduate in?",
     "ground_truth": "Theo joked about being 'undeclared for life', but at graduation, it was revealed he actually majored in Accounting.",
-    "evidence_turns": [130, 676]
+    "evidence_turns": [84, 305]
   },
   {
     "test_case": "Temporal_Study_Group",
     "category": "Temporal Reasoning",
     "natural_query": "Who was in my original orgo study group back in 2024, and who ended up replacing Nico later on?",
     "ground_truth": "The original group was Beatrice, Nico, and Dmitri. Nico left due to a schedule conflict and was replaced by Sanjay.",
-    "evidence_turns": [17, 821, 822]
+    "evidence_turns": [12, 338, 339]
   },
   {
     "test_case": "Temporal_Kwame_Mira",
     "category": "Temporal Reasoning",
     "natural_query": "Remind me how Kwame and Mira even started dating. Didn't she give him a hard time when we first moved in?",
     "ground_truth": "It started as a strict RA-to-resident relationship where Mira wrote Kwame up for a noise violation. They eventually started dating and went public once Mira moved floors to avoid a conflict of interest.",
-    "evidence_turns": [3, 285, 498, 554, 811]
+    "evidence_turns": [35, 186, 198, 240]
   },
   {
     "test_case": "Inference_Grind_Tension",
     "category": "Multi-Hop Inference",
     "natural_query": "Why was it so awkward when Sienna came into The Grind that morning in February?",
     "ground_truth": "The awkwardness was because Sienna and your coworker Frankie are exes who had a bad breakup.",
-    "evidence_turns": [526, 528, 530, 541]
+    "evidence_turns": [158, 218, 229, 230]
   },
   {
     "test_case": "Inference_Grandma_Cookies",
     "category": "Multi-Hop Inference",
     "natural_query": "Who's this 'Grandma Lucia' everyone at work is always talking about? How do they even know her?",
     "ground_truth": "She is your grandmother. Your coworkers know her because you brought in the cookies she sent you to share at the shop.",
-    "evidence_turns": [25, 163, 164, 746]
+    "evidence_turns": [18, 103, 104, 211]
   },
   {
     "test_case": "Tracking_Pigeon_Council",
     "category": "Attribute Tracking",
     "natural_query": "Have you noticed the pigeons outside my window? I feel like there are more of them now than when I first moved in.",
-    "ground_truth": "You're right; it started as one pigeon, became two in early 2025, and grew into a 'tribunal' of three by September 2025.",
-    "evidence_turns": [10, 531, 824]
+    "ground_truth": "You're right; it started as one pigeon, became two in early 2025, and grew into a 'tribunal' of three by September 2025 (and eventually six by senior year).",
+    "evidence_turns": [8, 94, 328, 489, 620]
   },
   {
     "test_case": "Constraint_Oscar_Social",
     "category": "Negative Constraint",
     "natural_query": "Out of everyone I work with at the coffee shop, who have I never actually seen at a party or a game?",
     "ground_truth": "Oscar is the only coworker who stays strictly in the work context and hasn't attended your social events.",
-    "evidence_turns": [541, 565, 696]
+    "evidence_turns": [317, 536, 560]
   },
   {
     "test_case": "Temporal_Study_Spot",
     "category": "Temporal/Entity Reasoning",
     "natural_query": "I used to have a secret study spot in the library back in 2024. Whatever happened to that?",
     "ground_truth": "You lost that spot on the third floor to 'blanket guy,' a student who apparently lived there.",
-    "evidence_turns": [114, 158]
+    "evidence_turns": [71, 100]
   },
   {
     "test_case": "Inference_Cameron_Visit",
     "category": "Multi-Hop Inference",
     "natural_query": "Who all did Cameron actually meet when he came to visit me at school?",
     "ground_truth": "He met Kwame, Oscar, Frankie, Juno, and your teammate Sienna.",
-    "evidence_turns": [564, 565, 569, 571]
+    "evidence_turns": [246, 247, 248, 251]
   },
   {
     "test_case": "Entity_Victor_Facts",
     "category": "Entity Extraction",
     "natural_query": "What was that medieval history stuff Victor used to talk about while he was waiting for his chai?",
     "ground_truth": "Victor often shared random facts about medieval trade routes and the spice trade.",
-    "evidence_turns": [208, 650]
+    "evidence_turns": [169, 202]
   },
   {
     "test_case": "Sentiment_Huang_Evolution",
     "category": "Sentiment Tracking",
     "natural_query": "Professor Huang used to scare me so much freshman year. Did I ever actually end up getting on her good side?",
-    "ground_truth": "Yes, after being 'terrified' of her initially, you ended up with an A- and a note from her praising your 'significant improvement'.",
-    "evidence_turns": [7, 687, 688]
+    "ground_truth": "Yes, after being 'terrified' of her initially, you ended up with an A- and a note from her praising your 'significant improvement' and eventually an A.",
+    "evidence_turns": [5, 313, 568]
   },
   {
     "test_case": "Geography_Science_Building",
     "category": "Entity Property",
     "natural_query": "Why am I always complaining about where the science building is?",
     "ground_truth": "You consistently complain that it is a fifteen-minute walk and 'unreasonably far' from the rest of the campus.",
-    "evidence_turns": [6, 412, 563]
+    "evidence_turns": [4, 623]
   },
   {
     "test_case": "Ritual_Pastry_Detective",
     "category": "Event/Relationship Reasoning",
     "natural_query": "What’s that show Kwame and I used to watch every Tuesday night with the detective?",
     "ground_truth": "You and Kwame watched a show about a detective who is also a pastry chef named Chef Inspector Moreau.",
-    "evidence_turns": [78, 152, 249]
+    "evidence_turns": [52, 194, 453]
   },
   {
     "test_case": "Abstinence_Beatrice_Volleyball",
     "category": "Negative Constraint",
     "natural_query": "Did Beatrice ever end up joining the intramural volleyball team with me?",
     "ground_truth": "No. Beatrice is a member of the organic chemistry study group and has never been mentioned in the context of volleyball practices, games, or team dinners.",
-    "evidence_turns": [17, 20, 85, 129]
+    "evidence_turns": [12, 13, 129]
   },
   {
     "test_case": "Abstinence_Huang_Film",
     "category": "Negative Constraint",
     "natural_query": "Was Professor Huang the one who taught my film class junior year?",
     "ground_truth": "No. Professor Huang is the Organic Chemistry professor. The film class was taught by a different, 'super chill' professor whose name is not mentioned.",
-    "evidence_turns": [7, 421, 430]
+    "evidence_turns": [5, 175]
   },
   {
     "test_case": "Abstinence_Malik_Parents",
     "category": "Negative Constraint",
     "natural_query": "Did I ever get a chance to meet Malik’s parents during the time he and Zara were together?",
     "ground_truth": "No. There is no mention of meeting Malik's parents. You met Kwame's parents during Thanksgiving, but your interaction with Malik was limited to seeing him at parties and during his 'situationship' with Zara.",
-    "evidence_turns": [49, 119, 268]
+    "evidence_turns": [33, 75]
+  },
+  {
+    "test_case": "Attribute_Roommate_Leo",
+    "category": "Attribute Tracking",
+    "natural_query": "What was the deal with my new roommate senior year? Was he quiet like Kwame?",
+    "ground_truth": "No. Your senior year roommate was Leo, a music major who brought an electric keyboard into the room and played jazz late at night.",
+    "evidence_turns": [565, 619, 629]
+  },
+  {
+    "test_case": "Inference_Elena_Succession",
+    "category": "Multi-Hop Inference",
+    "natural_query": "Who ended up taking over the 'operational wizard' role at The Grind after Frankie left?",
+    "ground_truth": "Elena took over that role. She proved herself by fixing the espresso machine with a paperclip and Oscar eventually started relying on her for inventory and logistics.",
+    "evidence_turns": [438, 457, 458, 511]
+  },
+  {
+    "test_case": "Entity_Celeste_Pigeons",
+    "category": "Entity Extraction",
+    "natural_query": "Did anyone besides me ever acknowledge the 'Pigeon Tribunal' outside my window?",
+    "ground_truth": "Yes, Celeste (Tobias's girlfriend) observed them from the quad and painted a portrait of them for her senior exhibition.",
+    "evidence_turns": [524]
+  },
+  {
+    "test_case": "Tracking_Orgo_Grades",
+    "category": "Attribute Tracking",
+    "natural_query": "Did I ever get a grade lower than a B+ on any of my organic chemistry exams throughout the years?",
+    "ground_truth": "Yes. You received a B on the first midterm of Organic Chemistry 2 (Spring 2025), which you described as a 'step down' at the time.",
+    "evidence_turns": [225]
   }
 ]

@@ -1,7 +1,7 @@
 from typing import Counter
 
 from loguru import logger
-from db.memgraph import MemGraphStore
+from db.store import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobResult
 
 

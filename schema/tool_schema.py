@@ -8,7 +8,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Keywords or phrase to search for"},
-                    "limit": {"type": "integer", "description": "Max results (default 10)"}
+                    "limit": {"type": "integer", "description": "Max results (default 8)"}
                 },
                 "required": ["query"]
             }
@@ -18,7 +18,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_entity",
-            "description": "Find a person, place, or thing by name. Returns their full profile (type, summary, aliases, topic) and their 5 strongest connections. Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.",
+            "description": "Find a person, place, or thing by name. Returns their full profile (type, facts, aliases, topic) and their 5 strongest connections. Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -33,7 +33,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_connections",
-            "description": "Get the full relationship network for an entity. Returns all connections (up to 50) with evidence — the actual messages that established each connection. Use when you need comprehensive relationship details beyond the top 5 from search_entity.",
+            "description": "Get the full relationship network for an entity. Returns all connections (up to 50) with evidence. Connections through inactive topics are noted but not detailed.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -70,6 +70,28 @@ TOOL_SCHEMAS = [
                     "entity_b": {"type": "string", "description": "Second entity name"}
                 },
                 "required": ["entity_a", "entity_b"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_hierarchy",
+            "description": "Get parent/child relationships for an entity. Use when you see hierarchy hints in search_entity results (parent name or children_count > 0), or when asked 'what exams are in this course' or 'what course is this exam part of'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_name": {
+                        "type": "string",
+                        "description": "Entity to get hierarchy for"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down", "both"],
+                        "description": "up = get parents, down = get children, both = full tree (default: both)"
+                    }
+                },
+                "required": ["entity_name"]
             }
         }
     },

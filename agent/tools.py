@@ -1,56 +1,37 @@
 import json
 from typing import List, Dict, Optional
 
-from rapidfuzz import process as fuzzy_process, fuzz
 import redis
 from main.entity_resolve import EntityResolver
-from db.memgraph import MemGraphStore
+from db.store import MemGraphStore
+from main.topics_config import TopicConfig
 
 
 
 class Tools:
     
-    def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, redis_client: redis.Redis, active_topics: List[str] = None):
+    def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, 
+                 redis_client: redis.Redis, topic_config: TopicConfig = None):
         self.store = store
         self.resolver = ent_resolver
         self.user_name = user_name
         self.redis = redis_client
-        self.active_topics = active_topics or []
+        self.topic_config = topic_config
+        self.active_topics = topic_config.active_topics if topic_config else []
     
     def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
-        
-        
-        entity_id = self.resolver.get_id(entity)
-        if entity_id:
-            profile = self.resolver.entity_profiles.get(entity_id)
-            return profile["canonical_name"] if profile else entity
-        
-        if not self.resolver._name_to_id:
-            return None
-        
-        result = fuzzy_process.extractOne(
-            query=entity,
-            choices=self.resolver._name_to_id.keys(),
-            scorer=fuzz.WRatio,
-            score_cutoff=85
-        )
-        
-        if result:
-            matched_name, _, _ = result
-            entity_id = self.resolver._name_to_id[matched_name]
-            profile = self.resolver.entity_profiles.get(entity_id)
-            return profile["canonical_name"] if profile else matched_name
-        
-        return None
+        return self.resolver.resolve_entity_name(entity)
     
     async def _hydrate_evidence(self, evidence_ids: list[str]) -> list[dict]:
         if not evidence_ids:
             return []
+        
         content_key = f"message_content:{self.user_name}"
+        raw_results = await self.redis.hmget(content_key, *evidence_ids)
+        
         results = []
-        for msg_id in evidence_ids:
-            raw = await self.redis.hget(content_key, msg_id)
+        for msg_id, raw in zip(evidence_ids, raw_results):
             if raw:
                 data = json.loads(raw)
                 results.append({
@@ -59,6 +40,31 @@ class Tools:
                     "timestamp": data["timestamp"]
                 })
         return results
+    
+    def _normalize_output(self, entity_list: List[Dict]) -> List[Dict]:
+        """
+        Renames legacy types to the modern schema before showing the Agent.
+        Example: type="Library" -> type="Dependency"
+        """
+        if not entity_list or not self.topic_config:
+            return entity_list
+        
+        # build label alias map from config
+        alias_map = {}
+        for _, config in self.topic_config.raw.items():
+            label_aliases = config.get("label_aliases", {})
+            for legacy, canonical in label_aliases.items():
+                alias_map[legacy] = canonical
+        
+        for entity in entity_list:
+            raw_type = entity.get("type")
+            if raw_type in alias_map:
+                entity["type"] = alias_map[raw_type]
+            
+            if "top_connections" in entity:
+                self._normalize_output(entity["top_connections"])
+        
+        return entity_list
     
 
     async def _get_surrounding_context(self, msg_id: str, forward: int = 3, target_total: int = 10) -> List[Dict]:
@@ -217,11 +223,12 @@ class Tools:
         
         Returns: List of matching entities with id, name, summary snippet, type.
         """
-        results = self.store.search_entity(query, limit)
+        results = self.store.search_entity(query, self.active_topics, limit)
     
         if not results:
             return []
         
+        results = self._normalize_output(results)
         for entity in results:
             for conn in entity.get("top_connections", []):
                 evidence_ids = conn.pop("evidence_ids", [])
@@ -229,7 +236,7 @@ class Tools:
         
         return results
 
-    async def get_connections(self, entity_name: str, active_only: bool = True) -> List[Dict]:
+    async def get_connections(self, entity_name: str) -> List[Dict]:
         """
         Get the full relationship network for an entity.
         Returns all connections (up to 50) with evidence — the actual messages that established each connection. 
@@ -244,12 +251,24 @@ class Tools:
         canonical = self._resolve_entity_name(entity_name)
         if not canonical:
             return []
-        results = self.store.get_related_entities([canonical], active_only) or []
         
-        for r in results:
-            r["evidence"] = await self._hydrate_evidence(r.pop("evidence_ids", []))
+        results = self.store.get_related_entities([canonical], active_topics=self.active_topics)
+        results = self._normalize_output(results)
+        if results:
+            for r in results:
+                r["evidence"] = await self._hydrate_evidence(r.pop("evidence_ids", []))
+            return results
         
-        return results
+        hidden_results = self.store.get_related_entities([canonical], active_topics=None)
+        
+        if hidden_results:
+            return [{
+                "hidden": True,
+                "count": len(hidden_results),
+                "message": f"{len(hidden_results)} connection(s) exist through inactive topics"
+            }]
+        
+        return []
 
     async def get_recent_activity(self, entity_name: str, hours: int = 24) -> List[Dict]:
         """
@@ -266,7 +285,7 @@ class Tools:
         canonical = self._resolve_entity_name(entity_name)
         if not canonical:
             return []
-        results = self.store.get_recent_activity(canonical, hours) or []
+        results = self.store.get_recent_activity(canonical, active_topics=self.active_topics, hours=hours)
         
         for r in results:
             r["evidence"] = await self._hydrate_evidence(r.pop("evidence_ids", []))
@@ -293,15 +312,31 @@ class Tools:
         if not canonical_a or not canonical_b:
             return []
 
-        path = self.store._find_path_filtered(canonical_a, canonical_b, active_only=True)
+        path, has_inactive_shortcut = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=self.active_topics)
+        
         if path:
             for step in path:
                 step["evidence"] = await self._hydrate_evidence(step.pop("evidence_refs", []))
+            if has_inactive_shortcut:
+                path.append({"note": "A shorter connection exists through inactive topics"})
             return path
-
-        full_path = self.store._find_path_filtered(canonical_a, canonical_b, active_only=False)
-        if full_path:
-            return [{"hidden": True, "message": "Connection exists through inactive topics"}]
+        
+        if has_inactive_shortcut:
+            full_path, _ = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=None)
+    
+            safe_path = []
+            for step in full_path:
+                if step['topic'] in self.active_topics:
+                    safe_path.append(step)
+                else:
+                    safe_path.append({
+                        "canonical_name": step['canonical_name'],
+                        "topic": step['topic'],
+                        "status": "LOCKED (Inactive Topic)",
+                        "summary": "[REDACTED]" 
+                    })
+                    
+            return safe_path
         
         return []
 
@@ -319,15 +354,17 @@ class Tools:
         """
         if not hot_topics:
             return {}
+        
         raw = self.store.get_hot_topic_context_with_messages(hot_topics, msg_limit=10, slim=slim)
-    
-        # Hydrate message IDs from Redis
         content_key = f"message_content:{self.user_name}"
         
         for _, data in raw.items():
+            msg_ids = data.get("message_ids", [])
+            
+            if msg_ids:
+                raw_msgs = await self.redis.hmget(content_key, *msg_ids)
                 messages = []
-                for msg_id in data.pop("message_ids", []):
-                    raw_msg = await self.redis.hget(content_key, msg_id)
+                for msg_id, raw_msg in zip(msg_ids, raw_msgs):
                     if raw_msg:
                         parsed = json.loads(raw_msg)
                         messages.append({
@@ -335,8 +372,64 @@ class Tools:
                             "message": parsed["message"]
                         })
                 data["messages"] = messages
+            else:
+                data["messages"] = []
+            
+            data.pop("message_ids", None)
         
         return raw
+    
+    async def get_hierarchy(self, entity_name: str, direction: str = "both") -> Dict:
+        """
+        Get hierarchy relationships for an entity.
+        
+        Args:
+            entity_name: Entity to check hierarchy for
+            direction: "up" (parents), "down" (children), or "both"
+        
+        Returns:
+            Dict with parent chain and/or children list
+        """
+        canonical = self._resolve_entity_name(entity_name)
+        if not canonical:
+            return {"error": f"Entity '{entity_name}' not found"}
+        
+        entity_id = self.resolver.get_id(canonical)
+        if not entity_id:
+            return {"error": f"Could not resolve '{canonical}' to ID"}
+        
+        result = {
+            "entity": canonical,
+            "entity_id": entity_id
+        }
+        
+        if direction in ("up", "both"):
+            parents = self.store.get_parent_entities(entity_id)
+            result["parents"] = parents
+            
+            if parents:
+                ancestry = []
+                current_id = entity_id
+                visited = {current_id}
+                
+                while True:
+                    parent_list = self.store.get_parent_entities(current_id)
+                    if not parent_list:
+                        break
+                    parent = parent_list[0]  # assume single parent for now
+                    if parent["id"] in visited:
+                        break  # cycle protection
+                    visited.add(parent["id"])
+                    ancestry.append(parent["canonical_name"])
+                    current_id = parent["id"]
+                
+                result["ancestry"] = ancestry
+        
+        if direction in ("down", "both"):
+            children = self.store.get_child_entities(entity_id)
+            result["children"] = children
+        
+        return result
 
 
 

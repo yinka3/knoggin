@@ -1,0 +1,13 @@
+{
+  "index": 3,
+  "dataset": "tempo",
+  "type": "temporal-reasoning",
+  "question": "How many months have passed since I participated in two charity events in a row, on consecutive days?",
+  "question_date": "2023/04/18 (Tue) 03:31",
+  "expected": 2,
+  "response": "<scratchpad>\n- Question type: temporal / aggregation\n- Looking for: Two charity events on consecutive days.\n- Found so far: \n    1. \"Walk for Hunger\" on 2023-03-19 (Sunday).\n    2. \"Books for Kids\" on 2023-02-15 (Wednesday).\n    3. \"24-Hour Bike Ride\" on 2023-02-14 (Tuesday).\n- Gap: Check if there are any other events. 2023-02-14 and 2023-02-15 are consecutive days.\n- Current date: 2023-04-18.\n- Calculation: From Feb 15, 2023 to April 18, 2023 is approximately 2 months.\n- Next action: Confirm if there are any other charity events to ensure these are the most recent \"two in a row\".\n</scratchpad>\n\n<evidence tool=\"search_messages\" query=\"charity event\">\n- [2023-03-19] \"Walk for Hunger\" (5km walk).\n- [2023-02-15] \"Books for Kids\" (sorting books).\n- [2023-02-14] \"24-Hour Bike Ride\" (4 hours cycling).\n- The events on Feb 14 and Feb 15 are on consecutive days.\n- No other consecutive charity events found in the provided context.\n</evidence>\n\nApproximately 2 months have passed.\n\nYou participated in the **\"24-Hour Bike Ride\"** on February 14, 2023, and the **\"Books for Kids\"** book drive on February 15, 2023. Given today's date is April 18, 2023, it has been just over 2 months since those consecutive events.",
+  "tools_used": [
+    "search_entity",
+    "search_messages"
+  ]
+}

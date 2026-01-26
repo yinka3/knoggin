@@ -4,50 +4,40 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
+from typing import List, Tuple
+import uuid
 from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from agent.loop import run
-from db.memgraph import MemGraphStore
+from agent.orchestrator import run
+from db.store import MemGraphStore
 from main.context import Context
 from schema.dtypes import MessageData
 from answer import answer_key
-logger.remove()
-logger.add(sys.stdout, level="INFO")
+from log.logging_setup import setup_logging
+
+
+setup_logging(log_level="DEBUG", log_file="benchmark.log", colorize=True)
 
 USER_NAME = "TestUser"
-DEFAULT_TOPICS = [
-    "Shopping",
-    "Travel",
-    "Career",
-    "Health",
-    "Fitness",
-    "Medical",
-    "Entertainment",
-    "Media",
-    "Events",
-    "Hobbies",
-    "Sports",
-    "Technology",
-    "Education",
-    "Family",
-    "Relationships",
-    "Friends",
-    "Routines",
-    "Pets",
-    "Food",
-    "Cooking",
-    "Home",
-    "Finance",
-    "Investments",
-    "Transportation",
-    "Appointments",
-    "Projects",
-    "Gaming",
-    "Wellness",
-    "Goals",
-    "General",
-]
+SESSION_ID = str(uuid.uuid4())
+TOPIC_CONFIG  = {
+    "Identity": {
+        "active": True,
+        "labels": ["person"],
+        "hierarchy": {},
+        "aliases": [],
+        "label_aliases": {}
+    },
+    "General": {
+        "active": False,
+        "labels": ["person", "place", "organization", "event"],
+        "hierarchy": {},
+        "aliases": [],
+        "label_aliases": {}
+    }
+}
+
 
 DATASET_FILES = {
     "multi": "test_multi_session.json",
@@ -63,38 +53,81 @@ DATASET_FILES = {
 async def ingest_haystack(context: Context, haystack_sessions: list, haystack_dates: list):
     total_sessions = len(haystack_sessions)
     
-    for i, session in enumerate(haystack_sessions):
-        parts = haystack_dates[i]
+    for session_idx, session in enumerate(haystack_sessions):
+        # Parse session date
+        parts = haystack_dates[session_idx]
         date_str = parts.split(" (")[0]
         time_str = parts.split(") ")[1]
         session_date = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
         session_date = session_date.replace(tzinfo=timezone.utc)
         
-        for turn in session:
+        logger.info(f"Session {session_idx + 1}/{total_sessions} - {len(session)} turns")
+        
+        for i, turn in enumerate(session):
             if turn["role"] == "user":
                 msg = MessageData(message=turn["content"], timestamp=session_date)
                 await context.add(msg)
             else:
                 await context.add_assistant_turn(turn["content"], session_date)
             
-            await asyncio.sleep(0.1)
+            # Stability drain within large sessions
+            if (i + 1) % 8 == 0:
+                await wait_for_batch_drain(context)
         
-        logger.info(f"Session {i+1}/{total_sessions} complete, waiting for processing...")
-        await asyncio.sleep(15)
+        # Session boundary: drain + jobs
+        await wait_for_batch_drain(context)
+        await wait_for_processing(context)
+        logger.info(f"Session {session_idx + 1}/{total_sessions} complete")
     
     logger.info("Haystack ingestion complete")
 
 
-async def ask_stella(context: Context, question: str, question_date: str) -> str:
-    topics = context.store.get_topics_by_status()
-    active = topics.get("active", []) + topics.get("hot", [])
+async def wait_for_batch_drain(context: Context, timeout: int = 120):
+    user = context.user_name
+    start = asyncio.get_event_loop().time()
     
+    while asyncio.get_event_loop().time() - start < timeout:
+        buffer_len = await context.redis_client.llen(f"buffer:{user}")
+        if buffer_len == 0:
+            return
+        await asyncio.sleep(2)
+    
+    logger.warning(f"Batch drain timeout after {timeout}s")
+
+
+async def wait_for_processing(context: Context, drain_timeout: int = 180, max_retries: int = 2):
+    user = context.user_name
+    
+    for attempt in range(max_retries):
+        # Drain buffer
+        start = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start < drain_timeout:
+            buffer_len = await context.redis_client.llen(f"buffer:{user}")
+            if buffer_len == 0:
+                break
+            await asyncio.sleep(2)
+        
+        # Check if there's still work pending
+        buffer_len = await context.redis_client.llen(f"buffer:{user}")
+        dirty_len = await context.redis_client.scard(f"dirty_entities:{user}")
+        
+        if buffer_len == 0 and dirty_len == 0:
+            break
+            
+        if attempt < max_retries - 1:
+            logger.warning(f"Work still pending (buffer={buffer_len}, dirty={dirty_len}), retry {attempt + 1}/{max_retries}")
+            await asyncio.sleep(5)
+    
+    await context.redis_client.set(f"checkpoint_count:{user}", 0)
+    await context._run_session_jobs()
+
+async def ask_stella(context: Context, question: str, question_date: str) -> Tuple[str, List]:
     result = await run(
         user_query=question,
         user_name=context.user_name,
         conversation_history=[],
         hot_topics=[],
-        active_topics=active,
+        topic_config=context.topic_config,
         llm=context.llm,
         store=context.store,
         ent_resolver=context.ent_resolver,
@@ -103,7 +136,9 @@ async def ask_stella(context: Context, question: str, question_date: str) -> str
         slim_hot_context=True
     )
     
-    return result.get("response") or result.get("question", "No response")
+    response = result.response or (result.question or None)
+    tools_used = result.tools_used or []
+    return response, tools_used
 
 
 def answer_key(index, file):
@@ -163,30 +198,31 @@ async def main():
     logger.info(f"Question Date: {q['question_date']}")
     logger.info(f"{'='*60}")
     
-    executor = ThreadPoolExecutor(max_workers=5)
+    executor = ThreadPoolExecutor(max_workers=2)
     store = MemGraphStore()
     context = await Context.create(
         user_name=USER_NAME,
         store=store,
         cpu_executor=executor,
-        topics=DEFAULT_TOPICS
+        topics_config=TOPIC_CONFIG,
+        session_id=SESSION_ID
     )
     
     try:
         await ingest_haystack(context, q["haystack_sessions"], q["haystack_dates"])
-        
+
         logger.info("Waiting for processing...")
         await asyncio.sleep(30)
-        await context._flush_batch_shutdown()
-        
-        response = await ask_stella(context, q["question"], q["question_date"])
+        await wait_for_processing(context)
+        logger.info("Asking AGENT...")
+        response, tools_used = await ask_stella(context, q["question"], q["question_date"])
         
         logger.info(f"\n{'='*60}")
         logger.info(f"RESULTS")
         logger.info(f"{'='*60}")
         logger.info(f"Question: {q['question']}")
         logger.info(f"Expected: {q['answer']}")
-        logger.info(f"STELLA: {response}")
+        logger.info(f"AGENT: {response}")
         
         answer_key(idx, dataset_file)
         result = {
@@ -196,7 +232,8 @@ async def main():
             "question": q["question"],
             "question_date": q["question_date"],
             "expected": q["answer"],
-            "response": response
+            "response": response,
+            "tools_used": tools_used
         }
         
         output_file = Path(__file__).parent / f"eval_result_{dataset}_{idx}.json"
@@ -206,9 +243,8 @@ async def main():
         logger.info(f"\nSaved to {output_file}")
         
     finally:
-        await context.redis_client.aclose()
+        await context.shutdown()
         store.close()
-        executor.shutdown(wait=True)
 
 
 if __name__ == "__main__":
