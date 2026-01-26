@@ -21,7 +21,7 @@ class BatchConsumer:
         self.processor = processor
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
-        self.checkpoint_interval = checkpoint_interval * batch_size
+        self.checkpoint_interval = checkpoint_interval
         self.session_window = session_window
         self.redis = AsyncRedisClient().get_client()
 

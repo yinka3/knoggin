@@ -14,6 +14,7 @@ from jobs.merger import MergeDetectionJob
 from jobs.cleaner import EntityCleanupJob
 from config import get_config_value
 from main.consumer import BatchConsumer
+from main.embedding import EmbeddingService
 from main.processor import BatchProcessor, BatchResult
 from main.service import LLMService
 from main.redisclient import AsyncRedisClient
@@ -39,6 +40,7 @@ class Context:
         
         self.store: MemGraphStore = None
         self.nlp_pipe: NLPPipeline = None
+        self.embedding_service: EmbeddingService = None
         self.ent_resolver: EntityResolver = None
         self.session_id: str = None
         self.topic_config: TopicConfig = None
@@ -90,10 +92,11 @@ class Context:
         if not current_redis or int(current_redis) < max_id:
             await redis_conn.set("global:next_ent_id", max_id)
         
-
+        instance.embedding_service = EmbeddingService()
         instance.ent_resolver = EntityResolver(
             session_id=instance.session_id,
             store=instance.store,
+            embedding_service=instance.embedding_service,
             hierarchy_config=instance.topic_config.hierarchy
         )
         
@@ -145,10 +148,10 @@ class Context:
             executor=instance.executor
         )
         instance.merge_job = MergeDetectionJob(
-            user_name, instance.ent_resolver, 
-            instance.store, instance.llm,
-            instance.topic_config,
-            instance.executor
+            user_name=user_name, ent_resolver=instance.ent_resolver, 
+            store=instance.store, llm_client=instance.llm,
+            topic_config=instance.topic_config,
+            executor=instance.executor
         )
         
 
@@ -197,7 +200,7 @@ class Context:
         )
 
         # Create initial fact as Fact node
-        fact_embedding = self.ent_resolver.embedding_model.encode([initial_fact_content])[0].tolist()
+        fact_embedding = self.embedding_service.encode_single(initial_fact_content)
         
         facts: List[Fact] = []
 
