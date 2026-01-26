@@ -10,6 +10,7 @@ from loguru import logger
 import numpy as np
 from db.store import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobNotifier, JobResult
+from main.embedding import EmbeddingService
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
 from main.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
@@ -31,12 +32,14 @@ class ProfileRefinementJob(BaseJob):
     IDLE_THRESHOLD = 60
     PROFILE_BATCH_SIZE = 8
 
-    def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, executor: ThreadPoolExecutor):
+    def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, executor: ThreadPoolExecutor, embedding_service: EmbeddingService):
         self.llm = llm
         self.resolver = resolver
         self.store = store
         self.executor = executor
+        self.embedding_service = embedding_service
         self.batch_semaphore = asyncio.Semaphore(2)
+        
 
     @property
     def name(self) -> str:
@@ -474,10 +477,9 @@ class ProfileRefinementJob(BaseJob):
             
             embedding = await loop.run_in_executor(
                 self.executor,
-                self.resolver.embedding_model.encode,
-                [content]
+                self.embedding_service.encode_single,
+                content
             )
-            embedding = embedding[0].tolist()
             
             contradicted_ids = await self._detect_contradictions(content, embedding, active_existing, new_msg_id=msg_id)
             for contradicted_id in contradicted_ids:

@@ -15,7 +15,7 @@ class AsyncRedisClient:
     _instance = None
 
     def __new__(cls):
-        if cls._instance is None:
+        if cls._instance is None or cls._instance.client.connection_pool._closed:
             cls._instance = super().__new__(cls)
             pool = async_redis.ConnectionPool.from_url(
                 url=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}",

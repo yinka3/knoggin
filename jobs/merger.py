@@ -304,41 +304,57 @@ class MergeDetectionJob(BaseJob):
             
             dirty_ids = []
             for item in final_merge_list:
-                success = await self._execute_merge_db_only(
+                db_success = await self._execute_merge_db_only(
                     item["primary_id"], 
                     item["secondary_id"], 
                     item["duplicate_fact_ids"]
                 )
                 
-                if success:
-                    successful += 1
-                    self._sync_resolver(item["primary_id"], item["secondary_id"])
-                    loop = asyncio.get_running_loop()
-                    
-                    all_facts = await loop.run_in_executor(
-                        None, 
-                        self.store.get_facts_for_entity, 
-                        item["primary_id"], 
-                        True # active_only
-                    )
-                    
-                    resolution_text = f"{item['primary_name']}. " + " ".join([f.content for f in all_facts])
-                    
-                    new_embedding = self.ent_resolver.compute_embedding(
-                        item["primary_id"], 
-                        resolution_text
-                    )
-                    
-                    await loop.run_in_executor(
-                        None,
-                        self.store.update_entity_embedding,
-                        item["primary_id"],
-                        new_embedding
-                    )
+                if db_success:
+                    try:
+                        self._sync_resolver(p_id, s_id)
+                        loop = asyncio.get_running_loop()
+                        
+                        all_facts = await loop.run_in_executor(
+                            None, 
+                            self.store.get_facts_for_entity, 
+                            p_id, 
+                            True
+                        )
+                        
+                        resolution_text = f"{item['primary_name']}. " + " ".join([f.content for f in all_facts])
+                        
+                        new_embedding = self.ent_resolver.compute_embedding(
+                            p_id, 
+                            resolution_text
+                        )
+                        
+                        await loop.run_in_executor(
+                            None,
+                            self.store.update_entity_embedding,
+                            p_id,
+                            new_embedding
+                        )
 
-                    dirty_ids.append(item["primary_id"])
-
-                    logger.info(f"Merged & Re-embedded {item['primary_name']} <- {item['secondary_name']}")
+                        dirty_ids.append(p_id)
+                        successful += 1
+                        logger.info(f"Merged & Re-embedded {item['primary_name']} <- {item['secondary_name']}")
+                        
+                    except Exception as e:
+                        logger.critical(
+                            f"Split-brain during merge {p_id}<-{s_id}: {e}. "
+                            f"Evicting entities from memory to prevent data corruption."
+                        )
+                        
+                        # HEALING STEP: 
+                        # Remove both from RAM. 
+                        # Next time they are mentioned, the system will hit the DB (Vector Search)
+                        # and find the correct merged state.
+                        self.ent_resolver.remove_entities([p_id, s_id])
+                        
+                        # We don't raise here because we've handled the RAM consistency.
+                        # We mark as failed so the job stats are accurate.
+                        failed += 1
                 else:
                     failed += 1
             

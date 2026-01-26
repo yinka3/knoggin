@@ -1,6 +1,7 @@
 import json
 from typing import List, Dict, Optional
 
+from loguru import logger
 import redis
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
@@ -16,6 +17,7 @@ class Tools:
         self.resolver = ent_resolver
         self.user_name = user_name
         self.redis = redis_client
+        self.embedding_service = ent_resolver.embedding_service
         self.topic_config = topic_config
         self.active_topics = topic_config.active_topics if topic_config else []
     
@@ -156,6 +158,50 @@ class Tools:
 
         return pre_context + [target_msg] + post_context
 
+
+    def _search_messages(self, query: str, k: int = 10) -> list[tuple[str, float]]:
+
+        results = {}
+        query_embedding = self.embedding_service.encode_single(query)
+        sem_results = self.store.search_messages_vector(query_embedding, limit=50)
+
+        for msg_id, score in sem_results:
+            msg_key = f"msg_{msg_id}" if msg_id < 1_000_000_000 else f"turn_{msg_id - 1_000_000_000}"
+            results[msg_key] = ("semantic", float(score))
+        
+        fts_results = self.store.search_messages_fts(query, limit=50)
+        max_fts = max([s for _, s in fts_results]) if fts_results else 1.0
+
+        for msg_id, raw_score in fts_results:
+            msg_key = f"msg_{msg_id}"
+            
+            norm_score = raw_score / max_fts if max_fts > 0 else 0
+            
+            logger.debug(f"FTS result: {msg_key} score={norm_score:.3f}")
+
+            if msg_key in results:
+                _, sem_score = results[msg_key]
+                results[msg_key] = ("both", sem_score + norm_score)
+            else:
+                results[msg_key] = ("keyword", norm_score)
+        
+        if not results:
+            return []
+        
+        if len(results) > 1:
+            candidate_keys = list(results.keys())[:45]
+            texts = []
+            for msg_key in candidate_keys:
+                msg_id = int(msg_key.split("_")[1])
+                texts.append(self.store.get_message_text(msg_id))
+            
+            scores = self.embedding_service.rerank(query, texts)
+            reranked = sorted(zip(candidate_keys, scores), key=lambda x: x[1], reverse=True)
+            return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
+            
+        # Fallback: single result
+        sorted_results = sorted(results.items(), key=lambda x: x[1][1], reverse=True)[:k]
+        return [(key, score) for key, (_, score) in sorted_results]
     
     async def search_messages(self, query: str, limit: int = 8) -> List[Dict]:
         """
@@ -170,38 +216,42 @@ class Tools:
         Returns: List of turns with id, role, message, timestamp, score, 
                 and surrounding context (adjacent turns for continuity).
         """
-        results = self.resolver._search_messages(query, limit)
-        seen_ids = set()
+        results = self._search_messages(query, limit)
+        seen_turns = set()
         output = []
-        for msg_id, score in results:
-            if msg_id in seen_ids:
+        for msg_key, score in results:
+            if msg_key.startswith("msg_"):
+                turn_key = await self.redis.hget(f"lookup:msg_to_turn:{self.user_name}", msg_key)
+            else:
+                turn_key = msg_key
+            
+            if not turn_key or turn_key in seen_turns:
                 continue
-
-            context = await self._get_surrounding_context(msg_id)
+            
+            context = await self._get_surrounding_context(msg_key)
             for msg in context:
-                seen_ids.add(msg['id'])
-
-            if msg_id.startswith("msg_"):
+                seen_turns.add(msg['id'])
+            
+            if msg_key.startswith("msg_"):
                 content_key = f"message_content:{self.user_name}"
-                raw = await self.redis.hget(content_key, msg_id)
+                raw = await self.redis.hget(content_key, msg_key)
                 if raw:
                     data = json.loads(raw)
                     output.append({
-                        "id": msg_id,
+                        "id": msg_key,
                         "role": "user",
                         "message": data["message"],
                         "timestamp": data["timestamp"],
                         "score": score,
                         "context": context
                     })
-                    
-            elif msg_id.startswith("turn_"):
+            else:
                 conv_key = f"conversation:{self.user_name}"
-                raw = await self.redis.hget(conv_key, msg_id)
+                raw = await self.redis.hget(conv_key, msg_key)
                 if raw:
                     data = json.loads(raw)
                     output.append({
-                        "id": msg_id,
+                        "id": msg_key,
                         "role": data["role"],
                         "message": data["content"],
                         "timestamp": data["timestamp"],
@@ -210,6 +260,7 @@ class Tools:
                     })
         
         return output
+    
 
     async def search_entity(self, query: str, limit: int = 5) -> List[Dict]:
         """

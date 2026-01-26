@@ -59,7 +59,7 @@ class LLMService:
         system: str,
         user: str,
         model: Optional[str] = None,
-        temperature: float = 1.0,
+        temperature: float = 0.0,
         max_retries: int = 5,
         reasoning: str = "low"
     ) -> Optional[str]:

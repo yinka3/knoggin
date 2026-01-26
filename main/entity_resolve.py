@@ -3,10 +3,8 @@ from loguru import logger
 import threading
 from typing import Dict, List, Optional, Tuple
 from rapidfuzz import fuzz, process
-import numpy as np
-from sentence_transformers import SentenceTransformer, CrossEncoder
-import torch
 from db.store import MemGraphStore
+from main.embedding import EmbeddingService
 from main.utils import is_substring_match
 from schema.dtypes import Fact
 
@@ -14,15 +12,11 @@ from schema.dtypes import Fact
 class EntityResolver:
     
 
-    def __init__(self, store: 'MemGraphStore', session_id: str = None, hierarchy_config: dict = None, embedding_model='dunzhang/stella_en_400M_v5'):
+    def __init__(self, store: 'MemGraphStore', embedding_service: EmbeddingService, session_id: str = None, hierarchy_config: dict = None):
         self.store = store
         self.hierarchy_config = hierarchy_config or {}
         self.session_id = session_id
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        logger.info(f"EntityResolver using device: {device}")
-        self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True, device=device, model_kwargs={"torch_dtype": torch.float16})
-        self.cross_encoder = CrossEncoder('BAAI/bge-reranker-base', device=device)
-        self.embedding_dim = 1024
+        self.embedding_service = embedding_service
         self.entity_profiles = {}
         self._name_to_id = {}
         self._lock = threading.RLock()
@@ -60,7 +54,7 @@ class EntityResolver:
                         "session_id": ent.get("session_id")
                     }
                     
-                    if embedding and len(embedding) == self.embedding_dim:
+                    if embedding and len(embedding) == EmbeddingService.EMBEDDING_DIM:
                         ids.append(ent_id)
                         vectors.append(embedding)
             
@@ -122,54 +116,9 @@ class EntityResolver:
         if not texts:
             return []
             
-        embeddings = self.embedding_model.encode(texts).astype(np.float32)
+        embeddings = self.embedding_service.encode(texts)
         return embeddings.tolist()
         
-
-    def _search_messages(self, query: str, k: int = 10) -> list[tuple[str, float]]:
-
-        results = {}
-        query_embedding = self.embedding_model.encode([query]).astype(np.float32)[0].tolist()
-        sem_results = self.store.search_messages_vector(query_embedding, limit=50)
-
-        for msg_id, score in sem_results:
-            msg_key = f"msg_{msg_id}" if msg_id < 1_000_000_000 else f"turn_{msg_id - 1_000_000_000}"
-            results[msg_key] = ("semantic", float(score))
-        
-        fts_results = self.store.search_messages_fts(query, limit=50)
-        max_fts = max([s for _, s in fts_results]) if fts_results else 1.0
-
-        for msg_id, raw_score in fts_results:
-            msg_key = f"msg_{msg_id}"
-            
-            norm_score = raw_score / max_fts if max_fts > 0 else 0
-            
-            logger.debug(f"FTS result: {msg_key} score={norm_score:.3f}")
-
-            if msg_key in results:
-                _, sem_score = results[msg_key]
-                results[msg_key] = ("both", sem_score + norm_score)
-            else:
-                results[msg_key] = ("keyword", norm_score)
-        
-        if not results:
-            return []
-        
-        if len(results) > 1:
-            candidate_keys = list(results.keys())[:45]
-            pairs = []
-            for msg_key in candidate_keys:
-                msg_id = int(msg_key.split("_")[1])
-                text = self.store.get_message_text(msg_id)
-                pairs.append((query, text))
-            
-            scores = self.cross_encoder.predict(pairs)
-            reranked = sorted(zip(candidate_keys, scores), key=lambda x: x[1], reverse=True)
-            return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
-            
-        # Fallback: single result
-        sorted_results = sorted(results.items(), key=lambda x: x[1][1], reverse=True)[:k]
-        return [(key, score) for key, (_, score) in sorted_results]
     
     def validate_existing(self, canonical_name: str, mentions: List[str]) -> Tuple[Optional[int], bool]:
         """
@@ -222,7 +171,7 @@ class EntityResolver:
 
         candidates = set()
         mention_lower = mention.lower()
-
+        vector = None
         with self._lock:
             if mention_lower in self._name_to_id:
                 candidates.add(self._name_to_id[mention_lower])
@@ -243,22 +192,24 @@ class EntityResolver:
                     candidates.add(eid)
             
             try:
-                vector = self.embedding_model.encode([mention]).astype(np.float32)[0].tolist()
-                vector_results = self.store.search_entities_by_embedding(
-                    vector, 
-                    limit=5, 
-                    score_threshold=vector_threshold
-                )
-                
-                for eid, score in vector_results:
-                    with self._lock:
-                        if eid:
-                            candidates.add(eid)
-                            logger.debug(f"Vector search found entity ID'{eid}' for '{mention}' (score={score:.2f})")
-
-            except Exception as e:
-                logger.warning(f"Vector candidate search failed: {e}")
+                vector = self.embedding_service.encode_single(mention)
+            except Exception:
+                logger.warning("Error with encoding, will try again one more time")
+                vector = self.embedding_service.encode_single(mention)
+        
+        if vector:
+            vector_results = self.store.search_entities_by_embedding(
+                vector, 
+                limit=5, 
+                score_threshold=vector_threshold
+            )
             
+            for eid, score in vector_results:
+                with self._lock:
+                    if eid:
+                        candidates.add(eid)
+                        logger.debug(f"Vector search found entity ID'{eid}' for '{mention}' (score={score:.2f})")
+
             return list(candidates)
     
     def register_entity(
@@ -303,7 +254,7 @@ class EntityResolver:
         
         # Build resolution text without facts (new facts added on profile cycle)
         resolution_text = canonical_name
-        embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
+        embedding = self.embedding_service.encode_single(resolution_text)
 
         with self._lock:                
             logger.info(f"Adding entity {entity_id}-{profile['canonical_name']} to resolver indexes.")
@@ -316,10 +267,10 @@ class EntityResolver:
                 "type": profile.get("type"),
                 "topic": profile.get("topic", "General"),
                 "session_id": session_id,
-                "embedding": embedding_np.tolist()
+                "embedding": embedding
             }
         
-        return embedding_np.tolist()
+        return embedding
     
 
     def compute_embedding(self, entity_id: int, resolution_text: str) -> List[float]:
@@ -334,10 +285,9 @@ class EntityResolver:
                 return []
             
             logger.info(f"Updating embedding for entity {entity_id}-{profile['canonical_name']}")
+
             
-            embedding_np = self.embedding_model.encode([resolution_text]).astype(np.float32)[0]
-            
-        return embedding_np.tolist()
+        return self.embedding_service.encode_single(resolution_text)
         
     def merge_into(self, primary_id: int, secondary_id: int):
         """Transfer secondary entity's aliases to primary, remove secondary from indexes."""
