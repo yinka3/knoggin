@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import List, Dict, Optional
 
@@ -216,25 +217,62 @@ class Tools:
         Returns: List of turns with id, role, message, timestamp, score, 
                 and surrounding context (adjacent turns for continuity).
         """
-        results = self._search_messages(query, limit)
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(None, self._search_messages, query, limit)
+        
+        if not results:
+            return []
+        
+        msg_keys = [msg_key for msg_key, _ in results]
+        scores = {msg_key: score for msg_key, score in results}
+        
+        lookup_key = f"lookup:msg_to_turn:{self.user_name}"
+        user_msg_keys = [k for k in msg_keys if k.startswith("msg_")]
+        
+        if user_msg_keys:
+            turn_mappings = await self.redis.hmget(lookup_key, *user_msg_keys)
+            msg_to_turn = dict(zip(user_msg_keys, turn_mappings))
+        else:
+            msg_to_turn = {}
+        
+        turn_keys = []
+        for msg_key in msg_keys:
+            if msg_key.startswith("msg_"):
+                turn_keys.append(msg_to_turn.get(msg_key))
+            else:
+                turn_keys.append(msg_key)
+        
+        contexts = await asyncio.gather(*[
+            self._get_surrounding_context(msg_key) for msg_key in msg_keys
+        ])
+        
+        content_key = f"message_content:{self.user_name}"
+        conv_key = f"conversation:{self.user_name}"
+        
+        assistant_msg_keys = [k for k in msg_keys if not k.startswith("msg_")]
+        
+        user_contents = {}
+        if user_msg_keys:
+            raw_contents = await self.redis.hmget(content_key, *user_msg_keys)
+            user_contents = dict(zip(user_msg_keys, raw_contents))
+        
+        assistant_contents = {}
+        if assistant_msg_keys:
+            raw_contents = await self.redis.hmget(conv_key, *assistant_msg_keys)
+            assistant_contents = dict(zip(assistant_msg_keys, raw_contents))
+        
         seen_turns = set()
         output = []
-        for msg_key, score in results:
-            if msg_key.startswith("msg_"):
-                turn_key = await self.redis.hget(f"lookup:msg_to_turn:{self.user_name}", msg_key)
-            else:
-                turn_key = msg_key
-            
+        
+        for msg_key, turn_key, context in zip(msg_keys, turn_keys, contexts):
             if not turn_key or turn_key in seen_turns:
                 continue
             
-            context = await self._get_surrounding_context(msg_key)
             for msg in context:
                 seen_turns.add(msg['id'])
             
             if msg_key.startswith("msg_"):
-                content_key = f"message_content:{self.user_name}"
-                raw = await self.redis.hget(content_key, msg_key)
+                raw = user_contents.get(msg_key)
                 if raw:
                     data = json.loads(raw)
                     output.append({
@@ -242,12 +280,11 @@ class Tools:
                         "role": "user",
                         "message": data["message"],
                         "timestamp": data["timestamp"],
-                        "score": score,
+                        "score": scores[msg_key],
                         "context": context
                     })
             else:
-                conv_key = f"conversation:{self.user_name}"
-                raw = await self.redis.hget(conv_key, msg_key)
+                raw = assistant_contents.get(msg_key)
                 if raw:
                     data = json.loads(raw)
                     output.append({
@@ -255,12 +292,12 @@ class Tools:
                         "role": data["role"],
                         "message": data["content"],
                         "timestamp": data["timestamp"],
-                        "score": score,
+                        "score": scores[msg_key],
                         "context": context
                     })
         
         return output
-    
+        
 
     async def search_entity(self, query: str, limit: int = 5) -> List[Dict]:
         """

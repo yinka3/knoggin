@@ -110,8 +110,8 @@ class Context:
                 NLPPipeline,
                 llm=instance.llm,
                 topic_config=instance.topic_config,
-                get_known_aliases=lambda: instance.ent_resolver._name_to_id,
-                get_profiles=lambda: instance.ent_resolver.entity_profiles
+                get_known_aliases=instance.ent_resolver.get_known_aliases,
+                get_profiles=instance.ent_resolver.get_profiles
             )
         )
         
@@ -145,7 +145,8 @@ class Context:
             llm=instance.llm,
             resolver=instance.ent_resolver,
             store=instance.store,
-            executor=instance.executor
+            executor=instance.executor,
+            embedding_service=instance.embedding_service
         )
         instance.merge_job = MergeDetectionJob(
             user_name=user_name, ent_resolver=instance.ent_resolver, 
@@ -308,33 +309,46 @@ class Context:
         )
     
     async def add_assistant_turn(self, content: str, timestamp: datetime):
+        """Add assistant turn to conversation log."""
         turn_id = await self.add_to_conversation_log(
             role="assistant",
             content=content,
             timestamp=timestamp
         )
         
-        loop = asyncio.get_running_loop()
-        embedding_list = await loop.run_in_executor(
-            self.executor,
-            partial(self.ent_resolver.compute_batch_embeddings, [content])
+        asyncio.create_task(
+            self._persist_assistant_embedding(turn_id, content, timestamp)
         )
-        embedding_vector = embedding_list[0]
 
-        graph_id = turn_id + 1_000_000_000
-        
-        agent_msg_batch = [{
-            "id": graph_id,
-            "content": content,
-            "role": "assistant",
-            "timestamp": timestamp.timestamp() * 1000,
-            "embedding": embedding_vector
-        }]
-        
-        await loop.run_in_executor(
-            self.executor,
-            partial(self.store.save_message_logs, agent_msg_batch)
-        )
+
+    async def _persist_assistant_embedding(self, turn_id: int, content: str, timestamp: datetime):
+        """Background task: compute embedding and write to graph."""
+        try:
+            loop = asyncio.get_running_loop()
+            
+            embedding_list = await loop.run_in_executor(
+                self.executor,
+                partial(self.ent_resolver.compute_batch_embeddings, [content])
+            )
+            embedding_vector = embedding_list[0]
+
+            graph_id = turn_id + 1_000_000_000
+            
+            agent_msg_batch = [{
+                "id": graph_id,
+                "content": content,
+                "role": "assistant",
+                "timestamp": timestamp.timestamp() * 1000,
+                "embedding": embedding_vector
+            }]
+            
+            await loop.run_in_executor(
+                self.executor,
+                partial(self.store.save_message_logs, agent_msg_batch)
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to persist assistant embedding for turn {turn_id}: {e}")
 
     
     async def get_conversation_context(self, num_turns: int, up_to_msg_id: int = None) -> List[Dict]:

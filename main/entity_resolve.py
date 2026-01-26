@@ -67,21 +67,28 @@ class EntityResolver:
     def get_id(self, name: str) -> Optional[int]:
         if not name:
             return None
-        return self._name_to_id.get(name.lower())
+        with self._lock:
+            return self._name_to_id.get(name.lower())
     
     def get_profiles(self) -> Dict[int, Dict]:
-        return self.entity_profiles
+        with self._lock:
+            return dict(self.entity_profiles)
     
     def get_mentions_for_id(self, entity_id: int) -> List[str]:
         with self._lock:
             items = list(self._name_to_id.items())
         return [mention for mention, eid in items if eid == entity_id]
+
+    def get_known_aliases(self) -> Dict[str, int]:
+        with self._lock:
+            return dict(self._name_to_id)
     
     def get_embedding_for_id(self, entity_id: int) -> List[float]:
         """Retrieve embedding from graph by ID."""
-        profile = self.entity_profiles.get(entity_id)
-        if profile and profile.get("embedding"):
-            return profile["embedding"]
+        with self._lock:
+            profile = self.entity_profiles.get(entity_id)
+            if profile and profile.get("embedding"):
+                return profile["embedding"]
         return self.store.get_entity_embedding(entity_id)
             
     def get_hierarchy_relationship(self, type_a: str, type_b: str, topic: str) -> Optional[str]:
@@ -130,7 +137,7 @@ class EntityResolver:
             return None, False
         
         with self._lock:
-            entity_id = self.get_id(canonical_name)
+            entity_id = self._name_to_id.get(canonical_name.lower())
             logger.debug(f"validate_existing: '{canonical_name}' -> id={entity_id}")
             if entity_id is None:
                 return None, False
@@ -146,8 +153,11 @@ class EntityResolver:
     def _build_generic_tokens(self, min_entity_freq: int = 10) -> set:
         """Tokens appearing in N+ distinct entities are generic."""
         token_to_entities = defaultdict(set)
+    
+        with self._lock:
+            profiles_snapshot = dict(self.entity_profiles)
         
-        for ent_id, profile in self.entity_profiles.items():
+        for ent_id, profile in profiles_snapshot.items():
             canonical = profile.get("canonical_name", "").lower()
             for token in canonical.split():
                 token_to_entities[token].add(ent_id)
@@ -225,18 +235,20 @@ class EntityResolver:
         Register new entity: update all indexes and return embedding.
         """
 
-        sessionID = session_id or self.session_id
-        profile = {
-            "canonical_name": canonical_name,
-            "type": entity_type,
-            "topic": topic,
-            "facts": [],
-            "session_id": sessionID
-        }
-        
-        embedding = self._add_entity(entity_id, profile, sessionID)
+        session_id = session_id or self.session_id
+        embedding = self.embedding_service.encode_single(canonical_name)
         
         with self._lock:
+            logger.info(f"Adding entity {entity_id}-{canonical_name} to resolver indexes.")
+            
+            self.entity_profiles[entity_id] = {
+                "canonical_name": canonical_name,
+                "type": entity_type,
+                "topic": topic or "General",
+                "session_id": session_id,
+                "embedding": embedding
+            }
+            
             self._name_to_id[canonical_name.lower()] = entity_id
             for mention in mentions:
                 mention_lower = mention.lower()
@@ -245,30 +257,6 @@ class EntityResolver:
                     logger.warning(f"Alias collision: '{mention}' belongs to {existing_id}, skipping for {entity_id}")
                     continue
                 self._name_to_id[mention_lower] = entity_id
-
-        return embedding
-
-
-    def _add_entity(self, entity_id: int, profile: Dict, session_id: str) -> List[float]:
-        canonical_name = profile.get("canonical_name", "")
-        
-        # Build resolution text without facts (new facts added on profile cycle)
-        resolution_text = canonical_name
-        embedding = self.embedding_service.encode_single(resolution_text)
-
-        with self._lock:                
-            logger.info(f"Adding entity {entity_id}-{profile['canonical_name']} to resolver indexes.")
-
-            profile.setdefault("topic", "General")
-
-            # Store profile without facts
-            self.entity_profiles[entity_id] = {
-                "canonical_name": profile["canonical_name"],
-                "type": profile.get("type"),
-                "topic": profile.get("topic", "General"),
-                "session_id": session_id,
-                "embedding": embedding
-            }
         
         return embedding
     
@@ -318,7 +306,10 @@ class EntityResolver:
 
     def detect_merge_candidates(self) -> list:
         """Detect potential entity merges using vector search + fuzzy matching."""
-        logger.info(f"Merge detection started. Scanning {len(self.entity_profiles)} entities.")
+        with self._lock:
+            entity_count = len(self.entity_profiles)
+        
+        logger.info(f"Merge detection started. Scanning {entity_count} entities.")
 
         generic_tokens = self._build_generic_tokens()
         candidate_pairs = self._collect_candidate_pairs(generic_tokens)
@@ -376,10 +367,10 @@ class EntityResolver:
         seen_pairs = {}
 
         with self._lock:
-            snapshot_ids = list(self.entity_profiles.keys())
+            profiles_snapshot = dict(self.entity_profiles)
 
-        for primary_id in snapshot_ids:
-            primary_profile = self.entity_profiles.get(primary_id)
+        for primary_id in profiles_snapshot:
+            primary_profile = profiles_snapshot.get(primary_id)
             if not primary_profile:
                 continue
 
@@ -390,7 +381,7 @@ class EntityResolver:
                 if neighbor_id == primary_id or neighbor_id < primary_id:
                     continue
 
-                neighbor_profile = self.entity_profiles.get(neighbor_id)
+                neighbor_profile = profiles_snapshot.get(neighbor_id)
                 if not neighbor_profile:
                     continue
 
@@ -427,7 +418,8 @@ class EntityResolver:
         id_a: int,
         id_b: int,
         fuzz_score: int,
-        facts_by_entity: Dict[int, List[Fact]]
+        facts_by_entity: Dict[int, List[Fact]],
+        profiles_snapshot: Dict[int, dict]
     ) -> Optional[dict]:
         """
         Evaluate one pair for merge or hierarchy relationship.
@@ -438,8 +430,8 @@ class EntityResolver:
         if self.store.has_hierarchy_edge(id_a, id_b):
             return None
 
-        profile_a = self.entity_profiles.get(id_a, {})
-        profile_b = self.entity_profiles.get(id_b, {})
+        profile_a = profiles_snapshot.get(id_a, {})
+        profile_b = profiles_snapshot.get(id_b, {})
 
         type_a = profile_a.get("type")
         type_b = profile_b.get("type")
