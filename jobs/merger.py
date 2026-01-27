@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult, JobNotifier
-from jobs.jobs_utils import cosine_similarity, find_duplicate_facts, has_sufficient_facts, parse_merge_score
+from jobs.jobs_utils import cosine_similarity, find_duplicate_facts, format_vp05_input, has_sufficient_facts, parse_merge_score
 from main.prompts import get_merge_judgment_prompt
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
@@ -98,20 +98,20 @@ class MergeDetectionJob(BaseJob):
         enriched_facts_a = await self._enrich_facts_with_sources(candidate.get("facts_a", []))
         enriched_facts_b = await self._enrich_facts_with_sources(candidate.get("facts_b", []))
         
-        user_content = json.dumps({
-            "entity_a": {
+        user_content = format_vp05_input(
+            {
                 "canonical_name": candidate["primary_name"],
                 "type": candidate.get("primary_type"),
                 "aliases": self.ent_resolver.get_mentions_for_id(candidate["primary_id"]),
                 "facts": enriched_facts_a
             },
-            "entity_b": {
+            {
                 "canonical_name": candidate["secondary_name"],
                 "type": candidate.get("secondary_type"),
                 "aliases": self.ent_resolver.get_mentions_for_id(candidate["secondary_id"]),
                 "facts": enriched_facts_b
             }
-        })
+        )
         
         result = await self.llm.call_llm(system, user_content, reasoning="medium")
         
@@ -304,9 +304,12 @@ class MergeDetectionJob(BaseJob):
             
             dirty_ids = []
             for item in final_merge_list:
+
+                p_id = item["primary_id"]
+                s_id = item["secondary_id"]
                 db_success = await self._execute_merge_db_only(
-                    item["primary_id"], 
-                    item["secondary_id"], 
+                    p_id, 
+                    s_id, 
                     item["duplicate_fact_ids"]
                 )
                 

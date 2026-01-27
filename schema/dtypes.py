@@ -123,7 +123,7 @@ class ClarificationRequest:
     question: str
 
 
-StellaResponse = Union[ToolCall, List[ToolCall], FinalResponse, ClarificationRequest]
+AgentResponse = Union[ToolCall, List[ToolCall], FinalResponse, ClarificationRequest]
 
 @dataclass
 class TraceEntry:

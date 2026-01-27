@@ -179,12 +179,12 @@ class EntityResolver:
         if not mention:
             return []
 
-        candidates = set()
+        candidate_scores: Dict[int, float] = {}
         mention_lower = mention.lower()
-        vector = None
+        
         with self._lock:
             if mention_lower in self._name_to_id:
-                candidates.add(self._name_to_id[mention_lower])
+                candidate_scores[self._name_to_id[mention_lower]] = 1.0
             
             choices = list(self._name_to_id.keys())
 
@@ -196,16 +196,21 @@ class EntityResolver:
                 scorer=fuzz.WRatio
             )
 
-            for alias, _, _ in results:
+            for alias, fuzz_score, _ in results:
                 eid = self._name_to_id.get(alias)
                 if eid is not None:
-                    candidates.add(eid)
+                    normalized = fuzz_score / 100.0
+                    candidate_scores[eid] = max(candidate_scores.get(eid, 0), normalized)
             
             try:
                 vector = self.embedding_service.encode_single(mention)
-            except Exception:
-                logger.warning("Error with encoding, will try again one more time")
-                vector = self.embedding_service.encode_single(mention)
+            except Exception as e:
+                logger.warning(f"Encoding failed: {e}, retrying once")
+                try:
+                    vector = self.embedding_service.encode_single(mention)
+                except Exception as e2:
+                    logger.error(f"Encoding retry failed: {e2}, skipping vector search")
+                    vector = None
         
         if vector:
             vector_results = self.store.search_entities_by_embedding(
@@ -213,14 +218,13 @@ class EntityResolver:
                 limit=5, 
                 score_threshold=vector_threshold
             )
-            
-            for eid, score in vector_results:
-                with self._lock:
-                    if eid:
-                        candidates.add(eid)
-                        logger.debug(f"Vector search found entity ID'{eid}' for '{mention}' (score={score:.2f})")
+        
+        for eid, vec_score in vector_results:
+            if eid:
+                candidate_scores[eid] = max(candidate_scores.get(eid, 0), vec_score)
+                logger.debug(f"Vector search found entity ID '{eid}' for '{mention}' (score={vec_score:.2f})")
 
-            return list(candidates)
+        return sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
     
     def register_entity(
         self, 
@@ -294,12 +298,14 @@ class EntityResolver:
     def resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
         candidates = self.get_candidate_ids(entity, fuzzy_threshold=85)
-        
+    
         if not candidates:
             return None
         
+        top_id, _ = candidates[0]
+        
         with self._lock:
-            profile = self.entity_profiles.get(candidates[0])
+            profile = self.entity_profiles.get(top_id)
         
         return profile["canonical_name"] if profile else None
             
@@ -308,6 +314,7 @@ class EntityResolver:
         """Detect potential entity merges using vector search + fuzzy matching."""
         with self._lock:
             entity_count = len(self.entity_profiles)
+            profiles_snapshot = dict(self.entity_profiles)
         
         logger.info(f"Merge detection started. Scanning {entity_count} entities.")
 
@@ -326,7 +333,7 @@ class EntityResolver:
 
         candidates = []
         for (id_a, id_b), fuzz_score in candidate_pairs.items():
-            result = self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity)
+            result = self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity, profiles_snapshot)
             if result:
                 candidates.append(result)
 

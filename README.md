@@ -1,91 +1,99 @@
-# Vestige
+# Knoggin
 
-A transparent, self-hosted knowledge graph for personal and conversational AI memory.
+Self-hosted knowledge graph memory for AI agents.
 
-Vestige helps you discover patterns in your data by extracting entities and relationships from unstructured text, maintaining evolving profiles, and providing grounded context for LLM conversations. Unlike black-box memory systems, Vestige emphasizes **explainability** — you can trace every entity, relationship, and decision back to its source.
+Knoggin extracts entities and relationships from conversations, maintains evolving profiles, and provides grounded context for LLM-powered agents. Privacy-first, self-hosted, explainable.
 
-Built on principles from [Zep's temporal knowledge graph architecture](https://github.com/getzep/zep), with emphasis on transparency and human oversight.
+## Why Knoggin?
+
+Most memory systems are black boxes. You feed in conversations and hope the right context comes back. Knoggin takes a different approach—every entity, relationship, and fact is traceable back to its source message. You can see what the system knows and why it knows it.
+
+Built for developers who want to own their data and understand their agent's memory.
 
 ## Features
 
-**Entity Extraction & Disambiguation**  
-Identifies people, places, organizations, and concepts from conversational text. Handles typos, nicknames, and inconsistent casing, resolving them to canonical entities.
+- **Entity extraction & disambiguation** — Identifies people, places, and concepts from text. Handles typos, nicknames, and inconsistent references.
+- **Relationship tracking** — Builds a graph of connections with message-level evidence and timestamps.
+- **Evolving profiles** — Entity summaries update as new information arrives. Contradictions are resolved temporally.
+- **Topic configuration** — Define custom schemas with labels, hierarchies, and aliases. Toggle topics active/inactive to control what the agent retrieves. Mark topics as "hot" for priority context loading.
+- **Agent-ready retrieval** — Hybrid search combining semantic, keyword, and graph traversal.
 
-**Relationship Tracking**  
-Builds a graph of connections with message-level evidence. Relationships have weights and timestamps — you know what's strong and what's stale.
+## Quick Start
 
-**Topic-Based Access Control**  
-Toggle topics active/inactive to restrict what the agent can see. Mark topics as "hot" for priority retrieval.
+> Coming soon — Installation instructions will be available once the UI is complete.
 
----
+For now, if you want to explore the codebase:
+```bash
+git clone https://github.com/yourusername/knoggin.git
+cd knoggin
+```
+
+Requirements:
+- Python 3.12+
+- Docker (for Memgraph + Redis)
+- LLM API key (OpenAI, Anthropic, Google, or any OpenAI-compatible provider)
 
 ## Architecture
 
-Vestige separates **write** (deterministic extraction) from **read** (bounded retrieval).
+Knoggin separates **write** (extraction) from **read** (retrieval).
 
-### Write Path — VEGAPUNK Satellites
+### Write Path — VEGAPUNK
 
 In *One Piece*, Dr. Vegapunk is the world's greatest scientist, so brilliant that his brain grew too large for his body. His solution? Split his consciousness into six satellites, each handling a specialized aspect of his genius.
 
-Vestige borrows this idea. Rather than one monolithic prompt, the write path splits cognitive labor across specialized prompts:
+Knoggin borrows this idea. Rather than one monolithic prompt, the write path splits cognitive labor across specialized prompts. Each does one thing well, and reasoning stays separate from formatting.
 
 *(Please don't sue me, Eiichiro Oda. I'm just a fan who needed a naming convention.)*
 
-| Satellite | Role |
-|-----------|------|
-| VEGAPUNK-01 | Named entity recognition |
-| VEGAPUNK-02 | Disambiguation reasoning |
-| VEGAPUNK-03 | Disambiguation formatting |
-| VEGAPUNK-04 | Connection reasoning |
-| VEGAPUNK-05 | Connection formatting |
-| VEGAPUNK-06 | Profile refinement |
-| VEGAPUNK-07 | Summary merging |
-| VEGAPUNK-08 | Merge judgment |
+- **VP-01**: Named entity recognition
+- **VP-02**: Entity disambiguation
+- **VP-03**: Connection extraction
+- **VP-04**: Profile refinement
+- **VP-05**: Merge judgment
 
-Each prompt does one thing well. Reasoning and formatting are deliberately separated.
+### Read Path
 
-### Read Path — STELLA
+The conversational agent uses bounded tool calls to query the graph and synthesize responses with grounded context.
 
-STELLA serves as the conversational agent, using a bounded 5-state machine for retrieval. Tools query the graph; the LLM synthesizes responses with grounded context.
+**Tools**: `search_entity`, `search_messages`, `get_connections`, `get_activity`, `find_path`, `get_hierarchy`
 
-**Tools:**
-- `search_messages` — Semantic search over past messages
-- `search_entity` — Find entities by name or alias
-- `get_connections` — Find related entities
-- `get_activity` — Recent interactions involving an entity
-- `find_path` — Shortest connection path between two entities
-- `finish` — Deliver final response
-- `request_clarification` — Ask user for clarity
+### Background Jobs
 
-### SS Agents (Sleepy/Simple)
-
-Background jobs that wake during idle periods:
-
-- **Profile Refinement** — Entity summaries evolve as new information arrives
+**Session jobs** (run during active use):
+- **Profile Refinement** — Entity summaries evolve with new information
 - **Merge Detection** — Catches duplicates that slip through initial disambiguation
-- **Mood Checkpoint** — Tracks emotional patterns from user messages over time
+
+**Scheduled jobs** (run periodically):
+- **Entity Cleanup** — Removes orphan entities with no relationships
+- **Fact Archival** — Archives invalidated facts past retention period
+- **Mood Checkpoint** — Tracks emotional patterns from user messages
 - **DLQ Replay** — Retries failed batches on transient errors
 
----
+## Topic Configuration
+
+Topics are central to how Knoggin organizes and retrieves knowledge. Each topic defines:
+
+- **Labels** — Entity types valid within the topic (e.g., "person", "company", "project")
+- **Hierarchy** — Parent/child relationships between entity types (e.g., a "course" contains "exams")
+- **Aliases** — Alternative names for labels to handle vocabulary variation
+- **Active state** — Toggle topics on/off to control retrieval scope without deleting data
+
+Users define their schema manually. A future discovery mode will analyze messages and suggest schema edits via LLM.
 
 ## License
 
-Vestige is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE).
+Knoggin is licensed under [AGPL-3.0](./LICENSE).
 
-**What this means for you:**
+- Self-host, modify, deploy for personal or commercial use
+- Contributions welcome under the same license
+- If you modify Knoggin and offer it as a network service, you must release your source code under AGPL-3.0
 
-- ✅ **Self-hosting** — Free to use, modify, and deploy for personal or commercial use
-- ✅ **Contributions** — Welcomed and licensed under AGPL-3.0
-- ✅ **Internal use** — Deploy in your organization without restrictions
-- ⚠️ **Modified SaaS** — If you modify Vestige and offer it as a network service, you must release your source code under AGPL-3.0
-- 📧 **Commercial licensing** — Contact adedewe.a@northeastern.edu for alternative licensing options
+Knoggin uses [Memgraph](https://memgraph.com) as its graph database, licensed separately under the [Business Source License](https://memgraph.com/legal).
 
-**Dependencies:** Vestige uses [Memgraph](https://memgraph.com) as its default graph database, licensed separately under the [Business Source License (BSL)](https://memgraph.com/legal). The database layer can be swapped for other Cypher-compatible stores (Neo4j, etc.) if needed.
+## Contributing
 
----
+Contributions welcome. Please open an issue first to discuss larger changes. Keep PRs focused.
 
-## Disclaimer
+## Support
 
-Vestige is a decision-support tool and decision-making system. Users have access for verifying all extracted entities, relationships, and insights.
-
-See [LICENSE](./LICENSE) for full terms.
+Questions or issues? Open a GitHub issue.

@@ -9,7 +9,7 @@ from main.processor import BatchProcessor, BatchResult
 
 class BatchConsumer:
 
-    def __init__(self, user_name: str, store: MemGraphStore, processor: BatchProcessor, 
+    def __init__(self, user_name: str, store: MemGraphStore, processor: BatchProcessor, redis,
                 get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
                 run_session_jobs: Callable[[], Awaitable[None]],
                 write_to_graph: Callable[[BatchResult], Awaitable[None]],
@@ -23,7 +23,7 @@ class BatchConsumer:
         self.batch_timeout = batch_timeout
         self.checkpoint_interval = checkpoint_interval
         self.session_window = session_window
-        self.redis = AsyncRedisClient().get_client()
+        self.redis = redis
 
         # callbacks
         self.get_session_ctx = get_session_context
@@ -104,10 +104,6 @@ class BatchConsumer:
 
     async def _drain_buffer(self):
         while True:
-            buffer_len = await self.redis.llen(self._buffer_key)
-            if buffer_len == 0:
-                break
-
             raw = await self.redis.lrange(self._buffer_key, 0, self.batch_size - 1)
             if not raw:
                 break
@@ -129,7 +125,7 @@ class BatchConsumer:
                         "content": msg['message'],
                         "role": msg.get('role', 'user'),
                         "timestamp": msg.get('timestamp', ''),
-                        "embedding": msg.get('embedding', [])
+                        "embedding": result.message_embeddings.get(msg['id'], [])
                     }
                     for msg in messages
                 ]

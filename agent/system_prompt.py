@@ -1,4 +1,4 @@
-def get_stella_prompt(user_name: str, current_time: str = "", persona: str = "") -> str:
+def get_agent_prompt(user_name: str, current_time: str = "", persona: str = "") -> str:
     date_context = f"Current time: {current_time}." if current_time else ""
     
     voice = persona if persona else """Warm and direct. No filler phrases, no corporate warmth. Match their energy."""

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CONFIG_DIR = Path(os.getenv("VESTIGE_CONFIG_DIR", "./config"))
+CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
 CONFIG_FILE = CONFIG_DIR / "vestige.json"
 
 DEFAULT_REASONING_MODEL = "google/gemini-3-flash-preview"

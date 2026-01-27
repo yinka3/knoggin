@@ -12,6 +12,7 @@ from jobs.profile import ProfileRefinementJob
 from jobs.scheduler import Scheduler
 from jobs.merger import MergeDetectionJob
 from jobs.cleaner import EntityCleanupJob
+from main.utils import handle_background_task_result
 from shared.config import get_config_value
 from main.consumer import BatchConsumer
 from main.embedding import EmbeddingService
@@ -127,6 +128,7 @@ class Context:
         instance.consumer = BatchConsumer(
             user_name=user_name,
             store=instance.store,
+            redis=resources.redis,
             processor=instance.batch_processor,
             get_session_context=instance.get_conversation_context,
             run_session_jobs=instance._run_session_jobs,
@@ -310,9 +312,10 @@ class Context:
             timestamp=timestamp
         )
         
-        asyncio.create_task(
+        task = asyncio.create_task(
             self._persist_assistant_embedding(turn_id, content, timestamp)
         )
+        task.add_done_callback(handle_background_task_result)
 
 
     async def _persist_assistant_embedding(self, turn_id: int, content: str, timestamp: datetime):
@@ -386,7 +389,7 @@ class Context:
         for turn_id, data in zip(turn_ids, turn_data):
             if data:
                 parsed = json.loads(data)
-                role_label = "User" if parsed["role"] == "user" else "STELLA"
+                role_label = "User" if parsed["role"] == "user" else "AGENT"
                 ts = datetime.fromisoformat(parsed['timestamp'])
                 date_str = ts.strftime("%Y-%m-%d %H:%M")
                 results.append({

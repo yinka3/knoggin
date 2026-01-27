@@ -1,3 +1,4 @@
+import asyncio
 import re
 from typing import List, Optional, Tuple
 
@@ -17,6 +18,15 @@ PRONOUNS = {
         "he", "she", "they", "we", "i", "me", "him", "them", "us",
         "this", "that", "these", "those"
     }
+
+
+def handle_background_task_result(task: asyncio.Task):
+    """Log any unhandled exceptions from background tasks."""
+    if task.cancelled():
+        return
+    if exc := task.exception():
+        logger.error(f"Background task failed: {exc}")
+
 
 def is_substring_match(name_a: str, name_b: str) -> bool:
     """Case-insensitive substring check."""

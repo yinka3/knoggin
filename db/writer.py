@@ -478,3 +478,69 @@ class GraphWriter:
             logger.error(f"Failed to create hierarchy edge ({child_id})-[:PART_OF]->({parent_id}): {e}")
             return False
     
+
+    def create_preference(
+        self,
+        id: str,
+        content: str,
+        kind: str,  # "preference" or "ick"
+        session_id: str
+    ) -> bool:
+        query = """
+        CREATE (p:Preference {
+            id: $id,
+            content: $content,
+            kind: $kind,
+            session_id: $session_id,
+            created_at: timestamp()
+        })
+        RETURN p.id AS id
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {
+                    "id": id,
+                    "content": content,
+                    "kind": kind,
+                    "session_id": session_id
+                }).single()
+                return result is not None
+        except Exception as e:
+            logger.error(f"Failed to create preference: {e}")
+            return False
+
+
+    def list_preferences(self, session_id: str, kind: str = None) -> List[Dict]:
+        where_kind = "AND p.kind = $kind" if kind else ""
+        query = f"""
+        MATCH (p:Preference {{session_id: $session_id}})
+        WHERE true {where_kind}
+        RETURN p.id AS id, p.content AS content, p.kind AS kind, p.created_at AS created_at
+        ORDER BY p.created_at DESC
+        """
+        params = {"session_id": session_id}
+        if kind:
+            params["kind"] = kind
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, params)
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to list preferences: {e}")
+            return []
+
+
+    def delete_preference(self, pref_id: str) -> bool:
+        query = """
+        MATCH (p:Preference {id: $id})
+        DELETE p
+        RETURN count(*) AS deleted
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"id": pref_id}).single()
+                return result and result["deleted"] > 0
+        except Exception as e:
+            logger.error(f"Failed to delete preference: {e}")
+            return False

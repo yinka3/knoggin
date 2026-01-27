@@ -14,7 +14,7 @@ from main.embedding import EmbeddingService
 from main.service import LLMService
 from main.entity_resolve import EntityResolver
 from main.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
-from jobs.jobs_utils import extract_fact_with_source, process_extracted_facts, parse_new_facts
+from jobs.jobs_utils import extract_fact_with_source, format_vp04_input, process_extracted_facts, parse_new_facts
 from schema.dtypes import Fact, FactMergeResult
 
 class ProfileRefinementJob(BaseJob):
@@ -75,7 +75,7 @@ class ProfileRefinementJob(BaseJob):
         return success
     
     async def _get_conversation_context(self, ctx: JobContext, num_turns: int, user_ratio: float = 0.75, up_to_msg_id: int = None) -> List[Dict]:
-        """Fetch recent conversation with both user and STELLA turns."""
+        """Fetch recent conversation with both user and agent turns."""
         sorted_key = f"recent_conversation:{ctx.user_name}"
         conv_key = f"conversation:{ctx.user_name}"
         
@@ -121,7 +121,7 @@ class ProfileRefinementJob(BaseJob):
             parsed = json.loads(data)
             ts = datetime.fromisoformat(parsed['timestamp'])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
-            role_label = "User" if parsed["role"] == "user" else "STELLA"
+            role_label = "User" if parsed["role"] == "user" else "AGENT"
             
             if parsed["role"] == "user" and parsed.get("user_msg_id") is not None:
                 formatted = f"[MSG_{parsed['user_msg_id']}] [{date_str}] [{role_label}]: {parsed['content']}"
@@ -237,15 +237,13 @@ class ProfileRefinementJob(BaseJob):
         
         system_reasoning = get_profile_extraction_prompt(ctx.user_name)
         enriched_facts = await self._enrich_facts_with_sources(existing_facts)
-        user_content = json.dumps({
-            "entities": [{
+        llm_input = [{
                 "entity_name": ctx.user_name,
                 "entity_type": "person",
                 "existing_facts": enriched_facts,
                 "known_aliases": [alias for alias in profile.get("aliases", [ctx.user_name])]
-            }],
-            "conversation": conversation_text
-        })
+            }]
+        user_content = format_vp04_input(llm_input, conversation_text)
         
         reasoning = await self.llm.call_llm(system_reasoning, user_content)
 
@@ -280,7 +278,6 @@ class ProfileRefinementJob(BaseJob):
         
         embedding = await self._update_entity_embedding(user_id, ctx.user_name)
         
-        # Update entity profile in graph
         await loop.run_in_executor(
             self.executor,
             partial(
@@ -291,6 +288,10 @@ class ProfileRefinementJob(BaseJob):
                 last_msg_id=current_msg_id
             )
         )
+
+        with self.resolver._lock:
+            if user_id in self.resolver.entity_profiles:
+                self.resolver.entity_profiles[user_id]["embedding"] = embedding
         
         logger.info(f"Refined user profile for {ctx.user_name}")
         return True
@@ -317,10 +318,7 @@ class ProfileRefinementJob(BaseJob):
                 })
             
             system_reasoning = get_profile_extraction_prompt(ctx.user_name)
-            user_content = json.dumps({
-                "entities": llm_input,
-                "conversation": conversation_text
-            })
+            user_content = format_vp04_input(llm_input, conversation_text)
             
             reasoning = await self.llm.call_llm(system_reasoning, user_content)
             
@@ -672,5 +670,9 @@ class ProfileRefinementJob(BaseJob):
                     last_msg_id=update["last_msg_id"]
                 )
             )
+
+            with self.resolver._lock:
+                if update["id"] in self.resolver.entity_profiles:
+                    self.resolver.entity_profiles[update["id"]]["embedding"] = update["embedding"]
         
         logger.info(f"Wrote {len(updates)} profile updates to graph")

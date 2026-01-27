@@ -30,8 +30,6 @@ class NLPPipeline:
         self._nlp = spacy
         self._gliner = gliner
         self.emotion_classifier = emotion_classifier
-        
-        logger.info(f"NLPPipeline initialized | device={self.device} | spacy={self._nlp.meta['name']}")
        
     def _build_label_to_topics(self) -> Dict[str, List[str]]:
         """Invert topic_config: label -> [topics that include it]"""

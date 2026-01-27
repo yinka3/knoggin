@@ -38,6 +38,7 @@ class BatchResult:
     alias_updated_ids: Set[int] = field(default_factory=set)
     extraction_result: Optional[List[MessageConnections]] = None
     emotions: List[str] = field(default_factory=list)
+    message_embeddings: Dict[int, List[float]] = field(default_factory=dict)
     success: bool = True
     error: Optional[str] = None
 
@@ -105,6 +106,7 @@ class BatchProcessor:
 
             for i, msg in enumerate(messages):
                 msg['embedding'] = embeddings[i]
+                result.message_embeddings[msg['id']] = embeddings[i]
 
             if not mentions:
                 logger.info("No mentions found in batch, skipping LLM calls")
@@ -178,7 +180,7 @@ class BatchProcessor:
         max_amount: int = 50
     ) -> List[Dict]:
                 
-        candidate_scores = {}
+        candidate_scores: Dict[int, float] = {}
 
         for msg_id, name, _, _ in mentions:
             if not name:
@@ -189,7 +191,7 @@ class BatchProcessor:
                 score = 1.0 / (rank + 1) # higher ranks gets boosted score
                 if eid not in candidate_scores or score > candidate_scores[eid]:
                     candidate_scores[eid] = score
-                logger.debug(f"Mention '{name}' (MSG {msg_id}) candidate entity ID {eid} = score {score}")
+                logger.debug(f"Mention '{name}' (MSG {msg_id}) candidate entity ID {eid} = score {score:.3f}")
         
 
         sorted_ids = sorted(candidate_scores.keys(), key=lambda x: candidate_scores[x], reverse=True)

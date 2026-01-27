@@ -178,7 +178,7 @@ class LLMService:
                     ]
                 
                 if message.content:
-                    logger.info(f"[STELLA THOUGHT]: {message.content[:200]}")
+                    logger.info(f"[AGENT THOUGHT]: {message.content[:200]}")
                     print(f"\n=== SCRATCHPAD ===\n{message.content}\n==================\n")
                 
                 if xml_helper:

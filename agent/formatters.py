@@ -62,7 +62,7 @@ def format_retrieved_messages(messages: List[Dict]) -> str:
             except (ValueError, TypeError):
                 pass
             
-            role = "User" if msg['role'] == 'user' else "Stella"
+            role = "USER" if msg['role'] == 'user' else "AGENT"
             content = msg.get('content', '')
             
             marker = ">> " if msg.get('is_hit') else "   "

@@ -1,5 +1,5 @@
 import re
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from loguru import logger
 import numpy as np
 from rapidfuzz import fuzz
@@ -229,3 +229,124 @@ def parse_merge_score(reasoning: str) -> Optional[float]:
         
     return None
 
+def format_vp04_input(
+    entities: List[Dict],
+    conversation_text: str
+) -> str:
+    """
+    Format input for VP-04 (Profile Extraction).
+    
+    entities: List of {
+        "entity_name": str,
+        "entity_type": str,
+        "existing_facts": List[{"content", "recorded_at", "source_message"}],
+        "known_aliases": List[str]
+    }
+    """
+    lines = []
+    
+    lines.append("## Entities")
+    
+    for ent in entities:
+        name = ent.get("entity_name", "Unknown")
+        etype = ent.get("entity_type", "unknown")
+        aliases = ent.get("known_aliases", [])
+        facts = ent.get("existing_facts", [])
+        
+        lines.append(f"\n### {name} [{etype}]")
+        
+        if aliases:
+            lines.append(f"Aliases: {', '.join(aliases)}")
+        
+        if facts:
+            lines.append("Existing Facts:")
+            for f in facts:
+                content = f.get("content", "")
+                recorded = f.get("recorded_at", "")
+                source = f.get("source_message")
+                
+                if recorded:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+                        recorded_str = dt.strftime("%Y-%m-%d")
+                    except (ValueError, AttributeError):
+                        recorded_str = str(recorded)[:10]
+                else:
+                    recorded_str = "unknown"
+                
+                if source:
+                    lines.append(f"  - {content} (recorded: {recorded_str}, source: \"{source}\")")
+                else:
+                    lines.append(f"  - {content} (recorded: {recorded_str})")
+        else:
+            lines.append("Existing Facts: (none)")
+    
+    lines.append("\n## Prior Conversation For Context")
+    lines.append(conversation_text)
+    
+    return "\n".join(lines)
+
+
+def format_vp05_input(
+    entity_a: Dict,
+    entity_b: Dict
+) -> str:
+    """
+    Format input for VP-05 (Merge Judgment).
+    
+    entity: {
+        "canonical_name": str,
+        "type": str,
+        "aliases": List[str],
+        "facts": List[{"content", "recorded_at", "source_message"}]
+    }
+    """
+    def _format_entity(ent: Dict, label: str) -> List[str]:
+        lines = []
+        name = ent.get("canonical_name", "Unknown")
+        etype = ent.get("type", "unknown")
+        aliases = ent.get("aliases", [])
+        facts = ent.get("facts", [])
+        
+        lines.append(f"## {label}")
+        lines.append(f"Name: {name}")
+        lines.append(f"Type: {etype}")
+        
+        if aliases:
+            lines.append(f"Aliases: {', '.join(aliases)}")
+        else:
+            lines.append("Aliases: (none)")
+        
+        if facts:
+            lines.append("Facts:")
+            for f in facts:
+                content = f.get("content", "")
+                recorded = f.get("recorded_at", "")
+                source = f.get("source_message")
+                
+                if recorded:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+                        recorded_str = dt.strftime("%Y-%m-%d")
+                    except (ValueError, AttributeError):
+                        recorded_str = str(recorded)[:10]
+                else:
+                    recorded_str = "unknown"
+                
+                if source:
+                    lines.append(f"  - {content} (recorded: {recorded_str}, source: \"{source}\")")
+                else:
+                    lines.append(f"  - {content} (recorded: {recorded_str})")
+        else:
+            lines.append("Facts: (none)")
+        
+        return lines
+    
+    output = []
+    output.extend(_format_entity(entity_a, "Entity A"))
+    output.append("")
+    output.extend(_format_entity(entity_b, "Entity B"))
+    
+    return "\n".join(output)

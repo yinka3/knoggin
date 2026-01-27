@@ -10,7 +10,6 @@ from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from agent.orchestrator import run
-from main.topics_config import TopicConfig
 from db.store import MemGraphStore
 from main.context import Context
 from schema.dtypes import MessageData
@@ -214,7 +213,7 @@ async def wait_for_processing(context: Context, drain_timeout: int = 180):
     logger.info("Session jobs complete ✓")
 
 
-async def ask_stella(context: Context, question: str) -> str:
+async def ask_agent(context: Context, question: str) -> str:
     
     result = await run(
         user_query=question,
@@ -279,7 +278,7 @@ async def main():
             logger.info(f"[{i+1}/{len(questions)}] {q['test_case']} ({q['category']})")
             logger.info(f"Q: {q['natural_query']}")
             
-            response, tools_used = await ask_stella(context, q["natural_query"])
+            response, tools_used = await ask_agent(context, q["natural_query"])
             
             logger.info(f"Expected: {q['ground_truth']}")
             logger.info(f"Got: {response}")
