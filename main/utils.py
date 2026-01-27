@@ -11,6 +11,13 @@ from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
 
 from schema.dtypes import EntityItem, EntityPair, MessageConnections, ResolutionEntry
 
+
+PRONOUNS = {
+        "my", "his", "her", "their", "our", "your", "its",
+        "he", "she", "they", "we", "i", "me", "him", "them", "us",
+        "this", "that", "these", "those"
+    }
+
 def is_substring_match(name_a: str, name_b: str) -> bool:
     """Case-insensitive substring check."""
     a, b = name_a.lower(), name_b.lower()

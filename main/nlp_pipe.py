@@ -1,11 +1,10 @@
-import torch
 from main.prompts import ner_reasoning_prompt
 from main.service import LLMService
 from main.topics_config import TopicConfig
-from main.utils import format_vp01_input, is_covered, is_generic_phrase, parse_entities, validate_entity
+from main.utils import PRONOUNS, format_vp01_input, is_covered, is_generic_phrase, parse_entities, validate_entity
 from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
-from transformers import pipeline
+from transformers import Pipeline
 import spacy
 from spacy.matcher import PhraseMatcher
 from gliner import GLiNER
@@ -13,59 +12,27 @@ from gliner import GLiNER
 
 class NLPPipeline:
 
-    PRONOUNS = {
-        "my", "his", "her", "their", "our", "your", "its",
-        "he", "she", "they", "we", "i", "me", "him", "them", "us",
-        "this", "that", "these", "those"
-    }
-    
     def __init__(
         self,
         llm: LLMService,
         topic_config: TopicConfig,
         get_known_aliases: Callable[[], Dict[str, int]],
         get_profiles: Callable[[], Dict[int, dict]],
-        emotion_model: str = "j-hartmann/emotion-english-distilroberta-base",
-        device: Optional[str] = None
+        gliner: GLiNER,
+        spacy: spacy.Language,
+        emotion_classifier: Pipeline
     ):
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.llm_client = llm
         self.topic_config = topic_config
         self.get_known_aliases = get_known_aliases
         self.get_profiles = get_profiles
-        
-        # build inverse label map: label -> [topics]
         self._label_to_topics = self._build_label_to_topics()
-        
-        self._nlp = self._load_spacy()
-        self._gliner = self._load_gliner()
-        self._init_emotion(emotion_model)
+        self._nlp = spacy
+        self._gliner = gliner
+        self.emotion_classifier = emotion_classifier
         
         logger.info(f"NLPPipeline initialized | device={self.device} | spacy={self._nlp.meta['name']}")
        
-    
-    def _load_spacy(self) -> spacy.Language:
-        exclude = ["ner", "lemmatizer", "attribute_ruler"]
-        nlp = spacy.load("en_core_web_lg", exclude=exclude)
-        nlp.add_pipe("doc_cleaner")
-        logger.info("Loaded en_core_web_lg (CPU)")
-        return nlp
-    
-    def _load_gliner(self) -> GLiNER:
-        model = GLiNER.from_pretrained("urchade/gliner_large-v2.1")
-        model.to(self.device)
-        logger.info("Loaded GLiNER large-v2.1")
-        return model
-        
-    def _init_emotion(self, model_name: str):
-        device_id = 0 if torch.cuda.is_available() else -1
-        self.emotion_classifier = pipeline(
-            "text-classification",
-            model=model_name,
-            top_k=None,
-            device=device_id
-        )
-    
     def _build_label_to_topics(self) -> Dict[str, List[str]]:
         """Invert topic_config: label -> [topics that include it]"""
         label_to_topics = {}
@@ -130,7 +97,7 @@ class NLPPipeline:
             
             logger.debug(f"GLiNER: '{span}' | label={e['label']} | score={score:.3f}")
             
-            if span.lower() in self.PRONOUNS or span.split()[0].lower() in self.PRONOUNS:
+            if span.lower() in PRONOUNS or span.split()[0].lower() in PRONOUNS:
                 logger.debug(f"  -> Filtered (pronoun)")
                 continue
             

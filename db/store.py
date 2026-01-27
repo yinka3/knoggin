@@ -203,6 +203,11 @@ class MemGraphStore:
     def search_messages_vector(self, query_embedding: List[float], limit: int = 50) -> List[Tuple[int, float]]:
         return self._reader.search_messages_vector(query_embedding, limit)
     
+    def list_entities(self, limit: int = 20, offset: int = 0, topic: str = None, entity_type: str = None, search: str = None) -> Tuple[List[Dict], int]:
+        return self._reader.list_entities(limit, offset, topic, entity_type, search)
+    
+    def get_entity_by_id(self, entity_id: int):
+        return self._reader.get_entity_by_id(entity_id=entity_id)
 
     # ===== TOOL QUERY DELEGATIONS =====
 
@@ -227,4 +232,4 @@ class MemGraphStore:
     def get_mood_history(self, user_name: str, limit: int = 10) -> List[Dict]:
         return self._tools.get_mood_history(user_name, limit)
     
-
+    

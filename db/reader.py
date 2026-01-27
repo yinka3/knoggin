@@ -1,6 +1,6 @@
 from datetime import datetime
 from loguru import logger
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from neo4j import Driver
 
 from schema.dtypes import Fact
@@ -419,4 +419,89 @@ class GraphReader:
             logger.error(f"Hierarchy candidate query failed: {e}")
             return []
     
+    def list_entities(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        topic: str = None,
+        entity_type: str = None,
+        search: str = None
+    ) -> Tuple[List[Dict], int]:
+        """Paginated entity listing with optional filters."""
+        
+        where_clauses = []
+        params = {"limit": limit, "offset": offset}
+        
+        if entity_type:
+            where_clauses.append("e.type = $entity_type")
+            params["entity_type"] = entity_type
+        
+        if search:
+            where_clauses.append("toLower(e.canonical_name) CONTAINS toLower($search)")
+            params["search"] = search
+        
+        if topic:
+            where_clauses.append("t.name = $topic")
+            params["topic"] = topic
+        
+        topic_match = "MATCH (e)-[:BELONGS_TO]->(t:Topic)" if topic else "OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)"
+        where_str = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        
+        count_query = f"""
+        MATCH (e:Entity)
+        {topic_match}
+        {where_str}
+        RETURN count(e) AS total
+        """
+        
+        data_query = f"""
+        MATCH (e:Entity)
+        {topic_match}
+        {where_str}
+        WITH e, t
+        ORDER BY e.last_mentioned DESC
+        SKIP $offset LIMIT $limit
+        RETURN e.id AS id,
+            e.canonical_name AS canonical_name,
+            e.type AS type,
+            t.name AS topic,
+            e.last_mentioned AS last_mentioned
+        """
+        
+        try:
+            with self.driver.session() as session:
+                count_result = session.run(count_query, params).single()
+                total = count_result["total"] if count_result else 0
+                
+                if total == 0:
+                    return [], 0
+                
+                result = session.run(data_query, params)
+                entities = [dict(record) for record in result]
+                
+                return entities, total
+        except Exception as e:
+            logger.error(f"Failed to list entities: {e}")
+            return [], 0
     
+    def get_entity_by_id(self, entity_id: int) -> Optional[Dict]:
+        """Get single entity by ID with topic."""
+        query = """
+        MATCH (e:Entity {id: $entity_id})
+        OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
+        RETURN e.id AS id,
+            e.canonical_name AS canonical_name,
+            e.aliases AS aliases,
+            e.type AS type,
+            t.name AS topic,
+            e.last_mentioned AS last_mentioned,
+            e.last_updated AS last_updated
+        """
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"entity_id": entity_id}).single()
+                return dict(result) if result else None
+        except Exception as e:
+            logger.error(f"Failed to get entity {entity_id}: {e}")
+            return None

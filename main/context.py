@@ -12,22 +12,21 @@ from jobs.profile import ProfileRefinementJob
 from jobs.scheduler import Scheduler
 from jobs.merger import MergeDetectionJob
 from jobs.cleaner import EntityCleanupJob
-from config import get_config_value
+from shared.config import get_config_value
 from main.consumer import BatchConsumer
 from main.embedding import EmbeddingService
 from main.processor import BatchProcessor, BatchResult
 from main.service import LLMService
-from main.redisclient import AsyncRedisClient
 from typing import Dict, List
 from functools import partial
 from main.topics_config import TopicConfig
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
-from log.llm_trace import get_trace_logger
 import uuid
 
 from schema.dtypes import Fact, MessageConnections, MessageData
+from shared.resource import ResourceManager
 
 class Context:
 
@@ -50,14 +49,12 @@ class Context:
         self.consumer: BatchConsumer = None
         self.profile_job: BaseJob = None
         self.merge_job: BaseJob = None
-        self.trace_logger = get_trace_logger()
 
     @classmethod
     async def create(
         cls,
         user_name: str,
-        store: MemGraphStore,
-        cpu_executor: ThreadPoolExecutor,
+        resources: ResourceManager,
         topics_config: dict = None,
         session_id: str = None
     ) -> "Context":
@@ -67,32 +64,29 @@ class Context:
             topics_config = {"General": {"labels": [], "hierarchy": {}}}
         
 
-        redis_conn = AsyncRedisClient().get_client()
-        instance = cls(user_name, list(topics_config.keys()), redis_conn)
+        instance = cls(user_name, list(topics_config.keys()), resources.redis)
+    
+        instance.session_id = session_id
+        instance.store = resources.store
+        instance.executor = resources.executor
+        instance.llm = resources.llm_service
+        instance.redis_client = resources.redis
+        instance.embedding_service = resources.embedding
         
-
-        instance.session_id = session_id or str(uuid.uuid4())
-        instance.store = store
-        instance.executor = cpu_executor
-        instance.llm = LLMService(trace_logger=get_trace_logger())
-        
-
-        await redis_conn.hset(
+        await resources.redis.hset(
             f"session_config:{user_name}",
             instance.session_id,
             json.dumps(topics_config)
         )
-        instance.topic_config = await TopicConfig.load(redis_conn, user_name, instance.session_id)
-        await instance.topic_config.save(redis_conn, user_name, instance.session_id)
+        instance.topic_config = await TopicConfig.load(resources.redis, user_name, instance.session_id)
+        await instance.topic_config.save(resources.redis, user_name, instance.session_id)
         
-
         loop = asyncio.get_running_loop()
         max_id = await loop.run_in_executor(None, instance.store.get_max_entity_id)
-        current_redis = await redis_conn.get("global:next_ent_id")
+        current_redis = await resources.redis.get("global:next_ent_id")
         if not current_redis or int(current_redis) < max_id:
-            await redis_conn.set("global:next_ent_id", max_id)
+            await resources.redis.set("global:next_ent_id", max_id)
         
-        instance.embedding_service = EmbeddingService()
         instance.ent_resolver = EntityResolver(
             session_id=instance.session_id,
             store=instance.store,
@@ -100,25 +94,26 @@ class Context:
             hierarchy_config=instance.topic_config.hierarchy
         )
         
-
         await instance._get_or_create_user_entity(user_name)
         
-
         instance.nlp_pipe = await loop.run_in_executor(
             instance.executor,
             partial(
                 NLPPipeline,
                 llm=instance.llm,
                 topic_config=instance.topic_config,
-                get_known_aliases=instance.ent_resolver.get_known_aliases,
-                get_profiles=instance.ent_resolver.get_profiles
+                get_known_aliases=lambda: instance.ent_resolver._name_to_id,
+                get_profiles=lambda: instance.ent_resolver.entity_profiles,
+                gliner=resources.gliner,
+                spacy=resources.spacy,
+                emotion_classifier=resources.emotion_classifier
             )
         )
         
 
         instance.batch_processor = BatchProcessor(
             session_id=instance.session_id,
-            redis_client=redis_conn,
+            redis_client=resources.redis,
             llm=instance.llm,
             ent_resolver=instance.ent_resolver,
             nlp_pipe=instance.nlp_pipe,
@@ -129,7 +124,6 @@ class Context:
             get_next_ent_id=instance.get_next_ent_id
         )
         
-
         instance.consumer = BatchConsumer(
             user_name=user_name,
             store=instance.store,
@@ -140,7 +134,6 @@ class Context:
         )
         instance.consumer.start()
         
-
         instance.profile_job = ProfileRefinementJob(
             llm=instance.llm,
             resolver=instance.ent_resolver,
@@ -149,13 +142,14 @@ class Context:
             embedding_service=instance.embedding_service
         )
         instance.merge_job = MergeDetectionJob(
-            user_name=user_name, ent_resolver=instance.ent_resolver, 
-            store=instance.store, llm_client=instance.llm,
+            user_name=user_name,
+            ent_resolver=instance.ent_resolver, 
+            store=instance.store,
+            llm_client=instance.llm,
             topic_config=instance.topic_config,
             executor=instance.executor
         )
         
-
         instance.scheduler = Scheduler(user_name)
         instance.scheduler.register(DLQReplayJob())
         instance.scheduler.register(EntityCleanupJob(user_name, instance.store, instance.ent_resolver))
