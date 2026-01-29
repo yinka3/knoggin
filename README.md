@@ -90,6 +90,12 @@ Knoggin is licensed under [AGPL-3.0](./LICENSE).
 
 Knoggin uses [Memgraph](https://memgraph.com) as its graph database, licensed separately under the [Business Source License](https://memgraph.com/legal).
 
+## Security
+
+Knoggin is designed for local, single-user deployment. All services run on localhost.
+
+If you discover a security issue, do not open a public GitHub issue. Email adedewe.a@northeastern.edu with steps to reproduce. Allow 48 hours for initial response.
+
 ## Contributing
 
 Contributions welcome. Please open an issue first to discuss larger changes. Keep PRs focused.

@@ -13,7 +13,8 @@ from main.topics_config import TopicConfig
 class Tools:
     
     def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, 
-                 redis_client: redis.Redis, topic_config: TopicConfig = None):
+                 redis_client: redis.Redis, session_id: str, topic_config: TopicConfig = None):
+        self.session_id = session_id
         self.store = store
         self.resolver = ent_resolver
         self.user_name = user_name
@@ -72,9 +73,9 @@ class Tools:
 
     async def _get_surrounding_context(self, msg_id: str, forward: int = 3, target_total: int = 10) -> List[Dict]:
         """Get surrounding turns for context."""
-        sorted_key = f"recent_conversation:{self.user_name}"
-        conv_key = f"conversation:{self.user_name}"
-        lookup_key = f"lookup:msg_to_turn:{self.user_name}"
+        sorted_key = f"recent_conversation:{self.user_name}:{self.session_id}"
+        conv_key = f"conversation:{self.user_name}:{self.session_id}"
+        lookup_key = f"lookup:msg_to_turn:{self.user_name}:{self.session_id}"
         
         target_turn_id = msg_id
         if msg_id.startswith("msg_"):
@@ -226,7 +227,7 @@ class Tools:
         msg_keys = [msg_key for msg_key, _ in results]
         scores = {msg_key: score for msg_key, score in results}
         
-        lookup_key = f"lookup:msg_to_turn:{self.user_name}"
+        lookup_key = f"lookup:msg_to_turn:{self.user_name}:{self.session_id}"
         user_msg_keys = [k for k in msg_keys if k.startswith("msg_")]
         
         if user_msg_keys:
@@ -247,7 +248,7 @@ class Tools:
         ])
         
         content_key = f"message_content:{self.user_name}"
-        conv_key = f"conversation:{self.user_name}"
+        conv_key = f"conversation:{self.user_name}:{self.session_id}"
         
         assistant_msg_keys = [k for k in msg_keys if not k.startswith("msg_")]
         

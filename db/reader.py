@@ -462,10 +462,11 @@ class GraphReader:
         ORDER BY e.last_mentioned DESC
         SKIP $offset LIMIT $limit
         RETURN e.id AS id,
+            e.session_id AS session_id,
             e.canonical_name AS canonical_name,
             e.type AS type,
             t.name AS topic,
-            e.last_mentioned AS last_mentioned
+            e.last_mentioned / 1000 AS last_mentioned
         """
         
         try:
@@ -490,12 +491,13 @@ class GraphReader:
         MATCH (e:Entity {id: $entity_id})
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         RETURN e.id AS id,
+            e.session_id AS session_id,
             e.canonical_name AS canonical_name,
             e.aliases AS aliases,
             e.type AS type,
             t.name AS topic,
-            e.last_mentioned AS last_mentioned,
-            e.last_updated AS last_updated
+            e.last_mentioned / 1000 AS last_mentioned,
+            e.last_updated / 1000 AS last_updated
         """
         
         try:

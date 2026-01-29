@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 
 # Timestamp bounds (Unix seconds)
@@ -32,7 +32,7 @@ def _format_timestamp(ts) -> str:
             ts_normalized = _normalize_timestamp(ts)
             if ts_normalized is None:
                 return "unknown"
-            return datetime.fromtimestamp(ts_normalized).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(ts_normalized, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             
     except (ValueError, OSError, OverflowError):
         pass

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Dict, List
 import uuid
 
@@ -22,6 +23,7 @@ from schema.dtypes import ClarificationRequest, FinalResponse, ToolCall
 async def run_stream(
     user_query: str,
     user_name: str,
+    session_id: str,
     conversation_history: List[Dict],
     hot_topics: List[str],
     topic_config: TopicConfig,
@@ -29,8 +31,7 @@ async def run_stream(
     store,
     ent_resolver,
     redis_client: redis.Redis,
-    persona: str = "",
-    date: str = ""
+    persona: str = ""
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
     
@@ -51,14 +52,14 @@ async def run_stream(
             history=conversation_history
         )
 
-        tools = Tools(user_name, store, ent_resolver, redis_client, topic_config)
+        tools = Tools(user_name, store, ent_resolver, redis_client, session_id, topic_config)
 
         if hot_topics:
             yield {"event": "status", "data": {"message": "Loading context..."}}
             ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=False)
 
         last_result = None
-
+        current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         while ctx.state.attempt_count < ctx.config.max_attempts:
             ctx.state.attempt_count += 1
 
@@ -69,7 +70,7 @@ async def run_stream(
             if should_force:
                 ctx.state.last_error = "Final attempt. Respond now with accumulated evidence."
 
-            response = await call_agent(llm, ctx, user_name, last_result, persona, date)
+            response = await call_agent(llm, ctx, user_name, last_result, persona, current_time)
 
             if isinstance(response, FinalResponse):
                 yield {"event": "response", "data": {"content": response.content}}
@@ -81,6 +82,10 @@ async def run_stream(
 
             # Process tool calls
             tool_calls = [response] if isinstance(response, ToolCall) else response
+
+            if tool_calls and tool_calls[0].thinking:
+                yield {"event": "thinking", "data": {"content": tool_calls[0].thinking}}
+
             all_results = []
 
             for tc in tool_calls:

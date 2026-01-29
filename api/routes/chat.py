@@ -20,6 +20,7 @@ def get_app_state(request: Request) -> AppState:
 class ChatRequest(BaseModel):
     message: str
     hot_topics: Optional[List[str]] = None
+    timezone: Optional[str] = None
 
 
 @router.post("/{session_id}")
@@ -52,6 +53,7 @@ async def send_message(
             async for event in run_stream(
                 user_query=body.message,
                 user_name=state.user_name,
+                session_id=session_id,
                 conversation_history=formatted_history,
                 hot_topics=body.hot_topics or [],
                 topic_config=context.topic_config,

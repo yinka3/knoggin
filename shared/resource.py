@@ -44,9 +44,9 @@ class ResourceManager:
         instance.embedding = EmbeddingService(device=device)
 
         exclude = ["ner", "lemmatizer", "attribute_ruler"]
-        nlp = spacy.load("en_core_web_lg", exclude=exclude)
+        nlp = spacy.load("en_core_web_md", exclude=exclude)
         nlp.add_pipe("doc_cleaner")
-        logger.info("Loaded en_core_web_lg (CPU)")
+        logger.info("Loaded en_core_web_md (CPU)")
         instance.spacy = nlp
 
         model = GLiNER.from_pretrained("urchade/gliner_large-v2.1")

@@ -76,13 +76,13 @@ class ProfileRefinementJob(BaseJob):
     
     async def _get_conversation_context(self, ctx: JobContext, num_turns: int, user_ratio: float = 0.75, up_to_msg_id: int = None) -> List[Dict]:
         """Fetch recent conversation with both user and agent turns."""
-        sorted_key = f"recent_conversation:{ctx.user_name}"
-        conv_key = f"conversation:{ctx.user_name}"
+        sorted_key = f"recent_conversation:{ctx.user_name}:{ctx.session_id}"
+        conv_key = f"conversation:{ctx.user_name}:{ctx.session_id}"
         
         fetch_count = int(num_turns * 2)
         if up_to_msg_id:
             turn_key = await ctx.redis.hget(
-                f"lookup:msg_to_turn:{ctx.user_name}",
+                f"lookup:msg_to_turn:{ctx.user_name}:{ctx.session_id}",
                 f"msg_{up_to_msg_id}"
             )
             if turn_key:

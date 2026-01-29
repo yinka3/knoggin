@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
-CONFIG_FILE = CONFIG_DIR / "vestige.json"
+CONFIG_FILE = CONFIG_DIR / "knoggin.json"
 
-DEFAULT_REASONING_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_REASONING_MODEL = "google/gemini-2.5-flash"
 DEFAULT_AGENT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_TOPICS = ["General"]
 
@@ -26,7 +26,20 @@ def get_default_config() -> dict:
         "reasoning_model": DEFAULT_REASONING_MODEL,
         "agent_model": DEFAULT_AGENT_MODEL,
         "default_topics": {
-            "General": {"labels": [], "hierarchy": {}, "active": True}
+            "General": {
+                "active": True, 
+                "labels": [],
+                "hierarchy": {}, 
+                "aliases": [],
+                "label_aliases": {},
+            },
+            "Identity": {
+                "active": True,
+                "labels": ["person"],
+                "hierarchy": {},
+                "aliases": [],
+                "label_aliases": {}
+            }
         }
     }
 

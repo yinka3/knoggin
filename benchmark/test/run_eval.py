@@ -251,6 +251,7 @@ async def ask_agent(context: Context, question: str, question_date: str) -> Tupl
     result = await run(
         user_query=question,
         user_name=context.user_name,
+        session_id=SESSION_ID,
         conversation_history=[],
         hot_topics=[],
         topic_config=context.topic_config,

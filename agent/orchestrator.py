@@ -9,7 +9,7 @@ import redis
 from agent.formatters import format_entity_results, format_graph_results, format_retrieved_messages
 from agent.tools import Tools
 from main.service import LLMService
-from agent.system_prompt import get_benchmark_fallback_prompt, get_benchmark_prompt
+from agent.system_prompt import get_agent_prompt, get_fallback_summary_prompt
 from main.topics_config import TopicConfig
 from schema.dtypes import (
     ClarificationRequest,
@@ -49,7 +49,7 @@ async def call_agent(
     date: str = ""
 ) -> AgentResponse:
     
-    system_prompt = get_benchmark_prompt(user_name, date, persona)
+    system_prompt = get_agent_prompt(user_name, date, persona)
     user_message = build_user_message(ctx, last_result)
 
     response = await llm.call_llm_with_tools(
@@ -77,9 +77,9 @@ async def call_agent(
 
         if name == "request_clarification":
             return ClarificationRequest(question=args.get("question", ""))
-        return ToolCall(name=name, args=args)
+        return ToolCall(name=name, args=args, thinking=content if content else None)
 
-    return [ToolCall(name=tc["name"], args=json.loads(tc["arguments"])) for tc in tool_calls]
+    return [ToolCall(name=tc["name"], args=json.loads(tc["arguments"]), thinking=content if content else None) for tc in tool_calls]
 
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
@@ -196,6 +196,7 @@ async def _process_tool_calls(
 async def run(
     user_query: str,
     user_name: str,
+    session_id: str,
     conversation_history: List[Dict],
     hot_topics: List[str],
     topic_config: TopicConfig,
@@ -239,7 +240,7 @@ async def run(
         history=conversation_history
     )
 
-    tools = Tools(user_name, store, ent_resolver, redis_client, topic_config)
+    tools = Tools(user_name, store, ent_resolver, redis_client, session_id, topic_config)
 
     if hot_topics:
         ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=slim_hot_context)
@@ -298,7 +299,7 @@ async def run(
             evidence_ctx += f"Connections:\n{format_graph_results(ctx.evidence.graph)}\n\n"
         
         summary = await llm.call_llm(
-            system=get_benchmark_fallback_prompt(user_name),
+            system=get_fallback_summary_prompt(user_name),
             user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
         )
         

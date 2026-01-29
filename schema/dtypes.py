@@ -111,6 +111,7 @@ RunResult = Union[CompleteResult, ClarificationResult]
 class ToolCall:
     name: str
     args: Dict = field(default_factory=dict)
+    thinking: Optional[str] = None
 
 
 @dataclass 

@@ -236,7 +236,8 @@ class Context:
         ctx = JobContext(
             user_name=self.user_name,
             redis=self.redis_client,
-            idle_seconds=0
+            idle_seconds=0,
+            session_id=self.session_id
         )
 
         if await self.profile_job.should_run(ctx):
@@ -276,8 +277,8 @@ class Context:
         if user_msg_id is not None:
             payload["user_msg_id"] = user_msg_id
         
-        conv_key = f"conversation:{self.user_name}"
-        sorted_key = f"recent_conversation:{self.user_name}"
+        conv_key = f"conversation:{self.user_name}:{self.session_id}"
+        sorted_key = f"recent_conversation:{self.user_name}:{self.session_id}"
         
         await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
         await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
@@ -299,7 +300,7 @@ class Context:
         )
 
         await self.redis_client.hset(
-            f"lookup:msg_to_turn:{self.user_name}", 
+            f"lookup:msg_to_turn:{self.user_name}:{self.session_id}", 
             msg_key, 
             f"turn_{turn_id}"
         )
@@ -350,12 +351,12 @@ class Context:
     
     async def get_conversation_context(self, num_turns: int, up_to_msg_id: int = None) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
-        sorted_key = f"recent_conversation:{self.user_name}"
-        conv_key = f"conversation:{self.user_name}"
+        sorted_key = f"recent_conversation:{self.user_name}:{self.session_id}"
+        conv_key = f"conversation:{self.user_name}:{self.session_id}"
         
         if up_to_msg_id:
             turn_key = await self.redis_client.hget(
-                f"lookup:msg_to_turn:{self.user_name}", 
+                f"lookup:msg_to_turn:{self.user_name}:{self.session_id}", 
                 f"msg_{up_to_msg_id}"
             )
             if turn_key:

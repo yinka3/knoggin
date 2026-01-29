@@ -31,6 +31,24 @@ class AppState:
     async def create_session(self, topics_config: dict = None) -> Context:
         session_id = str(uuid.uuid4())
         
+        if topics_config is None:
+            topics_config = {
+                "General": {
+                    "active": True,
+                    "labels": [],
+                    "hierarchy": {},
+                    "aliases": [],
+                    "label_aliases": {}
+                },
+                "Identity": {
+                    "active": True,
+                    "labels": ["person"],
+                    "hierarchy": {},
+                    "aliases": [],
+                    "label_aliases": {}
+                }
+            }
+        
         context = await Context.create(
             user_name=self.user_name,
             resources=self.resources,
@@ -40,7 +58,7 @@ class AppState:
         
         metadata = {
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "topics_config": topics_config or {"General": {"labels": [], "hierarchy": {}}},
+            "topics_config": topics_config,
             "last_active": datetime.now(timezone.utc).isoformat()
         }
         

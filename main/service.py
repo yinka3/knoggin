@@ -126,7 +126,7 @@ class LLMService:
         model: Optional[str] = None,
         temperature: float = 0.0,
         max_retries: int = 3,
-        xml_helper: bool = False
+        xml_helper: bool = True
     ) -> Optional[Dict]:
         """Call with function tools. Returns parsed tool call."""
         model = model or self._agent_model
@@ -205,6 +205,7 @@ class LLMService:
                     if self._trace:
                         self._trace.error(f"[TOOLS SYNC] Failed: {e}")
                     return None
+    
     
     def _parse_xml_tool_calls(self, content: str) -> list:
         """Fallback parser for DeepSeek XML tool calls.(Or any model with xml tool calls)"""

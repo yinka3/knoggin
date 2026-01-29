@@ -13,6 +13,7 @@ class JobContext:
     redis: redis.Redis
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None
+    session_id: Optional[str] = None
 
 
 @dataclass 
