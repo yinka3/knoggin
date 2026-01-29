@@ -117,11 +117,13 @@ class ToolCall:
 @dataclass 
 class FinalResponse:
     content: str
+    usage: Optional[Dict] = None
 
 
 @dataclass
 class ClarificationRequest:
     question: str
+    usage: Optional[Dict] = None
 
 
 AgentResponse = Union[ToolCall, List[ToolCall], FinalResponse, ClarificationRequest]

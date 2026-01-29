@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import re
-from typing import Dict, List, Optional, TypeVar
+from typing import AsyncGenerator, Dict, List, Optional, TypeVar
 from openai import AsyncOpenAI
 from loguru import logger
 from pydantic import BaseModel
@@ -205,7 +205,104 @@ class LLMService:
                     if self._trace:
                         self._trace.error(f"[TOOLS SYNC] Failed: {e}")
                     return None
-    
+                
+    async def call_llm_with_tools_streaming(
+        self,
+        system: str,
+        user: str,
+        tools: List[Dict],
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        reasoning: str = "low"
+    ) -> AsyncGenerator[Dict, None]:
+        """
+        Streaming version of call_llm_with_tools.
+        Yields tokens for text, accumulates tool calls silently.
+        """
+        model = model or self._agent_model
+        
+        content = ""
+        tool_calls_by_index = {}
+        tool_calls_detected = False
+        usage = None
+        generation_id = None
+        try:
+            response = await self._client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user}
+                ],
+                tools=tools,
+                tool_choice="auto",
+                temperature=temperature,
+                stream=True,
+                stream_options={"include_usage": True},
+                extra_body={
+                    "provider": {
+                        "allow_fallbacks": True,
+                        "data_collection": "deny",
+                        # "zdr": True
+                    },
+                    "reasoning": {"effort": reasoning}
+                }
+            )
+             
+            async for chunk in response:
+                if chunk.id and not generation_id:
+                    generation_id = chunk.id
+                
+                if not chunk.choices:
+                    continue
+                    
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason
+                
+                # Handle content delta
+                if delta.content:
+                    content += delta.content
+                    if not tool_calls_detected:
+                        yield {"type": "token", "content": delta.content}
+                
+                # Handle tool call deltas
+                if delta.tool_calls:
+                    tool_calls_detected = True
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_by_index:
+                            tool_calls_by_index[idx] = {"name": "", "arguments": ""}
+                        if tc.function.name:
+                            tool_calls_by_index[idx]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            tool_calls_by_index[idx]["arguments"] += tc.function.arguments
+                
+                if hasattr(delta, 'reasoning_details') and delta.reasoning_details:
+                    for rd in delta.reasoning_details:
+                        if hasattr(rd, 'content') and rd.content:
+                            yield {"type": "thinking", "content": rd.content}
+                
+                # Handle finish
+                if finish_reason:
+                    if tool_calls_by_index:
+                        calls = [
+                            {"name": tc["name"], "arguments": tc["arguments"]}
+                            for tc in tool_calls_by_index.values()
+                        ]
+                        yield {"type": "tool_calls", "calls": calls, "content": content}
+
+            if generation_id and not usage:
+                import asyncio
+                for attempt in range(3):
+                    await asyncio.sleep(0.5)
+                    usage = await self._fetch_generation_stats(generation_id)
+                    if usage:
+                        break
+            
+            yield {"type": "done", "content": content, "usage": usage}
+                    
+        except Exception as e:
+            logger.error(f"Streaming call failed: {e}")
+            yield {"type": "error", "message": str(e)}
     
     def _parse_xml_tool_calls(self, content: str) -> list:
         """Fallback parser for DeepSeek XML tool calls.(Or any model with xml tool calls)"""
@@ -230,4 +327,28 @@ class LLMService:
             tools.append({"name": name, "arguments": json.dumps(args)})
         
         return tools
+    
+    async def _fetch_generation_stats(self, generation_id: str) -> Optional[Dict]:
+        """Fetch usage stats from OpenRouter generation endpoint"""
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"https://openrouter.ai/api/v1/generation?id={generation_id}",
+                    headers={"Authorization": f"Bearer {self._api_key}"}
+                )
+                logger.info(f"Generation API status: {resp.status_code}")
+                logger.info(f"Generation API response: {resp.text}")
+                
+                if resp.status_code == 200:
+                    data = resp.json().get("data", {})
+                    return {
+                        "prompt_tokens": data.get("tokens_prompt", 0),
+                        "completion_tokens": data.get("tokens_completion", 0),
+                        "total_tokens": data.get("tokens_prompt", 0) + data.get("tokens_completion", 0),
+                        "cost": data.get("total_cost", 0)
+                    }
+        except Exception as e:
+            logger.warning(f"Failed to fetch generation stats: {e}")
+        return None
     

@@ -10,6 +10,7 @@ import redis.asyncio as redis
 class JobContext:
     """Context passed to every job method."""
     user_name: str
+    session_id: str
     redis: redis.Redis
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None

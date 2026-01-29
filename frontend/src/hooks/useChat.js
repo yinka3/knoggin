@@ -5,17 +5,24 @@ export function useChat(sessionId) {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
   const [streaming, setStreaming] = useState(false)
+  const [streamingContent, setStreamingContent] = useState('')
   const [toolCalls, setToolCalls] = useState([])
   const [currentThinking, setCurrentThinking] = useState(null)
+  const [totalTokens, setTotalTokens] = useState(0)
+  
   const toolCallsRef = useRef([])
   const thinkingRef = useRef(null)
+  const streamingContentRef = useRef('')
 
   useEffect(() => {
     setMessages([])
     setToolCalls([])
     setCurrentThinking(null)
+    setStreamingContent('')
+    setTotalTokens(0)
     toolCallsRef.current = []
     thinkingRef.current = null
+    streamingContentRef.current = ''
   }, [sessionId])
 
   const loadHistory = useCallback(async () => {
@@ -43,8 +50,10 @@ export function useChat(sessionId) {
     setStreaming(true)
     setToolCalls([])
     setCurrentThinking(null)
+    setStreamingContent('')
     toolCallsRef.current = []
     thinkingRef.current = null
+    streamingContentRef.current = ''
 
     try {
       await sendMessage(sessionId, content, [], (eventType, data) => {
@@ -83,23 +92,42 @@ export function useChat(sessionId) {
             setToolCalls([...toolCallsRef.current])
             break
 
-          case 'response':
+          case 'token':
+            streamingContentRef.current += data.content
+            setStreamingContent(streamingContentRef.current)
+            break
+
+          case 'response': {
+            console.log('Usage data:', data.usage)
             setMessages((prev) => [...prev, {
               role: 'assistant',
               content: data.content,
               timestamp: new Date().toISOString(),
-              toolCalls: toolCallsRef.current.length > 0 ? [...toolCallsRef.current] : null
+              toolCalls: toolCallsRef.current.length > 0 ? [...toolCallsRef.current] : null,
+              usage: data.usage
             }])
+            setStreamingContent('')
+            streamingContentRef.current = ''
+            const tokens = (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0)
+            setTotalTokens(prev => prev + tokens)
             break
+          }
 
-          case 'clarification':
+          case 'clarification': {
             setMessages((prev) => [...prev, {
               role: 'assistant',
               content: data.question,
               timestamp: new Date().toISOString(),
-              toolCalls: toolCallsRef.current.length > 0 ? [...toolCallsRef.current] : null
+              toolCalls: toolCallsRef.current.length > 0 ? [...toolCallsRef.current] : null,
+              usage: data.usage,
+              isClarification: true
             }])
+            setStreamingContent('')
+            streamingContentRef.current = ''
+            const tokens = (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0)
+            setTotalTokens(prev => prev + tokens)
             break
+          }
 
           case 'error':
             console.error('Stream error:', data.message)
@@ -108,6 +136,8 @@ export function useChat(sessionId) {
               content: `Error: ${data.message}`,
               timestamp: new Date().toISOString()
             }])
+            setStreamingContent('')
+            streamingContentRef.current = ''
             break
 
           case 'status':
@@ -125,6 +155,8 @@ export function useChat(sessionId) {
       setStreaming(false)
       setToolCalls([])
       setCurrentThinking(null)
+      setStreamingContent('')
+      streamingContentRef.current = ''
     }
   }, [sessionId])
 
@@ -132,8 +164,10 @@ export function useChat(sessionId) {
     messages,
     loading,
     streaming,
+    streamingContent,
     toolCalls,
     currentThinking,
+    totalTokens,
     loadHistory,
     send
   }

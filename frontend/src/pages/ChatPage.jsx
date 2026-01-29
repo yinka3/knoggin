@@ -8,12 +8,23 @@ import { Skeleton } from '@/components/ui/skeleton'
 import InputBar from '../components/chat/InputBar'
 import MessageList from '../components/chat/MessageList'
 import TopicsDrawer from '../components/chat/TopicsDrawer'
+import TokenCounter from '../components/chat/TokenCounter'
 
 export default function ChatPage() {
   const { sessionId } = useParams()
   const { createSession, setCurrentSessionId } = useSession()
   const [showSkeleton, setShowSkeleton] = useState(false)
-  const { messages, loading, streaming, toolCalls, currentThinking, loadHistory, send } = useChat(sessionId)
+  const { 
+    messages, 
+    loading, 
+    streaming, 
+    streamingContent,
+    toolCalls, 
+    currentThinking, 
+    totalTokens,
+    loadHistory, 
+    send 
+  } = useChat(sessionId)
 
   useEffect(() => {
     if (loading) {
@@ -38,7 +49,10 @@ export default function ChatPage() {
           <span className="text-xs text-muted-foreground font-mono">
             {sessionId.slice(0, 8)}...
           </span>
-          <TopicsDrawer sessionId={sessionId} />
+          <div className="flex items-center gap-4">
+            <TokenCounter value={totalTokens} />
+            <TopicsDrawer sessionId={sessionId} />
+          </div>
         </div>
       )}
 
@@ -46,20 +60,21 @@ export default function ChatPage() {
       <div className="flex-1 overflow-y-auto p-4">
         {sessionId ? (
           loading && showSkeleton ? (
-              <div className="space-y-4">
-                <Skeleton className="h-12 w-3/4" />
-                <Skeleton className="h-12 w-1/2" />
-                <Skeleton className="h-12 w-2/3" />
-              </div>
-            ) : loading ? null : (
-              <MessageList 
-                messages={messages} 
-                streaming={streaming} 
-                currentToolCalls={toolCalls}
-                currentThinking={currentThinking}
-              />
-            )
-          ) : (
+            <div className="space-y-4">
+              <Skeleton className="h-12 w-3/4" />
+              <Skeleton className="h-12 w-1/2" />
+              <Skeleton className="h-12 w-2/3" />
+            </div>
+          ) : loading ? null : (
+            <MessageList 
+              messages={messages} 
+              streaming={streaming}
+              streamingContent={streamingContent}
+              currentToolCalls={toolCalls}
+              currentThinking={currentThinking}
+            />
+          )
+        ) : (
           <div>
             <p className="mb-2 text-muted-foreground">No session selected</p>
             <Button
