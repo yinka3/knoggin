@@ -26,15 +26,15 @@ const DEFAULT_CONFIG = {
     labels: [],
     hierarchy: {},
     aliases: [],
-    label_aliases: {}
+    label_aliases: {},
   },
   Identity: {
     active: true,
     labels: ['person'],
     hierarchy: {},
     aliases: [],
-    label_aliases: {}
-  }
+    label_aliases: {},
+  },
 }
 
 export default function SessionConfigModal({ open, onOpenChange, sessions, onCreateSession }) {
@@ -61,10 +61,10 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
 
   async function handleGenerate() {
     if (!description.trim()) return
-    
+
     setGenerating(true)
     setError(null)
-    
+
     try {
       // TODO: Call API endpoint
       // const res = await fetch('/topics/generate', {
@@ -74,12 +74,18 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
       // })
       // const data = await res.json()
       // setGeneratedConfig(data.config)
-      
+
       // Placeholder for now
       await new Promise(resolve => setTimeout(resolve, 1500))
       setGeneratedConfig({
         General: { active: true, labels: [], hierarchy: {}, aliases: [], label_aliases: {} },
-        'Job Search': { active: true, labels: ['Company', 'Role', 'Contact', 'Interview'], hierarchy: {}, aliases: ['jobs', 'career'], label_aliases: {} }
+        'Job Search': {
+          active: true,
+          labels: ['Company', 'Role', 'Contact', 'Interview'],
+          hierarchy: {},
+          aliases: ['jobs', 'career'],
+          label_aliases: {},
+        },
       })
     } catch (err) {
       setError('Failed to generate config. Please try again.')
@@ -92,16 +98,16 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
     if (mode === 'defaults') {
       return DEFAULT_CONFIG
     }
-    
+
     if (mode === 'copy' && selectedSessionId) {
       const session = sessions.find(s => s.session_id === selectedSessionId)
       return session?.topics_config || DEFAULT_CONFIG
     }
-    
+
     if (mode === 'generate' && generatedConfig) {
       return generatedConfig
     }
-    
+
     return null
   }
 
@@ -113,9 +119,9 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
     }
   }
 
-  const canCreate = 
-    mode === 'defaults' || 
-    (mode === 'copy' && selectedSessionId) || 
+  const canCreate =
+    mode === 'defaults' ||
+    (mode === 'copy' && selectedSessionId) ||
     (mode === 'generate' && generatedConfig)
 
   return (
@@ -130,9 +136,11 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
 
         <RadioGroup value={mode} onValueChange={setMode} className="space-y-3 py-4">
           {/* Option 1: Defaults */}
-          <div 
+          <div
             className={`flex items-start space-x-3 rounded-lg border p-4 cursor-pointer transition-colors ${
-              mode === 'defaults' ? 'border-accent bg-muted/50' : 'border-border hover:border-muted-foreground'
+              mode === 'defaults'
+                ? 'border-accent bg-muted/50'
+                : 'border-border hover:border-muted-foreground'
             }`}
             onClick={() => setMode('defaults')}
           >
@@ -141,16 +149,16 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
               <Label htmlFor="defaults" className="text-foreground cursor-pointer">
                 Start with defaults
               </Label>
-              <p className="text-sm text-muted-foreground mt-1">
-                General + Identity topics
-              </p>
+              <p className="text-sm text-muted-foreground mt-1">General + Identity topics</p>
             </div>
           </div>
 
           {/* Option 2: Copy from session */}
-          <div 
+          <div
             className={`flex items-start space-x-3 rounded-lg border p-4 cursor-pointer transition-colors ${
-              mode === 'copy' ? 'border-accent bg-muted/50' : 'border-border hover:border-muted-foreground'
+              mode === 'copy'
+                ? 'border-accent bg-muted/50'
+                : 'border-border hover:border-muted-foreground'
             }`}
             onClick={() => setMode('copy')}
           >
@@ -177,29 +185,34 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
           </div>
 
           {/* Option 3: Generate */}
-          <div 
+          <div
             className={`flex items-start space-x-3 rounded-lg border p-4 cursor-pointer transition-colors ${
-              mode === 'generate' ? 'border-accent bg-muted/50' : 'border-border hover:border-muted-foreground'
+              mode === 'generate'
+                ? 'border-accent bg-muted/50'
+                : 'border-border hover:border-muted-foreground'
             }`}
             onClick={() => setMode('generate')}
           >
             <RadioGroupItem value="generate" id="generate" className="mt-1" />
             <div className="flex-1 space-y-3">
-              <Label htmlFor="generate" className="text-foreground cursor-pointer flex items-center gap-2">
+              <Label
+                htmlFor="generate"
+                className="text-foreground cursor-pointer flex items-center gap-2"
+              >
                 Generate from description
                 <Sparkles size={14} className="text-accent" />
               </Label>
-              
+
               {mode === 'generate' && (
                 <>
                   <textarea
                     value={description}
-                    onChange={(e) => setDescription(e.target.value)}
+                    onChange={e => setDescription(e.target.value)}
                     placeholder="Describe what you want to track... e.g. 'Track my job search - companies, interviews, contacts, offers'"
                     rows={3}
                     className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-accent"
                   />
-                  
+
                   <Button
                     variant="outline"
                     size="sm"
@@ -217,9 +230,7 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
                     )}
                   </Button>
 
-                  {error && (
-                    <p className="text-sm text-destructive">{error}</p>
-                  )}
+                  {error && <p className="text-sm text-destructive">{error}</p>}
 
                   {generatedConfig && (
                     <div className="rounded-lg bg-muted/80 border border-accent/20 p-3 space-y-2">

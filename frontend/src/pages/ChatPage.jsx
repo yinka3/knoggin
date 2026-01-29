@@ -14,16 +14,16 @@ export default function ChatPage() {
   const { sessionId } = useParams()
   const { createSession, setCurrentSessionId } = useSession()
   const [showSkeleton, setShowSkeleton] = useState(false)
-  const { 
-    messages, 
-    loading, 
-    streaming, 
+  const {
+    messages,
+    loading,
+    streaming,
     streamingContent,
-    toolCalls, 
-    currentThinking, 
+    toolCalls,
+    currentThinking,
     totalTokens,
-    loadHistory, 
-    send 
+    loadHistory,
+    send,
   } = useChat(sessionId)
 
   useEffect(() => {
@@ -66,8 +66,8 @@ export default function ChatPage() {
               <Skeleton className="h-12 w-2/3" />
             </div>
           ) : loading ? null : (
-            <MessageList 
-              messages={messages} 
+            <MessageList
+              messages={messages}
               streaming={streaming}
               streamingContent={streamingContent}
               currentToolCalls={toolCalls}
@@ -89,9 +89,7 @@ export default function ChatPage() {
       </div>
 
       {/* Input */}
-      {sessionId && (
-        <InputBar onSend={send} disabled={loading || streaming} />
-      )}
+      {sessionId && <InputBar onSend={send} disabled={loading || streaming} />}
     </div>
   )
 }

@@ -1,4 +1,3 @@
-
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -52,14 +51,11 @@ export default function MarkdownRenderer({ content }) {
 
           // Inline code
           return (
-            <code 
-              className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono" 
-              {...props}
-            >
+            <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
               {children}
             </code>
           )
-        }
+        },
       }}
     >
       {content}

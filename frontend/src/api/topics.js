@@ -10,7 +10,7 @@ export async function createTopic(sessionId, data) {
   const res = await fetch(`${API_BASE}/topics/${sessionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
+    body: JSON.stringify(data),
   })
   if (!res.ok) {
     const err = await res.json()
@@ -23,7 +23,7 @@ export async function updateTopic(sessionId, topicName, data) {
   const res = await fetch(`${API_BASE}/topics/${sessionId}/${encodeURIComponent(topicName)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
+    body: JSON.stringify(data),
   })
   if (!res.ok) {
     const err = await res.json()
@@ -33,9 +33,12 @@ export async function updateTopic(sessionId, topicName, data) {
 }
 
 export async function deleteTopic(sessionId, topicName) {
-  const res = await fetch(`${API_BASE}/topics/${sessionId}/${encodeURIComponent(topicName)}?confirm=true`, {
-    method: 'DELETE'
-  })
+  const res = await fetch(
+    `${API_BASE}/topics/${sessionId}/${encodeURIComponent(topicName)}?confirm=true`,
+    {
+      method: 'DELETE',
+    }
+  )
   if (!res.ok) {
     const err = await res.json()
     throw new Error(err.detail || 'Failed to delete topic')

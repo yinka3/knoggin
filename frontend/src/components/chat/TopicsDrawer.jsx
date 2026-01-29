@@ -37,13 +37,13 @@ export default function TopicsDrawer({ sessionId }) {
   const [activeTopics, setActiveTopics] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  
+
   // Edit dialog state
   const [editOpen, setEditOpen] = useState(false)
   const [editTopic, setEditTopic] = useState({ name: '', labels: '', aliases: '', active: true })
   const [isNew, setIsNew] = useState(false)
   const [saving, setSaving] = useState(false)
-  
+
   // Delete dialog state
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState(null)
@@ -70,7 +70,14 @@ export default function TopicsDrawer({ sessionId }) {
   }, [open, sessionId])
 
   function openNewTopic() {
-    setEditTopic({ name: '', labels: '', aliases: '', hierarchy: '', labelAliases: '', active: true })
+    setEditTopic({
+      name: '',
+      labels: '',
+      aliases: '',
+      hierarchy: '',
+      labelAliases: '',
+      active: true,
+    })
     setIsNew(true)
     setEditOpen(true)
   }
@@ -81,13 +88,15 @@ export default function TopicsDrawer({ sessionId }) {
       name,
       labels: config.labels?.join(', ') || '',
       aliases: config.aliases?.join(', ') || '',
-      hierarchy: Object.keys(config.hierarchy || {}).length > 0 
-        ? JSON.stringify(config.hierarchy, null, 2) 
-        : '',
-      labelAliases: Object.keys(config.label_aliases || {}).length > 0 
-        ? JSON.stringify(config.label_aliases, null, 2) 
-        : '',
-      active: config.active !== false
+      hierarchy:
+        Object.keys(config.hierarchy || {}).length > 0
+          ? JSON.stringify(config.hierarchy, null, 2)
+          : '',
+      labelAliases:
+        Object.keys(config.label_aliases || {}).length > 0
+          ? JSON.stringify(config.label_aliases, null, 2)
+          : '',
+      active: config.active !== false,
     })
     setIsNew(false)
     setEditOpen(true)
@@ -98,7 +107,7 @@ export default function TopicsDrawer({ sessionId }) {
     try {
       let hierarchyObj = {}
       let labelAliasesObj = {}
-      
+
       try {
         if (editTopic.hierarchy.trim()) {
           hierarchyObj = JSON.parse(editTopic.hierarchy)
@@ -108,7 +117,7 @@ export default function TopicsDrawer({ sessionId }) {
         setSaving(false)
         return
       }
-      
+
       try {
         if (editTopic.labelAliases.trim()) {
           labelAliasesObj = JSON.parse(editTopic.labelAliases)
@@ -122,19 +131,39 @@ export default function TopicsDrawer({ sessionId }) {
       if (isNew) {
         await createTopic(sessionId, {
           name: editTopic.name.trim(),
-          labels: editTopic.labels ? editTopic.labels.split(',').map(s => s.trim()).filter(Boolean) : [],
-          aliases: editTopic.aliases ? editTopic.aliases.split(',').map(s => s.trim()).filter(Boolean) : [],
+          labels: editTopic.labels
+            ? editTopic.labels
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean)
+            : [],
+          aliases: editTopic.aliases
+            ? editTopic.aliases
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean)
+            : [],
           hierarchy: hierarchyObj,
           label_aliases: labelAliasesObj,
-          active: editTopic.active
+          active: editTopic.active,
         })
       } else {
         await updateTopic(sessionId, editTopic.name, {
-          labels: editTopic.labels ? editTopic.labels.split(',').map(s => s.trim()).filter(Boolean) : [],
-          aliases: editTopic.aliases ? editTopic.aliases.split(',').map(s => s.trim()).filter(Boolean) : [],
+          labels: editTopic.labels
+            ? editTopic.labels
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean)
+            : [],
+          aliases: editTopic.aliases
+            ? editTopic.aliases
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean)
+            : [],
           hierarchy: hierarchyObj,
           label_aliases: labelAliasesObj,
-          active: editTopic.active
+          active: editTopic.active,
         })
       }
       setEditOpen(false)
@@ -188,10 +217,10 @@ export default function TopicsDrawer({ sessionId }) {
 
           {!loading && (
             <div className="mt-6 space-y-1">
-              {topicNames.map((name) => {
+              {topicNames.map(name => {
                 const config = topics[name]
                 const isActive = config.active !== false
-                
+
                 return (
                   <button
                     key={name}
@@ -200,7 +229,9 @@ export default function TopicsDrawer({ sessionId }) {
                       isActive ? 'text-foreground' : 'text-muted-foreground'
                     }`}
                   >
-                    <span className={`w-2 h-2 rounded-full ${isActive ? 'bg-accent' : 'bg-muted-foreground/30'}`} />
+                    <span
+                      className={`w-2 h-2 rounded-full ${isActive ? 'bg-accent' : 'bg-muted-foreground/30'}`}
+                    />
                     <span>{name}</span>
                   </button>
                 )
@@ -229,21 +260,23 @@ export default function TopicsDrawer({ sessionId }) {
               {isNew ? 'Create a new topic' : 'Edit topic configuration'}
             </DialogDescription>
           </DialogHeader>
-          
+
           <div className="space-y-4 py-4">
             {isNew && (
               <div className="space-y-2">
-                <Label htmlFor="name" className="text-muted-foreground">Name</Label>
+                <Label htmlFor="name" className="text-muted-foreground">
+                  Name
+                </Label>
                 <Input
                   id="name"
                   value={editTopic.name}
-                  onChange={(e) => setEditTopic({ ...editTopic, name: e.target.value })}
+                  onChange={e => setEditTopic({ ...editTopic, name: e.target.value })}
                   placeholder="Work"
                   className="bg-muted border-border"
                 />
               </div>
             )}
-            
+
             <div className="space-y-2">
               <Label htmlFor="labels" className="text-muted-foreground">
                 Labels <span className="text-xs">(comma-separated)</span>
@@ -251,12 +284,12 @@ export default function TopicsDrawer({ sessionId }) {
               <Input
                 id="labels"
                 value={editTopic.labels}
-                onChange={(e) => setEditTopic({ ...editTopic, labels: e.target.value })}
+                onChange={e => setEditTopic({ ...editTopic, labels: e.target.value })}
                 placeholder="Company, Project, Person"
                 className="bg-muted border-border"
               />
             </div>
-            
+
             <div className="space-y-2">
               <Label htmlFor="aliases" className="text-muted-foreground">
                 Aliases <span className="text-xs">(comma-separated)</span>
@@ -264,7 +297,7 @@ export default function TopicsDrawer({ sessionId }) {
               <Input
                 id="aliases"
                 value={editTopic.aliases}
-                onChange={(e) => setEditTopic({ ...editTopic, aliases: e.target.value })}
+                onChange={e => setEditTopic({ ...editTopic, aliases: e.target.value })}
                 placeholder="job, office"
                 className="bg-muted border-border"
               />
@@ -277,7 +310,7 @@ export default function TopicsDrawer({ sessionId }) {
               <textarea
                 id="hierarchy"
                 value={editTopic.hierarchy}
-                onChange={(e) => setEditTopic({ ...editTopic, hierarchy: e.target.value })}
+                onChange={e => setEditTopic({ ...editTopic, hierarchy: e.target.value })}
                 placeholder='{"parent": "child"}'
                 rows={2}
                 className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-accent font-mono"
@@ -291,24 +324,26 @@ export default function TopicsDrawer({ sessionId }) {
               <textarea
                 id="labelAliases"
                 value={editTopic.labelAliases}
-                onChange={(e) => setEditTopic({ ...editTopic, labelAliases: e.target.value })}
+                onChange={e => setEditTopic({ ...editTopic, labelAliases: e.target.value })}
                 placeholder='{"OldLabel": "NewLabel"}'
                 rows={2}
                 className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-accent font-mono"
               />
             </div>
-            
+
             <div className="flex items-center justify-between py-2">
-              <Label htmlFor="active" className="text-muted-foreground">Active</Label>
+              <Label htmlFor="active" className="text-muted-foreground">
+                Active
+              </Label>
               <Switch
                 id="active"
                 checked={editTopic.active}
-                onCheckedChange={(checked) => setEditTopic({ ...editTopic, active: checked })}
+                onCheckedChange={checked => setEditTopic({ ...editTopic, active: checked })}
                 disabled={editTopic.name === 'General'}
               />
             </div>
           </div>
-          
+
           <div className="flex items-center justify-between">
             {!isNew && editTopic.name !== 'General' && (
               <Button
@@ -337,13 +372,18 @@ export default function TopicsDrawer({ sessionId }) {
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent className="bg-background border-border">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-foreground">Delete "{deleteTarget}"?</AlertDialogTitle>
+            <AlertDialogTitle className="text-foreground">
+              Delete "{deleteTarget}"?
+            </AlertDialogTitle>
             <AlertDialogDescription className="text-muted-foreground">
-              This will remove the topic configuration. Entities tagged with this topic will become uncategorized.
+              This will remove the topic configuration. Entities tagged with this topic will become
+              uncategorized.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="border-border text-muted-foreground">Cancel</AlertDialogCancel>
+            <AlertDialogCancel className="border-border text-muted-foreground">
+              Cancel
+            </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDelete}
               className="bg-destructive hover:bg-destructive/90 text-white"

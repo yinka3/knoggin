@@ -57,7 +57,7 @@ export function SessionProvider({ children }) {
     loading,
     createSession: openCreateSession,
     selectSession,
-    loadSessions
+    loadSessions,
   }
 
   return (

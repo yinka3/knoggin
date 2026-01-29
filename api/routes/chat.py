@@ -21,6 +21,7 @@ class ChatRequest(BaseModel):
     message: str
     hot_topics: Optional[List[str]] = None
     timezone: Optional[str] = None
+    model: Optional[str] = None
 
 
 @router.post("/{session_id}")
@@ -49,7 +50,7 @@ async def send_message(
                 {"role": turn["role"], "content": turn["content"], "timestamp": turn["timestamp"]}
                 for turn in history
             ]
-            
+            effective_model = body.model or context.model
             async for event in run_stream(
                 user_query=body.message,
                 user_name=state.user_name,
@@ -60,7 +61,8 @@ async def send_message(
                 llm=context.llm,
                 store=context.store,
                 ent_resolver=context.ent_resolver,
-                redis_client=state.resources.redis
+                redis_client=state.resources.redis,
+                model=effective_model
             ):
                 if event["event"] == "response":
                     final_response = event["data"]["content"]

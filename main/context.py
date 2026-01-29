@@ -18,7 +18,7 @@ from main.consumer import BatchConsumer
 from main.embedding import EmbeddingService
 from main.processor import BatchProcessor, BatchResult
 from main.service import LLMService
-from typing import Dict, List
+from typing import Dict, List, Optional
 from functools import partial
 from main.topics_config import TopicConfig
 from main.nlp_pipe import NLPPipeline
@@ -37,6 +37,7 @@ class Context:
         self.active_topics: List[str] = topics
         self.scheduler: Scheduler = None
         self.redis_client: redis.Redis = redis_client
+        self.model: Optional[str] = None
         self.llm: LLMService = None
         
         self.store: MemGraphStore = None
@@ -58,7 +59,8 @@ class Context:
         user_name: str,
         resources: ResourceManager,
         topics_config: dict = None,
-        session_id: str = None
+        session_id: str = None,
+        model: str = None
     ) -> "Context":
         
 
@@ -72,6 +74,7 @@ class Context:
         instance.store = resources.store
         instance.executor = resources.executor
         instance.llm = resources.llm_service
+        instance.model = model
         instance.redis_client = resources.redis
         instance.embedding_service = resources.embedding
         

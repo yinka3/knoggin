@@ -27,7 +27,8 @@ async def call_agent_streaming(
     user_name: str,
     last_result: Optional[Dict] = None,
     persona: str = "",
-    date: str = ""
+    date: str = "",
+    model: str = None
 ) -> AsyncGenerator[Union[Dict, ToolCall, List[ToolCall], ClarificationRequest, FinalResponse], None]:
     """
     Streaming version of call_agent.
@@ -43,7 +44,8 @@ async def call_agent_streaming(
     async for chunk in llm.call_llm_with_tools_streaming(
         system=system_prompt,
         user=user_message,
-        tools=TOOL_SCHEMAS
+        tools=TOOL_SCHEMAS,
+        model=model
     ):
         chunk_type = chunk.get("type")
         
@@ -107,7 +109,8 @@ async def run_stream(
     store,
     ent_resolver,
     redis_client: redis.Redis,
-    persona: str = ""
+    persona: str = "",
+    model: str = None
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
     
@@ -151,7 +154,7 @@ async def run_stream(
             # Collect tool calls while streaming tokens
             pending_tool_calls = []
             
-            async for chunk in call_agent_streaming(llm, ctx, user_name, last_result, persona, current_time):
+            async for chunk in call_agent_streaming(llm, ctx, user_name, last_result, persona, current_time, model):
                 
                 # Token - pass through to frontend
                 if isinstance(chunk, dict) and chunk.get("type") == "token":

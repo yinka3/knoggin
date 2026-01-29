@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -19,12 +20,10 @@ async def list_profiles(
     state: AppState = Depends(get_app_state)
 ):
     store: MemGraphStore = state.resources.store
-    entities, total = store.list_entities(
-        limit=limit,
-        offset=offset,
-        topic=topic,
-        entity_type=type,
-        search=q
+    loop = asyncio.get_running_loop()
+    entities, total = await loop.run_in_executor(
+        None,
+        lambda: store.list_entities(limit=limit, offset=offset, topic=topic, entity_type=type, search=q)
     )
     
     return {
@@ -40,21 +39,35 @@ async def get_profile(
     state: AppState = Depends(get_app_state)
 ):
     store: MemGraphStore = state.resources.store
+    loop = asyncio.get_running_loop()
     
-    entity = store.get_entity_by_id(entity_id)
+    entity = await loop.run_in_executor(
+        None,
+        lambda: store.get_entity_by_id(entity_id)
+    )
+    
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     
-    facts = store.get_facts_for_entity(entity_id, active_only=True)
+    facts = await loop.run_in_executor(
+        None,
+        lambda: store.get_facts_for_entity(entity_id, active_only=True)
+    )
     entity["facts"] = [
         {"content": f.content, "valid_at": f.valid_at.isoformat() if f.valid_at else None}
         for f in facts
     ]
     
-    entity["connections"] = store.get_neighbor_entities(entity_id, limit=20)
+    entity["connections"] = await loop.run_in_executor(
+        None,
+        lambda: store.get_neighbor_entities(entity_id, limit=20)
+    )
     
-    parents = store.get_parent_entities(entity_id)
-    children = store.get_child_entities(entity_id)
+    parents, children = await asyncio.gather(
+        loop.run_in_executor(None, lambda: store.get_parent_entities(entity_id)),
+        loop.run_in_executor(None, lambda: store.get_child_entities(entity_id))
+    )
+    
     entity["hierarchy"] = {
         "parent": parents[0]["canonical_name"] if parents else None,
         "children": [c["canonical_name"] for c in children]

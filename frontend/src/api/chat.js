@@ -6,16 +6,15 @@ export async function getHistory(sessionId, limit = 40) {
   return res.json()
 }
 
-
 export async function sendMessage(sessionId, message, hotTopics = [], onEvent) {
   const res = await fetch(`${API_BASE}/chat/${sessionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 
-      message, 
+    body: JSON.stringify({
+      message,
       hot_topics: hotTopics,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-    })
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
   })
 
   if (!res.ok) {
@@ -31,7 +30,7 @@ export async function sendMessage(sessionId, message, hotTopics = [], onEvent) {
     if (done) break
 
     buffer += decoder.decode(value, { stream: true })
-    
+
     const messages = buffer.split('\n\n')
     buffer = messages.pop()
 

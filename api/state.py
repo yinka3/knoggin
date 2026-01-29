@@ -28,7 +28,7 @@ class AppState:
             logger.warning(f"Failed to list sessions: {e}")
             return {}
 
-    async def create_session(self, topics_config: dict = None) -> Context:
+    async def create_session(self, topics_config: dict = None, model: str = None) -> Context:
         session_id = str(uuid.uuid4())
         
         if topics_config is None:
@@ -53,13 +53,15 @@ class AppState:
             user_name=self.user_name,
             resources=self.resources,
             topics_config=topics_config,
-            session_id=session_id
+            session_id=session_id,
+            model=model
         )
         
         metadata = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "topics_config": topics_config,
-            "last_active": datetime.now(timezone.utc).isoformat()
+            "last_active": datetime.now(timezone.utc).isoformat(),
+            "model": model
         }
         
         await self.resources.redis.hset(
@@ -86,7 +88,8 @@ class AppState:
             user_name=self.user_name,
             resources=self.resources,
             topics_config=metadata.get("topics_config"),
-            session_id=session_id
+            session_id=session_id,
+            model=metadata.get("model")
         )
         
         self.active_sessions[session_id] = context

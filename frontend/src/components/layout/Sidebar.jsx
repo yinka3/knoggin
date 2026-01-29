@@ -1,30 +1,22 @@
-
 import { useSession } from '../../context/SessionContext'
 import { Link, useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { 
-  Plus, 
-  MessageSquare, 
-  Brain, 
-  Settings,
-  PanelLeftClose,
-  PanelLeft
-} from 'lucide-react'
+import { Plus, MessageSquare, Brain, Settings, PanelLeftClose, PanelLeft } from 'lucide-react'
 
 export default function Sidebar({ isOpen, onToggle }) {
   const { sessions, currentSessionId, createSession, selectSession, loading } = useSession()
   const location = useLocation()
 
   return (
-    <div 
+    <div
       className={`${isOpen ? 'w-64' : 'w-14'} border-r border-border flex flex-col bg-sidebar transition-all duration-200`}
     >
       {/* Header with toggle */}
-      <div className={`flex items-center ${isOpen ? 'justify-between' : 'justify-center'} p-3 border-b border-border`}>
-        {isOpen && (
-          <span className="text-sm font-medium text-foreground">Knoggin</span>
-        )}
+      <div
+        className={`flex items-center ${isOpen ? 'justify-between' : 'justify-center'} p-3 border-b border-border`}
+      >
+        {isOpen && <span className="text-sm font-medium text-foreground">Knoggin</span>}
         <button
           onClick={onToggle}
           className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
@@ -77,16 +69,14 @@ export default function Sidebar({ isOpen, onToggle }) {
       {isOpen && (
         <ScrollArea className="flex-1 px-2">
           <div className="py-2">
-            <span className="px-2 text-xs font-medium text-muted-foreground">
-              Recent
-            </span>
+            <span className="px-2 text-xs font-medium text-muted-foreground">Recent</span>
             <div className="mt-2 space-y-1">
               {loading ? (
                 <div className="px-2 text-sm text-muted-foreground">Loading...</div>
               ) : sessions.length === 0 ? (
                 <div className="px-2 text-sm text-muted-foreground">No sessions yet</div>
               ) : (
-                sessions.map((session) => (
+                sessions.map(session => (
                   <button
                     key={session.session_id}
                     onClick={() => selectSession(session.session_id)}

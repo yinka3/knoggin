@@ -1,17 +1,8 @@
 import { useEffect, useState, useRef } from 'react'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown, ChevronRight, ArrowRight } from 'lucide-react'
 
 function BouncingDots() {
@@ -26,16 +17,16 @@ function BouncingDots() {
 
 function ArgsDisplay({ args }) {
   if (!args || Object.keys(args).length === 0) return null
-  
+
   const argsString = JSON.stringify(args, null, 2)
   const shortArgs = Object.entries(args)
     .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
     .join(', ')
-  
+
   if (shortArgs.length < 40) {
     return <span className="text-muted-foreground ml-2">{shortArgs}</span>
   }
-  
+
   return (
     <TooltipProvider>
       <Tooltip>
@@ -54,7 +45,7 @@ function ArgsDisplay({ args }) {
 
 function ToolCallItem({ tc, isLast, streaming }) {
   const isRunning = streaming && isLast && tc.status === 'running'
-  
+
   return (
     <div className="py-3 animate-in fade-in slide-in-from-left-2 duration-300">
       {tc.thinking && (
@@ -62,17 +53,17 @@ function ToolCallItem({ tc, isLast, streaming }) {
           {tc.thinking}
         </div>
       )}
-      
+
       <div className="flex items-center flex-wrap gap-2">
         <Badge variant="outline" className="text-accent border-accent font-mono">
           {tc.tool}
         </Badge>
-        
+
         {isRunning && <BouncingDots />}
-        
+
         <ArgsDisplay args={tc.args} />
       </div>
-      
+
       {tc.summary && (
         <div className="mt-2 text-primary text-[11px] animate-in fade-in duration-200 pl-3 border-l-2 border-primary/70 flex items-center gap-1.5">
           <ArrowRight size={10} className="shrink-0" />
@@ -116,9 +107,9 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
   if (toolCalls.length === 0 && !currentThinking) return null
 
   return (
-    <Collapsible 
-      open={isOpen} 
-      onOpenChange={setIsOpen} 
+    <Collapsible
+      open={isOpen}
+      onOpenChange={setIsOpen}
       className="border border-accent/20 rounded-lg bg-muted/80 shadow-md my-3"
     >
       <CollapsibleTrigger className="flex items-center gap-2 w-full px-4 py-2.5 text-xs text-muted-foreground hover:text-accent transition-colors">
@@ -130,7 +121,7 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
           </Badge>
         )}
         {streaming && <BouncingDots />}
-        
+
         {/* Timer */}
         {(streaming || elapsed > 0) && toolCalls.length > 0 && (
           <span className="ml-auto text-sm text-muted-foreground font-mono">
@@ -138,22 +129,18 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
           </span>
         )}
       </CollapsibleTrigger>
-      
+
       <CollapsibleContent className="px-4 pb-4 font-mono text-xs">
         {currentThinking && toolCalls.length === 0 && (
           <div className="py-2 text-muted-foreground italic animate-in fade-in duration-300 pl-3 border-l-2 border-accent/30">
             {currentThinking}
           </div>
         )}
-        
+
         {toolCalls.map((tc, idx) => (
           <div key={idx}>
             {idx > 0 && <Separator className="my-2" />}
-            <ToolCallItem 
-              tc={tc} 
-              isLast={idx === toolCalls.length - 1}
-              streaming={streaming}
-            />
+            <ToolCallItem tc={tc} isLast={idx === toolCalls.length - 1} streaming={streaming} />
           </div>
         ))}
       </CollapsibleContent>

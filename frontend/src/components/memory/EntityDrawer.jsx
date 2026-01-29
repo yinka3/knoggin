@@ -1,22 +1,12 @@
-
 import { useEffect, useState } from 'react'
 import { formatDistanceToNow } from 'date-fns'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getProfile, listProfiles } from '@/api/profiles'
 
 function SectionHeader({ children }) {
-  return (
-    <h3 className="text-xs font-medium text-muted-foreground mb-3">
-      {children}
-    </h3>
-  )
+  return <h3 className="text-xs font-medium text-muted-foreground mb-3">{children}</h3>
 }
 
 function Pill({ children, onClick }) {
@@ -116,96 +106,96 @@ export default function EntityDrawer({ entityId, open, onOpenChange, onEntityCli
             </div>
           ) : error ? (
             <div className="text-destructive text-sm">{error}</div>
-          ) : profile && (
-            <>
-              {/* Metadata */}
-              <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-muted-foreground">
-                {profile.topic && (
-                  <div>
-                    <span className="text-foreground">{profile.topic}</span>
-                  </div>
-                )}
-                {lastMentioned && (
-                  <div>Mentioned {lastMentioned}</div>
-                )}
-                {lastUpdated && (
-                  <div>Updated {lastUpdated}</div>
-                )}
-              </div>
-
-              {/* Facts */}
-              <div>
-                <SectionHeader>Facts ({facts.length})</SectionHeader>
-                {facts.length > 0 ? (
-                  <>
-                    <ul className="space-y-2">
-                      {visibleFacts.map((fact, idx) => (
-                        <li key={idx} className="text-sm text-foreground leading-relaxed">
-                          {fact.content}
-                        </li>
-                      ))}
-                    </ul>
-                    {hasMoreFacts && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setShowAllFacts(!showAllFacts)}
-                        className="mt-3 text-primary hover:text-primary"
-                      >
-                        {showAllFacts ? 'Show less' : `Show ${facts.length - FACTS_PREVIEW_COUNT} more`}
-                      </Button>
-                    )}
-                  </>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No facts recorded</p>
-                )}
-              </div>
-
-              {/* Connections */}
-              <div>
-                <SectionHeader>Connections ({profile.connections?.length || 0})</SectionHeader>
-                {profile.connections?.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {profile.connections.map((name, idx) => (
-                      <Pill key={idx} onClick={() => handleConnectionClick(name)}>
-                        {name}
-                      </Pill>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No connections</p>
-                )}
-              </div>
-
-              {/* Hierarchy */}
-              {(profile.hierarchy?.parent || profile.hierarchy?.children?.length > 0) && (
-                <div>
-                  <SectionHeader>Hierarchy</SectionHeader>
-                  <div className="space-y-3">
-                    {profile.hierarchy.parent && (
-                      <div className="flex items-center gap-3">
-                        <span className="text-xs text-muted-foreground w-16">Parent</span>
-                        <Pill onClick={() => handleConnectionClick(profile.hierarchy.parent)}>
-                          {profile.hierarchy.parent}
-                        </Pill>
-                      </div>
-                    )}
-                    {profile.hierarchy.children?.length > 0 && (
-                      <div className="flex items-start gap-3">
-                        <span className="text-xs text-muted-foreground w-16 pt-1">Children</span>
-                        <div className="flex flex-wrap gap-2">
-                          {profile.hierarchy.children.map((child, idx) => (
-                            <Pill key={idx} onClick={() => handleConnectionClick(child)}>
-                              {child}
-                            </Pill>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
+          ) : (
+            profile && (
+              <>
+                {/* Metadata */}
+                <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-muted-foreground">
+                  {profile.topic && (
+                    <div>
+                      <span className="text-foreground">{profile.topic}</span>
+                    </div>
+                  )}
+                  {lastMentioned && <div>Mentioned {lastMentioned}</div>}
+                  {lastUpdated && <div>Updated {lastUpdated}</div>}
                 </div>
-              )}
-            </>
+
+                {/* Facts */}
+                <div>
+                  <SectionHeader>Facts ({facts.length})</SectionHeader>
+                  {facts.length > 0 ? (
+                    <>
+                      <ul className="space-y-2">
+                        {visibleFacts.map((fact, idx) => (
+                          <li key={idx} className="text-sm text-foreground leading-relaxed">
+                            {fact.content}
+                          </li>
+                        ))}
+                      </ul>
+                      {hasMoreFacts && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setShowAllFacts(!showAllFacts)}
+                          className="mt-3 text-primary hover:text-primary"
+                        >
+                          {showAllFacts
+                            ? 'Show less'
+                            : `Show ${facts.length - FACTS_PREVIEW_COUNT} more`}
+                        </Button>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No facts recorded</p>
+                  )}
+                </div>
+
+                {/* Connections */}
+                <div>
+                  <SectionHeader>Connections ({profile.connections?.length || 0})</SectionHeader>
+                  {profile.connections?.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {profile.connections.map((name, idx) => (
+                        <Pill key={idx} onClick={() => handleConnectionClick(name)}>
+                          {name}
+                        </Pill>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No connections</p>
+                  )}
+                </div>
+
+                {/* Hierarchy */}
+                {(profile.hierarchy?.parent || profile.hierarchy?.children?.length > 0) && (
+                  <div>
+                    <SectionHeader>Hierarchy</SectionHeader>
+                    <div className="space-y-3">
+                      {profile.hierarchy.parent && (
+                        <div className="flex items-center gap-3">
+                          <span className="text-xs text-muted-foreground w-16">Parent</span>
+                          <Pill onClick={() => handleConnectionClick(profile.hierarchy.parent)}>
+                            {profile.hierarchy.parent}
+                          </Pill>
+                        </div>
+                      )}
+                      {profile.hierarchy.children?.length > 0 && (
+                        <div className="flex items-start gap-3">
+                          <span className="text-xs text-muted-foreground w-16 pt-1">Children</span>
+                          <div className="flex flex-wrap gap-2">
+                            {profile.hierarchy.children.map((child, idx) => (
+                              <Pill key={idx} onClick={() => handleConnectionClick(child)}>
+                                {child}
+                              </Pill>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
+            )
           )}
         </div>
       </DialogContent>

@@ -1,5 +1,5 @@
-@import "tailwindcss";
-@import "tw-animate-css";
+@import 'tailwindcss';
+@import 'tw-animate-css';
 
 @custom-variant dark (&:is(.dark *));
 
@@ -26,7 +26,8 @@
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.5);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 
 @theme inline {
@@ -83,7 +84,7 @@
   --secondary-foreground: oklch(0.93 0.005 260);
   --muted: oklch(0.22 0.005 260);
   --muted-foreground: oklch(0.55 0.01 260);
-  --accent: oklch(0.70 0.11 155);
+  --accent: oklch(0.7 0.11 155);
   --accent-foreground: oklch(0.17 0.005 260);
   --destructive: oklch(0.55 0.2 25);
   --border: oklch(0.26 0.008 260);
@@ -91,7 +92,7 @@
   --ring: oklch(0.62 0.12 155);
   --chart-1: oklch(0.62 0.12 155);
   --chart-2: oklch(0.65 0.15 170);
-  --chart-3: oklch(0.70 0.11 155);
+  --chart-3: oklch(0.7 0.11 155);
   --chart-4: oklch(0.55 0.12 145);
   --chart-5: oklch(0.75 0.08 160);
   --sidebar: oklch(0.24 0.005 260);
@@ -105,7 +106,8 @@
 }
 
 @keyframes bounce-high {
-  0%, 100% {
+  0%,
+  100% {
     transform: translateY(0);
   }
   50% {
@@ -118,7 +120,7 @@
 }
 
 .hero-glow {
-  background: 
+  background:
     radial-gradient(ellipse 80% 50% at 50% -20%, rgba(46, 170, 110, 0.12), transparent),
     var(--background);
 }

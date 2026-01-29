@@ -1,4 +1,3 @@
-
 import { useState, useEffect, useCallback } from 'react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -36,32 +35,35 @@ export default function MemoryPage() {
     setShowSkeleton(false)
   }, [loading])
 
-  const fetchEntities = useCallback(async (offset = 0, append = false) => {
-    if (append) {
-      setLoadingMore(true)
-    } else {
-      setLoading(true)
-    }
-
-    try {
-      const params = { limit: PAGE_SIZE, offset }
-      if (debouncedSearch) params.q = debouncedSearch
-
-      const data = await listProfiles(params)
-      
+  const fetchEntities = useCallback(
+    async (offset = 0, append = false) => {
       if (append) {
-        setEntities(prev => [...prev, ...data.entities])
+        setLoadingMore(true)
       } else {
-        setEntities(data.entities || [])
+        setLoading(true)
       }
-      setTotal(data.total || 0)
-    } catch (err) {
-      console.error('Failed to load entities:', err)
-    } finally {
-      setLoading(false)
-      setLoadingMore(false)
-    }
-  }, [debouncedSearch])
+
+      try {
+        const params = { limit: PAGE_SIZE, offset }
+        if (debouncedSearch) params.q = debouncedSearch
+
+        const data = await listProfiles(params)
+
+        if (append) {
+          setEntities(prev => [...prev, ...data.entities])
+        } else {
+          setEntities(data.entities || [])
+        }
+        setTotal(data.total || 0)
+      } catch (err) {
+        console.error('Failed to load entities:', err)
+      } finally {
+        setLoading(false)
+        setLoadingMore(false)
+      }
+    },
+    [debouncedSearch]
+  )
 
   useEffect(() => {
     fetchEntities(0, false)
@@ -98,10 +100,13 @@ export default function MemoryPage() {
           People, places, and things STELLA remembers
         </p>
         <div className="relative">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Search
+            size={16}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
           <Input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={e => setSearch(e.target.value)}
             placeholder="Search entities..."
             className="pl-9 bg-muted border-border rounded-xl"
           />
@@ -130,12 +135,8 @@ export default function MemoryPage() {
         ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {entities.map((entity) => (
-                <EntityCard
-                  key={entity.id}
-                  entity={entity}
-                  onClick={handleCardClick}
-                />
+              {entities.map(entity => (
+                <EntityCard key={entity.id} entity={entity} onClick={handleCardClick} />
               ))}
             </div>
 

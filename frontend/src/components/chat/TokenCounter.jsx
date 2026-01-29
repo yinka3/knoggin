@@ -14,12 +14,16 @@ function Particle({ active, index, total }) {
     <motion.div
       className="absolute w-1.5 h-1.5 rounded-full bg-primary"
       initial={{ opacity: 0, scale: 0, x: 0, y: 0 }}
-      animate={active ? {
-        opacity: [0, 1, 0],
-        scale: [0, 1, 0],
-        x: [0, Math.cos(radians) * distance],
-        y: [0, Math.sin(radians) * distance],
-      } : {}}
+      animate={
+        active
+          ? {
+              opacity: [0, 1, 0],
+              scale: [0, 1, 0],
+              x: [0, Math.cos(radians) * distance],
+              y: [0, Math.sin(radians) * distance],
+            }
+          : {}
+      }
       transition={{ duration: 0.6, ease: 'easeOut' }}
     />
   )
@@ -37,7 +41,7 @@ export default function TokenCounter({ value }) {
   }, [value, springValue])
 
   useEffect(() => {
-    return display.on('change', (v) => setDisplayText(v))
+    return display.on('change', v => setDisplayText(v))
   }, [display])
 
   // Milestone detection

@@ -44,37 +44,35 @@ function SectionHeader({ children, description }) {
   return (
     <div className="mb-4">
       <h2 className="text-base font-medium text-foreground">{children}</h2>
-      {description && (
-        <p className="text-sm text-muted-foreground mt-0.5">{description}</p>
-      )}
+      {description && <p className="text-sm text-muted-foreground mt-0.5">{description}</p>}
     </div>
   )
 }
 
 export default function SettingsPage() {
-    const [loading, setLoading] = useState(true)
-    const [saving, setSaving] = useState(false)
-    const [error, setError] = useState(null)
-    const [success, setSuccess] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const [success, setSuccess] = useState(false)
 
-    const [userName, setUserName] = useState('')
-    const [userSummary, setUserSummary] = useState('')
-    const [reasoningModel, setReasoningModel] = useState('')
-    const [agentModel, setAgentModel] = useState('')
-    const [defaultTopics, setDefaultTopics] = useState({})
-    const [expandedTopic, setExpandedTopic] = useState(null)
-    
-    const [addingTopic, setAddingTopic] = useState(false)
-    const [newTopicName, setNewTopicName] = useState('')
-    const [showSkeleton, setShowSkeleton] = useState(false)
+  const [userName, setUserName] = useState('')
+  const [userSummary, setUserSummary] = useState('')
+  const [reasoningModel, setReasoningModel] = useState('')
+  const [agentModel, setAgentModel] = useState('')
+  const [defaultTopics, setDefaultTopics] = useState({})
+  const [expandedTopic, setExpandedTopic] = useState(null)
 
-    useEffect(() => {
+  const [addingTopic, setAddingTopic] = useState(false)
+  const [newTopicName, setNewTopicName] = useState('')
+  const [showSkeleton, setShowSkeleton] = useState(false)
+
+  useEffect(() => {
     if (loading) {
-        const timer = setTimeout(() => setShowSkeleton(true), 150)
-        return () => clearTimeout(timer)
+      const timer = setTimeout(() => setShowSkeleton(true), 150)
+      return () => clearTimeout(timer)
     }
     setShowSkeleton(false)
-    }, [loading])
+  }, [loading])
 
   useEffect(() => {
     async function load() {
@@ -125,8 +123,8 @@ export default function SettingsPage() {
           labels: [],
           aliases: [],
           hierarchy: {},
-          label_aliases: {}
-        }
+          label_aliases: {},
+        },
       })
       setExpandedTopic(name)
       setNewTopicName('')
@@ -136,13 +134,13 @@ export default function SettingsPage() {
 
   if (loading) {
     return showSkeleton ? (
-        <div className="p-6 max-w-2xl mx-auto space-y-6">
+      <div className="p-6 max-w-2xl mx-auto space-y-6">
         <Skeleton className="h-8 w-32" />
         <Skeleton className="h-32 w-full rounded-xl" />
         <Skeleton className="h-32 w-full rounded-xl" />
-        </div>
+      </div>
     ) : null
-    }
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -153,11 +151,7 @@ export default function SettingsPage() {
             <h1 className="text-lg font-medium text-foreground">Settings</h1>
             <p className="text-sm text-muted-foreground">Manage your preferences</p>
           </div>
-          <Button
-            onClick={handleSave}
-            disabled={saving}
-            className="rounded-xl"
-          >
+          <Button onClick={handleSave} disabled={saving} className="rounded-xl">
             <Save size={16} className="mr-2" />
             {saving ? 'Saving...' : 'Save'}
           </Button>
@@ -169,9 +163,7 @@ export default function SettingsPage() {
         <div className="max-w-2xl mx-auto space-y-8">
           {/* Alerts */}
           {error && (
-            <div className="p-4 rounded-xl bg-destructive/10 text-destructive text-sm">
-              {error}
-            </div>
+            <div className="p-4 rounded-xl bg-destructive/10 text-destructive text-sm">{error}</div>
           )}
 
           {success && (
@@ -182,9 +174,7 @@ export default function SettingsPage() {
 
           {/* Profile Section */}
           <section>
-            <SectionHeader description="Your identity for STELLA">
-              Profile
-            </SectionHeader>
+            <SectionHeader description="Your identity for STELLA">Profile</SectionHeader>
             <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
               <div className="space-y-2">
                 <Label htmlFor="name" className="text-muted-foreground flex items-center gap-2">
@@ -206,7 +196,7 @@ export default function SettingsPage() {
                 <textarea
                   id="summary"
                   value={userSummary}
-                  onChange={(e) => setUserSummary(e.target.value)}
+                  onChange={e => setUserSummary(e.target.value)}
                   placeholder="A brief description about yourself for the agent..."
                   rows={3}
                   className="w-full bg-muted border border-border rounded-xl px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
@@ -217,9 +207,7 @@ export default function SettingsPage() {
 
           {/* Models Section */}
           <section>
-            <SectionHeader description="Choose which models power STELLA">
-              Models
-            </SectionHeader>
+            <SectionHeader description="Choose which models power STELLA">Models</SectionHeader>
             <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
               <div className="space-y-2">
                 <Label className="text-muted-foreground">Reasoning Model</Label>
@@ -228,7 +216,7 @@ export default function SettingsPage() {
                     <SelectValue placeholder="Select model" />
                   </SelectTrigger>
                   <SelectContent className="bg-popover border-border rounded-xl">
-                    {REASONING_MODELS.map((model) => (
+                    {REASONING_MODELS.map(model => (
                       <SelectItem key={model.value} value={model.value} className="rounded-lg">
                         <span className="flex items-center gap-2 w-full">
                           {model.label}
@@ -247,7 +235,7 @@ export default function SettingsPage() {
                     <SelectValue placeholder="Select model" />
                   </SelectTrigger>
                   <SelectContent className="bg-popover border-border rounded-xl">
-                    {AGENT_MODELS.map((model) => (
+                    {AGENT_MODELS.map(model => (
                       <SelectItem key={model.value} value={model.value} className="rounded-lg">
                         <span className="flex items-center gap-2 w-full">
                           {model.label}
@@ -268,31 +256,29 @@ export default function SettingsPage() {
             </SectionHeader>
             <div className="space-y-2">
               {Object.entries(defaultTopics).map(([name, config]) => (
-                <div 
-                  key={name} 
-                  className="rounded-xl overflow-hidden bg-card border border-border"
-                >
+                <div key={name} className="rounded-xl overflow-hidden bg-card border border-border">
                   <button
                     onClick={() => setExpandedTopic(expandedTopic === name ? null : name)}
                     className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/50 transition-colors"
                   >
                     <div className="flex items-center gap-3">
-                      <span className={`w-2 h-2 rounded-full ${config.active !== false ? 'bg-primary' : 'bg-muted-foreground/30'}`} />
+                      <span
+                        className={`w-2 h-2 rounded-full ${config.active !== false ? 'bg-primary' : 'bg-muted-foreground/30'}`}
+                      />
                       <div className="text-left">
                         <span className="text-foreground font-medium">{name}</span>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          {config.labels?.length > 0 
-                            ? config.labels.join(', ')
-                            : 'No labels'}
+                          {config.labels?.length > 0 ? config.labels.join(', ') : 'No labels'}
                         </p>
                       </div>
                     </div>
-                    {expandedTopic === name 
-                      ? <ChevronDown size={16} className="text-muted-foreground" />
-                      : <ChevronRight size={16} className="text-muted-foreground" />
-                    }
+                    {expandedTopic === name ? (
+                      <ChevronDown size={16} className="text-muted-foreground" />
+                    ) : (
+                      <ChevronRight size={16} className="text-muted-foreground" />
+                    )}
                   </button>
-                  
+
                   {expandedTopic === name && (
                     <div className="px-4 pb-4 pt-2 border-t border-border space-y-4">
                       {/* Topic Aliases */}
@@ -300,17 +286,22 @@ export default function SettingsPage() {
                         <Label className="text-xs text-muted-foreground">Topic Aliases</Label>
                         <Input
                           value={config.aliases?.join(', ') || ''}
-                          onChange={(e) => {
-                            const newAliases = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
+                          onChange={e => {
+                            const newAliases = e.target.value
+                              .split(',')
+                              .map(s => s.trim())
+                              .filter(Boolean)
                             setDefaultTopics({
                               ...defaultTopics,
-                              [name]: { ...config, aliases: newAliases }
+                              [name]: { ...config, aliases: newAliases },
                             })
                           }}
                           placeholder="work, job, office"
                           className="mt-1 bg-muted border-border rounded-lg text-sm"
                         />
-                        <p className="text-[11px] text-muted-foreground mt-1">Comma-separated alternate names for this topic</p>
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                          Comma-separated alternate names for this topic
+                        </p>
                       </div>
 
                       {/* Labels */}
@@ -318,32 +309,39 @@ export default function SettingsPage() {
                         <Label className="text-xs text-muted-foreground">Labels</Label>
                         <Input
                           value={config.labels?.join(', ') || ''}
-                          onChange={(e) => {
-                            const newLabels = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
+                          onChange={e => {
+                            const newLabels = e.target.value
+                              .split(',')
+                              .map(s => s.trim())
+                              .filter(Boolean)
                             setDefaultTopics({
                               ...defaultTopics,
-                              [name]: { ...config, labels: newLabels }
+                              [name]: { ...config, labels: newLabels },
                             })
                           }}
                           placeholder="person, company, project"
                           className="mt-1 bg-muted border-border rounded-lg text-sm"
                         />
-                        <p className="text-[11px] text-muted-foreground mt-1">Entity types to extract for this topic</p>
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                          Entity types to extract for this topic
+                        </p>
                       </div>
 
                       {/* Label Aliases */}
                       <div>
                         <Label className="text-xs text-muted-foreground">Label Aliases</Label>
                         <textarea
-                          value={Object.keys(config.label_aliases || {}).length > 0 
-                            ? JSON.stringify(config.label_aliases, null, 2) 
-                            : ''}
-                          onChange={(e) => {
+                          value={
+                            Object.keys(config.label_aliases || {}).length > 0
+                              ? JSON.stringify(config.label_aliases, null, 2)
+                              : ''
+                          }
+                          onChange={e => {
                             try {
                               const parsed = e.target.value.trim() ? JSON.parse(e.target.value) : {}
                               setDefaultTopics({
                                 ...defaultTopics,
-                                [name]: { ...config, label_aliases: parsed }
+                                [name]: { ...config, label_aliases: parsed },
                               })
                             } catch {
                               // Invalid JSON, don't update
@@ -353,22 +351,26 @@ export default function SettingsPage() {
                           rows={3}
                           className="mt-1 w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
                         />
-                        <p className="text-[11px] text-muted-foreground mt-1">JSON mapping alternate label names to canonical labels</p>
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                          JSON mapping alternate label names to canonical labels
+                        </p>
                       </div>
 
                       {/* Hierarchy */}
                       <div>
                         <Label className="text-xs text-muted-foreground">Hierarchy</Label>
                         <textarea
-                          value={Object.keys(config.hierarchy || {}).length > 0 
-                            ? JSON.stringify(config.hierarchy, null, 2) 
-                            : ''}
-                          onChange={(e) => {
+                          value={
+                            Object.keys(config.hierarchy || {}).length > 0
+                              ? JSON.stringify(config.hierarchy, null, 2)
+                              : ''
+                          }
+                          onChange={e => {
                             try {
                               const parsed = e.target.value.trim() ? JSON.parse(e.target.value) : {}
                               setDefaultTopics({
                                 ...defaultTopics,
-                                [name]: { ...config, hierarchy: parsed }
+                                [name]: { ...config, hierarchy: parsed },
                               })
                             } catch {
                               // Invalid JSON, don't update
@@ -378,7 +380,9 @@ export default function SettingsPage() {
                           rows={3}
                           className="mt-1 w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
                         />
-                        <p className="text-[11px] text-muted-foreground mt-1">JSON defining parent-child relationships between labels</p>
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                          JSON defining parent-child relationships between labels
+                        </p>
                       </div>
                     </div>
                   )}
@@ -390,8 +394,8 @@ export default function SettingsPage() {
                 <div className="flex items-center gap-2 p-2 rounded-xl border border-primary/50 bg-card">
                   <Input
                     value={newTopicName}
-                    onChange={(e) => setNewTopicName(e.target.value)}
-                    onKeyDown={(e) => {
+                    onChange={e => setNewTopicName(e.target.value)}
+                    onKeyDown={e => {
                       if (e.key === 'Enter') handleAddTopic()
                       if (e.key === 'Escape') {
                         setAddingTopic(false)

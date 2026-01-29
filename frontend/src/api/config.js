@@ -10,7 +10,7 @@ export async function updateConfig(data) {
   const res = await fetch(`${API_BASE}/config/`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
+    body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error('Failed to save config')
   return res.json()
