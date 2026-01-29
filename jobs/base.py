@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Optional
 import redis.asyncio as redis
 
+from shared.redisclient import RedisKeys
+
 
 
 @dataclass
@@ -14,7 +16,6 @@ class JobContext:
     redis: redis.Redis
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None
-    session_id: Optional[str] = None
 
 
 @dataclass 
@@ -29,7 +30,6 @@ class JobNotifier:
     """
     Sets a global 'Maintenance Mode' flag in Redis while a job runs.
     """
-    KEY = "system:active_job_warning"
     
     def __init__(self, redis_client: redis.Redis, message: str, ttl: int = 600):
         self.redis = redis_client
@@ -38,12 +38,12 @@ class JobNotifier:
 
     async def __aenter__(self):
         # Set the warning message visible to the Agent
-        await self.redis.setex(self.KEY, self.ttl, self.message)
+        await self.redis.setex(RedisKeys.system_active_job_warning(), self.ttl, self.message)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         # Clear the warning when job finishes (or fails)
-        await self.redis.delete(self.KEY)
+        await self.redis.delete(RedisKeys.system_active_job_warning())
 
 
 class BaseJob(ABC):

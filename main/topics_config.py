@@ -3,6 +3,8 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 import redis.asyncio as redis
 
+from shared.redisclient import RedisKeys
+
 
 def build_label_block(topics_config: dict) -> str:
     """Formats topics config into prompt-friendly label list for VP-01."""
@@ -78,7 +80,7 @@ class TopicConfig:
         session_id: str
     ) -> "TopicConfig":
         """Load config from Redis."""
-        raw = await redis_client.hget(f"session_config:{user_name}", session_id)
+        raw = await redis_client.hget(RedisKeys.session_config(user_name), session_id)
         if raw:
             config = json.loads(raw)
         else:
@@ -93,7 +95,7 @@ class TopicConfig:
     ):
         """Persist config to Redis."""
         await redis_client.hset(
-            f"session_config:{user_name}", 
+            RedisKeys.session_config(user_name),
             session_id, 
             json.dumps(self._config)
         )

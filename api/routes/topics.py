@@ -75,7 +75,7 @@ async def create_topic(
     
     # Update active session if loaded
     if session_id in state.active_sessions:
-        state.active_sessions[session_id].topic_config = topic_config
+        await state.active_sessions[session_id].update_topics_config(topic_config.raw)
     
     return {
         "success": True,
@@ -130,7 +130,7 @@ async def update_topic(
     
     # Update active session if loaded
     if session_id in state.active_sessions:
-        state.active_sessions[session_id].topic_config = topic_config
+        await state.active_sessions[session_id].update_topics_config(topic_config.raw)
     
     return {"success": True}
 
@@ -163,6 +163,6 @@ async def delete_topic(
     
     # Update active session if loaded
     if session_id in state.active_sessions:
-        state.active_sessions[session_id].topic_config = topic_config
+        await state.active_sessions[session_id].update_topics_config(topic_config.raw)
     
     return {"success": True, "deleted": topic_name}

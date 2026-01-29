@@ -3,6 +3,7 @@ from typing import Counter
 from loguru import logger
 from db.store import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobResult
+from shared.redisclient import RedisKeys
 
 
 class MoodCheckpointJob(BaseJob):
@@ -18,11 +19,11 @@ class MoodCheckpointJob(BaseJob):
         return "mood_checkpoint"
     
     async def should_run(self, ctx: JobContext) -> bool:
-        return await ctx.redis.llen(f"emotions:{ctx.user_name}") >= self.VOLUME_THRESHOLD
+        return await ctx.redis.llen(RedisKeys.emotions(ctx.user_name, ctx.session_id)) >= self.VOLUME_THRESHOLD
     
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        emotions_key = f"emotions:{ctx.user_name}"
+        emotions_key = RedisKeys.emotions(ctx.user_name, ctx.session_id)
         
         raw_emotions = await ctx.redis.lpop(emotions_key, self.VOLUME_THRESHOLD)
         if not raw_emotions:
@@ -36,7 +37,7 @@ class MoodCheckpointJob(BaseJob):
 
     async def flush(self, ctx: JobContext) -> JobResult:
         """Flush remaining emotions regardless of threshold. Called on shutdown."""
-        emotions_key = f"emotions:{ctx.user_name}"
+        emotions_key = RedisKeys.emotions(ctx.user_name, ctx.session_id)
         
         remaining = await ctx.redis.lrange(emotions_key, 0, -1)
         if not remaining:

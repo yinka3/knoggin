@@ -12,6 +12,7 @@ from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
 from main.topics_config import TopicConfig
 from schema.dtypes import Fact
+from shared.redisclient import RedisKeys
 
 
 class MergeDetectionJob(BaseJob):
@@ -37,8 +38,7 @@ class MergeDetectionJob(BaseJob):
         return "merge_detection"
     
     async def should_run(self, ctx: JobContext) -> bool:
-        profile_complete = await ctx.redis.get(f"profile_complete:{ctx.user_name}")
-        return profile_complete is not None
+        return RedisKeys.profile_complete(ctx.user_name, ctx.session_id) is not None
     
     def _same_topic(self, topic_a: str, topic_b: str) -> bool:
         """Check if topics are the same after alias normalization."""
@@ -47,7 +47,7 @@ class MergeDetectionJob(BaseJob):
         return canonical_a == canonical_b
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        await ctx.redis.set(f"merge_ran:{ctx.user_name}", "true")
+        await ctx.redis.set(RedisKeys.merge_ran(ctx.user_name, ctx.session_id), "true")
     
         candidates = self.ent_resolver.detect_merge_candidates()
         if not candidates:
@@ -362,7 +362,7 @@ class MergeDetectionJob(BaseJob):
                     failed += 1
             
             if dirty_ids:
-                dirty_key = f"dirty_entities:{ctx.user_name}"
+                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
                 await ctx.redis.sadd(dirty_key, *[str(eid) for eid in dirty_ids])
                 logger.info(f"Queued {len(dirty_ids)} merged entities for immediate profile refinement")
             
@@ -430,7 +430,7 @@ class MergeDetectionJob(BaseJob):
     
     async def _store_hitl_proposals(self, ctx: JobContext, proposals: list, merged_ids: set) -> int:
         stored = 0
-        proposal_key = f"merge_proposals:{ctx.user_name}"
+        proposal_key = RedisKeys.merge_proposals(ctx.user_name, ctx.session_id)
         
         for candidate in proposals:
             if candidate["primary_id"] in merged_ids or candidate["secondary_id"] in merged_ids:
@@ -453,5 +453,5 @@ class MergeDetectionJob(BaseJob):
     
     async def on_shutdown(self, ctx: JobContext) -> None:
         """Set pending flag so next session picks up merge work."""
-        await ctx.redis.set(f"pending:{ctx.user_name}:{self.name}", "true")
+        await ctx.redis.set(RedisKeys.job_pending(ctx.user_name, ctx.session_id, self.name), "true")
         logger.debug("Merge detection pending flag set")

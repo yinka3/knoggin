@@ -2,6 +2,7 @@ import json
 import time
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
+from shared.redisclient import RedisKeys
 
 class DLQReplayJob(BaseJob):
     """
@@ -41,7 +42,7 @@ class DLQReplayJob(BaseJob):
         return "dlq_auto_replay"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        last_run_key = f"last_run:{self.name}"
+        last_run_key = RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id)
         last_run_ts = await ctx.redis.get(last_run_key)
         
         if not last_run_ts:
@@ -53,9 +54,9 @@ class DLQReplayJob(BaseJob):
         return elapsed >= self.INTERVAL
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        dlq_key = f"dlq:{ctx.user_name}"
-        park_key = f"dlq:parked:{ctx.user_name}"
-        buffer_key = f"buffer:{ctx.user_name}"
+        dlq_key = RedisKeys.dlq(ctx.user_name, ctx.session_id)
+        park_key = RedisKeys.dlq_parked(ctx.user_name, ctx.session_id)
+        buffer_key = RedisKeys.buffer(ctx.user_name, ctx.session_id)
         
         queue_len = await ctx.redis.llen(dlq_key)
         if queue_len == 0:

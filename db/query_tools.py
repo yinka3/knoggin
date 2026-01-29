@@ -160,7 +160,7 @@ class GraphToolQueries:
                     })
             return list(entities.values())
 
-    def get_related_entities(self, entity_names: List[str], active_topics: List[str] = None, limit: int = 50):
+    def get_related_entities(self, entity_names: List[str], active_topics: List[str] = None, limit: int = 25):
         """
         Find all entities connected to the given entities.
         Use this when the user asks about someone's connections, relationships, network, or "who/what is related to X".

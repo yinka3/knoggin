@@ -2,14 +2,15 @@ import asyncio
 import json
 from typing import Awaitable, Callable, Dict, List, Optional
 from loguru import logger
+import redis
 from db.store import MemGraphStore
-from main.redisclient import AsyncRedisClient
 from main.processor import BatchProcessor, BatchResult
+from shared.redisclient import RedisKeys
 
 
 class BatchConsumer:
 
-    def __init__(self, user_name: str, store: MemGraphStore, processor: BatchProcessor, redis,
+    def __init__(self, user_name: str, session_id: str, store: MemGraphStore, processor: BatchProcessor, redis: redis.Redis,
                 get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
                 run_session_jobs: Callable[[], Awaitable[None]],
                 write_to_graph: Callable[[BatchResult], Awaitable[None]],
@@ -17,6 +18,7 @@ class BatchConsumer:
                 checkpoint_interval: int = 24, session_window: int = 16):
         
         self.user_name = user_name
+        self.session_id = session_id
         self.store = store
         self.processor = processor
         self.batch_size = batch_size
@@ -37,11 +39,11 @@ class BatchConsumer:
 
     @property
     def _buffer_key(self) -> str:
-        return f"buffer:{self.user_name}"
+        return RedisKeys.buffer(self.user_name, self.session_id)
 
     @property
     def _checkpoint_key(self) -> str:
-        return f"checkpoint_count:{self.user_name}"
+        return RedisKeys.checkpoint(self.user_name, self.session_id)
     
 
     def start(self):
@@ -132,7 +134,7 @@ class BatchConsumer:
                 await loop.run_in_executor(None, self.store.save_message_logs, batch)
                     
                 if result.emotions:
-                    await self.redis.rpush(f"emotions:{self.user_name}", *result.emotions)
+                    await self.redis.rpush(RedisKeys.emotions(self.user_name, self.session_id), *result.emotions)
                 
                 if result.extraction_result:
                    await self.write_to_graph(result)
@@ -144,7 +146,7 @@ class BatchConsumer:
 
             if messages:
                 last_id = max(m["id"] for m in messages)
-                await self.redis.set(f"last_processed_msg:{self.user_name}", last_id)
+                await self.redis.set(RedisKeys.last_processed(self.user_name, self.session_id), last_id)
                 
             await self.redis.ltrim(self._buffer_key, len(messages), -1)
            

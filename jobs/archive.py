@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from db.store import MemGraphStore
+from shared.redisclient import RedisKeys
 
 
 class FactArchivalJob(BaseJob):
@@ -22,8 +23,7 @@ class FactArchivalJob(BaseJob):
         return "fact_archival"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        profile_complete = await ctx.redis.get(f"profile_complete:{ctx.user_name}")
-        return profile_complete is not None
+        return RedisKeys.profile_complete(ctx.user_name, ctx.session_id) is not None
 
     async def execute(self, ctx: JobContext) -> JobResult:
         loop = asyncio.get_running_loop()

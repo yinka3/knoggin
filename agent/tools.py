@@ -7,6 +7,7 @@ import redis
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
 from main.topics_config import TopicConfig
+from shared.redisclient import RedisKeys
 
 
 
@@ -31,7 +32,7 @@ class Tools:
         if not evidence_ids:
             return []
         
-        content_key = f"message_content:{self.user_name}"
+        content_key = RedisKeys.message_content(self.user_name, self.session_id)
         raw_results = await self.redis.hmget(content_key, *evidence_ids)
         
         results = []
@@ -73,9 +74,9 @@ class Tools:
 
     async def _get_surrounding_context(self, msg_id: str, forward: int = 3, target_total: int = 10) -> List[Dict]:
         """Get surrounding turns for context."""
-        sorted_key = f"recent_conversation:{self.user_name}:{self.session_id}"
-        conv_key = f"conversation:{self.user_name}:{self.session_id}"
-        lookup_key = f"lookup:msg_to_turn:{self.user_name}:{self.session_id}"
+        sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
+        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
+        lookup_key = RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id)
         
         target_turn_id = msg_id
         if msg_id.startswith("msg_"):
@@ -227,7 +228,7 @@ class Tools:
         msg_keys = [msg_key for msg_key, _ in results]
         scores = {msg_key: score for msg_key, score in results}
         
-        lookup_key = f"lookup:msg_to_turn:{self.user_name}:{self.session_id}"
+        lookup_key = RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id)
         user_msg_keys = [k for k in msg_keys if k.startswith("msg_")]
         
         if user_msg_keys:
@@ -247,8 +248,8 @@ class Tools:
             self._get_surrounding_context(msg_key) for msg_key in msg_keys
         ])
         
-        content_key = f"message_content:{self.user_name}"
-        conv_key = f"conversation:{self.user_name}:{self.session_id}"
+        content_key = RedisKeys.message_content(self.user_name, self.session_id)
+        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
         
         assistant_msg_keys = [k for k in msg_keys if not k.startswith("msg_")]
         
@@ -445,7 +446,7 @@ class Tools:
             return {}
         
         raw = self.store.get_hot_topic_context_with_messages(hot_topics, msg_limit=10, slim=slim)
-        content_key = f"message_content:{self.user_name}"
+        content_key = RedisKeys.message_content(self.user_name, self.session_id)
         
         for _, data in raw.items():
             msg_ids = data.get("message_ids", [])

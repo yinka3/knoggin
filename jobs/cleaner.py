@@ -4,6 +4,7 @@ from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from db.store import MemGraphStore
 from main.entity_resolve import EntityResolver
+from shared.redisclient import RedisKeys
 
 
 class EntityCleanupJob(BaseJob):
@@ -31,7 +32,7 @@ class EntityCleanupJob(BaseJob):
 
     async def should_run(self, ctx: JobContext) -> bool:
         """Run if we haven't run in X hours."""
-        last_run_key = f"last_run:{self.name}:{self.user_name}"
+        last_run_key = RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id)
         last_run_ts = await ctx.redis.get(last_run_key)
         
         if not last_run_ts:
@@ -58,7 +59,7 @@ class EntityCleanupJob(BaseJob):
         
         
         if not orphan_ids:
-            await ctx.redis.set(f"last_run:{self.name}:{self.user_name}", time.time())
+            await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
             return JobResult(success=True, summary="No old orphans found")
         
         logger.info(f"Found {len(orphan_ids)} stale orphan entities (>{(self.RUN_INTERVAL // 60) // 60 }h old) to clean")
@@ -70,7 +71,7 @@ class EntityCleanupJob(BaseJob):
         )
         
         self.ent_resolver.remove_entities(orphan_ids)
-        await ctx.redis.set(f"last_run:{self.name}:{self.user_name}", time.time())
+        await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
         
         return JobResult(success=True, summary=f"Cleaned {deleted_count} orphan entities")
 

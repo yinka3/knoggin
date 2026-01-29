@@ -3,29 +3,29 @@ from concurrent.futures import ThreadPoolExecutor
 
 from gliner import GLiNER
 from loguru import logger
+import redis
 import spacy
 import torch
 from transformers import pipeline
 from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
 from main.embedding import EmbeddingService
-from main.redisclient import AsyncRedisClient
+from shared.redisclient import AsyncRedisClient
 from main.service import LLMService
-
+from transformers import Pipeline
 
 class ResourceManager:
     _instance = None
     
     def __init__(self):
-        self.store = None
-        self.embedding = None
-        self.redis = None
-        self.llm_service = None
-        self.executor = None
-        self.gliner = None
-        self.spacy = None
-        self.emotion_classifier = None
-        pass
+        self.store: MemGraphStore = None
+        self.embedding: EmbeddingService = None
+        self.redis: redis.Redis = None
+        self.llm_service: LLMService = None
+        self.executor: ThreadPoolExecutor = None
+        self.gliner: GLiNER = None
+        self.spacy: spacy.Language = None
+        self.emotion_classifier: Pipeline = None
 
     @classmethod
     async def initialize(cls) -> "ResourceManager":

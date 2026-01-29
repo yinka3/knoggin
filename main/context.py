@@ -27,6 +27,7 @@ from db.store import MemGraphStore
 import uuid
 
 from schema.dtypes import Fact, MessageConnections, MessageData
+from shared.redisclient import RedisKeys
 from shared.resource import ResourceManager
 
 class Context:
@@ -75,7 +76,7 @@ class Context:
         instance.embedding_service = resources.embedding
         
         await resources.redis.hset(
-            f"session_config:{user_name}",
+            RedisKeys.session_config(user_name),
             instance.session_id,
             json.dumps(topics_config)
         )
@@ -127,6 +128,7 @@ class Context:
         
         instance.consumer = BatchConsumer(
             user_name=user_name,
+            session_id=instance.session_id,
             store=instance.store,
             redis=resources.redis,
             processor=instance.batch_processor,
@@ -152,7 +154,7 @@ class Context:
             executor=instance.executor
         )
         
-        instance.scheduler = Scheduler(user_name)
+        instance.scheduler = Scheduler(user_name, instance.session_id, resources.redis)
         instance.scheduler.register(DLQReplayJob())
         instance.scheduler.register(EntityCleanupJob(user_name, instance.store, instance.ent_resolver))
         # instance.scheduler.register(FactArchivalJob(user_name, instance.store))
@@ -164,13 +166,13 @@ class Context:
         
 
     async def get_next_msg_id(self) -> int:
-        return await self.redis_client.incr("global:next_msg_id")
+        return await self.redis_client.incr(RedisKeys.global_next_msg_id())
 
     async def get_next_ent_id(self) -> int:
-        return await self.redis_client.incr("global:next_ent_id")
+        return await self.redis_client.incr(RedisKeys.global_next_ent_id())
     
     async def get_next_turn_id(self) -> int:
-        return await self.redis_client.incr(f"global:next_turn_id:{self.user_name}")
+        return await self.redis_client.incr(RedisKeys.global_next_turn_id(self.user_name, self.session_id))
     
     async def update_topics_config(self, new_config: dict):
         self.topic_config.update(new_config)
@@ -254,7 +256,7 @@ class Context:
         msg.id = await self.get_next_msg_id()
         await self.add_to_redis(msg)
 
-        buffer_key = f"buffer:{self.user_name}"
+        buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
         await self.redis_client.rpush(buffer_key, json.dumps({
             "id": msg.id,
             "message": msg.message.strip(),
@@ -277,8 +279,8 @@ class Context:
         if user_msg_id is not None:
             payload["user_msg_id"] = user_msg_id
         
-        conv_key = f"conversation:{self.user_name}:{self.session_id}"
-        sorted_key = f"recent_conversation:{self.user_name}:{self.session_id}"
+        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
+        sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
         
         await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
         await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
@@ -287,7 +289,9 @@ class Context:
     async def add_to_redis(self, msg: MessageData):
         msg_key = f"msg_{msg.id}"
         
-        await self.redis_client.hset(f"message_content:{self.user_name}", msg_key, json.dumps({
+        await self.redis_client.hset(
+            RedisKeys.message_content(self.user_name, self.session_id), 
+            msg_key, json.dumps({
             'message': msg.message.strip(),
             'timestamp': msg.timestamp.isoformat()
         }))
@@ -300,7 +304,7 @@ class Context:
         )
 
         await self.redis_client.hset(
-            f"lookup:msg_to_turn:{self.user_name}:{self.session_id}", 
+            RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id), 
             msg_key, 
             f"turn_{turn_id}"
         )
@@ -351,12 +355,12 @@ class Context:
     
     async def get_conversation_context(self, num_turns: int, up_to_msg_id: int = None) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
-        sorted_key = f"recent_conversation:{self.user_name}:{self.session_id}"
-        conv_key = f"conversation:{self.user_name}:{self.session_id}"
+        sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
+        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
         
         if up_to_msg_id:
             turn_key = await self.redis_client.hget(
-                f"lookup:msg_to_turn:{self.user_name}:{self.session_id}", 
+                RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id), 
                 f"msg_{up_to_msg_id}"
             )
             if turn_key:
@@ -511,9 +515,9 @@ class Context:
             )
         
         if safe_ids:
-            dirty_key = f"dirty_entities:{self.user_name}"
+            dirty_key = RedisKeys.dirty_entities(self.user_name, self.session_id)
             await self.redis_client.sadd(dirty_key, *[str(eid) for eid in safe_ids])
-            await self.redis_client.delete(f"profile_complete:{self.user_name}")
+            await self.redis_client.delete(RedisKeys.profile_complete(self.user_name, self.session_id))
         
         logger.info(f"Wrote {len(entities_to_write)} entities, {len(relationships)} relationships (Filtered {len(existing_candidates) - len(valid_existing_ids)} Zombies)")
     

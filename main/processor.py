@@ -28,6 +28,7 @@ from schema.dtypes import (
     MessageConnections,
     ResolutionEntry,
 )
+from shared.redisclient import RedisKeys
 
 
 @dataclass
@@ -67,6 +68,14 @@ class BatchProcessor:
         self.user_name = user_name
         self.topic_config = topic_config
         self._get_next_ent_id = get_next_ent_id
+    
+    @property
+    def _buffer_key(self) -> str:
+        return RedisKeys.buffer(self.user_name, self.session_id)
+
+    @property
+    def _checkpoint_key(self) -> str:
+        return RedisKeys.checkpoint(self.user_name, self.session_id)
         
     async def run(self, messages: List[Dict], session_text: str) -> BatchResult:
         """
@@ -422,7 +431,7 @@ class BatchProcessor:
     async def move_to_dead_letter(self, messages: List[Dict], error: str, attempt: int = 1):
         """Store failed batch in DLQ."""
         
-        dlq_key = f"dlq:{self.user_name}"
+        dlq_key = RedisKeys.dlq(self.user_name, self.session_id)
         entry = {
             "timestamp": time.time(),
             "error": error,

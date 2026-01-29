@@ -16,6 +16,7 @@ from main.entity_resolve import EntityResolver
 from main.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
 from jobs.jobs_utils import extract_fact_with_source, format_vp04_input, process_extracted_facts, parse_new_facts
 from schema.dtypes import Fact, FactMergeResult
+from shared.redisclient import RedisKeys
 
 class ProfileRefinementJob(BaseJob):
     """
@@ -46,7 +47,7 @@ class ProfileRefinementJob(BaseJob):
         return "profile_refinement"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        dirty_key = f"dirty_entities:{ctx.user_name}"
+        dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
         return await ctx.redis.scard(dirty_key) > 0
     
     async def _maybe_refine_user(self, ctx: JobContext, curr_msg_id: int) -> bool:
@@ -54,7 +55,7 @@ class ProfileRefinementJob(BaseJob):
         Check conditions and trigger user profile refinement if needed.
         Returns True if refinement ran.
         """
-        ran_key = f"user_profile_ran:{ctx.user_name}"
+        ran_key = RedisKeys.user_profile_ran(ctx.user_name, ctx.session_id)
         if await ctx.redis.get(ran_key):
             return False
         
@@ -76,13 +77,13 @@ class ProfileRefinementJob(BaseJob):
     
     async def _get_conversation_context(self, ctx: JobContext, num_turns: int, user_ratio: float = 0.75, up_to_msg_id: int = None) -> List[Dict]:
         """Fetch recent conversation with both user and agent turns."""
-        sorted_key = f"recent_conversation:{ctx.user_name}:{ctx.session_id}"
-        conv_key = f"conversation:{ctx.user_name}:{ctx.session_id}"
+        sorted_key = RedisKeys.recent_conversation(ctx.user_name, ctx.session_id)
+        conv_key = RedisKeys.conversation(ctx.user_name, ctx.session_id)
         
         fetch_count = int(num_turns * 2)
         if up_to_msg_id:
             turn_key = await ctx.redis.hget(
-                f"lookup:msg_to_turn:{ctx.user_name}:{ctx.session_id}",
+                RedisKeys.msg_to_turn_lookup(ctx.user_name, ctx.session_id),
                 f"msg_{up_to_msg_id}"
             )
             if turn_key:
@@ -162,10 +163,10 @@ class ProfileRefinementJob(BaseJob):
         warning = "⚠️ **Deepening Profiles.** I am reading through recent conversations to update entity details. Please wait a moment for the best results."
 
         async with JobNotifier(ctx.redis, warning):
-            current_msg_id = await ctx.redis.get(f"last_processed_msg:{ctx.user_name}")
+            current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
             current_msg_id = int(current_msg_id) if current_msg_id else 0
 
-            dirty_key = f"dirty_entities:{ctx.user_name}"
+            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
             raw_ids = await ctx.redis.spop(dirty_key, self.VOLUME_THRESHOLD)
             
             user_id = self.resolver.get_id(ctx.user_name)
@@ -201,7 +202,7 @@ class ProfileRefinementJob(BaseJob):
             summary = ", ".join(parts) if parts else "No profiles to update"
 
             await ctx.redis.setex(
-                f"profile_complete:{ctx.user_name}",
+                RedisKeys.profile_complete(ctx.user_name, ctx.session_id),
                 300,
                 str(datetime.now(timezone.utc).timestamp())
             )
@@ -223,7 +224,7 @@ class ProfileRefinementJob(BaseJob):
             return False
         
         # Get current message ID for checkpoint
-        current_msg_id = await ctx.redis.get(f"last_processed_msg:{ctx.user_name}")
+        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
         
         # Fetch existing facts from DB
