@@ -17,14 +17,17 @@ export default function MessageList({
   const [showScrollButton, setShowScrollButton] = useState(false)
   const [userScrolled, setUserScrolled] = useState(false)
 
-  const scrollToBottom = () => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  const scrollToBottom = (instant = false) => {
+    bottomRef.current?.scrollIntoView({
+      behavior: instant ? 'auto' : 'smooth',
+    })
     setUserScrolled(false)
   }
 
   useEffect(() => {
     if (!userScrolled) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+      const shouldBeInstant = streaming && streamingContent
+      scrollToBottom(shouldBeInstant)
     }
   }, [messages, streaming, currentToolCalls, currentThinking, streamingContent, userScrolled])
 

@@ -10,16 +10,20 @@ export default function Sidebar({ isOpen, onToggle }) {
 
   return (
     <div
-      className={`${isOpen ? 'w-64' : 'w-14'} border-r border-border flex flex-col bg-sidebar transition-all duration-200`}
+      className={`${isOpen ? 'w-64' : 'w-14'} border-r border-border flex flex-col bg-sidebar/50 backdrop-blur-xl transition-all duration-300 ease-in-out z-20`}
     >
-      {/* Header with toggle */}
+      {/* Header */}
       <div
-        className={`flex items-center ${isOpen ? 'justify-between' : 'justify-center'} p-3 border-b border-border`}
+        className={`flex items-center ${isOpen ? 'justify-between' : 'justify-center'} p-3 border-b border-border h-14`}
       >
-        {isOpen && <span className="text-sm font-medium text-foreground">Knoggin</span>}
+        {isOpen && (
+          <span className="text-sm font-semibold tracking-tight text-foreground animate-in fade-in duration-200">
+            Knoggin
+          </span>
+        )}
         <button
           onClick={onToggle}
-          className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors"
         >
           {isOpen ? <PanelLeftClose size={18} /> : <PanelLeft size={18} />}
         </button>
@@ -27,28 +31,36 @@ export default function Sidebar({ isOpen, onToggle }) {
 
       {/* Nav links */}
       <div className={`p-2 space-y-1 ${!isOpen && 'flex flex-col items-center'}`}>
-        <Link to="/chat">
+        <Link to="/chat" className="w-full">
           <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-xl text-sm transition-colors ${
+            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
               location.pathname.startsWith('/chat')
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                ? 'bg-primary/10 text-primary font-medium'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             }`}
           >
             <MessageSquare size={18} />
-            {isOpen && <span>Chat</span>}
+            <span
+              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+            >
+              Chat
+            </span>
           </button>
         </Link>
-        <Link to="/memory">
+        <Link to="/memory" className="w-full">
           <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-xl text-sm transition-colors ${
+            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
               location.pathname === '/memory'
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                ? 'bg-primary/10 text-primary font-medium'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             }`}
           >
             <Brain size={18} />
-            {isOpen && <span>Memory</span>}
+            <span
+              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+            >
+              Memory
+            </span>
           </button>
         </Link>
       </div>
@@ -58,46 +70,48 @@ export default function Sidebar({ isOpen, onToggle }) {
         <Button
           variant="outline"
           onClick={createSession}
-          className={`${isOpen ? 'w-full' : 'w-10 p-0'} rounded-xl border-primary/50 text-primary hover:bg-primary hover:text-primary-foreground transition-colors`}
+          className={`${isOpen ? 'w-full justify-start' : 'w-10 justify-center px-0'} rounded-md border-primary/20 hover:border-primary/50 text-primary hover:bg-primary/5 transition-all shadow-none`}
         >
           <Plus size={18} className={isOpen ? 'mr-2' : ''} />
-          {isOpen && 'New Chat'}
+          <span
+            className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+          >
+            New Chat
+          </span>
         </Button>
       </div>
 
       {/* Sessions list */}
       {isOpen && (
         <ScrollArea className="flex-1 px-2">
-          <div className="py-2">
-            <span className="px-2 text-xs font-medium text-muted-foreground">Recent</span>
-            <div className="mt-2 space-y-1">
+          <div className="py-2 animate-in fade-in slide-in-from-left-2 duration-300">
+            <span className="px-2 text-[10px] uppercase font-bold text-muted-foreground/60 tracking-wider">
+              Recent
+            </span>
+            <div className="mt-2 space-y-0.5">
               {loading ? (
-                <div className="space-y-1">
-                  {[1, 2, 3, 4].map(i => (
-                    <div key={i} className="flex items-center gap-2 px-2 py-2">
-                      <div className="w-4 h-4 rounded bg-muted-foreground/20 animate-pulse shrink-0" />
-                      <div
-                        className="h-4 bg-muted-foreground/20 rounded animate-pulse"
-                        style={{ width: `${60 + i * 8}%` }}
-                      />
-                    </div>
+                <div className="space-y-2 px-1">
+                  {[...Array(3)].map((_, i) => (
+                    <div key={i} className="h-8 rounded-md bg-muted/40 animate-pulse" />
                   ))}
                 </div>
               ) : sessions.length === 0 ? (
-                <div className="px-2 text-sm text-muted-foreground">No sessions yet</div>
+                <div className="px-2 text-sm text-muted-foreground italic">No sessions</div>
               ) : (
                 sessions.map(session => (
                   <button
                     key={session.session_id}
                     onClick={() => selectSession(session.session_id)}
-                    className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg text-sm truncate transition-colors ${
+                    className={`w-full flex items-center gap-2 px-2 py-2 rounded-md text-sm truncate transition-colors text-left ${
                       currentSessionId === session.session_id
-                        ? 'bg-muted text-foreground'
-                        : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                        ? 'bg-muted font-medium text-foreground'
+                        : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
                     }`}
                   >
-                    <MessageSquare size={14} className="shrink-0" />
-                    <span className="truncate">{session.session_id.slice(0, 8)}...</span>
+                    <span className="truncate flex-1">
+                      {/* Fallback if title is missing */}
+                      {session.title || `Session ${session.session_id.slice(0, 4)}`}
+                    </span>
                   </button>
                 ))
               )}
@@ -108,16 +122,20 @@ export default function Sidebar({ isOpen, onToggle }) {
 
       {/* Settings at bottom */}
       <div className={`border-t border-border p-2 ${!isOpen && 'flex justify-center'}`}>
-        <Link to="/settings">
+        <Link to="/settings" className="w-full">
           <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-xl text-sm transition-colors ${
+            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 ${
               location.pathname === '/settings'
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                ? 'bg-primary/10 text-primary'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             }`}
           >
             <Settings size={18} />
-            {isOpen && <span>Settings</span>}
+            <span
+              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+            >
+              Settings
+            </span>
           </button>
         </Link>
       </div>

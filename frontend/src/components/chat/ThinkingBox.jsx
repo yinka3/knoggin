@@ -7,10 +7,10 @@ import { ChevronDown, ChevronRight, ArrowRight } from 'lucide-react'
 
 function BouncingDots() {
   return (
-    <span className="inline-flex gap-1 ml-2">
-      <span className="w-1.5 h-1.5 bg-accent rounded-full animate-bounce [animation-delay:-0.3s]" />
-      <span className="w-1.5 h-1.5 bg-accent rounded-full animate-bounce [animation-delay:-0.15s]" />
-      <span className="w-1.5 h-1.5 bg-accent rounded-full animate-bounce" />
+    <span className="inline-flex gap-1 ml-2 items-center">
+      <span className="w-1 h-1 bg-accent rounded-full animate-bounce [animation-delay:-0.3s]" />
+      <span className="w-1 h-1 bg-accent rounded-full animate-bounce [animation-delay:-0.15s]" />
+      <span className="w-1 h-1 bg-accent rounded-full animate-bounce" />
     </span>
   )
 }
@@ -23,16 +23,12 @@ function ArgsDisplay({ args }) {
     .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
     .join(', ')
 
-  if (shortArgs.length < 40) {
-    return <span className="text-muted-foreground ml-2">{shortArgs}</span>
-  }
-
   return (
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="text-muted-foreground ml-2 cursor-help underline decoration-dotted">
-            {shortArgs.slice(0, 35)}...
+          <span className="text-muted-foreground ml-2 text-[10px] font-mono cursor-help underline decoration-dotted max-w-[200px] truncate inline-block align-bottom">
+            {shortArgs}
           </span>
         </TooltipTrigger>
         <TooltipContent side="bottom" className="max-w-sm">
@@ -47,15 +43,15 @@ function ToolCallItem({ tc, isLast, streaming }) {
   const isRunning = streaming && isLast && tc.status === 'running'
 
   return (
-    <div className="py-3 animate-in fade-in slide-in-from-left-2 duration-300">
+    <div className="py-2.5 animate-in fade-in slide-in-from-left-1 duration-300">
       {tc.thinking && (
-        <div className="mb-2 text-muted-foreground italic text-[11px] leading-relaxed pl-3 border-l-2 border-accent/30">
+        <div className="mb-1.5 text-muted-foreground italic text-[11px] leading-relaxed pl-3 border-l-2 border-accent/20">
           {tc.thinking}
         </div>
       )}
 
       <div className="flex items-center flex-wrap gap-2">
-        <Badge variant="outline" className="text-accent border-accent font-mono">
+        <Badge variant="outline" className="text-accent border-accent/40 font-mono text-[10px] h-5">
           {tc.tool}
         </Badge>
 
@@ -65,11 +61,11 @@ function ToolCallItem({ tc, isLast, streaming }) {
       </div>
 
       {tc.summary && (
-        <div className="mt-2 text-primary text-[11px] animate-in fade-in duration-200 pl-3 border-l-2 border-primary/70 flex items-center gap-1.5">
-          <ArrowRight size={10} className="shrink-0" />
-          <span>{tc.summary}</span>
+        <div className="mt-1.5 text-primary text-[11px] animate-in fade-in duration-200 pl-3 border-l-2 border-primary/50 flex items-center gap-1.5">
+          <ArrowRight size={10} className="shrink-0 opacity-70" />
+          <span className="opacity-90">{tc.summary}</span>
           {tc.count !== undefined && (
-            <Badge variant="secondary" className="text-[9px] px-1.5 py-0">
+            <Badge variant="secondary" className="text-[9px] px-1.5 py-0 h-4">
               {tc.count}
             </Badge>
           )}
@@ -97,7 +93,7 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
       }
       const interval = setInterval(() => {
         setElapsed(Date.now() - startTimeRef.current)
-      }, 100)
+      }, 200)
       return () => clearInterval(interval)
     } else if (!streaming) {
       startTimeRef.current = null
@@ -110,36 +106,38 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
     <Collapsible
       open={isOpen}
       onOpenChange={setIsOpen}
-      className="border border-accent/20 rounded-lg bg-muted/80 shadow-md my-3"
+      className="border border-border/50 rounded-lg bg-muted/40 my-3 overflow-hidden transition-all duration-200"
     >
-      <CollapsibleTrigger className="flex items-center gap-2 w-full px-4 py-2.5 text-xs text-muted-foreground hover:text-accent transition-colors">
+      <CollapsibleTrigger className="flex items-center gap-2 w-full px-4 py-2 text-xs text-muted-foreground hover:bg-muted/60 transition-colors">
         {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <span className="font-medium">Agent Reasoning</span>
+        <span className="font-medium">Reasoning Process</span>
+
         {toolCalls.length > 0 && (
-          <Badge variant="secondary" className="text-[10px]">
-            {toolCalls.length} tool{toolCalls.length !== 1 ? 's' : ''}
+          <Badge variant="secondary" className="text-[9px] px-1.5 h-4 ml-1">
+            {toolCalls.length}
           </Badge>
         )}
+
         {streaming && <BouncingDots />}
 
         {/* Timer */}
         {(streaming || elapsed > 0) && toolCalls.length > 0 && (
-          <span className="ml-auto text-sm text-muted-foreground font-mono">
+          <span className="ml-auto text-[10px] text-muted-foreground/70 font-mono tabular-nums">
             {(elapsed / 1000).toFixed(1)}s
           </span>
         )}
       </CollapsibleTrigger>
 
-      <CollapsibleContent className="px-4 pb-4 font-mono text-xs">
+      <CollapsibleContent className="px-4 pb-3 pt-0 font-mono text-xs">
         {currentThinking && toolCalls.length === 0 && (
-          <div className="py-2 text-muted-foreground italic animate-in fade-in duration-300 pl-3 border-l-2 border-accent/30">
+          <div className="py-2 text-muted-foreground/80 italic animate-in fade-in duration-300 pl-3 border-l-2 border-accent/20">
             {currentThinking}
           </div>
         )}
 
         {toolCalls.map((tc, idx) => (
           <div key={idx}>
-            {idx > 0 && <Separator className="my-2" />}
+            {idx > 0 && <Separator className="my-2 bg-border/50" />}
             <ToolCallItem tc={tc} isLast={idx === toolCalls.length - 1} streaming={streaming} />
           </div>
         ))}

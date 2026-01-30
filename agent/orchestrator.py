@@ -87,7 +87,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         "search_messages": lambda: tools.search_messages(args.get("query", ""), min(args.get("limit", 8), 8)),
         "search_entity": lambda: tools.search_entity(args.get("query", ""), min(args.get("limit", 5), 5)),
         "get_connections": lambda: tools.get_connections(args.get("entity_name", "")),
-        "get_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
+        "get_recent_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
         "find_path": lambda: tools.find_path(args.get("entity_a", ""), args.get("entity_b", "")),
         "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both"))
     }

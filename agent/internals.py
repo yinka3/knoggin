@@ -127,7 +127,7 @@ def build_user_message(ctx: AgentContext, last_result: Optional[Dict] = None) ->
             tool = r.get("tool", "unknown")
             data = r.get("result", {}).get("data")
             
-            if tool in ("search_messages", "search_entity", "get_connections", "get_activity", "find_path"):
+            if tool in ("search_messages", "search_entity", "get_connections", "get_recent_activity", "find_path"):
                 count = len(data) if isinstance(data, list) else 0
                 if count > 0:
                     msg += f"- `{tool}`: Success. Found {count} items. (See 'Retrieved Context' below)\n"
@@ -184,7 +184,7 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             ctx.evidence.messages = ctx.evidence.messages[:ctx.config.max_accumulated_messages]
     elif tool_name == "search_entity":
         _merge_unique(ctx.evidence.profiles, data if isinstance(data, list) else [], lambda x: x['id'])
-    elif tool_name in ("get_connections", "get_activity"):
+    elif tool_name in ("get_connections", "get_recent_activity"):
         ctx.evidence.graph.extend(data if isinstance(data, list) else [])
     elif tool_name == "find_path":
         ctx.evidence.paths.extend(data if isinstance(data, list) else [])
@@ -204,7 +204,7 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
     if data is None:
         return "No results", 0
 
-    if tool_name in ("get_connections", "get_activity", "search_messages", "search_entity"):
+    if tool_name in ("get_connections", "get_recent_activity", "search_messages", "search_entity"):
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} results", count
 

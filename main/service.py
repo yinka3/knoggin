@@ -225,8 +225,7 @@ class LLMService:
         user: str,
         tools: List[Dict],
         model: Optional[str] = None,
-        temperature: float = 0.0,
-        reasoning: str = "low"
+        temperature: float = 0.0
     ) -> AsyncGenerator[Dict, None]:
         """
         Streaming version of call_llm_with_tools.
@@ -256,8 +255,7 @@ class LLMService:
                         "allow_fallbacks": True,
                         "data_collection": "deny",
                         # "zdr": True
-                    },
-                    "reasoning": {"effort": reasoning}
+                    }
                 }
             )
              

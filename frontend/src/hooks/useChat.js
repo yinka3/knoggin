@@ -14,6 +14,14 @@ export function useChat(sessionId) {
   const thinkingRef = useRef(null)
   const streamingContentRef = useRef('')
 
+  const rafRef = useRef(null)
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+  }, [])
+
   useEffect(() => {
     setMessages([])
     setToolCalls([])
@@ -23,6 +31,7 @@ export function useChat(sessionId) {
     toolCallsRef.current = []
     thinkingRef.current = null
     streamingContentRef.current = ''
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
   }, [sessionId])
 
   const loadHistory = useCallback(async () => {
@@ -52,6 +61,7 @@ export function useChat(sessionId) {
       setToolCalls([])
       setCurrentThinking(null)
       setStreamingContent('')
+
       toolCallsRef.current = []
       thinkingRef.current = null
       streamingContentRef.current = ''
@@ -95,11 +105,20 @@ export function useChat(sessionId) {
 
             case 'token':
               streamingContentRef.current += data.content
-              setStreamingContent(streamingContentRef.current)
+              if (!rafRef.current) {
+                rafRef.current = requestAnimationFrame(() => {
+                  setStreamingContent(streamingContentRef.current)
+                  rafRef.current = null
+                })
+              }
               break
 
             case 'response': {
-              console.log('Usage data:', data.usage)
+              if (rafRef.current) {
+                cancelAnimationFrame(rafRef.current)
+                rafRef.current = null
+              }
+
               setMessages(prev => [
                 ...prev,
                 {
@@ -118,6 +137,11 @@ export function useChat(sessionId) {
             }
 
             case 'clarification': {
+              if (rafRef.current) {
+                cancelAnimationFrame(rafRef.current)
+                rafRef.current = null
+              }
+
               setMessages(prev => [
                 ...prev,
                 {
@@ -138,6 +162,8 @@ export function useChat(sessionId) {
 
             case 'error':
               console.error('Stream error:', data.message)
+              if (rafRef.current) cancelAnimationFrame(rafRef.current)
+
               setMessages(prev => [
                 ...prev,
                 {
@@ -165,6 +191,10 @@ export function useChat(sessionId) {
           },
         ])
       } finally {
+        if (rafRef.current) {
+          cancelAnimationFrame(rafRef.current)
+          rafRef.current = null
+        }
         setStreaming(false)
         setToolCalls([])
         setCurrentThinking(null)

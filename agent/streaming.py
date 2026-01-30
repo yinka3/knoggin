@@ -12,7 +12,7 @@ from agent.orchestrator import (
     summarize_result
 )
 from agent.tools import Tools
-from agent.system_prompt import get_agent_prompt
+from agent.system_prompt import get_agent_prompt, get_fallback_summary_prompt
 from agent.internals import AgentConfig, AgentState, RetrievedEvidence, AgentContext, build_user_message
 from agent.formatters import format_entity_results, format_retrieved_messages, format_graph_results
 from main.service import LLMService
@@ -62,16 +62,13 @@ async def call_agent_streaming(
         elif chunk_type == "done":
             usage = chunk.get("usage")
             
-            # No tool calls - pure text response
             if not tool_calls:
                 yield FinalResponse(content=chunk.get("content", ""), usage=usage)
                 return
             
-            # Process tool calls
             if content:
                 logger.info(f"[AGENT THOUGHT]: {content[:200]}")
             
-            # Single tool call
             if len(tool_calls) == 1:
                 tc = tool_calls[0]
                 name = tc["name"]
@@ -85,7 +82,6 @@ async def call_agent_streaming(
                 yield {"type": "usage", "data": usage}
                 return
             
-            # Multiple tool calls
             yield [
                 ToolCall(name=tc["name"], args=json.loads(tc["arguments"]), thinking=content if content else None)
                 for tc in tool_calls
@@ -261,7 +257,7 @@ async def run_stream(
                 evidence_ctx += f"Connections:\n{format_graph_results(ctx.evidence.graph)}\n\n"
 
             summary = await llm.call_llm(
-                system=get_agent_prompt(user_name),
+                system=get_fallback_summary_prompt(user_name),
                 user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
             )
 
