@@ -4,7 +4,7 @@ import threading
 from typing import Dict, List, Optional, Tuple
 from rapidfuzz import fuzz, process
 from db.store import MemGraphStore
-from main.embedding import EmbeddingService
+from shared.embedding import EmbeddingService
 from main.utils import is_substring_match
 from schema.dtypes import Fact
 
@@ -226,14 +226,21 @@ class EntityResolver:
         mentions: List[str], 
         entity_type: str, 
         topic: str,
-        session_id: str = None
+        session_id: str = None,
+        source_context: str = None
     ) -> List[float]:
         """
         Register new entity: update all indexes and return embedding.
         """
 
         session_id = session_id or self.session_id
-        embedding = self.embedding_service.encode_single(canonical_name)
+        text_to_embed = None
+        if source_context:
+            text_to_embed = f"{canonical_name} ({entity_type}). Context: {source_context}"
+        else:
+            text_to_embed = f"{canonical_name} ({entity_type})"
+
+        embedding = self.embedding_service.encode_single(text_to_embed)
         
         with self._lock:
             logger.info(f"Adding entity {entity_id}-{canonical_name} to resolver indexes.")

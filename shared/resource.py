@@ -7,7 +7,7 @@ import spacy
 import torch
 from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
-from main.embedding import EmbeddingService
+from shared.embedding import EmbeddingService
 from shared.redisclient import AsyncRedisClient
 from main.service import LLMService
 

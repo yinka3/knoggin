@@ -44,3 +44,12 @@ class EmbeddingService:
             return []
         pairs = [(query, c) for c in candidates]
         return self._reranker.predict(pairs).tolist()
+    
+    def cleanup(self):
+        """Explicitly free model memory."""
+        del self._embedder
+        del self._reranker
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        logger.info("EmbeddingService cleaned up")

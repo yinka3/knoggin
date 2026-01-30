@@ -14,7 +14,7 @@ from jobs.cleaner import EntityCleanupJob
 from main.utils import handle_background_task_result
 from shared.config import get_config_value
 from main.consumer import BatchConsumer
-from main.embedding import EmbeddingService
+from shared.embedding import EmbeddingService
 from main.processor import BatchProcessor, BatchResult
 from main.service import LLMService
 from typing import Dict, List, Optional

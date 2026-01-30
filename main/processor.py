@@ -128,7 +128,7 @@ class BatchProcessor:
                 result.error = "VEGAPUNK-02 returned empty disambiguation"
                 return result
             
-            entity_ids, new_ids, alias_ids, entity_msg_map = await self._resolve(disambiguation)
+            entity_ids, new_ids, alias_ids, entity_msg_map = await self._resolve(disambiguation, messages)
             result.entity_ids = entity_ids
             result.new_entity_ids = new_ids
             result.alias_updated_ids = alias_ids
@@ -299,9 +299,15 @@ class BatchProcessor:
         return result if result else None
 
 
-    async def _resolve(self, disambiguation: List[ResolutionEntry]) -> Tuple[List[int], Set[int], Set[int], Dict[int, List[int]]]:
+    async def _resolve(
+        self, 
+        disambiguation: List[ResolutionEntry], 
+        messages: List[Dict]
+    ) -> Tuple[List[int], Set[int], Set[int], Dict[int, List[int]]]:
+        
         loop = asyncio.get_running_loop()
         
+        msg_text_map = {m["id"]: m["message"] for m in messages}
         entity_ids = []
         new_ids = set()
         alias_ids = set()
@@ -362,11 +368,22 @@ class BatchProcessor:
             
             else:
                 ent_id = await self._get_next_ent_id()
+                source_context = None
+                if entry.msg_ids:
+                    first_msg_id = entry.msg_ids[0]
+                    source_context = msg_text_map.get(first_msg_id)
+
                 await loop.run_in_executor(
                     self.executor,
                     partial(
                         self.ent_resolver.register_entity,
-                        ent_id, canonical_clean, entry.mentions, entry.entity_type, entry.topic, self.session_id
+                        ent_id, 
+                        canonical_clean, 
+                        entry.mentions, 
+                        entry.entity_type, 
+                        entry.topic, 
+                        self.session_id,
+                        source_context
                     )
                 )
                 new_ids.add(ent_id)

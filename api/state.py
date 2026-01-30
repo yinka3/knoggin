@@ -133,9 +133,10 @@ class AppState:
             await self.close_session(session_id)
         
         self.resources.executor.shutdown(wait=True)
-        await self.resources.redis.aclose()
+        await self.resources.redis.close()
         self.resources.store.close()
-        
+        if self.resources.embedding:
+            self.resources.embedding.cleanup()
         logger.info("AppState shutdown complete")
 
     
