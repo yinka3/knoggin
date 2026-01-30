@@ -177,6 +177,14 @@ class Context:
     async def get_next_turn_id(self) -> int:
         return await self.redis_client.incr(RedisKeys.global_next_turn_id(self.user_name, self.session_id))
     
+    def update_models(
+        self,
+        reasoning_model: Optional[str] = None,
+        agent_model: Optional[str] = None
+    ) -> None:
+        """Update LLM models for this session."""
+        self.llm.update_models(reasoning_model=reasoning_model, agent_model=agent_model)
+    
     async def update_topics_config(self, new_config: dict):
         self.topic_config.update(new_config)
         await self.topic_config.save(self.redis_client, self.user_name, self.session_id)
@@ -537,8 +545,3 @@ class Context:
     async def shutdown(self):
         await self.consumer.stop()
         await self.scheduler.stop()
-
-        if self.executor:
-            self.executor.shutdown(wait=True)
-        if self.redis_client:
-            await self.redis_client.aclose()

@@ -7,11 +7,10 @@ import uuid
 from loguru import logger
 from main.context import Context
 from shared.resource import ResourceManager
+from shared.config import load_config
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# USER_NAME = os.environ
 
 class AppState:
 
@@ -32,22 +31,26 @@ class AppState:
         session_id = str(uuid.uuid4())
         
         if topics_config is None:
-            topics_config = {
-                "General": {
-                    "active": True,
-                    "labels": [],
-                    "hierarchy": {},
-                    "aliases": [],
-                    "label_aliases": {}
-                },
-                "Identity": {
-                    "active": True,
-                    "labels": ["person"],
-                    "hierarchy": {},
-                    "aliases": [],
-                    "label_aliases": {}
+            config = load_config()
+            topics_config = config.get("default_topics") if config else None
+            
+            if not topics_config:
+                topics_config = {
+                    "General": {
+                        "active": True,
+                        "labels": [],
+                        "hierarchy": {},
+                        "aliases": [],
+                        "label_aliases": {}
+                    },
+                    "Identity": {
+                        "active": True,
+                        "labels": ["person"],
+                        "hierarchy": {},
+                        "aliases": [],
+                        "label_aliases": {}
+                    }
                 }
-            }
         
         context = await Context.create(
             user_name=self.user_name,

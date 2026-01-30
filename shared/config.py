@@ -40,7 +40,21 @@ def get_default_config() -> dict:
                 "aliases": [],
                 "label_aliases": {}
             }
-        }
+        },
+        "agent_name": "STELLA",
+"system_prompt": """You are {agent_name}, a personal knowledge management assistant. Your role is to help the user organize, recall, and connect information from their conversations.
+
+Core behaviors:
+- Be conversational and helpful
+- Remember context from previous messages
+- Surface relevant connections between topics
+- Ask clarifying questions when needed
+- Be concise unless detail is requested
+
+You have access to a knowledge graph that stores entities, facts, and relationships extracted from conversations.""",
+        "openrouter_api_key": "",
+        "direct_provider": None,
+        "direct_api_key": "",
     }
 
 def load_config() -> Optional[dict]:

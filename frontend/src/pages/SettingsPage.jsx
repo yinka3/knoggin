@@ -12,8 +12,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Lock, Save, ChevronDown, ChevronRight, Plus, X } from 'lucide-react'
+import { Lock, Save, ChevronDown, ChevronRight, Plus, X, Trash2, Eye, EyeOff } from 'lucide-react'
 import { getConfig, updateConfig } from '@/api/config'
+import { toast } from 'sonner'
 
 const REASONING_MODELS = [
   { value: 'google/gemini-2.5-flash', label: 'gemini-2.5-flash', tier: 'default' },
@@ -53,7 +54,6 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
-  const [success, setSuccess] = useState(false)
 
   const [userName, setUserName] = useState('')
   const [userSummary, setUserSummary] = useState('')
@@ -65,6 +65,12 @@ export default function SettingsPage() {
   const [addingTopic, setAddingTopic] = useState(false)
   const [newTopicName, setNewTopicName] = useState('')
   const [showSkeleton, setShowSkeleton] = useState(false)
+  const [agentName, setAgentName] = useState('')
+  const [systemPrompt, setSystemPrompt] = useState('')
+  const [openrouterKey, setOpenrouterKey] = useState('')
+  const [directProvider, setDirectProvider] = useState('')
+  const [directApiKey, setDirectApiKey] = useState('')
+  const [showKeys, setShowKeys] = useState(false)
 
   useEffect(() => {
     if (loading) {
@@ -83,6 +89,11 @@ export default function SettingsPage() {
         setReasoningModel(config.reasoning_model || '')
         setAgentModel(config.agent_model || '')
         setDefaultTopics(config.default_topics || {})
+        setAgentName(config.agent_name || '')
+        setSystemPrompt(config.system_prompt || '')
+        setOpenrouterKey(config.openrouter_api_key || '')
+        setDirectProvider(config.direct_provider || '')
+        setDirectApiKey(config.direct_api_key || '')
       } catch (err) {
         setError(err.message)
       } finally {
@@ -94,8 +105,6 @@ export default function SettingsPage() {
 
   async function handleSave() {
     setSaving(true)
-    setError(null)
-    setSuccess(false)
 
     try {
       await updateConfig({
@@ -103,11 +112,19 @@ export default function SettingsPage() {
         reasoning_model: reasoningModel,
         agent_model: agentModel,
         default_topics: defaultTopics,
+        agent_name: agentName || null,
+        system_prompt: systemPrompt || null,
+        openrouter_api_key: openrouterKey || null,
+        direct_provider: directProvider || null,
+        direct_api_key: directApiKey || null,
       })
-      setSuccess(true)
-      setTimeout(() => setSuccess(false), 3000)
+      toast.success('Settings saved', {
+        description: 'Model changes applied to active sessions',
+      })
     } catch (err) {
-      setError(err.message)
+      toast.error('Failed to save settings', {
+        description: err.message,
+      })
     } finally {
       setSaving(false)
     }
@@ -164,12 +181,6 @@ export default function SettingsPage() {
           {/* Alerts */}
           {error && (
             <div className="p-4 rounded-xl bg-destructive/10 text-destructive text-sm">{error}</div>
-          )}
-
-          {success && (
-            <div className="p-4 rounded-xl bg-primary/10 text-primary text-sm">
-              Settings saved successfully
-            </div>
           )}
 
           {/* Profile Section */}
@@ -245,6 +256,124 @@ export default function SettingsPage() {
                     ))}
                   </SelectContent>
                 </Select>
+              </div>
+            </div>
+          </section>
+
+          {/* Agent Section */}
+          <section>
+            <SectionHeader description="Customize your AI assistant">Agent</SectionHeader>
+            <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
+              <div className="space-y-2">
+                <Label htmlFor="agentName" className="text-muted-foreground">
+                  Agent Name
+                </Label>
+                <Input
+                  id="agentName"
+                  value={agentName}
+                  onChange={e => setAgentName(e.target.value)}
+                  placeholder="STELLA"
+                  className="bg-muted border-border rounded-xl"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Use {'{agent_name}'} in the system prompt to reference this
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="systemPrompt" className="text-muted-foreground">
+                  System Prompt
+                </Label>
+                <textarea
+                  id="systemPrompt"
+                  value={systemPrompt}
+                  onChange={e => setSystemPrompt(e.target.value)}
+                  placeholder="You are {agent_name}, a personal knowledge management assistant..."
+                  rows={8}
+                  className="w-full bg-muted border border-border rounded-xl px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* API Keys Section */}
+          <section>
+            <SectionHeader description="Configure LLM provider access">API Keys</SectionHeader>
+            <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
+              <div className="flex items-center justify-between">
+                <Label className="text-muted-foreground">Show Keys</Label>
+                <button
+                  type="button"
+                  onClick={() => setShowKeys(!showKeys)}
+                  className="text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showKeys ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="openrouterKey" className="text-muted-foreground">
+                  OpenRouter API Key
+                </Label>
+                <Input
+                  id="openrouterKey"
+                  type={showKeys ? 'text' : 'password'}
+                  value={openrouterKey}
+                  onChange={e => setOpenrouterKey(e.target.value)}
+                  placeholder="sk-or-..."
+                  className="bg-muted border-border rounded-xl font-mono text-sm"
+                />
+              </div>
+
+              <div className="border-t border-border pt-4 space-y-4">
+                <p className="text-xs text-muted-foreground">
+                  Optional: Use a direct provider instead of OpenRouter
+                </p>
+
+                <div className="space-y-2">
+                  <Label className="text-muted-foreground">Provider</Label>
+                  <Select value={directProvider} onValueChange={setDirectProvider}>
+                    <SelectTrigger className="bg-muted border-border rounded-xl">
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-popover border-border rounded-xl">
+                      <SelectItem value="none" className="rounded-lg">
+                        None
+                      </SelectItem>
+                      <SelectItem value="openai" className="rounded-lg">
+                        OpenAI
+                      </SelectItem>
+                      <SelectItem value="anthropic" className="rounded-lg">
+                        Anthropic
+                      </SelectItem>
+                      <SelectItem value="google" className="rounded-lg">
+                        Google
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {directProvider && (
+                  <div className="space-y-2">
+                    <Label htmlFor="directApiKey" className="text-muted-foreground">
+                      {directProvider.charAt(0).toUpperCase() + directProvider.slice(1)} API Key
+                    </Label>
+                    <Input
+                      id="directApiKey"
+                      type={showKeys ? 'text' : 'password'}
+                      value={directApiKey}
+                      onChange={e => setDirectApiKey(e.target.value)}
+                      placeholder={
+                        directProvider === 'openai'
+                          ? 'sk-...'
+                          : directProvider === 'anthropic'
+                            ? 'sk-ant-...'
+                            : '...'
+                      }
+                      className="bg-muted border-border rounded-xl font-mono text-sm"
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </section>
@@ -384,6 +513,23 @@ export default function SettingsPage() {
                           JSON defining parent-child relationships between labels
                         </p>
                       </div>
+
+                      {name !== 'General' && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            const updated = { ...defaultTopics }
+                            delete updated[name]
+                            setDefaultTopics(updated)
+                            setExpandedTopic(null)
+                          }}
+                          className="text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 size={14} className="mr-1" />
+                          Remove Topic
+                        </Button>
+                      )}
                     </div>
                   )}
                 </div>

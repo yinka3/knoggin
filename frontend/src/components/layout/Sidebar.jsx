@@ -72,7 +72,17 @@ export default function Sidebar({ isOpen, onToggle }) {
             <span className="px-2 text-xs font-medium text-muted-foreground">Recent</span>
             <div className="mt-2 space-y-1">
               {loading ? (
-                <div className="px-2 text-sm text-muted-foreground">Loading...</div>
+                <div className="space-y-1">
+                  {[1, 2, 3, 4].map(i => (
+                    <div key={i} className="flex items-center gap-2 px-2 py-2">
+                      <div className="w-4 h-4 rounded bg-muted-foreground/20 animate-pulse shrink-0" />
+                      <div
+                        className="h-4 bg-muted-foreground/20 rounded animate-pulse"
+                        style={{ width: `${60 + i * 8}%` }}
+                      />
+                    </div>
+                  ))}
+                </div>
               ) : sessions.length === 0 ? (
                 <div className="px-2 text-sm text-muted-foreground">No sessions yet</div>
               ) : (

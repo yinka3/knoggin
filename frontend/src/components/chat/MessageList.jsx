@@ -3,7 +3,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ArrowDown } from 'lucide-react'
 import ThinkingBox from './ThinkingBox'
 import ThinkingOrb from './ThinkingOrb'
-import MarkdownRenderer from './MarkdownContent'
+import MarkdownRenderer from './MarkdownRenderer'
 
 export default function MessageList({
   messages,

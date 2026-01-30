@@ -1,18 +1,20 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
 import { useChat } from '../hooks/useChat'
-import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-
+import { getConfig } from '@/api/config'
+import { createSession as apiCreateSession } from '@/api/sessions'
+import { toast } from 'sonner'
 import InputBar from '../components/chat/InputBar'
 import MessageList from '../components/chat/MessageList'
 import TopicsDrawer from '../components/chat/TopicsDrawer'
 import TokenCounter from '../components/chat/TokenCounter'
+import WelcomeState from '../components/chat/WelcomeState'
 
 export default function ChatPage() {
   const { sessionId } = useParams()
-  const { createSession, setCurrentSessionId } = useSession()
+  const { createSession, setCurrentSessionId, loadSessions } = useSession()
   const [showSkeleton, setShowSkeleton] = useState(false)
   const {
     messages,
@@ -25,6 +27,21 @@ export default function ChatPage() {
     loadHistory,
     send,
   } = useChat(sessionId)
+
+  const navigate = useNavigate()
+  const location = useLocation()
+
+  useEffect(() => {
+    if (sessionId) {
+      setCurrentSessionId(sessionId)
+      loadHistory().then(() => {
+        if (location.state?.firstMessage) {
+          send(location.state.firstMessage)
+          navigate(location.pathname, { replace: true, state: {} })
+        }
+      })
+    }
+  }, [sessionId])
 
   useEffect(() => {
     if (loading) {
@@ -40,6 +57,23 @@ export default function ChatPage() {
       loadHistory()
     }
   }, [sessionId, loadHistory])
+
+  async function handleFirstMessage(message) {
+    try {
+      const config = await getConfig()
+      const topicsConfig = config.default_topics || null
+      const data = await apiCreateSession(topicsConfig)
+
+      if (data?.session_id) {
+        setCurrentSessionId(data.session_id)
+        await loadSessions()
+        navigate(`/chat/${data.session_id}`, { state: { firstMessage: message } })
+      }
+    } catch (err) {
+      console.error('Failed to create session:', err)
+      toast.error('Failed to start conversation')
+    }
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -75,16 +109,7 @@ export default function ChatPage() {
             />
           )
         ) : (
-          <div>
-            <p className="mb-2 text-muted-foreground">No session selected</p>
-            <Button
-              variant="outline"
-              onClick={createSession}
-              className="border-primary text-primary hover:bg-primary hover:text-primary-foreground"
-            >
-              New Chat
-            </Button>
-          </div>
+          <WelcomeState onFirstMessage={handleFirstMessage} />
         )}
       </div>
 

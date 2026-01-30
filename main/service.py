@@ -53,6 +53,19 @@ class LLMService:
     def agent_model(self) -> str:
         """Model used for agent"""
         return self._agent_model
+    
+    def update_models(
+        self,
+        reasoning_model: Optional[str] = None,
+        agent_model: Optional[str] = None
+    ) -> None:
+        """Hot-swap models for this LLM service instance."""
+        if reasoning_model:
+            logger.info(f"LLMService: reasoning model {self._reasoning_model} → {reasoning_model}")
+            self._reasoning_model = reasoning_model
+        if agent_model:
+            logger.info(f"LLMService: agent model {self._agent_model} → {agent_model}")
+            self._agent_model = agent_model
 
     async def call_llm(
         self,

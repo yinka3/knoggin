@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -18,6 +18,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { getConfig } from '@/api/config'
 import { Loader2, Sparkles } from 'lucide-react'
 
 const DEFAULT_CONFIG = {
@@ -41,9 +42,21 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
   const [mode, setMode] = useState('defaults')
   const [selectedSessionId, setSelectedSessionId] = useState(null)
   const [description, setDescription] = useState('')
+  const [defaultTopics, setDefaultTopics] = useState(null)
+  const [loadingDefaults, setLoadingDefaults] = useState(false)
   const [generatedConfig, setGeneratedConfig] = useState(null)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState(null)
+
+  useEffect(() => {
+    if (open) {
+      setLoadingDefaults(true)
+      getConfig()
+        .then(config => setDefaultTopics(config.default_topics || null))
+        .catch(err => console.error('Failed to load default topics:', err))
+        .finally(() => setLoadingDefaults(false))
+    }
+  }, [open])
 
   function resetState() {
     setMode('defaults')
@@ -52,6 +65,8 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
     setGeneratedConfig(null)
     setGenerating(false)
     setError(null)
+    setDefaultTopics(null)
+    setLoadingDefaults(false)
   }
 
   function handleOpenChange(open) {
@@ -96,7 +111,7 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
 
   function getSelectedConfig() {
     if (mode === 'defaults') {
-      return DEFAULT_CONFIG
+      return defaultTopics || DEFAULT_CONFIG
     }
 
     if (mode === 'copy' && selectedSessionId) {
@@ -120,7 +135,7 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
   }
 
   const canCreate =
-    mode === 'defaults' ||
+    (mode === 'defaults' && !loadingDefaults && (defaultTopics || DEFAULT_CONFIG)) ||
     (mode === 'copy' && selectedSessionId) ||
     (mode === 'generate' && generatedConfig)
 
@@ -149,7 +164,18 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
               <Label htmlFor="defaults" className="text-foreground cursor-pointer">
                 Start with defaults
               </Label>
-              <p className="text-sm text-muted-foreground mt-1">General + Identity topics</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                {loadingDefaults ? (
+                  <span className="flex items-center gap-2">
+                    <span className="w-3 h-3 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
+                    Loading...
+                  </span>
+                ) : defaultTopics ? (
+                  Object.keys(defaultTopics).join(' + ')
+                ) : (
+                  'General + Identity topics'
+                )}
+              </p>
             </div>
           </div>
 

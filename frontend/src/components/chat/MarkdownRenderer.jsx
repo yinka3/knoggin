@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -9,6 +10,7 @@ function CodeBlock({ language, children }) {
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(children)
+    toast.success('Copied to clipboard')
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }

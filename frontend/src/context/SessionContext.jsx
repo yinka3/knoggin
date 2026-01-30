@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { toast } from 'sonner'
 import { listSessions, createSession as apiCreateSession } from '../api/sessions'
 import SessionConfigModal from '../components/session/SessionConfigModal'
 
@@ -41,6 +42,9 @@ export function SessionProvider({ children }) {
       return data.session_id
     } catch (err) {
       console.error('Failed to create session:', err)
+      toast.error('Failed to create session', {
+        description: err.message,
+      })
       return null
     }
   }

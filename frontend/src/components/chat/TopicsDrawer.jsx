@@ -28,6 +28,7 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { toast } from 'sonner'
 import { Settings, Plus, Trash2 } from 'lucide-react'
 import { createTopic, getTopics, updateTopic, deleteTopic } from '../../api/topics'
 
@@ -169,6 +170,7 @@ export default function TopicsDrawer({ sessionId }) {
       setEditOpen(false)
       setError(null)
       await loadTopics()
+      toast.success(isNew ? 'Topic created' : 'Topic updated')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -189,6 +191,7 @@ export default function TopicsDrawer({ sessionId }) {
       setEditOpen(false)
       setDeleteTarget(null)
       await loadTopics()
+      toast.success('Topic deleted')
     } catch (err) {
       setError(err.message)
     }
@@ -212,7 +215,19 @@ export default function TopicsDrawer({ sessionId }) {
             </SheetDescription>
           </SheetHeader>
 
-          {loading && <p className="text-muted-foreground text-sm mt-4">Loading...</p>}
+          {loading && (
+            <div className="mt-6 space-y-1">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="flex items-center gap-3 px-3 py-2">
+                  <div className="w-2 h-2 rounded-full bg-muted-foreground/20 animate-pulse" />
+                  <div
+                    className="h-4 bg-muted-foreground/20 rounded animate-pulse"
+                    style={{ width: `${50 + i * 15}%` }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
           {error && <p className="text-destructive text-sm mt-4">{error}</p>}
 
           {!loading && (
@@ -340,6 +355,7 @@ export default function TopicsDrawer({ sessionId }) {
                 checked={editTopic.active}
                 onCheckedChange={checked => setEditTopic({ ...editTopic, active: checked })}
                 disabled={editTopic.name === 'General'}
+                className="data-[state=unchecked]:bg-muted-foreground/30"
               />
             </div>
           </div>
