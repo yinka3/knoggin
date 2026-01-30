@@ -33,32 +33,25 @@ class EntityResolver:
                 return
             
             ids = []
-            vectors = []
             
             with self._lock:
                 for ent in entities:
                     ent_id = ent["id"]
                     canonical = ent["canonical_name"]
                     aliases = ent["aliases"] or []
-                    embedding = ent["embedding"]
                     
                     self._name_to_id[canonical.lower()] = ent_id
                     for alias in aliases:
                         self._name_to_id[alias.lower()] = ent_id
                     
-                    # no facts in cache anymore
                     self.entity_profiles[ent_id] = {
                         "canonical_name": canonical,
                         "type": ent["type"],
                         "topic": ent.get("topic", "General"),
                         "session_id": ent.get("session_id")
                     }
-                    
-                    if embedding and len(embedding) == EmbeddingService.EMBEDDING_DIM:
-                        ids.append(ent_id)
-                        vectors.append(embedding)
-            
-            logger.info(f"Hydrated {len(self.entity_profiles)} entities, {len(ids)} vectors from Memgraph")
+
+            logger.info(f"Hydrated {len(self.entity_profiles)} entities from Memgraph")
             
         except Exception as e:
             logger.error(f"Hydration failed: {e}")
