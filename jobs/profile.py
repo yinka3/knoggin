@@ -186,6 +186,14 @@ class ProfileRefinementJob(BaseJob):
                     
                     if updates:
                         await self._write_updates(updates)
+
+                        merge_queue = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
+                        updated_ids = [str(u["id"]) for u in updates]
+                        
+                        if updated_ids:
+                            await ctx.redis.sadd(merge_queue, *updated_ids)
+                            logger.info(f"Passed {len(updated_ids)} updated entities to Merge Queue")
+
                 except Exception as e:
                     logger.error(f"Profile refinement failed, re-queuing {len(entity_ids)} entities: {e}")
                     await ctx.redis.sadd(dirty_key, *[str(eid) for eid in entity_ids])
@@ -396,7 +404,7 @@ class ProfileRefinementJob(BaseJob):
     async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]):
         """Process entities in batches instead of individually."""
         
-        current_msg_id = await ctx.redis.get(f"last_processed_msg:{ctx.user_name}")
+        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
         conversation_text = "\n".join([turn["formatted"] for turn in conversation])
 

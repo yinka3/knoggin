@@ -48,10 +48,20 @@ class MergeDetectionJob(BaseJob):
 
     async def execute(self, ctx: JobContext) -> JobResult:
         await ctx.redis.set(RedisKeys.merge_ran(ctx.user_name, ctx.session_id), "true")
+
+        merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
     
-        candidates = self.ent_resolver.detect_merge_candidates()
+        dirty_raw = await ctx.redis.spop(merge_key, 50)
+        
+        if not dirty_raw:
+            return JobResult(success=True, summary="No recently updated entities to check")
+            
+        dirty_ids = {int(eid) for eid in dirty_raw}
+        
+        candidates = self.ent_resolver.detect_merge_entitiy_candidates(dirty_ids=dirty_ids)
+        
         if not candidates:
-            return JobResult(success=True, summary="No candidates found")
+            return JobResult(success=True, summary=f"Checked {len(dirty_ids)} entities, no duplicates found")
         
         logger.info(f"Processing {len(candidates)} merge candidates")
     
@@ -393,25 +403,10 @@ class MergeDetectionJob(BaseJob):
                     topic,
                     parent_type,
                     child_types,
-                    2  # min_weight
+                    2  # min_weight: ensures they have been mentioned together at least twice
                 )
                 
                 for c in candidates:
-                    parent_emb = c.get("parent_embedding", [])
-                    child_emb = c.get("child_embedding", [])
-                    
-                    if not parent_emb or not child_emb:
-                        continue
-                    
-                    similarity = cosine_similarity(parent_emb, child_emb)
-                    
-                    if similarity < 0.65:
-                        logger.debug(
-                            f"Hierarchy rejected: {c['child_name']} -> {c['parent_name']} "
-                            f"(similarity={similarity:.3f})"
-                        )
-                        continue
-                    
                     success = await loop.run_in_executor(
                         self.executor,
                         self.store.create_hierarchy_edge,
@@ -422,8 +417,8 @@ class MergeDetectionJob(BaseJob):
                     if success:
                         created += 1
                         logger.info(
-                            f"Hierarchy: {c['child_name']} -[:PART_OF]-> {c['parent_name']} "
-                            f"(similarity={similarity:.3f})"
+                            f"Hierarchy Established: {c['child_name']} ({c['child_type']}) "
+                            f"-[:PART_OF]-> {c['parent_name']} ({c['parent_type']})"
                         )
         
         return f"{created} hierarchy edges"

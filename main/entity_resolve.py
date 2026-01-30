@@ -303,16 +303,22 @@ class EntityResolver:
         return profile["canonical_name"] if profile else None
             
 
-    def detect_merge_candidates(self) -> list:
+    def detect_merge_entitiy_candidates(self, dirty_ids: set = None) -> list:
         """Detect potential entity merges using vector search + fuzzy matching."""
         with self._lock:
-            entity_count = len(self.entity_profiles)
+            scan_targets = dirty_ids if dirty_ids else list(self.entity_profiles.keys())
             profiles_snapshot = dict(self.entity_profiles)
         
-        logger.info(f"Merge detection started. Scanning {entity_count} entities.")
+        valid_targets = [eid for eid in scan_targets if eid in profiles_snapshot]
+        
+        if not valid_targets:
+            logger.debug("Merge detection skipped: No valid dirty entities to check.")
+            return []
+
+        logger.info(f"Merge detection started. Scanning {len(valid_targets)} entities against graph.")
 
         generic_tokens = self._build_generic_tokens()
-        candidate_pairs = self._collect_candidate_pairs(generic_tokens)
+        candidate_pairs = self._collect_candidate_pairs(valid_targets, generic_tokens)
 
         if not candidate_pairs:
             return []
@@ -355,7 +361,8 @@ class EntityResolver:
 
 
     def _collect_candidate_pairs(
-        self, 
+        self,
+        target_ids: list,
         generic_tokens: set,
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
@@ -378,7 +385,12 @@ class EntityResolver:
             neighbors = self.store.search_similar_entities(primary_id, limit=50)
 
             for neighbor_id, _ in neighbors:
-                if neighbor_id == primary_id or neighbor_id < primary_id:
+                if neighbor_id == primary_id:
+                    continue
+
+                pair_key = tuple(sorted((primary_id, neighbor_id)))
+                
+                if pair_key in seen_pairs:
                     continue
 
                 neighbor_profile = profiles_snapshot.get(neighbor_id)
@@ -389,7 +401,6 @@ class EntityResolver:
                 score = fuzz.WRatio(primary_name, neighbor_name)
                 is_substring = is_substring_match(primary_name, neighbor_name)
 
-                # threshold check
                 passes_threshold = (
                     (is_substring and score >= fuzzy_substring_threshold) or
                     score >= fuzzy_non_substring_threshold
@@ -398,16 +409,13 @@ class EntityResolver:
                 if not passes_threshold:
                     continue
 
-                # generic token overlap check
                 tokens_i = set(primary_name.lower().split()) - generic_tokens
                 tokens_j = set(neighbor_name.lower().split()) - generic_tokens
 
                 if not (tokens_i & tokens_j):
-                    logger.warning(f"Skipping {primary_id}-{neighbor_id}: generic token overlap only")
                     continue
 
-                pair_key = (primary_id, neighbor_id)
-                if pair_key not in seen_pairs or score > seen_pairs[pair_key][0]:
+                if pair_key not in seen_pairs or score > seen_pairs[pair_key]:
                     seen_pairs[pair_key] = score
 
         return seen_pairs

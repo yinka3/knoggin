@@ -59,6 +59,10 @@ class RedisKeys:
     @staticmethod
     def profile_complete(user: str, session: str) -> str:
         return f"profile_complete:{user}:{session}"
+
+    @staticmethod
+    def merge_queue(user_name: str, session: str) -> str:
+        return f"merge_queue:{user_name}:{session}"
     
     @staticmethod
     def dlq(user: str, session: str) -> str:
