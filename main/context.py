@@ -7,7 +7,6 @@ import json
 from jobs.archive import FactArchivalJob
 from jobs.base import BaseJob, JobContext
 from jobs.dlq import DLQReplayJob
-from jobs.mood import MoodCheckpointJob
 from jobs.profile import ProfileRefinementJob
 from jobs.scheduler import Scheduler
 from jobs.merger import MergeDetectionJob
@@ -110,8 +109,7 @@ class Context:
                 get_known_aliases=lambda: instance.ent_resolver._name_to_id,
                 get_profiles=lambda: instance.ent_resolver.entity_profiles,
                 gliner=resources.gliner,
-                spacy=resources.spacy,
-                emotion_classifier=resources.emotion_classifier
+                spacy=resources.spacy
             )
         )
         
@@ -161,7 +159,6 @@ class Context:
         instance.scheduler.register(DLQReplayJob())
         instance.scheduler.register(EntityCleanupJob(user_name, instance.store, instance.ent_resolver))
         # instance.scheduler.register(FactArchivalJob(user_name, instance.store))
-        # instance.scheduler.register(MoodCheckpointJob(user_name, instance.store))
         await instance.scheduler.start()
         
         logger.info(f"Session started: {instance.session_id}")

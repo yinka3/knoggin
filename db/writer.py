@@ -137,37 +137,6 @@ class GraphWriter:
         logger.info(f"Saved {len(messages)} message logs to Memgraph.")
         return True
     
-    def log_mood_checkpoint(
-        self,
-        user_name: str,
-        primary: str,
-        primary_count: int,
-        secondary: str,
-        secondary_count: int,
-        message_count: int
-    ):
-        query = """
-        MATCH (u:Entity {canonical_name: $user_name, type: 'person'})
-        CREATE (m:MoodCheckpoint {
-            timestamp: timestamp(),
-            primary_emotion: $primary,
-            primary_count: $primary_count,
-            secondary_emotion: $secondary,
-            secondary_count: $secondary_count,
-            message_count: $message_count
-        })
-        MERGE (u)-[:FELT]->(m)
-        """
-        with self.driver.session() as session:
-            session.run(query, {
-                "user_name": user_name,
-                "primary": primary,
-                "primary_count": primary_count,
-                "secondary": secondary,
-                "secondary_count": secondary_count,
-                "message_count": message_count
-            }).consume()
-    
 
     def write_batch(self, entities: List[Dict], relationships: List[Dict]):
         entity_params = []

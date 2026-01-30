@@ -53,10 +53,6 @@ class RedisKeys:
         return f"message_content:{user}:{session}"
     
     @staticmethod
-    def emotions(user: str, session: str) -> str:
-        return f"emotions:{user}:{session}"
-    
-    @staticmethod
     def dirty_entities(user: str, session: str) -> str:
         return f"dirty_entities:{user}:{session}"
     

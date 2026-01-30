@@ -333,19 +333,3 @@ class GraphToolQueries:
         # No active path exists, only the inactive one
         return [], True
     
-    
-    def get_mood_history(self, user_name: str, limit: int = 10) -> list[dict]:
-        query = """
-        MATCH (u:Entity {canonical_name: $user_name})-[:FELT]->(m:MoodCheckpoint)
-        RETURN m.primary_emotion as primary_emotion,
-            m.primary_count as primary_count,
-            m.secondary_emotion as secondary_emotion,
-            m.secondary_count as secondary_count,
-            m.timestamp as timestamp,
-            m.message_count as message_count
-        ORDER BY m.timestamp DESC
-        LIMIT $limit
-        """
-        with self.driver.session() as session:
-            result = session.run(query, {"user_name": user_name, "limit": limit})
-            return [dict(record) for record in result]

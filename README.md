@@ -23,12 +23,14 @@ Built for developers who want to own their data and understand their agent's mem
 > Coming soon — Installation instructions will be available once the UI is complete.
 
 For now, if you want to explore the codebase:
+
 ```bash
 git clone https://github.com/yourusername/knoggin.git
 cd knoggin
 ```
 
 Requirements:
+
 - Python 3.12+
 - Docker (for Memgraph + Redis)
 - LLM API key (OpenAI, Anthropic, Google, or any OpenAI-compatible provider)
@@ -39,11 +41,11 @@ Knoggin separates **write** (extraction) from **read** (retrieval).
 
 ### Write Path — VEGAPUNK
 
-In *One Piece*, Dr. Vegapunk is the world's greatest scientist, so brilliant that his brain grew too large for his body. His solution? Split his consciousness into six satellites, each handling a specialized aspect of his genius.
+In _One Piece_, Dr. Vegapunk is the world's greatest scientist, so brilliant that his brain grew too large for his body. His solution? Split his consciousness into six satellites, each handling a specialized aspect of his genius.
 
 Knoggin borrows this idea. Rather than one monolithic prompt, the write path splits cognitive labor across specialized prompts. Each does one thing well, and reasoning stays separate from formatting.
 
-*(Please don't sue me, Eiichiro Oda. I'm just a fan who needed a naming convention.)*
+_(Please don't sue me, Eiichiro Oda. I'm just a fan who needed a naming convention.)_
 
 - **VP-01**: Named entity recognition
 - **VP-02**: Entity disambiguation
@@ -60,13 +62,14 @@ The conversational agent uses bounded tool calls to query the graph and synthesi
 ### Background Jobs
 
 **Session jobs** (run during active use):
+
 - **Profile Refinement** — Entity summaries evolve with new information
 - **Merge Detection** — Catches duplicates that slip through initial disambiguation
 
 **Scheduled jobs** (run periodically):
+
 - **Entity Cleanup** — Removes orphan entities with no relationships
 - **Fact Archival** — Archives invalidated facts past retention period
-- **Mood Checkpoint** — Tracks emotional patterns from user messages
 - **DLQ Replay** — Retries failed batches on transient errors
 
 ## Topic Configuration

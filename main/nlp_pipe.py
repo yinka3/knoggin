@@ -4,7 +4,6 @@ from main.topics_config import TopicConfig
 from main.utils import PRONOUNS, format_vp01_input, is_covered, is_generic_phrase, parse_entities, validate_entity
 from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
-from transformers import Pipeline
 import spacy
 from spacy.matcher import PhraseMatcher
 from gliner import GLiNER
@@ -19,8 +18,7 @@ class NLPPipeline:
         get_known_aliases: Callable[[], Dict[str, int]],
         get_profiles: Callable[[], Dict[int, dict]],
         gliner: GLiNER,
-        spacy: spacy.Language,
-        emotion_classifier: Pipeline
+        spacy: spacy.Language
     ):
         self.llm_client = llm
         self.topic_config = topic_config
@@ -29,7 +27,6 @@ class NLPPipeline:
         self._label_to_topics = self._build_label_to_topics()
         self._nlp = spacy
         self._gliner = gliner
-        self.emotion_classifier = emotion_classifier
        
     def _build_label_to_topics(self) -> Dict[str, List[str]]:
         """Invert topic_config: label -> [topics that include it]"""
@@ -236,13 +233,3 @@ class NLPPipeline:
         )
         
         return output
-
-
-    def analyze_emotion(self, text: str) -> List[dict]:
-        if not text or not text.strip():
-            return []
-        try:
-            results = self.emotion_classifier(text, truncation=True)
-            return results[0] if results else []
-        except Exception:
-            return []

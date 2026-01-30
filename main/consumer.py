@@ -133,9 +133,6 @@ class BatchConsumer:
                 ]
                 await loop.run_in_executor(None, self.store.save_message_logs, batch)
                     
-                if result.emotions:
-                    await self.redis.rpush(RedisKeys.emotions(self.user_name, self.session_id), *result.emotions)
-                
                 if result.extraction_result:
                    await self.write_to_graph(result)
 

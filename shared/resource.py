@@ -1,18 +1,15 @@
 
 from concurrent.futures import ThreadPoolExecutor
-
 from gliner import GLiNER
 from loguru import logger
 import redis
 import spacy
 import torch
-from transformers import pipeline
 from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
 from main.embedding import EmbeddingService
 from shared.redisclient import AsyncRedisClient
 from main.service import LLMService
-from transformers import Pipeline
 
 class ResourceManager:
     _instance = None
@@ -25,7 +22,6 @@ class ResourceManager:
         self.executor: ThreadPoolExecutor = None
         self.gliner: GLiNER = None
         self.spacy: spacy.Language = None
-        self.emotion_classifier: Pipeline = None
 
     @classmethod
     async def initialize(cls) -> "ResourceManager":
@@ -40,7 +36,7 @@ class ResourceManager:
         instance.executor = ThreadPoolExecutor(max_workers=4)
         instance.store = MemGraphStore()
         instance.redis = AsyncRedisClient().get_client()
-        instance.llm_service = LLMService(trace_logger=get_trace_logger()) # maybe move api env here instead
+        instance.llm_service = LLMService(trace_logger=get_trace_logger())
         instance.embedding = EmbeddingService(device=device)
 
         exclude = ["ner", "lemmatizer", "attribute_ruler"]
@@ -54,13 +50,6 @@ class ResourceManager:
         logger.info("Loaded GLiNER large-v2.1")
         instance.gliner = model
 
-        instance.emotion_classifier = pipeline(
-            "text-classification",
-            model="j-hartmann/emotion-english-distilroberta-base",
-            top_k=None,
-            device=device_id
-        )
-        logger.info("Loaded Emotion Model")
         cls._instance = instance
         return instance
 

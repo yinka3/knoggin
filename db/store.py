@@ -64,7 +64,6 @@ class MemGraphStore:
             "CREATE INDEX ON :Fact(invalid_at);",
             "CREATE INDEX ON :Fact(created_at);",
             "CREATE INDEX ON :Message(timestamp);",
-            "CREATE INDEX ON :MoodCheckpoint(timestamp);",
             "CREATE INDEX ON :Entity(canonical_name);",
         ]
 
@@ -116,9 +115,6 @@ class MemGraphStore:
 
     def update_entity_embedding(self, entity_id: int, embedding: List[float]):
         return self._writer.update_entity_embedding(entity_id, embedding)
-
-    def log_mood_checkpoint(self, user_name: str, primary: str, primary_count: int, secondary: str, secondary_count: int, message_count: int):
-        return self._writer.log_mood_checkpoint(user_name, primary, primary_count, secondary, secondary_count, message_count)
 
     def create_hierarchy_edge(self, parent_id: int, child_id: int) -> bool:
         return self._writer.create_hierarchy_edge(parent_id, child_id)
@@ -228,8 +224,5 @@ class MemGraphStore:
 
     def find_path_filtered(self, start_name: str, end_name: str, active_topics: List[str] = None) -> Tuple[List[Dict], bool]:
         return self._tools._find_path_filtered(start_name, end_name, active_topics)
-
-    def get_mood_history(self, user_name: str, limit: int = 10) -> List[Dict]:
-        return self._tools.get_mood_history(user_name, limit)
     
     

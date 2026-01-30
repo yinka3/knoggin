@@ -38,7 +38,6 @@ class BatchResult:
     new_entity_ids: Set[int] = field(default_factory=set)
     alias_updated_ids: Set[int] = field(default_factory=set)
     extraction_result: Optional[List[MessageConnections]] = None
-    emotions: List[str] = field(default_factory=list)
     message_embeddings: Dict[int, List[float]] = field(default_factory=dict)
     success: bool = True
     error: Optional[str] = None
@@ -90,8 +89,7 @@ class BatchProcessor:
         logger.debug(f"Processing batch of {len(messages)} messages: {[m['id'] for m in messages]}")
         
         try:
-            mentions, emotions = await self._extract_mentions(messages)
-            result.emotions = emotions
+            mentions = await self._extract_mentions(messages)
 
             valid_mentions = []
             for msg_id, text, typ, topic in mentions:
@@ -157,9 +155,8 @@ class BatchProcessor:
             return result
 
     
-    async def _extract_mentions(self, messages: List[Dict]) -> Tuple[List[Tuple[int, str, str, str]], List[str]]:
-        """Run NER and emotion detection across all messages."""
-        # loop = asyncio.get_running_loop()
+    async def _extract_mentions(self, messages: List[Dict]) -> List[Tuple[int, str, str, str]]:
+        """Run NER across all messages."""
         
         mentions = await self.nlp.extract_mentions(self.user_name, messages)
 
@@ -168,20 +165,8 @@ class BatchProcessor:
             norm_topic = self.topic_config.normalize_topic(topic)
             normalized_mentions.append((msg_id, text, typ, norm_topic))
         
-        # emotion_tasks = [
-        #     loop.run_in_executor(self.executor, self.nlp.analyze_emotion, m["message"])
-        #     for m in messages
-        # ]
-        # all_emotions = await asyncio.gather(*emotion_tasks)
-        
-        emotions = []
-        # for emotion_list in all_emotions:
-        #     if emotion_list:
-        #         dominant = max(emotion_list, key=lambda x: x["score"])
-        #         emotions.append(dominant["label"])
-        
-        logger.debug(f"Extracted {normalized_mentions} mentions and emotions {emotions}")
-        return normalized_mentions, emotions
+        logger.debug(f"Extracted {normalized_mentions} mentions")
+        return normalized_mentions
 
     async def _build_known_entities(
         self, 
