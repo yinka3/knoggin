@@ -1,3 +1,4 @@
+import gc
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer, CrossEncoder

@@ -58,7 +58,7 @@ class MergeDetectionJob(BaseJob):
             
         dirty_ids = {int(eid) for eid in dirty_raw}
         
-        candidates = self.ent_resolver.detect_merge_entitiy_candidates(dirty_ids=dirty_ids)
+        candidates = self.ent_resolver.detect_merge_entity_candidates(dirty_ids=dirty_ids)
         
         if not candidates:
             return JobResult(success=True, summary=f"Checked {len(dirty_ids)} entities, no duplicates found")

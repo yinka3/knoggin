@@ -87,9 +87,9 @@ class Context:
         
         loop = asyncio.get_running_loop()
         max_id = await loop.run_in_executor(None, instance.store.get_max_entity_id)
-        current_redis = await resources.redis.get("global:next_ent_id")
+        current_redis = await resources.redis.get(RedisKeys.global_next_ent_id())
         if not current_redis or int(current_redis) < max_id:
-            await resources.redis.set("global:next_ent_id", max_id)
+            await resources.redis.set(RedisKeys.global_next_ent_id(), max_id)
         
         instance.ent_resolver = EntityResolver(
             session_id=instance.session_id,

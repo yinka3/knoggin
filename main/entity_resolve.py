@@ -310,7 +310,7 @@ class EntityResolver:
         return profile["canonical_name"] if profile else None
             
 
-    def detect_merge_entitiy_candidates(self, dirty_ids: set = None) -> list:
+    def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
         """Detect potential entity merges using vector search + fuzzy matching."""
         with self._lock:
             scan_targets = dirty_ids if dirty_ids else list(self.entity_profiles.keys())
