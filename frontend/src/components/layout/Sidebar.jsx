@@ -23,7 +23,7 @@ export default function Sidebar({ isOpen, onToggle }) {
         )}
         <button
           onClick={onToggle}
-          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors"
+          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all duration-200 hover:scale-105 active:scale-95"
         >
           {isOpen ? <PanelLeftClose size={18} /> : <PanelLeft size={18} />}
         </button>
@@ -31,6 +31,7 @@ export default function Sidebar({ isOpen, onToggle }) {
 
       {/* Nav links */}
       <div className={`p-2 space-y-1 ${!isOpen && 'flex flex-col items-center'}`}>
+        {/* CHAT BUTTON */}
         <Link to="/chat" className="w-full">
           <button
             className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
@@ -39,7 +40,11 @@ export default function Sidebar({ isOpen, onToggle }) {
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             }`}
           >
-            <MessageSquare size={18} />
+            {/* ANIMATION: Scales up and tilts left */}
+            <MessageSquare
+              size={18}
+              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:-rotate-6 group-hover:text-primary"
+            />
             <span
               className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
             >
@@ -47,6 +52,8 @@ export default function Sidebar({ isOpen, onToggle }) {
             </span>
           </button>
         </Link>
+
+        {/* MEMORY BUTTON */}
         <Link to="/memory" className="w-full">
           <button
             className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
@@ -55,7 +62,11 @@ export default function Sidebar({ isOpen, onToggle }) {
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             }`}
           >
-            <Brain size={18} />
+            {/* ANIMATION: Scales up and tilts right */}
+            <Brain
+              size={18}
+              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:rotate-6 group-hover:text-primary"
+            />
             <span
               className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
             >
@@ -70,9 +81,13 @@ export default function Sidebar({ isOpen, onToggle }) {
         <Button
           variant="outline"
           onClick={createSession}
-          className={`${isOpen ? 'w-full justify-start' : 'w-10 justify-center px-0'} rounded-md border-primary/20 hover:border-primary/50 text-primary hover:bg-primary/5 transition-all shadow-none`}
+          className={`${isOpen ? 'w-full justify-start' : 'w-10 justify-center px-0'} rounded-md border-primary/20 hover:border-primary/50 text-primary hover:bg-primary/5 transition-all shadow-none group`}
         >
-          <Plus size={18} className={isOpen ? 'mr-2' : ''} />
+          {/* ANIMATION: Rotates 90 degrees */}
+          <Plus
+            size={18}
+            className={`transition-transform duration-300 ease-out group-hover:rotate-90 ${isOpen ? 'mr-2' : ''}`}
+          />
           <span
             className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
           >
@@ -102,14 +117,13 @@ export default function Sidebar({ isOpen, onToggle }) {
                   <button
                     key={session.session_id}
                     onClick={() => selectSession(session.session_id)}
-                    className={`w-full flex items-center gap-2 px-2 py-2 rounded-md text-sm truncate transition-colors text-left ${
+                    className={`w-full flex items-center gap-2 px-2 py-2 rounded-md text-sm truncate transition-all duration-200 group ${
                       currentSessionId === session.session_id
                         ? 'bg-muted font-medium text-foreground'
                         : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
                     }`}
                   >
-                    <span className="truncate flex-1">
-                      {/* Fallback if title is missing */}
+                    <span className="truncate flex-1 group-hover:translate-x-1 transition-transform duration-200">
                       {session.title || `Session ${session.session_id.slice(0, 4)}`}
                     </span>
                   </button>
@@ -124,13 +138,17 @@ export default function Sidebar({ isOpen, onToggle }) {
       <div className={`border-t border-border p-2 ${!isOpen && 'flex justify-center'}`}>
         <Link to="/settings" className="w-full">
           <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 ${
+            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group ${
               location.pathname === '/settings'
                 ? 'bg-primary/10 text-primary'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             }`}
           >
-            <Settings size={18} />
+            {/* ANIMATION: Spins like a gear */}
+            <Settings
+              size={18}
+              className="transition-transform duration-700 ease-out group-hover:rotate-180"
+            />
             <span
               className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
             >

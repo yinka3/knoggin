@@ -203,8 +203,15 @@ export default function TopicsDrawer({ sessionId }) {
     <>
       <Sheet open={open} onOpenChange={setOpen} modal={false}>
         <SheetTrigger asChild>
-          <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-accent">
-            <Settings size={18} />
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all duration-300 group"
+          >
+            <Settings
+              size={18}
+              className="transition-transform duration-500 ease-out group-hover:rotate-90"
+            />
           </Button>
         </SheetTrigger>
         <SheetContent className="bg-background border-border w-72">

@@ -1,36 +1,74 @@
-// src/components/memory/EntityCard.jsx
-import { formatDistanceToNow } from 'date-fns'
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { User, Box, Tag, MapPin, Calendar, Globe, Hash } from 'lucide-react'
+
+const TYPE_ICONS = {
+  person: User,
+  project: Box,
+  organization: Globe,
+  location: MapPin,
+  event: Calendar,
+  concept: Hash,
+  topic: Tag,
+  // Fallback
+  default: Box,
+}
 
 export default function EntityCard({ entity, onClick }) {
-  const lastMentioned = entity.last_mentioned
-    ? formatDistanceToNow(new Date(entity.last_mentioned), { addSuffix: true })
-    : 'never'
+  const Icon = TYPE_ICONS[entity.type] || TYPE_ICONS.default
 
   return (
-    <button
-      onClick={() => onClick(entity.id)}
-      className="w-full text-left p-4 rounded-xl bg-card border border-border 
-        hover:border-primary/50 hover:bg-card/80
-        transition-all duration-200 cursor-pointer group"
+    <Card
+      onClick={onClick}
+      className="
+        group relative cursor-pointer overflow-hidden border-border/60 bg-card/50 backdrop-blur-sm
+        transition-all duration-300 ease-out
+        hover:-translate-y-1 hover:shadow-xl hover:shadow-primary/5 hover:border-primary/40
+      "
     >
-      <div className="flex items-start justify-between gap-3 mb-2">
-        <h3 className="font-medium text-foreground group-hover:text-primary transition-colors">
-          {entity.canonical_name}
-        </h3>
-        <span className="text-[11px] text-muted-foreground bg-muted px-2 py-0.5 rounded-full shrink-0">
-          {entity.type || 'unknown'}
-        </span>
-      </div>
+      {/* BACKGROUND GRADIENT BLOB (Visible on Hover) */}
+      <div
+        className="
+          absolute -right-10 -top-10 h-32 w-32 rounded-full bg-primary/10 blur-3xl 
+          transition-opacity duration-500 opacity-0 group-hover:opacity-100
+        "
+      />
 
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2 relative z-10">
+        <div className="space-y-1">
+          <CardTitle className="text-base font-semibold leading-tight tracking-tight text-foreground/90 group-hover:text-primary transition-colors duration-300">
+            {entity.canonical_name}
+          </CardTitle>
+          <div className="text-xs text-muted-foreground font-mono">{entity.type}</div>
+        </div>
+
+        {/* ICON ANIMATION */}
+        <div className="p-2 rounded-md bg-muted/50 text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary transition-colors duration-300">
+          <Icon
+            size={18}
+            className="transition-transform duration-500 group-hover:scale-110 group-hover:rotate-6"
+          />
+        </div>
+      </CardHeader>
+
+      <CardContent className="relative z-10">
+        <div className="text-sm text-muted-foreground line-clamp-2 min-h-[2.5rem] mb-3 leading-relaxed">
+          {entity.summary || 'No summary available.'}
+        </div>
+
+        {/* TOPIC BADGE */}
         {entity.topic && (
-          <>
-            <span>{entity.topic}</span>
-            <span>·</span>
-          </>
+          <Badge
+            variant="secondary"
+            className="
+              text-[10px] bg-secondary/50 text-secondary-foreground/80 hover:bg-secondary 
+              transition-colors duration-300
+            "
+          >
+            {entity.topic}
+          </Badge>
         )}
-        <span>{lastMentioned}</span>
-      </div>
-    </button>
+      </CardContent>
+    </Card>
   )
 }

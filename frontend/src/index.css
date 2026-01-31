@@ -183,6 +183,30 @@
   scrollbar-color: hsl(142 25% 50%) transparent;
 }
 
+@layer utilities {
+  /* The Line Drawing Animation */
+  @keyframes draw-lines {
+    0% {
+      stroke-dashoffset: 100;
+      opacity: 0;
+    }
+    10% {
+      opacity: 1;
+    }
+    100% {
+      stroke-dashoffset: 0;
+      opacity: 1;
+    }
+  }
+
+  /* Apply to the paths inside the Lucide Icon */
+  .animate-blueprint path {
+    stroke-dasharray: 100; /* Long enough to cover the icon paths */
+    stroke-dashoffset: 100;
+    animation: draw-lines 2.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
