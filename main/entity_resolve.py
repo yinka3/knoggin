@@ -4,15 +4,23 @@ import threading
 from typing import Dict, List, Optional, Tuple
 from rapidfuzz import fuzz, process
 from db.store import MemGraphStore
-from main.embedding import EmbeddingService
+from shared.embedding import EmbeddingService
 from main.utils import is_substring_match
 from schema.dtypes import Fact
+from shared.events import emit_sync
 
 
 class EntityResolver:
     
 
-    def __init__(self, store: 'MemGraphStore', embedding_service: EmbeddingService, session_id: str = None, hierarchy_config: dict = None):
+    def __init__(self, store: 'MemGraphStore', embedding_service: EmbeddingService, 
+                session_id: str = None, hierarchy_config: dict = None,
+                fuzzy_substring_threshold: int = 75,
+                fuzzy_non_substring_threshold: int = 91,
+                generic_token_freq: int = 10,
+                candidate_fuzzy_threshold: int = 85,
+                candidate_vector_threshold: int = 0.85):
+        
         self.store = store
         self.hierarchy_config = hierarchy_config or {}
         self.session_id = session_id
@@ -20,6 +28,12 @@ class EntityResolver:
         self.entity_profiles = {}
         self._name_to_id = {}
         self._lock = threading.RLock()
+
+        self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
+        self.candidate_vector_threshold = candidate_vector_threshold
+        self.fuzzy_substring_threshold = fuzzy_substring_threshold
+        self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
+        self.generic_token_freq = generic_token_freq
     
         self._hydrate_from_store()
 
@@ -32,81 +46,82 @@ class EntityResolver:
                 logger.info("No entities in Memgraph. Starting fresh.")
                 return
             
-            ids = []
-            vectors = []
-            
             with self._lock:
                 for ent in entities:
                     ent_id = ent["id"]
                     canonical = ent["canonical_name"]
                     aliases = ent["aliases"] or []
-                    embedding = ent["embedding"]
                     
                     self._name_to_id[canonical.lower()] = ent_id
                     for alias in aliases:
                         self._name_to_id[alias.lower()] = ent_id
                     
-                    # no facts in cache anymore
                     self.entity_profiles[ent_id] = {
                         "canonical_name": canonical,
                         "type": ent["type"],
                         "topic": ent.get("topic", "General"),
                         "session_id": ent.get("session_id")
                     }
-                    
-                    if embedding and len(embedding) == EmbeddingService.EMBEDDING_DIM:
-                        ids.append(ent_id)
-                        vectors.append(embedding)
-            
-            logger.info(f"Hydrated {len(self.entity_profiles)} entities, {len(ids)} vectors from Memgraph")
+
+            logger.info(f"Hydrated {len(self.entity_profiles)} entities from Memgraph")
+
+            if self.session_id:  # May be None during early init
+                emit_sync(self.session_id, "resolver", "hydrated", {
+                    "entity_count": len(self.entity_profiles),
+                    "alias_count": len(self._name_to_id)
+                })
             
         except Exception as e:
             logger.error(f"Hydration failed: {e}")
             raise
     
+    def update_settings(self, fuzzy_substring_threshold: int = None, 
+                        fuzzy_non_substring_threshold: int = None, 
+                        generic_token_freq: int = None,
+                        candidate_fuzzy_threshold: int = None,
+                        candidate_vector_threshold: float = None):
+        
+        """Update resolution thresholds on the fly."""
+        if fuzzy_substring_threshold:
+            self.fuzzy_substring_threshold = fuzzy_substring_threshold
+        if fuzzy_non_substring_threshold:
+            self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
+        if generic_token_freq:
+            self.generic_token_freq = generic_token_freq
+        
+        if candidate_fuzzy_threshold:
+            self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
+        if candidate_vector_threshold:
+            self.candidate_vector_threshold = candidate_vector_threshold
+            
+        logger.info(f"EntityResolver settings updated: sub={self.fuzzy_substring_threshold}, non-sub={self.fuzzy_non_substring_threshold}, freq={self.generic_token_freq}")
+    
     def get_id(self, name: str) -> Optional[int]:
         if not name:
             return None
-        return self._name_to_id.get(name.lower())
+        with self._lock:
+            return self._name_to_id.get(name.lower())
     
     def get_profiles(self) -> Dict[int, Dict]:
-        return self.entity_profiles
+        with self._lock:
+            return dict(self.entity_profiles)
     
     def get_mentions_for_id(self, entity_id: int) -> List[str]:
         with self._lock:
             items = list(self._name_to_id.items())
         return [mention for mention, eid in items if eid == entity_id]
+
+    def get_known_aliases(self) -> Dict[str, int]:
+        with self._lock:
+            return dict(self._name_to_id)
     
     def get_embedding_for_id(self, entity_id: int) -> List[float]:
         """Retrieve embedding from graph by ID."""
-        profile = self.entity_profiles.get(entity_id)
-        if profile and profile.get("embedding"):
-            return profile["embedding"]
+        with self._lock:
+            profile = self.entity_profiles.get(entity_id)
+            if profile and profile.get("embedding"):
+                return profile["embedding"]
         return self.store.get_entity_embedding(entity_id)
-            
-    def get_hierarchy_relationship(self, type_a: str, type_b: str, topic: str) -> Optional[str]:
-        """
-        Check if two types have a parent/child relationship within a topic.
-        
-        Returns:
-            "parent" if type_a is parent of type_b
-            "child" if type_a is child of type_b
-            None if no hierarchy relationship
-        """
-        topic_hierarchy = self.hierarchy_config.get(topic, {})
-        
-        if not topic_hierarchy:
-            return None
-        
-        if type_a in topic_hierarchy:
-            if type_b in topic_hierarchy[type_a]:
-                return "parent"
-        
-        if type_b in topic_hierarchy:
-            if type_a in topic_hierarchy[type_b]:
-                return "child"
-        
-        return None
     
 
     def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
@@ -120,34 +135,49 @@ class EntityResolver:
         return embeddings.tolist()
         
     
-    def validate_existing(self, canonical_name: str, mentions: List[str]) -> Tuple[Optional[int], bool]:
+    def validate_existing(self, canonical_name: str, mentions: List[str]) -> Tuple[Optional[int], bool, List[str]]:
         """
         Check if canonical_name exists. If yes, register mention aliases and return ID.
         If no, return None (caller handles demotion).
+        
+        Returns:
+            Tuple of (entity_id, aliases_added, new_aliases_list)
         """
-
         if not canonical_name:
-            return None, False
+            return None, False, []
         
         with self._lock:
-            entity_id = self.get_id(canonical_name)
+            entity_id = self._name_to_id.get(canonical_name.lower())
             logger.debug(f"validate_existing: '{canonical_name}' -> id={entity_id}")
             if entity_id is None:
-                return None, False
+                return None, False, []
             
-            new_aliases = {}
+            new_aliases = []
             for mention in mentions:
                 if mention.lower() not in self._name_to_id:
-                    self._name_to_id[mention.lower()] = entity_id
-                    new_aliases[mention] = entity_id
+                    new_aliases.append(mention)
 
-            return entity_id, len(new_aliases) > 0
+            return entity_id, len(new_aliases) > 0, new_aliases
     
-    def _build_generic_tokens(self, min_entity_freq: int = 10) -> set:
+    def commit_new_aliases(self, entity_id: int, aliases: List[str]):
+        """Explicitly commit aliases after Graph validation."""
+        if not aliases:
+            return
+
+        with self._lock:
+            if entity_id not in self.entity_profiles:
+                return
+            for mention in aliases:
+                self._name_to_id[mention.lower()] = entity_id
+    
+    def _build_generic_tokens(self) -> set:
         """Tokens appearing in N+ distinct entities are generic."""
         token_to_entities = defaultdict(set)
+    
+        with self._lock:
+            profiles_snapshot = dict(self.entity_profiles)
         
-        for ent_id, profile in self.entity_profiles.items():
+        for ent_id, profile in profiles_snapshot.items():
             canonical = profile.get("canonical_name", "").lower()
             for token in canonical.split():
                 token_to_entities[token].add(ent_id)
@@ -157,24 +187,23 @@ class EntityResolver:
                     token_to_entities[token].add(ent_id)
         
         return {token for token, ent_ids in token_to_entities.items() 
-                if len(ent_ids) >= min_entity_freq}
+                if len(ent_ids) >= self.generic_token_freq}
     
     def get_candidate_ids(
         self, 
         mention: str,
-        fuzzy_threshold: int = 75,
-        vector_threshold: float = 0.85
+        precomputed_embedding: List[float] = None
     ) -> List[Tuple[int, float]]:
         
         if not mention:
             return []
 
-        candidates = set()
+        candidate_scores: Dict[int, float] = {}
         mention_lower = mention.lower()
-        vector = None
+        
         with self._lock:
             if mention_lower in self._name_to_id:
-                candidates.add(self._name_to_id[mention_lower])
+                candidate_scores[self._name_to_id[mention_lower]] = 1.0
             
             choices = list(self._name_to_id.keys())
 
@@ -182,35 +211,37 @@ class EntityResolver:
                 mention_lower,
                 choices,
                 limit=50,
-                score_cutoff=fuzzy_threshold,
+                score_cutoff=self.candidate_fuzzy_threshold,
                 scorer=fuzz.WRatio
             )
 
-            for alias, _, _ in results:
+            for alias, fuzz_score, _ in results:
                 eid = self._name_to_id.get(alias)
                 if eid is not None:
-                    candidates.add(eid)
-            
+                    normalized = fuzz_score / 100.0
+                    candidate_scores[eid] = max(candidate_scores.get(eid, 0), normalized)
+        
+        vector = precomputed_embedding
+        if vector is None:
             try:
                 vector = self.embedding_service.encode_single(mention)
-            except Exception:
-                logger.warning("Error with encoding, will try again one more time")
-                vector = self.embedding_service.encode_single(mention)
+            except Exception as e:
+                logger.warning(f"Encoding failed: {e}")
+                vector = None
         
+        vector_results = []
         if vector:
             vector_results = self.store.search_entities_by_embedding(
                 vector, 
                 limit=5, 
-                score_threshold=vector_threshold
+                score_threshold=self.candidate_vector_threshold
             )
-            
-            for eid, score in vector_results:
-                with self._lock:
-                    if eid:
-                        candidates.add(eid)
-                        logger.debug(f"Vector search found entity ID'{eid}' for '{mention}' (score={score:.2f})")
+        
+        for eid, vec_score in vector_results:
+            if eid:
+                candidate_scores[eid] = max(candidate_scores.get(eid, 0), vec_score)
 
-            return list(candidates)
+        return sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
     
     def register_entity(
         self, 
@@ -219,24 +250,33 @@ class EntityResolver:
         mentions: List[str], 
         entity_type: str, 
         topic: str,
-        session_id: str = None
+        session_id: str = None,
+        source_context: str = None
     ) -> List[float]:
         """
         Register new entity: update all indexes and return embedding.
         """
 
-        sessionID = session_id or self.session_id
-        profile = {
-            "canonical_name": canonical_name,
-            "type": entity_type,
-            "topic": topic,
-            "facts": [],
-            "session_id": sessionID
-        }
-        
-        embedding = self._add_entity(entity_id, profile, sessionID)
+        session_id = session_id or self.session_id
+        text_to_embed = None
+        if source_context:
+            text_to_embed = f"{canonical_name} ({entity_type}). Context: {source_context}"
+        else:
+            text_to_embed = f"{canonical_name} ({entity_type})"
+
+        embedding = self.embedding_service.encode_single(text_to_embed)
         
         with self._lock:
+            logger.info(f"Adding entity {entity_id}-{canonical_name} to resolver indexes.")
+            
+            self.entity_profiles[entity_id] = {
+                "canonical_name": canonical_name,
+                "type": entity_type,
+                "topic": topic or "General",
+                "session_id": session_id,
+                "embedding": embedding
+            }
+            
             self._name_to_id[canonical_name.lower()] = entity_id
             for mention in mentions:
                 mention_lower = mention.lower()
@@ -245,39 +285,11 @@ class EntityResolver:
                     logger.warning(f"Alias collision: '{mention}' belongs to {existing_id}, skipping for {entity_id}")
                     continue
                 self._name_to_id[mention_lower] = entity_id
-
-        return embedding
-
-
-    def _add_entity(self, entity_id: int, profile: Dict, session_id: str) -> List[float]:
-        canonical_name = profile.get("canonical_name", "")
-        
-        # Build resolution text without facts (new facts added on profile cycle)
-        resolution_text = canonical_name
-        embedding = self.embedding_service.encode_single(resolution_text)
-
-        with self._lock:                
-            logger.info(f"Adding entity {entity_id}-{profile['canonical_name']} to resolver indexes.")
-
-            profile.setdefault("topic", "General")
-
-            # Store profile without facts
-            self.entity_profiles[entity_id] = {
-                "canonical_name": profile["canonical_name"],
-                "type": profile.get("type"),
-                "topic": profile.get("topic", "General"),
-                "session_id": session_id,
-                "embedding": embedding
-            }
         
         return embedding
     
 
     def compute_embedding(self, entity_id: int, resolution_text: str) -> List[float]:
-        """
-        Update entity facts and recompute embedding.
-        Returns new embedding.
-        """
         with self._lock:
             profile = self.entity_profiles.get(entity_id)
             if not profile:
@@ -285,9 +297,14 @@ class EntityResolver:
                 return []
             
             logger.info(f"Updating embedding for entity {entity_id}-{profile['canonical_name']}")
-
-            
-        return self.embedding_service.encode_single(resolution_text)
+        
+        embedding = self.embedding_service.encode_single(resolution_text)
+        
+        with self._lock:
+            if entity_id in self.entity_profiles:
+                self.entity_profiles[entity_id]["embedding"] = embedding
+        
+        return embedding
         
     def merge_into(self, primary_id: int, secondary_id: int):
         """Transfer secondary entity's aliases to primary, remove secondary from indexes."""
@@ -302,26 +319,45 @@ class EntityResolver:
             
             if secondary_id in self.entity_profiles:
                 del self.entity_profiles[secondary_id]
+            
+            logger.info(f"Merged entity {secondary_id} into {primary_id}, transferred {len(secondary_aliases)} aliases")
+            emit_sync(self.session_id, "resolver", "entity_merged", {
+                "primary_id": primary_id,
+                "secondary_id": secondary_id,
+                "aliases_transferred": len(secondary_aliases)
+            })
     
     def resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
-        candidates = self.get_candidate_ids(entity, fuzzy_threshold=85)
-        
+        candidates = self.get_candidate_ids(entity)
+    
         if not candidates:
             return None
         
+        top_id, _ = candidates[0]
+        
         with self._lock:
-            profile = self.entity_profiles.get(candidates[0])
+            profile = self.entity_profiles.get(top_id)
         
         return profile["canonical_name"] if profile else None
             
 
-    def detect_merge_candidates(self) -> list:
+    def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
         """Detect potential entity merges using vector search + fuzzy matching."""
-        logger.info(f"Merge detection started. Scanning {len(self.entity_profiles)} entities.")
+        with self._lock:
+            scan_targets = dirty_ids if dirty_ids else list(self.entity_profiles.keys())
+            profiles_snapshot = dict(self.entity_profiles)
+        
+        valid_targets = [eid for eid in scan_targets if eid in profiles_snapshot]
+        
+        if not valid_targets:
+            logger.debug("Merge detection skipped: No valid dirty entities to check.")
+            return []
+
+        logger.info(f"Merge detection started. Scanning {len(valid_targets)} entities against graph.")
 
         generic_tokens = self._build_generic_tokens()
-        candidate_pairs = self._collect_candidate_pairs(generic_tokens)
+        candidate_pairs = self._collect_candidate_pairs(valid_targets, generic_tokens)
 
         if not candidate_pairs:
             return []
@@ -335,7 +371,7 @@ class EntityResolver:
 
         candidates = []
         for (id_a, id_b), fuzz_score in candidate_pairs.items():
-            result = self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity)
+            result = self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity, profiles_snapshot)
             if result:
                 candidates.append(result)
 
@@ -360,37 +396,46 @@ class EntityResolver:
         
         if removed > 0:
             logger.info(f"Removed {removed} entities from resolver")
+            emit_sync(self.session_id, "resolver", "entities_removed", {
+                "requested": len(entity_ids),
+                "removed": removed
+            })
         return removed
 
 
     def _collect_candidate_pairs(
-        self, 
-        generic_tokens: set,
-        fuzzy_substring_threshold: int = 75,
-        fuzzy_non_substring_threshold: int = 91,
+        self,
+        target_ids: list,
+        generic_tokens: set
     ) -> Dict[Tuple[int, int], int]:
         """
         Vector search + fuzzy filter.
-        Returns {(id_a, id_b): (fuzz_score, is_substring)}
+        Returns {(id_a, id_b): fuzz_score}
         """
         seen_pairs = {}
 
         with self._lock:
-            snapshot_ids = list(self.entity_profiles.keys())
+            profiles_snapshot = dict(self.entity_profiles)
 
-        for primary_id in snapshot_ids:
-            primary_profile = self.entity_profiles.get(primary_id)
+        for primary_id in target_ids:
+            primary_profile = profiles_snapshot.get(primary_id)
             if not primary_profile:
                 continue
 
             primary_name = primary_profile["canonical_name"]
+            
             neighbors = self.store.search_similar_entities(primary_id, limit=50)
 
             for neighbor_id, _ in neighbors:
-                if neighbor_id == primary_id or neighbor_id < primary_id:
+                if neighbor_id == primary_id:
                     continue
 
-                neighbor_profile = self.entity_profiles.get(neighbor_id)
+                pair_key = tuple(sorted((primary_id, neighbor_id)))
+                
+                if pair_key in seen_pairs:
+                    continue
+
+                neighbor_profile = profiles_snapshot.get(neighbor_id)
                 if not neighbor_profile:
                     continue
 
@@ -398,28 +443,24 @@ class EntityResolver:
                 score = fuzz.WRatio(primary_name, neighbor_name)
                 is_substring = is_substring_match(primary_name, neighbor_name)
 
-                # threshold check
                 passes_threshold = (
-                    (is_substring and score >= fuzzy_substring_threshold) or
-                    score >= fuzzy_non_substring_threshold
+                    (is_substring and score >= self.fuzzy_substring_threshold) or
+                    score >= self.fuzzy_non_substring_threshold
                 )
 
                 if not passes_threshold:
                     continue
 
-                # generic token overlap check
                 tokens_i = set(primary_name.lower().split()) - generic_tokens
                 tokens_j = set(neighbor_name.lower().split()) - generic_tokens
 
                 if not (tokens_i & tokens_j):
-                    logger.warning(f"Skipping {primary_id}-{neighbor_id}: generic token overlap only")
                     continue
 
-                pair_key = (primary_id, neighbor_id)
                 if pair_key not in seen_pairs or score > seen_pairs[pair_key][0]:
-                    seen_pairs[pair_key] = score
+                    seen_pairs[pair_key] = (score, is_substring)
 
-        return seen_pairs
+        return {k: v[0] for k, v in seen_pairs.items()}
 
 
     def _classify_pair(
@@ -427,7 +468,8 @@ class EntityResolver:
         id_a: int,
         id_b: int,
         fuzz_score: int,
-        facts_by_entity: Dict[int, List[Fact]]
+        facts_by_entity: Dict[int, List[Fact]],
+        profiles_snapshot: Dict[int, dict]
     ) -> Optional[dict]:
         """
         Evaluate one pair for merge or hierarchy relationship.
@@ -438,8 +480,8 @@ class EntityResolver:
         if self.store.has_hierarchy_edge(id_a, id_b):
             return None
 
-        profile_a = self.entity_profiles.get(id_a, {})
-        profile_b = self.entity_profiles.get(id_b, {})
+        profile_a = profiles_snapshot.get(id_a, {})
+        profile_b = profiles_snapshot.get(id_b, {})
 
         type_a = profile_a.get("type")
         type_b = profile_b.get("type")

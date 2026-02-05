@@ -1,11 +1,11 @@
 services:
   redis:
-    image: redis:8-alpine  # Upgraded to AGPLv3 version
-    container_name: vestige-redis
+    image: redis:8-alpine
+    container_name: knoggin-redis
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
-      - redis_data:/data
+      - knoggin_redis_data:/data
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
@@ -17,13 +17,13 @@ services:
 
   memgraph:
     image: memgraph/memgraph-mage:latest
-    container_name: vestige-memgraph
+    container_name: knoggin-memgraph
     ports:
       - "127.0.0.1:7687:7687"
       - "127.0.0.1:7444:7444"
     volumes:
-      - mg_lib:/var/lib/memgraph
-      - mg_log:/var/log/memgraph
+      - knoggin_mg_lib:/var/lib/memgraph
+      - knoggin_mg_log:/var/log/memgraph
     command: ["--log-level=WARNING"]
     environment:
       - MEMGRAPH_USER=${MEMGRAPH_USER}
@@ -38,7 +38,7 @@ services:
 
   memgraph-lab:
     image: memgraph/lab:latest
-    container_name: vestige-memgraph-lab
+    container_name: knoggin-memgraph-lab
     ports:
       - "127.0.0.1:3001:3000"
     depends_on:
@@ -49,11 +49,11 @@ services:
       - QUICK_CONNECT_MG_PORT=7687
     restart: unless-stopped
 
-  vestige-api:
+  knoggin-api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: vestige-api
+    container_name: knoggin-api
     ports:
       - "127.0.0.1:3000:8000"
     volumes:
@@ -66,7 +66,7 @@ services:
       - MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD}
       - MEMGRAPH_HOST=memgraph
       - MEMGRAPH_PORT=7687
-      - VESTIGE_CONFIG_DIR=/app/config
+      - CONFIG_DIR=/app/config
     depends_on:
       redis:
         condition: service_healthy
@@ -81,6 +81,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  mg_lib:
-  mg_log:
-  redis_data:
+  knoggin_mg_lib:
+  knoggin_mg_log:
+  knoggin_redis_data:

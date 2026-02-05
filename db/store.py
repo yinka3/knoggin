@@ -1,7 +1,7 @@
 from datetime import datetime
 import time
 from loguru import logger
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 import os
@@ -58,14 +58,15 @@ class MemGraphStore:
             "CREATE CONSTRAINT ON (t:Topic) ASSERT t.name IS UNIQUE;",
             "CREATE CONSTRAINT ON (m:Message) ASSERT m.id IS UNIQUE;",
             "CREATE CONSTRAINT ON (f:Fact) ASSERT f.id IS UNIQUE;",
+            
         ]
 
         indices = [
             "CREATE INDEX ON :Fact(invalid_at);",
             "CREATE INDEX ON :Fact(created_at);",
             "CREATE INDEX ON :Message(timestamp);",
-            "CREATE INDEX ON :MoodCheckpoint(timestamp);",
             "CREATE INDEX ON :Entity(canonical_name);",
+            "CREATE INDEX ON :Entity(last_mentioned);"
         ]
 
         vector_indices = [
@@ -102,7 +103,7 @@ class MemGraphStore:
     def save_message_logs(self, messages: List[Dict]) -> bool:
         return self._writer.save_message_logs(messages)
 
-    def write_batch(self, entities: List[Dict], relationships: List[Dict]):
+    def write_batch(self, entities: List[Dict], relationships: List[Dict]) -> bool:
         return self._writer.write_batch(entities, relationships)
 
     def create_facts_batch(self, entity_id: int, facts: List[Fact]) -> int:
@@ -116,9 +117,9 @@ class MemGraphStore:
 
     def update_entity_embedding(self, entity_id: int, embedding: List[float]):
         return self._writer.update_entity_embedding(entity_id, embedding)
-
-    def log_mood_checkpoint(self, user_name: str, primary: str, primary_count: int, secondary: str, secondary_count: int, message_count: int):
-        return self._writer.log_mood_checkpoint(user_name, primary, primary_count, secondary, secondary_count, message_count)
+    
+    def update_entity_aliases(self, alias_updates: Dict[int, List[str]]):
+        return self._writer.update_entity_aliases(alias_updates)
 
     def create_hierarchy_edge(self, parent_id: int, child_id: int) -> bool:
         return self._writer.create_hierarchy_edge(parent_id, child_id)
@@ -128,12 +129,21 @@ class MemGraphStore:
 
     def cleanup_null_entities(self) -> int:
         return self._writer.cleanup_null_entities()
+    
+    def delete_entity(self, entity_id: int) -> bool:
+        return self._writer.delete_entity(entity_id)
 
     def bulk_delete_entities(self, entity_ids: List[int]) -> int:
         return self._writer.bulk_delete_entities(entity_ids)
 
-    def delete_old_invalidated_facts(self, limit: int, threshold: float, cutoff: datetime) -> int:
-        return self._writer.delete_old_invalidated_facts(limit, threshold, cutoff)
+    def delete_old_invalidated_facts(self, cutoff: datetime) -> int:
+        return self._writer.delete_old_invalidated_facts(cutoff)
+    
+    def create_preference(self, id: str, content: str, kind: str, session_id: str) -> bool:
+        return self._writer.create_preference(id, content, kind, session_id)
+    
+    def delete_preference(self, pref_id: str) -> bool:
+        return self._writer.delete_preference(pref_id)
     
     # ===== READER DELEGATIONS =====
 
@@ -142,9 +152,6 @@ class MemGraphStore:
 
     def get_entity_embedding(self, entity_id: int) -> List[float]:
         return self._reader.get_entity_embedding(entity_id)
-
-    def get_all_message_embeddings(self) -> Dict[int, List[float]]:
-        return self._reader.get_all_message_embeddings()
 
     def get_message_text(self, message_id: int) -> str:
         return self._reader.get_message_text(message_id)
@@ -158,7 +165,7 @@ class MemGraphStore:
     def get_facts_from_message(self, msg_id: int) -> List[Fact]:
         return self._reader.get_facts_from_message(msg_id)
 
-    def validate_existing_ids(self, ids: List[int]) -> Set[int]:
+    def validate_existing_ids(self, ids: List[int]) -> Optional[Set[int]]:
         return self._reader.validate_existing_ids(ids)
 
     def get_all_entities_for_hydration(self) -> List[Dict]:
@@ -167,8 +174,8 @@ class MemGraphStore:
     def find_alias_collisions(self) -> List[Tuple[int, int]]:
         return self._reader.find_alias_collisions()
 
-    def get_orphan_entities(self, protected_id: int = 1, cutoff_ms: int = 0) -> List[int]:
-        return self._reader.get_orphan_entities(protected_id, cutoff_ms)
+    def get_orphan_entities(self, protected_id: int = 1, orphan_cutoff_ms: int = 0, stale_junk_cutoff_ms: int = 0) -> List[int]:
+        return self._reader.get_orphan_entities(protected_id, orphan_cutoff_ms, stale_junk_cutoff_ms)
 
     def get_neighbor_ids(self, entity_id: int) -> Set[int]:
         return self._reader.get_neighbor_ids(entity_id)
@@ -197,11 +204,20 @@ class MemGraphStore:
     def search_similar_entities(self, entity_id: int, limit: int = 50) -> List[Tuple[int, float]]:
         return self._reader.search_similar_entities(entity_id, limit)
 
-    def search_entities_by_embedding(self, embedding: List[float], limit: int = 10, score_threshold: float = 0.8) -> List[Tuple[str, float]]:
+    def search_entities_by_embedding(self, embedding: List[float], limit: int = 10, score_threshold: float = 0.8) -> List[Tuple[int, float]]:
         return self._reader.search_entities_by_embedding(embedding, limit, score_threshold)
 
     def search_messages_vector(self, query_embedding: List[float], limit: int = 50) -> List[Tuple[int, float]]:
         return self._reader.search_messages_vector(query_embedding, limit)
+    
+    def list_entities(self, limit: int = 20, offset: int = 0, topic: str = None, entity_type: str = None, search: str = None) -> Tuple[List[Dict], int]:
+        return self._reader.list_entities(limit, offset, topic, entity_type, search)
+    
+    def get_entity_by_id(self, entity_id: int):
+        return self._reader.get_entity_by_id(entity_id=entity_id)
+    
+    def list_preferences(self, session_id: str, kind: str = None) -> List[Dict]:
+        return self._reader.list_preferences(session_id, kind)
     
 
     # ===== TOOL QUERY DELEGATIONS =====
@@ -223,8 +239,5 @@ class MemGraphStore:
 
     def find_path_filtered(self, start_name: str, end_name: str, active_topics: List[str] = None) -> Tuple[List[Dict], bool]:
         return self._tools._find_path_filtered(start_name, end_name, active_topics)
-
-    def get_mood_history(self, user_name: str, limit: int = 10) -> List[Dict]:
-        return self._tools.get_mood_history(user_name, limit)
     
-
+    

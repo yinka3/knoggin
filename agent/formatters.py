@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 
 # Timestamp bounds (Unix seconds)
@@ -32,7 +32,7 @@ def _format_timestamp(ts) -> str:
             ts_normalized = _normalize_timestamp(ts)
             if ts_normalized is None:
                 return "unknown"
-            return datetime.fromtimestamp(ts_normalized).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(ts_normalized, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             
     except (ValueError, OSError, OverflowError):
         pass
@@ -62,7 +62,7 @@ def format_retrieved_messages(messages: List[Dict]) -> str:
             except (ValueError, TypeError):
                 pass
             
-            role = "User" if msg['role'] == 'user' else "Stella"
+            role = "USER" if msg['role'] == 'user' else "AGENT"
             content = msg.get('content', '')
             
             marker = ">> " if msg.get('is_hit') else "   "
@@ -186,10 +186,13 @@ def format_path_results(path: List[Dict]) -> str:
         
         step_block = f"  [{step_num}] {ent_a} -> {ent_b}\n"
         
-        for ev in step.get("evidence", []):
-            msg = ev.get("message", "")
-            ts = _format_timestamp(ev.get("timestamp"))
-            step_block += f"      \"{msg}\" [{ts}]\n"
+        if step.get("status") == "LOCKED":
+            step_block += f"      [LOCKED: {step.get('locked_reason', 'Inactive topic')}]\n"
+        else:
+            for ev in step.get("evidence", []):
+                msg = ev.get("message", "")
+                ts = _format_timestamp(ev.get("timestamp"))
+                step_block += f"      \"{msg}\" [{ts}]\n"
         
         steps.append(step_block)
     

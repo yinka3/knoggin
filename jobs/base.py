@@ -2,7 +2,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
-import redis.asyncio as redis
+from loguru import logger
+import redis.asyncio as aioredis
 
 
 
@@ -10,7 +11,8 @@ import redis.asyncio as redis
 class JobContext:
     """Context passed to every job method."""
     user_name: str
-    redis: redis.Redis
+    session_id: str
+    redis: aioredis.Redis
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None
 
@@ -21,27 +23,6 @@ class JobResult:
     success: bool = True
     summary: str = ""
     reschedule_seconds: Optional[float] = None
-
-
-class JobNotifier:
-    """
-    Sets a global 'Maintenance Mode' flag in Redis while a job runs.
-    """
-    KEY = "system:active_job_warning"
-    
-    def __init__(self, redis_client: redis.Redis, message: str, ttl: int = 600):
-        self.redis = redis_client
-        self.message = message
-        self.ttl = ttl  # Auto-expire after 10 mins if we crash
-
-    async def __aenter__(self):
-        # Set the warning message visible to the Agent
-        await self.redis.setex(self.KEY, self.ttl, self.message)
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # Clear the warning when job finishes (or fails)
-        await self.redis.delete(self.KEY)
 
 
 class BaseJob(ABC):
@@ -62,4 +43,23 @@ class BaseJob(ABC):
     
     async def on_shutdown(self, ctx: JobContext) -> None:
         """Override for cleanup. Default no-op."""
-        raise NotImplementedError
+        pass
+    
+    def update_settings(self, **kwargs):
+        """
+        Standard interface for runtime tuning.
+        Updates instance attributes if they match the keys provided.
+        """
+        updates = []
+        for key, value in kwargs.items():
+            if value is not None:
+                # Security: Only update if the job actually HAS this attribute.
+                # This prevents adding random garbage attributes to the instance.
+                if hasattr(self, key):
+                    setattr(self, key, value)
+                    updates.append(f"{key}={value}")
+                else:
+                    logger.warning(f"Job {self.name} received unknown setting: {key}")
+        
+        if updates:
+            logger.info(f"Job {self.name} reconfigured: {', '.join(updates)}")

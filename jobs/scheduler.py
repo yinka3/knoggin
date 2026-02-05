@@ -3,7 +3,9 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from loguru import logger
-from main.redisclient import AsyncRedisClient
+import redis.asyncio as aioredis
+from shared.events import emit
+from shared.redisclient import RedisKeys
 from jobs.base import BaseJob, JobContext
 
 
@@ -15,9 +17,10 @@ class Scheduler:
     
     CHECK_INTERVAL = 30
     
-    def __init__(self, user_name: str):
+    def __init__(self, user_name: str, session_id: str, redis: aioredis.Redis):
         self.user_name = user_name
-        self.redis = AsyncRedisClient().get_client()
+        self.session_id = session_id
+        self.redis = redis
         self._jobs: Dict[str, BaseJob] = {}
         self._last_runs: Dict[str, datetime] = {}
         self._running_tasks: Dict[str, asyncio.Task] = {}
@@ -37,6 +40,12 @@ class Scheduler:
         await self._run_pending_checks()
         
         self._monitor_task = asyncio.create_task(self._monitor_loop())
+        await emit(
+            self.session_id,
+            "job",
+            "scheduler_started",
+            {"jobs": list(self._jobs.keys())}
+        )
         logger.info(f"Scheduler started with {len(self._jobs)} jobs: {list(self._jobs.keys())}")
     
     async def stop(self):
@@ -50,6 +59,13 @@ class Scheduler:
             except asyncio.CancelledError:
                 pass
         
+        for task in list(self._running_tasks.values()):
+            if not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Job timed out during shutdown")
+        
         ctx = await self._build_context()
         for job in self._jobs.values():
             try:
@@ -57,12 +73,14 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"Job {job.name} shutdown failed: {e}")
         
+        await emit(self.session_id, "job", "scheduler_stopped", {})
+        
         logger.info("Scheduler stopped")
     
     async def record_activity(self):
         """Record user activity timestamp. Call on each user message."""
         await self.redis.set(
-            f"last_activity:{self.user_name}", 
+            RedisKeys.last_activity(self.user_name, self.session_id), 
             datetime.now(timezone.utc).isoformat()
         )
     
@@ -71,13 +89,14 @@ class Scheduler:
         idle_seconds = await self._get_idle_seconds()
         return JobContext(
             user_name=self.user_name,
+            session_id=self.session_id,
             redis=self.redis,
             idle_seconds=idle_seconds
         )
     
     async def _get_idle_seconds(self) -> float:
         """Calculate seconds since last user activity."""
-        last_activity = await self.redis.get(f"last_activity:{self.user_name}")
+        last_activity = await self.redis.get(RedisKeys.last_activity(self.user_name, self.session_id))
         if not last_activity:
             return 0.0
         last_ts = datetime.fromisoformat(last_activity)
@@ -88,7 +107,7 @@ class Scheduler:
         ctx = await self._build_context()
         
         for job_name, job in self._jobs.items():
-            pending_key = f"pending:{self.user_name}:{job_name}"
+            pending_key = RedisKeys.job_pending(self.user_name, self.session_id, job_name)
             if await self.redis.get(pending_key):
                 logger.info(f"Found pending work for job: {job_name}")
                 await self.redis.delete(pending_key)
@@ -121,9 +140,14 @@ class Scheduler:
     async def _execute_job(self, job: BaseJob, ctx: JobContext):
         """Execute a single job with error handling."""
         logger.info(f"Executing job: {job.name}")
-        
+        await emit(ctx.session_id, "job", "started", {"name": job.name})
         try:
             result = await job.execute(ctx)
+            await emit(ctx.session_id, "job", "completed", {
+                "name": job.name,
+                "success": result.success,
+                "summary": result.summary
+            })
             self._last_runs[job.name] = datetime.now(timezone.utc)
             
             if result.summary:
@@ -133,6 +157,10 @@ class Scheduler:
                 asyncio.create_task(self._delayed_run(job, result.reschedule_seconds))
                 
         except Exception as e:
+            await emit(ctx.session_id, "job", "failed", {
+                "name": job.name,
+                "error": str(e)
+            })
             logger.error(f"Job {job.name} execution failed: {e}")
     
     async def _delayed_run(self, job: BaseJob, delay: float):

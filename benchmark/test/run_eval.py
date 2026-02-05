@@ -3,14 +3,15 @@ import sys
 import json
 from pathlib import Path
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 import uuid
 from loguru import logger
 
+
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from shared.resource import ResourceManager
 from agent.orchestrator import run
-from db.store import MemGraphStore
 from main.context import Context
 from schema.dtypes import MessageData
 from answer import answer_key
@@ -21,7 +22,7 @@ setup_logging(log_level="DEBUG", log_file="benchmark.log", colorize=True)
 
 USER_NAME = "TestUser"
 SESSION_ID = str(uuid.uuid4())
-TOPIC_CONFIG  = {
+TOPIC_CONFIG = {
     "Identity": {
         "active": True,
         "labels": ["person"],
@@ -29,9 +30,134 @@ TOPIC_CONFIG  = {
         "aliases": [],
         "label_aliases": {}
     },
+    "Lifestyle & Leisure": {
+        "active": True,
+        "labels": [
+            "place",
+            "consumable",
+            "product",
+            "clothing",
+            "activity",
+            "brand",
+            "establishment",
+            "trip"
+        ],
+        "hierarchy": {
+            "trip": ["place", "establishment", "activity"],
+            "product": ["consumable", "clothing"]
+        },
+        "aliases": ["Daily Life", "Shopping", "Travel", "Food"],
+        "label_aliases": {
+            "nyc": "place",
+            "kyoto": "place",
+            "samosa": "consumable",
+            "garam masala": "consumable",
+            "knee-high boots": "clothing",
+            "distressed denim": "clothing",
+            "zara": "brand",
+            "macy's": "brand",
+            "the greenwich hotel": "establishment",
+            "carbone": "establishment"
+        }
+    },
+    "Arts & Creativity": {
+        "active": True,
+        "labels": [
+            "creative_work",
+            "book",
+            "film",
+            "podcast",
+            "song",
+            "art_form",
+            "dance",
+            "photography",
+            "painting",
+            "music",
+            "equipment",
+            "technique",
+            "historical_event",
+            "genre",
+            "material"
+        ],
+        "hierarchy": {
+            "creative_work": ["book", "film", "podcast", "song"],
+            "art_form": ["dance", "photography", "painting", "music"]
+        },
+        "aliases": ["Culture", "Hobbies", "Media", "History"],
+        "label_aliases": {
+            "donnie darko": "film",
+            "the nightingale": "book",
+            "the daily boost": "podcast",
+            "salsa": "dance",
+            "nikon d750": "equipment",
+            "ilford hp5 plus": "material",
+            "acrylics": "material",
+            "world war i": "historical_event",
+            "spillings hoard": "creative_work"
+        }
+    },
+    "Technology & Work": {
+        "active": True,
+        "labels": [
+            "system",
+            "device",
+            "software",
+            "component",
+            "methodology",
+            "project",
+            "document",
+            "task"
+        ],
+        "hierarchy": {
+            "system": ["device", "software", "component"],
+            "project": ["task", "document"]
+        },
+        "aliases": ["Computing", "Productivity", "Academics", "Research"],
+        "label_aliases": {
+            "lenovo thinkpad": "device",
+            "samsung s22": "device",
+            "ddr4 ram": "component",
+            "google calendar": "software",
+            "trello": "software",
+            "mendeley": "software",
+            "thesis": "document",
+            "literature review": "document",
+            "thematic analysis": "methodology"
+        }
+    },
+    "Science & Health": {
+        "active": True,
+        "labels": [
+            "organism",
+            "plant",
+            "animal",
+            "human",
+            "condition",
+            "substance",
+            "biological_process",
+            "exercise",
+            "medical_procedure"
+        ],
+        "hierarchy": {
+            "organism": ["plant", "animal", "human"]
+        },
+        "aliases": ["Wellness", "Biology", "Ecology", "Fitness"],
+        "label_aliases": {
+            "fern": "plant",
+            "snake plant": "plant",
+            "peace lily": "plant",
+            "decomposer": "organism",
+            "insomnia": "condition",
+            "anxiety": "condition",
+            "melatonin": "substance",
+            "alcohol": "substance",
+            "squat": "exercise",
+            "knee replacement": "medical_procedure"
+        }
+    },
     "General": {
         "active": False,
-        "labels": ["person", "place", "organization", "event"],
+        "labels": ["person", "location", "organization", "event", "date", "object", "concept"],
         "hierarchy": {},
         "aliases": [],
         "label_aliases": {}
@@ -121,10 +247,11 @@ async def wait_for_processing(context: Context, drain_timeout: int = 180, max_re
     await context.redis_client.set(f"checkpoint_count:{user}", 0)
     await context._run_session_jobs()
 
-async def ask_stella(context: Context, question: str, question_date: str) -> Tuple[str, List]:
+async def ask_agent(context: Context, question: str, question_date: str) -> Tuple[str, List]:
     result = await run(
         user_query=question,
         user_name=context.user_name,
+        session_id=SESSION_ID,
         conversation_history=[],
         hot_topics=[],
         topic_config=context.topic_config,
@@ -198,12 +325,10 @@ async def main():
     logger.info(f"Question Date: {q['question_date']}")
     logger.info(f"{'='*60}")
     
-    executor = ThreadPoolExecutor(max_workers=2)
-    store = MemGraphStore()
+    resource = await ResourceManager.initialize()
     context = await Context.create(
         user_name=USER_NAME,
-        store=store,
-        cpu_executor=executor,
+        resources=resource,
         topics_config=TOPIC_CONFIG,
         session_id=SESSION_ID
     )
@@ -215,7 +340,7 @@ async def main():
         await asyncio.sleep(30)
         await wait_for_processing(context)
         logger.info("Asking AGENT...")
-        response, tools_used = await ask_stella(context, q["question"], q["question_date"])
+        response, tools_used = await ask_agent(context, q["question"], q["question_date"])
         
         logger.info(f"\n{'='*60}")
         logger.info(f"RESULTS")
@@ -244,7 +369,7 @@ async def main():
         
     finally:
         await context.shutdown()
-        store.close()
+        resource.store.close()
 
 
 if __name__ == "__main__":

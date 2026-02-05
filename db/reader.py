@@ -1,6 +1,6 @@
 from datetime import datetime
 from loguru import logger
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from neo4j import Driver
 
 from schema.dtypes import Fact
@@ -13,23 +13,6 @@ class GraphReader:
     def _hydrate_fact(self, record) -> Fact:
         """Convert DB record to Fact dataclass."""
         return Fact.from_record(record)
-
-    def get_all_message_embeddings(self) -> Dict[int, List[float]]:
-        """
-        Fetch all message embeddings for rapid FAISS hydration.
-        """
-        query = """
-        MATCH (m:Message) 
-        WHERE m.embedding IS NOT NULL
-        RETURN m.id as id, m.embedding as embedding
-        """
-        try:
-            with self.driver.session() as session:
-                result = session.run(query)
-                return {record["id"]: record["embedding"] for record in result}
-        except Exception as e:
-            logger.error(f"Failed to fetch message embeddings: {e}")
-            return {}
 
     def get_message_text(self, message_id: int) -> str:
         """
@@ -45,7 +28,7 @@ class GraphReader:
             logger.error(f"Failed to get message text for {message_id}: {e}")
             return ""
 
-    def validate_existing_ids(self, ids: List[int]) -> Set[int]:
+    def validate_existing_ids(self, ids: List[int]) -> Optional[Set[int]]:
         """
         Liveness Check: Returns the subset of IDs that actually exist in the DB.
         Used to prevent 'Zombie Resurrection' of deleted entities during writes.
@@ -64,7 +47,7 @@ class GraphReader:
                 return {record["id"] for record in result}
         except Exception as e:
             logger.error(f"Liveness check failed: {e}")
-            return set()
+            return None
 
     def get_facts_for_entity(self, entity_id: int, active_only: bool = True):
         """Get facts from an entity."""
@@ -155,9 +138,13 @@ class GraphReader:
         Used on startup to sync Redis counters.
         """
         query = "MATCH (e:Entity) RETURN max(e.id) as max_id"
-        with self.driver.session() as session:
-            result = session.run(query).single()
-            return result["max_id"] if result and result["max_id"] is not None else 0
+        try:
+            with self.driver.session() as session:
+                result = session.run(query).single()
+                return result["max_id"] if result and result["max_id"] is not None else 0
+        except Exception as e:
+            logger.error(f"Failed to get max entity ID: {e}")
+            return 0
     
 
     def get_entity_embedding(self, entity_id: int) -> List[float]:
@@ -189,9 +176,13 @@ class GraphReader:
             e.embedding AS embedding,
             e.session_id AS session_id
         """
-        with self.driver.session() as session:
-            result = session.run(query)
-            return [dict(record) for record in result]
+        try:
+            with self.driver.session() as session:
+                result = session.run(query)
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to hydrate entities: {e}")
+            return []
     
     def find_alias_collisions(self) -> List[Tuple[int, int]]:
         """Find entity pairs sharing exact canonical names or aliases."""
@@ -204,36 +195,67 @@ class GraphReader:
             OR toLower(b.canonical_name) IN [x IN a.aliases | toLower(x)])
         RETURN a.id AS id_a, b.id AS id_b
         """
-        with self.driver.session() as session:
-            result = session.run(query)
-            return [(r["id_a"], r["id_b"]) for r in result]
+        try:
+            with self.driver.session() as session:
+                result = session.run(query)
+                return [(r["id_a"], r["id_b"]) for r in result]
+        except Exception as e:
+            logger.error(f"Failed to find alias collisions: {e}")
+            return []
     
 
-    def get_orphan_entities(self, protected_id: int = 1, cutoff_ms: int = 0) -> List[int]:
-        """Find entity IDs with NO relationships AND NO facts."""
+    def get_orphan_entities(
+        self, 
+        protected_id: int = 1, 
+        orphan_cutoff_ms: int = 0, 
+        stale_junk_cutoff_ms: int = 0
+    ) -> List[int]:
+        """
+        Find entities to delete based on two criteria:
+        1. Pure Orphans: 0 relationships, older than orphan_cutoff.
+        2. Stale Junk: Only 1 relationship (to User), NO facts, older than stale_junk_cutoff.
+        """
         query = """
         MATCH (e:Entity)
-        WHERE NOT (e)-[:RELATED_TO]-() 
+        WHERE e.id <> $protected_id
         AND NOT (e)-[:HAS_FACT]->()
-        AND e.id <> $protected_id
-        AND e.last_mentioned < $cutoff
+        AND e.last_mentioned < $orphan_cutoff 
+
+        OPTIONAL MATCH (e)-[r:RELATED_TO]-(neighbor)
+        WITH e, collect(neighbor.id) as neighbors, $stale_cutoff as stale_limit, $orphan_cutoff as orphan_limit
+
+        WHERE
+            (size(neighbors) = 0 AND e.last_mentioned < orphan_limit)
+            OR
+            (size(neighbors) = 1 AND neighbors[0] = $protected_id AND e.last_mentioned < stale_limit)
+
         RETURN e.id as id
         """
-        with self.driver.session() as session:
-            result = session.run(query, {
-                "protected_id": protected_id, 
-                "cutoff": cutoff_ms
-            })
-            return [record["id"] for record in result]
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {
+                    "protected_id": protected_id, 
+                    "orphan_cutoff": orphan_cutoff_ms,
+                    "stale_cutoff": stale_junk_cutoff_ms
+                })
+                return [record["id"] for record in result]
+        except Exception as e:
+            logger.error(f"Failed to fetch orphans: {e}")
+            return []
     
     def get_neighbor_ids(self, entity_id: int) -> set[int]:
         query = """
         MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity)
         RETURN neighbor.id as neighbor_id
         """
-        with self.driver.session() as session:
-            result = session.run(query, {"entity_id": entity_id})
-            return {record["neighbor_id"] for record in result}
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"entity_id": entity_id})
+                return {record["neighbor_id"] for record in result}
+        except Exception as e:
+            logger.error(f"Failed to get neighbor IDs for {entity_id}: {e}")
+            return set()
     
     def get_entities_by_names(self, names: List[str]) -> List[Dict]:
         lower_names = [n.lower() for n in names]
@@ -245,9 +267,13 @@ class GraphReader:
             e.type as type, e.aliases as aliases,
             [(e)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as facts
         """
-        with self.driver.session() as session:
-            result = session.run(query, {"names": lower_names})
-            return [dict(record) for record in result]
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"names": lower_names})
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get entities by names: {e}")
+            return []
     
     def get_parent_entities(self, entity_id: int) -> List[Dict]:
         """Get entities this one is PART_OF."""
@@ -276,9 +302,13 @@ class GraphReader:
         ORDER BY neighbor.last_mentioned DESC
         LIMIT $limit
         """
-        with self.driver.session() as session:
-            result = session.run(query, {"entity_id": entity_id, "limit": limit})
-            return [record["name"] for record in result]
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"entity_id": entity_id, "limit": limit})
+                return [record["name"] for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get neighbor entities for {entity_id}: {e}")
+            return []
         
     def get_child_entities(self, entity_id: int) -> List[Dict]:
         """Get entities that are PART_OF this one."""
@@ -304,9 +334,13 @@ class GraphReader:
         MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b})
         RETURN count(r) > 0 as connected
         """
-        with self.driver.session() as session:
-            result = session.run(query, {"id_a": id_a, "id_b": id_b}).single()
-            return result["connected"] if result else False
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"id_a": id_a, "id_b": id_b}).single()
+                return result["connected"] if result else False
+        except Exception as e:
+            logger.error(f"Failed to check direct edge between {id_a} and {id_b}: {e}")
+            return False
 
     def has_hierarchy_edge(self, id_a: int, id_b: int) -> bool:
         """Check if PART_OF relationship exists in either direction."""
@@ -316,8 +350,12 @@ class GraphReader:
         RETURN true as exists
         LIMIT 1
         """
-        with self.driver.session() as session:
-            return session.run(query, {"id_a": id_a, "id_b": id_b}).single() is not None
+        try:
+            with self.driver.session() as session:
+                return session.run(query, {"id_a": id_a, "id_b": id_b}).single() is not None
+        except Exception as e:
+            logger.error(f"Failed to check hierarchy edge between {id_a} and {id_b}: {e}")
+            return False
     
     def search_similar_entities(self, entity_id: int, limit: int = 50) -> List[Tuple[int, float]]:
         query = """
@@ -336,7 +374,7 @@ class GraphReader:
             logger.error(f"Failed to search similar entities for {entity_id}: {e}")
             return []
     
-    def search_entities_by_embedding(self, embedding: List[float], limit: int = 10, score_threshold: float = 0.8) -> List[Tuple[str, float]]:
+    def search_entities_by_embedding(self, embedding: List[float], limit: int = 10, score_threshold: float = 0.8) -> List[Tuple[int, float]]:
         """
         Find entities based on semantic description.
         Used when fuzzy string matching fails (e.g., "The plumber" -> "John Smith").
@@ -419,4 +457,111 @@ class GraphReader:
             logger.error(f"Hierarchy candidate query failed: {e}")
             return []
     
+    def list_entities(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        topic: str = None,
+        entity_type: str = None,
+        search: str = None
+    ) -> Tuple[List[Dict], int]:
+        """Paginated entity listing with optional filters."""
+        
+        where_clauses = []
+        params = {"limit": limit, "offset": offset}
+        
+        if entity_type:
+            where_clauses.append("e.type = $entity_type")
+            params["entity_type"] = entity_type
+        
+        if search:
+            where_clauses.append("toLower(e.canonical_name) CONTAINS toLower($search)")
+            params["search"] = search
+        
+        if topic:
+            where_clauses.append("t.name = $topic")
+            params["topic"] = topic
+        
+        topic_match = "MATCH (e)-[:BELONGS_TO]->(t:Topic)" if topic else "OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)"
+        where_str = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        
+        count_query = f"""
+        MATCH (e:Entity)
+        {topic_match}
+        {where_str}
+        RETURN count(e) AS total
+        """
+        
+        data_query = f"""
+        MATCH (e:Entity)
+        {topic_match}
+        {where_str}
+        WITH e, t
+        ORDER BY e.last_mentioned DESC
+        SKIP $offset LIMIT $limit
+        RETURN e.id AS id,
+            e.session_id AS session_id,
+            e.canonical_name AS canonical_name,
+            e.type AS type,
+            t.name AS topic,
+            e.last_mentioned / 1000 AS last_mentioned
+        """
+        
+        try:
+            with self.driver.session() as session:
+                count_result = session.run(count_query, params).single()
+                total = count_result["total"] if count_result else 0
+                
+                if total == 0:
+                    return [], 0
+                
+                result = session.run(data_query, params)
+                entities = [dict(record) for record in result]
+                
+                return entities, total
+        except Exception as e:
+            logger.error(f"Failed to list entities: {e}")
+            return [], 0
     
+    def get_entity_by_id(self, entity_id: int) -> Optional[Dict]:
+        """Get single entity by ID with topic."""
+        query = """
+        MATCH (e:Entity {id: $entity_id})
+        OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
+        RETURN e.id AS id,
+            e.session_id AS session_id,
+            e.canonical_name AS canonical_name,
+            e.aliases AS aliases,
+            e.type AS type,
+            t.name AS topic,
+            e.last_mentioned / 1000 AS last_mentioned,
+            e.last_updated / 1000 AS last_updated
+        """
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"entity_id": entity_id}).single()
+                return dict(result) if result else None
+        except Exception as e:
+            logger.error(f"Failed to get entity {entity_id}: {e}")
+            return None
+    
+    def list_preferences(self, session_id: str, kind: str = None) -> List[Dict]:
+        where_kind = "AND p.kind = $kind" if kind else ""
+        query = f"""
+        MATCH (p:Preference {{session_id: $session_id}})
+        WHERE true {where_kind}
+        RETURN p.id AS id, p.content AS content, p.kind AS kind, p.created_at AS created_at
+        ORDER BY p.created_at DESC
+        """
+        params = {"session_id": session_id}
+        if kind:
+            params["kind"] = kind
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, params)
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to list preferences: {e}")
+            return []

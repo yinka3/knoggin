@@ -1,7 +1,7 @@
 import sys
 from loguru import logger
 
-def setup_logging(log_level="INFO", log_file="vestige.log", colorize=False):
+def setup_logging(log_level="INFO", log_file="knoggin.log", colorize=False):
     logger.remove()
     
     if colorize:

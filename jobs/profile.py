@@ -9,13 +9,15 @@ import uuid
 from loguru import logger
 import numpy as np
 from db.store import MemGraphStore
-from jobs.base import BaseJob, JobContext, JobNotifier, JobResult
-from main.embedding import EmbeddingService
-from main.service import LLMService
+from jobs.base import BaseJob, JobContext, JobResult
+from shared.embedding import EmbeddingService
+from shared.service import LLMService
 from main.entity_resolve import EntityResolver
 from main.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
-from jobs.jobs_utils import extract_fact_with_source, process_extracted_facts, parse_new_facts
+from jobs.jobs_utils import enrich_facts_with_sources, extract_fact_with_source, format_vp04_input, process_extracted_facts, parse_new_facts
 from schema.dtypes import Fact, FactMergeResult
+from shared.events import emit
+from shared.redisclient import RedisKeys
 
 class ProfileRefinementJob(BaseJob):
     """
@@ -26,19 +28,28 @@ class ProfileRefinementJob(BaseJob):
     1. VOLUME: If >=20 entities are dirty (ensures we catch them in the 75-msg window).
     2. TIME: If user is idle for >5 minutes and we have ANY dirty entities.
     """
-    
-    MSG_WINDOW = 30
-    VOLUME_THRESHOLD = 30
-    IDLE_THRESHOLD = 60
-    PROFILE_BATCH_SIZE = 8
 
-    def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, executor: ThreadPoolExecutor, embedding_service: EmbeddingService):
+    def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, 
+                executor: ThreadPoolExecutor, embedding_service: EmbeddingService,
+                msg_window: int = 30, volume_threshold: int = 30, idle_threshold: int = 60,
+                contradiction_sim_low: float = 0.70, contradiction_sim_high: float = 0.95,
+                contradiction_batch_size: int = 4, profile_batch_size: int = 8):
+        
         self.llm = llm
         self.resolver = resolver
         self.store = store
         self.executor = executor
         self.embedding_service = embedding_service
         self.batch_semaphore = asyncio.Semaphore(2)
+
+        self.profile_batch_size = profile_batch_size
+        self.msg_window = msg_window
+        self.volume_threshold = volume_threshold
+        self.idle_threshold = idle_threshold
+
+        self.contradiction_sim_low = contradiction_sim_low
+        self.contradiction_sim_high = contradiction_sim_high
+        self.contradiction_batch_size = contradiction_batch_size
         
 
     @property
@@ -46,15 +57,16 @@ class ProfileRefinementJob(BaseJob):
         return "profile_refinement"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        dirty_key = f"dirty_entities:{ctx.user_name}"
+        dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
         return await ctx.redis.scard(dirty_key) > 0
+    
     
     async def _maybe_refine_user(self, ctx: JobContext, curr_msg_id: int) -> bool:
         """
         Check conditions and trigger user profile refinement if needed.
         Returns True if refinement ran.
         """
-        ran_key = f"user_profile_ran:{ctx.user_name}"
+        ran_key = RedisKeys.user_profile_ran(ctx.user_name, ctx.session_id)
         if await ctx.redis.get(ran_key):
             return False
         
@@ -75,14 +87,14 @@ class ProfileRefinementJob(BaseJob):
         return success
     
     async def _get_conversation_context(self, ctx: JobContext, num_turns: int, user_ratio: float = 0.75, up_to_msg_id: int = None) -> List[Dict]:
-        """Fetch recent conversation with both user and STELLA turns."""
-        sorted_key = f"recent_conversation:{ctx.user_name}"
-        conv_key = f"conversation:{ctx.user_name}"
+        """Fetch recent conversation with both user and agent turns."""
+        sorted_key = RedisKeys.recent_conversation(ctx.user_name, ctx.session_id)
+        conv_key = RedisKeys.conversation(ctx.user_name, ctx.session_id)
         
         fetch_count = int(num_turns * 2)
         if up_to_msg_id:
             turn_key = await ctx.redis.hget(
-                f"lookup:msg_to_turn:{ctx.user_name}",
+                RedisKeys.msg_to_turn_lookup(ctx.user_name, ctx.session_id),
                 f"msg_{up_to_msg_id}"
             )
             if turn_key:
@@ -121,22 +133,15 @@ class ProfileRefinementJob(BaseJob):
             parsed = json.loads(data)
             ts = datetime.fromisoformat(parsed['timestamp'])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
-            role_label = "User" if parsed["role"] == "user" else "STELLA"
+            role_label = "User" if parsed["role"] == "user" else "AGENT"
             
             if parsed["role"] == "user" and parsed.get("user_msg_id") is not None:
                 formatted = f"[MSG_{parsed['user_msg_id']}] [{date_str}] [{role_label}]: {parsed['content']}"
             else:
                 formatted = f"[{date_str}] [{role_label}]: {parsed['content']}"
             
-            turn = {
-                "turn_id": turn_id,
-                "role": parsed["role"],
-                "role_label": role_label,
-                "content": parsed["content"],
-                "formatted": formatted,
-                "raw": parsed["content"],
-                "timestamp": parsed["timestamp"],
-                "user_msg_id": parsed.get("user_msg_id")
+            turn = {"turn_id": turn_id, "role": parsed["role"], "role_label": role_label, "content": parsed["content"],
+                "formatted": formatted, "raw": parsed["content"], "timestamp": parsed["timestamp"], "user_msg_id": parsed.get("user_msg_id")
             }
             
             if parsed["role"] == "user":
@@ -159,58 +164,76 @@ class ProfileRefinementJob(BaseJob):
         return combined
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        warning = "⚠️ **Deepening Profiles.** I am reading through recent conversations to update entity details. Please wait a moment for the best results."
 
-        async with JobNotifier(ctx.redis, warning):
-            current_msg_id = await ctx.redis.get(f"last_processed_msg:{ctx.user_name}")
-            current_msg_id = int(current_msg_id) if current_msg_id else 0
+        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
+        current_msg_id = int(current_msg_id) if current_msg_id else 0
 
-            dirty_key = f"dirty_entities:{ctx.user_name}"
-            raw_ids = await ctx.redis.spop(dirty_key, self.VOLUME_THRESHOLD)
-            
-            user_id = self.resolver.get_id(ctx.user_name)
-            entity_ids = [int(id_str) for id_str in raw_ids if int(id_str) != user_id] if raw_ids else []
-            
-            updates = []
-            
-            if entity_ids:
-                conversation = await self._get_conversation_context(ctx, self.MSG_WINDOW, up_to_msg_id=current_msg_id)
+        dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
         
-                if not conversation:
-                    await ctx.redis.sadd(dirty_key, *[str(eid) for eid in entity_ids])
-                    return JobResult(success=False, summary="No context found")
-                
-                try:
-                    updates = await self._run_updates(ctx, entity_ids, conversation)
-                    
-                    if updates:
-                        await self._write_updates(updates)
-                except Exception as e:
-                    logger.error(f"Profile refinement failed, re-queuing {len(entity_ids)} entities: {e}")
-                    await ctx.redis.sadd(dirty_key, *[str(eid) for eid in entity_ids])
-                    return JobResult(success=False, summary=f"Failed: {e}")
-            
-            user_refined = await self._maybe_refine_user(ctx, current_msg_id)
-            
-            parts = []
-            if updates:
-                parts.append(f"Refined {len(updates)} profiles")
-            if user_refined:
-                parts.append(f"refined {ctx.user_name}")
-            
-            summary = ", ".join(parts) if parts else "No profiles to update"
+        raw_ids = await ctx.redis.srandmember(dirty_key, self.volume_threshold)
+        
+        user_id = self.resolver.get_id(ctx.user_name)
+        entity_ids = [int(id_str) for id_str in raw_ids if int(id_str) != user_id] if raw_ids else []
 
-            await ctx.redis.setex(
-                f"profile_complete:{ctx.user_name}",
-                300,
-                str(datetime.now(timezone.utc).timestamp())
-            )
+        logger.info(f"Profile refinement starting: {len(entity_ids)} entities to process")
+        
+        updates = []
+        
+        if entity_ids:
+            conversation = await self._get_conversation_context(ctx, self.msg_window, up_to_msg_id=current_msg_id)
+
+            if not conversation:
+                return JobResult(success=False, summary="No context found")
             
-            return JobResult(success=True, summary=summary)
+            try:
+                updates = await self._run_updates(ctx, entity_ids, conversation)
+                
+                if updates:
+                    await self._write_updates(updates)
+                    await emit(ctx.session_id, "job", "profiles_refined", {
+                        "count": len(updates),
+                        "entities": [u["canonical_name"] for u in updates]
+                    })
+                    merge_queue = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
+                    updated_ids = [str(u["id"]) for u in updates]
+                    
+                    if updated_ids:
+                        await ctx.redis.sadd(merge_queue, *updated_ids)
+                        logger.info(f"Passed {len(updated_ids)} updated entities to Merge Queue")
+
+            except Exception as e:
+                logger.error(f"Profile refinement failed: {e}")
+                await emit(ctx.session_id, "job", "profile_refinement_failed", {
+                    "entity_count": len(entity_ids),
+                    "error": str(e)
+                })
+                return JobResult(success=False, summary=f"Failed: {e}")
+        
+        user_refined = await self._maybe_refine_user(ctx, current_msg_id)
+        
+        processed_ids = [str(u["id"]) for u in updates]
+        if processed_ids:
+            await ctx.redis.srem(dirty_key, *processed_ids)
+        
+        parts = []
+        if updates:
+            parts.append(f"Refined {len(updates)} profiles")
+        if user_refined:
+            parts.append(f"refined {ctx.user_name}")
+        
+        summary = ", ".join(parts) if parts else "No profiles to update"
+
+        await ctx.redis.setex(
+            RedisKeys.profile_complete(ctx.user_name, ctx.session_id),
+            300,
+            str(datetime.now(timezone.utc).timestamp())
+        )
+        
+        return JobResult(success=True, summary=summary)
     
     async def _refine_user_profile(self, ctx: JobContext, user_id: int, profile: dict, curr_msg_id: int) -> bool:
         """Execute user profile refinement."""
-        conversation = await self._get_conversation_context(ctx, int(self.MSG_WINDOW * 1.5), up_to_msg_id=curr_msg_id)
+        conversation = await self._get_conversation_context(ctx, int(self.msg_window * 1.5), up_to_msg_id=curr_msg_id)
 
         if not conversation:
             logger.warning("User profile refinement: no conversation context")
@@ -223,7 +246,7 @@ class ProfileRefinementJob(BaseJob):
             return False
         
         # Get current message ID for checkpoint
-        current_msg_id = await ctx.redis.get(f"last_processed_msg:{ctx.user_name}")
+        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
         
         # Fetch existing facts from DB
@@ -234,18 +257,25 @@ class ProfileRefinementJob(BaseJob):
             user_id,
             True  # active_only
         )
+
+        if existing_facts is None:
+            logger.warning("Could not fetch user facts, skipping refinement")
+            return False
         
         system_reasoning = get_profile_extraction_prompt(ctx.user_name)
-        enriched_facts = await self._enrich_facts_with_sources(existing_facts)
-        user_content = json.dumps({
-            "entities": [{
+        enriched_facts = await enrich_facts_with_sources(existing_facts, self.store)
+        llm_input = [{
                 "entity_name": ctx.user_name,
                 "entity_type": "person",
                 "existing_facts": enriched_facts,
                 "known_aliases": [alias for alias in profile.get("aliases", [ctx.user_name])]
-            }],
-            "conversation": conversation_text
-        })
+            }]
+        user_content = format_vp04_input(llm_input, conversation_text)
+
+        await emit(ctx.session_id, "job", "llm_call", {
+            "stage": "user_profile_extraction",
+            "prompt": user_content
+        }, verbose_only=True)
         
         reasoning = await self.llm.call_llm(system_reasoning, user_content)
 
@@ -276,11 +306,10 @@ class ProfileRefinementJob(BaseJob):
         
         valid_msg_ids = {turn['user_msg_id'] for turn in conversation if turn.get('user_msg_id') is not None}
 
-        await self._apply_fact_changes(user_id, merge_result, existing_facts, valid_msg_ids)
+        await self._apply_fact_changes(user_id, merge_result, existing_facts, valid_msg_ids, ctx.session_id)
         
         embedding = await self._update_entity_embedding(user_id, ctx.user_name)
         
-        # Update entity profile in graph
         await loop.run_in_executor(
             self.executor,
             partial(
@@ -293,6 +322,12 @@ class ProfileRefinementJob(BaseJob):
         )
         
         logger.info(f"Refined user profile for {ctx.user_name}")
+        await emit(ctx.session_id, "job", "user_profile_refined", {
+            "user_name": ctx.user_name,
+            "facts_invalidated": len(merge_result.to_invalidate),
+            "facts_created": len(merge_result.new_contents)
+        })
+        
         return True
 
     async def _process_single_batch(
@@ -308,7 +343,7 @@ class ProfileRefinementJob(BaseJob):
         async with self.batch_semaphore:
             llm_input = []
             for e in batch:
-                enriched_facts = await self._enrich_facts_with_sources(e["existing_facts"])
+                enriched_facts = await enrich_facts_with_sources(e["existing_facts"], self.store)
                 llm_input.append({
                     "entity_name": e["entity_name"],
                     "entity_type": e["entity_type"],
@@ -317,10 +352,13 @@ class ProfileRefinementJob(BaseJob):
                 })
             
             system_reasoning = get_profile_extraction_prompt(ctx.user_name)
-            user_content = json.dumps({
-                "entities": llm_input,
-                "conversation": conversation_text
-            })
+            user_content = format_vp04_input(llm_input, conversation_text)
+
+            await emit(ctx.session_id, "job", "llm_call", {
+                "stage": "profile_extraction",
+                "entities": [e["entity_name"] for e in batch],
+                "prompt": user_content
+            }, verbose_only=True)
             
             reasoning = await self.llm.call_llm(system_reasoning, user_content)
             
@@ -351,7 +389,7 @@ class ProfileRefinementJob(BaseJob):
                 existing_facts = ents_to_facts[orig["ent_id"]]
                 merge_result = process_extracted_facts(existing_facts, new_facts)
                 
-                await self._apply_fact_changes(orig["ent_id"], merge_result, existing_facts, valid_msg_ids)
+                await self._apply_fact_changes(orig["ent_id"], merge_result, existing_facts, valid_msg_ids, ctx.session_id)
                 
                 # Update entity embedding
                 embedding = await self._update_entity_embedding(orig["ent_id"], orig["entity_name"])
@@ -364,57 +402,37 @@ class ProfileRefinementJob(BaseJob):
                 })
 
             return updates
-
-    async def _enrich_facts_with_sources(self, facts: List[Fact]) -> List[Dict]:
-        """Enrich facts with timestamps and source message content."""
-        loop = asyncio.get_running_loop()
-        enriched = []
-        
-        for fact in facts:
-            entry = {
-                "content": fact.content,
-                "recorded_at": fact.valid_at.isoformat() if fact.valid_at else None,
-                "source_message": None
-            }
-            
-            if fact.source_msg_id:
-                try:
-                    text = await loop.run_in_executor(
-                        self.executor,
-                        self.store.get_message_text,
-                        fact.source_msg_id
-                    )
-                    if text:
-                        entry["source_message"] = text
-                except Exception as e:
-                    logger.debug(f"Could not fetch source for msg {fact.source_msg_id}: {e}")
-            
-            enriched.append(entry)
-        
-        return enriched
     
 
     async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]):
         """Process entities in batches instead of individually."""
         
-        current_msg_id = await ctx.redis.get(f"last_processed_msg:{ctx.user_name}")
+        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
         conversation_text = "\n".join([turn["formatted"] for turn in conversation])
 
         loop = asyncio.get_running_loop()
 
-        entity_inputs = []
-        ents_to_facts = {}
+        valid_entities = []
         for ent_id in entity_ids:
             profile = self.resolver.entity_profiles.get(ent_id)
-            if not profile:
-                continue
-            
-            existing_facts = await loop.run_in_executor(None,
-                                        self.store.get_facts_for_entity, ent_id, True)
-            
-            ents_to_facts[ent_id] = existing_facts
+            if profile:
+                valid_entities.append((ent_id, profile))
 
+        if not valid_entities:
+            return []
+        
+        ents_to_facts = await loop.run_in_executor(
+            None,
+            self.store.get_facts_for_entities,
+            [ent_id for ent_id, _ in valid_entities],
+            True
+        )
+
+        entity_inputs = []
+        for ent_id, profile in valid_entities:
+            existing_facts = ents_to_facts.get(ent_id, [])
+            
             entity_inputs.append({
                 "ent_id": ent_id,
                 "entity_name": profile.get("canonical_name", "Unknown"),
@@ -426,11 +444,9 @@ class ProfileRefinementJob(BaseJob):
         if not entity_inputs:
             return []
         
-        conversation_text = "\n".join([turn["formatted"] for turn in conversation])
-        
         batches = [
-            entity_inputs[i:i + self.PROFILE_BATCH_SIZE]
-            for i in range(0, len(entity_inputs), self.PROFILE_BATCH_SIZE)
+            entity_inputs[i:i + self.profile_batch_size]
+            for i in range(0, len(entity_inputs), self.profile_batch_size)
         ]
         
         valid_msg_ids = {turn['user_msg_id'] for turn in conversation if turn.get('user_msg_id') is not None}
@@ -449,22 +465,15 @@ class ProfileRefinementJob(BaseJob):
         entity_id: int,
         merge_result: FactMergeResult,
         existing_facts: List[Fact],
-        valid_msg_ids: Optional[set] = None
+        valid_msg_ids: Optional[set] = None,
+        session_id: str = None
     ):
-        """Invalidate old facts and create new ones."""
+        """Invalidate old facts and create new ones. Creates first, invalidates after."""
         loop = asyncio.get_running_loop()
         now = datetime.now(timezone.utc)
         
-        for fact_id in merge_result.to_invalidate:
-            await loop.run_in_executor(
-                self.executor,
-                self.store.invalidate_fact,
-                fact_id,
-                now
-            )
-        
-        invalidated_ids = set(merge_result.to_invalidate)
-        active_existing = [f for f in existing_facts if f.invalid_at is None and f.id not in invalidated_ids]
+        to_invalidate = set(merge_result.to_invalidate)
+        active_existing = [f for f in existing_facts if f.invalid_at is None and f.id not in to_invalidate]
         
         facts_to_create = []
 
@@ -481,14 +490,9 @@ class ProfileRefinementJob(BaseJob):
                 content
             )
             
-            contradicted_ids = await self._detect_contradictions(content, embedding, active_existing, new_msg_id=msg_id)
-            for contradicted_id in contradicted_ids:
-                await loop.run_in_executor(
-                    self.executor,
-                    self.store.invalidate_fact,
-                    contradicted_id,
-                    now
-                )
+            contradicted_ids = await self._detect_contradictions(content, embedding, active_existing, msg_id, session_id)
+            
+            to_invalidate.update(contradicted_ids)
             
             if contradicted_ids:
                 contradicted_set = set(contradicted_ids)
@@ -503,7 +507,6 @@ class ProfileRefinementJob(BaseJob):
                 source_entity_id=entity_id
             )
             facts_to_create.append(fact)
-            
             active_existing.append(fact)
 
         if facts_to_create:
@@ -514,19 +517,51 @@ class ProfileRefinementJob(BaseJob):
                     entity_id,
                     facts_to_create
                 )
-                logger.debug(f"Batched created {count} facts for entity {entity_id}")
+                logger.debug(f"Created {count} facts for entity {entity_id}")
+                
+                for fact_id in to_invalidate:
+                    await loop.run_in_executor(
+                        self.executor,
+                        self.store.invalidate_fact,
+                        fact_id,
+                        now
+                    )
+                
+                await emit(session_id, "job", "facts_changed", {
+                    "entity_id": entity_id,
+                    "invalidated": len(to_invalidate),
+                    "created": len(facts_to_create)
+                }, verbose_only=True)
+                
             except Exception as e:
-                logger.error(f"Failed to write facts for {entity_id}, dropping {len(facts_to_create)} facts. Error: {e}")
-    
+                logger.error(f"Failed to write facts for {entity_id}, skipping invalidations. Error: {e}")
+                await emit(session_id, "job", "facts_write_failed", {
+                    "entity_id": entity_id,
+                    "fact_count": len(facts_to_create),
+                    "error": str(e)
+                })
+        elif to_invalidate:
+            for fact_id in to_invalidate:
+                await loop.run_in_executor(
+                    self.executor,
+                    self.store.invalidate_fact,
+                    fact_id,
+                    now
+                )
+            
+            await emit(session_id, "job", "facts_changed", {
+                "entity_id": entity_id,
+                "invalidated": len(to_invalidate),
+                "created": 0
+            }, verbose_only=True)
+                
     async def _detect_contradictions(
         self,
         new_content: str,
         new_embedding: List[float],
         existing_facts: List[Fact],
         new_msg_id: Optional[int] = None,
-        similarity_low: float = 0.70,
-        similarity_high: float = 0.95,
-        batch_size: int = 4
+        session_id: str = None
     ) -> List[str]:
         """
         Find existing fact that new fact contradicts.
@@ -550,15 +585,12 @@ class ProfileRefinementJob(BaseJob):
             
             similarity = float(np.dot(new_emb, existing_emb))
             
-            if similarity_low <= similarity < similarity_high:
+            if self.contradiction_sim_low <= similarity < self.contradiction_sim_high:
                 if new_content.lower().strip() != fact.content.lower().strip():
                     if new_msg_id and fact.source_msg_id:
-                        try:
-                            if new_msg_id < fact.source_msg_id:
-                                logger.debug(f"Skipping contradiction check: msg_{new_msg_id} older than msg_{fact.source_msg_id} for '{new_content[:40]}...'")
-                                continue
-                        except ValueError:
-                            pass
+                        if new_msg_id < fact.source_msg_id:
+                            logger.debug(f"Skipping contradiction check: msg_{new_msg_id} older than msg_{fact.source_msg_id} for '{new_content[:40]}...'")
+                            continue
                     candidates.append((fact, similarity))
         
         if not candidates:
@@ -568,12 +600,12 @@ class ProfileRefinementJob(BaseJob):
         
         to_invalidate = []
     
-        for i in range(0, len(candidates), batch_size):
-            batch = candidates[i:i + batch_size]
+        for i in range(0, len(candidates), self.contradiction_batch_size):
+            batch = candidates[i:i + self.contradiction_batch_size]
             
             pairs = [(fact.content, new_content) for fact, _ in batch]
             
-            judgments = await self._llm_judge_contradiction(pairs)
+            judgments = await self._llm_judge_contradiction(pairs, session_id)
             
             for idx, is_contradiction in judgments.items():
                 if is_contradiction:
@@ -581,10 +613,15 @@ class ProfileRefinementJob(BaseJob):
                     logger.info(f"LLM confirmed contradiction: '{new_content[:50]}' supersedes '{fact.content[:50]}' (sim={sim:.3f})")
                     to_invalidate.append(fact.id)
         
+        await emit(session_id, "job", "contradictions_detected", {
+            "new_fact": new_content,
+            "invalidated_count": len(to_invalidate)
+        }, verbose_only=True)
+        
         return to_invalidate
 
 
-    async def _llm_judge_contradiction(self, pairs: List[Tuple[str, str]]) -> Dict[int, bool]:
+    async def _llm_judge_contradiction(self, pairs: List[Tuple[str, str]], session_id: str) -> Dict[int, bool]:
         """
         Ask LLM if new facts contradict existing facts.
         """
@@ -600,9 +637,16 @@ class ProfileRefinementJob(BaseJob):
         user = "\n".join(lines)
         
         result = await self.llm.call_llm(system, user)
+
+        await emit(session_id, "job", "llm_call", {
+            "stage": "contradiction_judgment",
+            "pair_count": len(pairs),
+            "prompt": user
+        }, verbose_only=True)
         
         if not result:
-            raise ValueError("LLM returned empty response for contradiction judgment")
+            logger.warning("LLM returned empty for contradiction check, skipping")
+            return {}
         
         match = re.search(r"<results>\s*(.*?)\s*</results>", result, re.DOTALL | re.IGNORECASE)
     
@@ -629,7 +673,13 @@ class ProfileRefinementJob(BaseJob):
             judgments[idx] = value
         
         if len(judgments) != len(pairs):
-            logger.warning(f"Expected {len(pairs)} results, got {len(judgments)}. Missing indices treated as false.")
+            missing = len(pairs) - len(judgments)
+            logger.warning(f"Contradiction check: {missing}/{len(pairs)} indices missing")
+            await emit(session_id, "job", "contradiction_partial_result", {
+                "expected": len(pairs),
+                "received": len(judgments),
+                "missing": missing
+            }, verbose_only=True)
         
         return judgments
     
@@ -647,6 +697,10 @@ class ProfileRefinementJob(BaseJob):
             entity_id,
             True
         )
+
+        if active_facts is None:
+            logger.warning(f"Could not fetch facts for embedding update, using name only")
+            active_facts = []
         
         resolution_text = f"{canonical_name}. " + " ".join([f.content for f in active_facts])
         
@@ -672,5 +726,5 @@ class ProfileRefinementJob(BaseJob):
                     last_msg_id=update["last_msg_id"]
                 )
             )
-        
+
         logger.info(f"Wrote {len(updates)} profile updates to graph")

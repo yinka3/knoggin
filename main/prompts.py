@@ -28,11 +28,13 @@ Never extract {user_name} as an entity—they are the implicit root node.
 2. **GLiNER Override**: If a GLiNER extraction is clearly wrong (wrong label, generic noun captured as entity, etc.), output the corrected version or omit it.
 
 3. **Discovery**: Scan messages for proper nouns and named things that both Known Entities and GLiNER missed.
-   - Extract noun chunks as they appear in messages (max 3 words)
-   - "Central Park", "Dr. Smith", "Project Apollo" are valid
+   - Extract the **full proper name** exactly as it appears.
+   - Do NOT split multi-word names (e.g., extract "The Museum of Modern Art" as one entity, not "Museum", "Modern", "Art").
+   - "Central Park", "Dr. Smith", "The Legend of Zelda", "Department of Motor Vehicles" are valid.
    - Do NOT extract:
      - Generic nouns ("the meeting", "a project", "my friend")
      - Pronouns or references ("he", "that place", "it")
+     - Long descriptive phrases that are not names ("the guy I met at the bar yesterday")
      - {user_name} or first-person references
 </tasks>
 
@@ -44,7 +46,7 @@ Downstream stages filter bad extractions, but every wrong entity wastes processi
 Work through:
 - Ambiguous: which topic fits based on context?
 - GLiNER: any clearly wrong extractions?
-- Discovery: any proper nouns missed? (max 3 words, as written in message)
+- Discovery: any proper nouns missed? (Keep full names intact)
 
 Keep concise.
 </scratchpad>
@@ -64,6 +66,7 @@ Example:
 <entities>
 4 | Bella | person | Gym | 0.92
 4 | Blue Bottle | restaurant | Food & Dining | 0.88
+5 | The Legend of Zelda: Breath of the Wild | media | Games | 0.95
 </entities>
 </output_format>
 """
