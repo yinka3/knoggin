@@ -1,44 +1,46 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import json
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from loguru import logger
-from jobs.base import BaseJob, JobContext, JobResult, JobNotifier
-from jobs.jobs_utils import cosine_similarity, find_duplicate_facts, format_vp05_input, has_sufficient_facts, parse_merge_score
+from jobs.base import BaseJob, JobContext, JobResult
+from jobs.jobs_utils import cosine_similarity, enrich_facts_with_sources, find_duplicate_facts, format_vp05_input, has_sufficient_facts, parse_merge_score
 from main.prompts import get_merge_judgment_prompt
-from main.service import LLMService
+from shared.service import LLMService
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
-from main.topics_config import TopicConfig
-from schema.dtypes import Fact
+from shared.topics_config import TopicConfig
+from shared.events import emit
 from shared.redisclient import RedisKeys
-
 
 class MergeDetectionJob(BaseJob):
     """
     Detects and processes duplicate entities (merge) and parent/child relationships (hierarchy).
     """
-    
-    AUTO_MERGE_THRESHOLD = 0.93
-    HITL_THRESHOLD = 0.65
-    HIERARCHY_FUZZ_THRESHOLD = 70
 
     def __init__(self, user_name: str, ent_resolver: EntityResolver, store: MemGraphStore, 
-                    llm_client: LLMService, topic_config: TopicConfig, executor: ThreadPoolExecutor):
+                    llm_client: LLMService, topic_config: TopicConfig, executor: ThreadPoolExecutor,
+                    auto_threshold: float = 0.93, hitl_threshold: float = 0.65, cosine_threshold: float = 0.65):
+        
         self.user_name = user_name
         self.ent_resolver = ent_resolver
         self.store = store
         self.llm = llm_client
         self.topic_config = topic_config
         self.executor = executor
+
+        self.auto_threshold = auto_threshold
+        self.hitl_threshold = hitl_threshold
+        self.cosine_threshold = cosine_threshold
     
     @property
     def name(self) -> str:
         return "merge_detection"
     
     async def should_run(self, ctx: JobContext) -> bool:
-        return RedisKeys.profile_complete(ctx.user_name, ctx.session_id) is not None
+        return await ctx.redis.get(RedisKeys.profile_complete(ctx.user_name, ctx.session_id)) is not None
     
     def _same_topic(self, topic_a: str, topic_b: str) -> bool:
         """Check if topics are the same after alias normalization."""
@@ -47,66 +49,47 @@ class MergeDetectionJob(BaseJob):
         return canonical_a == canonical_b
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        await ctx.redis.set(RedisKeys.merge_ran(ctx.user_name, ctx.session_id), "true")
 
         merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
     
-        dirty_raw = await ctx.redis.spop(merge_key, 50)
+        dirty_raw = await ctx.redis.srandmember(merge_key, 50)
         
         if not dirty_raw:
-            return JobResult(success=True, summary="No recently updated entities to check")
+            return JobResult(success=True, summary="No dirty entities to merge")
             
         dirty_ids = {int(eid) for eid in dirty_raw}
+
+        logger.info(f"Merge detection starting: {len(dirty_ids)} dirty entities")
+        await emit(ctx.session_id, "job", "merge_job_started", {
+            "dirty_count": len(dirty_ids)
+        })
         
         candidates = self.ent_resolver.detect_merge_entity_candidates(dirty_ids=dirty_ids)
         
         if not candidates:
-            return JobResult(success=True, summary=f"Checked {len(dirty_ids)} entities, no duplicates found")
+            await ctx.redis.srem(merge_key, *[str(eid) for eid in dirty_ids])
+            return JobResult(success=True, summary="No candidates found")
         
         logger.info(f"Processing {len(candidates)} merge candidates")
     
         merge_summary = await self._process_merges(ctx, candidates)
-        hierarchy_summary = await self._detect_hierarchy()
+        hierarchy_summary = await self._detect_hierarchy(ctx)
+
+        evaluated_ids = [str(eid) for eid in dirty_ids]
+        if evaluated_ids:
+            await ctx.redis.srem(merge_key, *evaluated_ids)
         
         return JobResult(
             success=True,
             summary=f"{merge_summary}; {hierarchy_summary}"
         )
     
-    async def _enrich_facts_with_sources(self, facts: List[Fact]) -> List[Dict]:
-        """Enrich facts with timestamps and source message content."""
-        loop = asyncio.get_running_loop()
-        enriched = []
-        
-        for fact in facts:
-            entry = {
-                "content": fact.content,
-                "recorded_at": fact.valid_at.isoformat() if fact.valid_at else None,
-                "source_message": None
-            }
-            
-            if fact.source_msg_id:
-                try:
-                    msg_id = int(fact.source_msg_id.replace("msg_", ""))
-                    text = await loop.run_in_executor(
-                        self.executor,
-                        self.store.get_message_text,
-                        msg_id
-                    )
-                    if text:
-                        entry["source_message"] = text
-                except (ValueError, Exception) as e:
-                    logger.debug(f"Could not fetch source for {fact.source_msg_id}: {e}")
-            
-            enriched.append(entry)
-        
-        return enriched
     
-    async def _get_merge_judgment(self, candidate: dict) -> Optional[float]:
+    async def _get_merge_judgment(self, candidate: dict, session_id: str = None) -> Optional[float]:
         system = get_merge_judgment_prompt(self.user_name)
         
-        enriched_facts_a = await self._enrich_facts_with_sources(candidate.get("facts_a", []))
-        enriched_facts_b = await self._enrich_facts_with_sources(candidate.get("facts_b", []))
+        enriched_facts_a = await enrich_facts_with_sources(candidate.get("facts_a", []), self.store)
+        enriched_facts_b = await enrich_facts_with_sources(candidate.get("facts_b", []), self.store)
         
         user_content = format_vp05_input(
             {
@@ -122,6 +105,12 @@ class MergeDetectionJob(BaseJob):
                 "facts": enriched_facts_b
             }
         )
+        await emit(session_id, "job", "llm_call", {
+            "stage": "merge_judgment",
+            "primary": candidate["primary_name"],
+            "secondary": candidate["secondary_name"],
+            "prompt": user_content
+        }, verbose_only=True)
         
         result = await self.llm.call_llm(system, user_content, reasoning="medium")
         
@@ -181,7 +170,10 @@ class MergeDetectionJob(BaseJob):
         """Update EntityResolver after merge."""
         self.ent_resolver.merge_into(primary_id, secondary_id)
     
-    async def _judgement(self, candidates: List, auto_merge: List, hitl: List) -> Tuple[List, List]:
+    async def _judgement(self, candidates: List, ctx: JobContext) -> Tuple[List, List]:
+        auto_merge = []
+        hitl = []
+        
         loop = asyncio.get_running_loop()
         collisions = await loop.run_in_executor(None, self.store.find_alias_collisions)
         collision_set = {tuple(sorted([a, b])) for a, b in collisions}
@@ -199,12 +191,12 @@ class MergeDetectionJob(BaseJob):
                     auto_merge.append(candidate)
                 else:
                     logger.info(f"Cross-topic alias collision ({candidate['primary_id']}, {candidate['secondary_id']}) | Sending to LLM")
-                    score = await self._get_merge_judgment(candidate)
+                    score = await self._get_merge_judgment(candidate, ctx.session_id)
                     if score is not None:
                         candidate["llm_score"] = score
-                        if score >= self.AUTO_MERGE_THRESHOLD:
+                        if score >= self.auto_threshold:
                             auto_merge.append(candidate)
-                        elif score >= self.HITL_THRESHOLD:
+                        elif score >= self.hitl_threshold:
                             hitl.append(candidate)
                 continue
 
@@ -216,34 +208,34 @@ class MergeDetectionJob(BaseJob):
             emb_b = self.ent_resolver.get_embedding_for_id(candidate["secondary_id"])
             cosine_score = cosine_similarity(emb_a, emb_b)
 
-            if cosine_score >= 0.93:
+            if cosine_score >= self.auto_threshold:
                 if same_topic:
                     logger.info(f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}, same topic")
                     auto_merge.append(candidate)
                 else:
                     logger.info(f"High cosine but cross-topic ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}, sending to LLM")
-                    score = await self._get_merge_judgment(candidate)
+                    score = await self._get_merge_judgment(candidate, ctx.session_id)
                     if score is not None:
                         candidate["llm_score"] = score
-                        if score >= self.AUTO_MERGE_THRESHOLD:
+                        if score >= self.auto_threshold:
                             auto_merge.append(candidate)
-                        elif score >= self.HITL_THRESHOLD:
+                        elif score >= self.hitl_threshold:
                             hitl.append(candidate)
                 continue
 
-            if cosine_score < 0.45:
+            if cosine_score < self.cosine_threshold:
                 logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}")
                 continue
             
-            score = await self._get_merge_judgment(candidate)
+            score = await self._get_merge_judgment(candidate, ctx.session_id)
             if score is None:
                 continue
             
             candidate["llm_score"] = score
             
-            if score >= self.AUTO_MERGE_THRESHOLD:
+            if score >= self.auto_threshold:
                 auto_merge.append(candidate)
-            elif score >= self.HITL_THRESHOLD:
+            elif score >= self.hitl_threshold:
                 hitl.append(candidate)
             else:
                 logger.info(f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}")
@@ -254,9 +246,14 @@ class MergeDetectionJob(BaseJob):
         if not candidates:
             return "0 merged"
         
-        auto_merge, hitl = await self._judgement(candidates, [], [])
+        auto_merge, hitl = await self._judgement(candidates, ctx)
 
         logger.info(f"Merge split: {len(auto_merge)} auto, {len(hitl)} HITL")
+        await emit(ctx.session_id, "job", "merge_judgments_complete", {
+            "auto_merge": len(auto_merge),
+            "hitl": len(hitl),
+            "rejected": len(candidates) - len(auto_merge) - len(hitl)
+        })
         
         if not auto_merge and not hitl:
             return "0 merged"
@@ -280,96 +277,113 @@ class MergeDetectionJob(BaseJob):
 
         async def prepare_single_merge(c):
             async with sem:
-                p_id = c["primary_id"]
-                s_id = c["secondary_id"]
-                
-                loop = asyncio.get_running_loop()
-                
-                facts_a = await loop.run_in_executor(
-                    None, self.store.get_facts_for_entity, p_id, False
-                )
-                facts_b = await loop.run_in_executor(
-                    None, self.store.get_facts_for_entity, s_id, False
-                )
-                
-                duplicate_ids = find_duplicate_facts(facts_a, facts_b)
-                
-                return {
-                    "primary_id": p_id,
-                    "secondary_id": s_id,
-                    "duplicate_fact_ids": duplicate_ids,
-                    "primary_name": c["primary_name"],
-                    "secondary_name": c["secondary_name"]
-                }
+                try:
+                    p_id = c["primary_id"]
+                    s_id = c["secondary_id"]
+                    
+                    loop = asyncio.get_running_loop()
+                    
+                    facts_a = await loop.run_in_executor(
+                        None, self.store.get_facts_for_entity, p_id, False
+                    )
+                    facts_b = await loop.run_in_executor(
+                        None, self.store.get_facts_for_entity, s_id, False
+                    )
+
+                    if facts_a is None or facts_b is None:
+                        logger.warning(f"Could not fetch facts for merge ({p_id}, {s_id}), skipping")
+                        return None
+                    
+                    duplicate_ids = await loop.run_in_executor(
+                        self.executor, find_duplicate_facts, facts_a, facts_b
+                    )
+                    
+                    return {
+                        "primary_id": p_id,
+                        "secondary_id": s_id,
+                        "duplicate_fact_ids": duplicate_ids,
+                        "primary_name": c["primary_name"],
+                        "secondary_name": c["secondary_name"]
+                    }
+                except Exception as e:
+                    logger.error(f"Failed to prepare merge ({c['primary_id']}, {c['secondary_id']}): {e}")
+                    return None
         
         tasks = [prepare_single_merge(c) for c in clean_batch]
         results = await asyncio.gather(*tasks)
         final_merge_list = [r for r in results if r is not None]
 
-        warning = "⚠️ **Memory Consolidation in Progress.** Merging duplicate entities."
+        successful = 0
+        failed = 0
+        
+        dirty_ids = []
+        for item in final_merge_list:
 
-        async with JobNotifier(ctx.redis, warning):
-            successful = 0
-            failed = 0
+            p_id = item["primary_id"]
+            s_id = item["secondary_id"]
+            db_success = await self._execute_merge_db_only(
+                p_id, 
+                s_id, 
+                item["duplicate_fact_ids"]
+            )
             
-            dirty_ids = []
-            for item in final_merge_list:
+            if db_success:
+                try:
+                    self._sync_resolver(p_id, s_id)
+                    loop = asyncio.get_running_loop()
+                    
+                    all_facts = await loop.run_in_executor(
+                        None, 
+                        self.store.get_facts_for_entity, 
+                        p_id, 
+                        True
+                    )
+                    
+                    resolution_text = f"{item['primary_name']}. " + " ".join([f.content for f in all_facts])
+                    
+                    new_embedding = await loop.run_in_executor(
+                        self.executor,
+                        partial(self.ent_resolver.compute_embedding, p_id, resolution_text)
+                    )
+                    
+                    await loop.run_in_executor(
+                        None,
+                        self.store.update_entity_embedding,
+                        p_id,
+                        new_embedding
+                    )
 
-                p_id = item["primary_id"]
-                s_id = item["secondary_id"]
-                db_success = await self._execute_merge_db_only(
-                    p_id, 
-                    s_id, 
-                    item["duplicate_fact_ids"]
-                )
-                
-                if db_success:
-                    try:
-                        self._sync_resolver(p_id, s_id)
-                        loop = asyncio.get_running_loop()
-                        
-                        all_facts = await loop.run_in_executor(
-                            None, 
-                            self.store.get_facts_for_entity, 
-                            p_id, 
-                            True
-                        )
-                        
-                        resolution_text = f"{item['primary_name']}. " + " ".join([f.content for f in all_facts])
-                        
-                        new_embedding = self.ent_resolver.compute_embedding(
-                            p_id, 
-                            resolution_text
-                        )
-                        
-                        await loop.run_in_executor(
-                            None,
-                            self.store.update_entity_embedding,
-                            p_id,
-                            new_embedding
-                        )
-
-                        dirty_ids.append(p_id)
-                        successful += 1
-                        logger.info(f"Merged & Re-embedded {item['primary_name']} <- {item['secondary_name']}")
-                        
-                    except Exception as e:
-                        logger.critical(
-                            f"Split-brain during merge {p_id}<-{s_id}: {e}. "
-                            f"Evicting entities from memory to prevent data corruption."
-                        )
-                        
-                        # HEALING STEP: 
-                        # Remove both from RAM. 
-                        # Next time they are mentioned, the system will hit the DB (Vector Search)
-                        # and find the correct merged state.
-                        self.ent_resolver.remove_entities([p_id, s_id])
-                        
-                        # We don't raise here because we've handled the RAM consistency.
-                        # We mark as failed so the job stats are accurate.
-                        failed += 1
-                else:
+                    dirty_ids.append(p_id)
+                    successful += 1
+                    logger.info(f"Merged & Re-embedded {item['primary_name']} <- {item['secondary_name']}")
+                    await emit(ctx.session_id, "job", "entities_merged", {
+                        "primary": item["primary_name"],
+                        "secondary": item["secondary_name"],
+                        "duplicate_facts_removed": len(item["duplicate_fact_ids"])
+                    }, verbose_only=True)
+                    
+                except Exception as e:
+                    logger.critical(
+                        f"Split-brain during merge {p_id}<-{s_id}: {e}. "
+                        f"Evicting entities from memory to prevent data corruption."
+                    )
+                    
+                    # HEALING STEP: 
+                    # Remove both from RAM. 
+                    # Next time they are mentioned, the system will hit the DB (Vector Search)
+                    # and find the correct merged state.
+                    self.ent_resolver.remove_entities([p_id, s_id])
+                    await emit(ctx.session_id, "job", "merge_split_brain", {
+                        "primary_id": p_id,
+                        "secondary_id": s_id,
+                        "error": str(e)
+                    })
+                    
+                    # We don't raise here because we've handled the RAM consistency.
+                    # We mark as failed so the job stats are accurate.
                     failed += 1
+            else:
+                failed += 1
             
             if dirty_ids:
                 dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
@@ -381,7 +395,7 @@ class MergeDetectionJob(BaseJob):
         return f"{successful} merged, {failed} failed, {proposals_stored} HITL"
     
 
-    async def _detect_hierarchy(self) -> str:
+    async def _detect_hierarchy(self, ctx: JobContext) -> str:
         """
         Post-merge hierarchy detection.
         Uses RELATED_TO edges + type matching from hierarchy_config.
@@ -420,6 +434,12 @@ class MergeDetectionJob(BaseJob):
                             f"Hierarchy Established: {c['child_name']} ({c['child_type']}) "
                             f"-[:PART_OF]-> {c['parent_name']} ({c['parent_type']})"
                         )
+
+                        await emit(ctx.session_id, "job", "hierarchy_created", {
+                            "parent": c["parent_name"],
+                            "child": c["child_name"],
+                            "topic": topic
+                        }, verbose_only=True)
         
         return f"{created} hierarchy edges"
     
@@ -445,6 +465,22 @@ class MergeDetectionJob(BaseJob):
             stored += 1
         
         return stored
+    
+    def update_settings(self, auto_threshold: float = None, hitl_threshold: float = None, cosine_threshold: float = None):
+        updates = []
+        
+        if auto_threshold is not None:
+            self.auto_threshold = auto_threshold
+            updates.append(f"auto={auto_threshold}")
+        if hitl_threshold is not None:
+            self.hitl_threshold = hitl_threshold
+            updates.append(f"hitl={hitl_threshold}")
+        if cosine_threshold is not None:
+            self.cosine_threshold = cosine_threshold
+            updates.append(f"cosine={cosine_threshold}")
+        
+        if updates:
+            logger.info(f"MergeDetectionJob updated: {', '.join(updates)}")
     
     async def on_shutdown(self, ctx: JobContext) -> None:
         """Set pending flag so next session picks up merge work."""

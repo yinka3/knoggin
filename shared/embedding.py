@@ -10,14 +10,17 @@ class EmbeddingService:
     """Embedding infrastructure for the knowledge graph."""
     
     EMBEDDING_DIM = 1024
+    BATCH_SIZE = 64  # Process in chunks to avoid OOM
     
     def __init__(
         self,
         embedding_model: str = 'dunzhang/stella_en_400M_v5',
         reranker_model: str = 'BAAI/bge-reranker-base',
-        device: str = None
+        device: str = None,
+        batch_size: int = 64
     ):
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.batch_size = batch_size
         
         self._embedder = SentenceTransformer(
             embedding_model, 
@@ -27,29 +30,59 @@ class EmbeddingService:
         )
         self._reranker = CrossEncoder(reranker_model, device=self.device)
         
-        logger.info(f"EmbeddingService initialized | device={self.device}")
+        logger.info(f"EmbeddingService initialized | device={self.device} | batch_size={batch_size}")
     
     def encode(self, texts: List[str]) -> np.ndarray:
-        """Batch encode texts to vectors."""
+        """Batch encode texts to vectors with chunking for large inputs."""
         if not texts:
             return np.array([])
-        return self._embedder.encode(texts).astype(np.float32)
+        
+        if len(texts) <= self.batch_size:
+            return self._embedder.encode(texts).astype(np.float32)
+        
+        all_embeddings = []
+        for i in range(0, len(texts), self.batch_size):
+            chunk = texts[i:i + self.batch_size]
+            embeddings = self._embedder.encode(chunk)
+            all_embeddings.append(embeddings)
+        
+        return np.vstack(all_embeddings).astype(np.float32)
     
     def encode_single(self, text: str) -> List[float]:
         """Encode single text, returns list for JSON serialization."""
-        return self.encode([text])[0].tolist()
+
+        embedding = self._embedder.encode([text])[0]
+        return embedding.astype(np.float32).tolist()
     
-    def rerank(self, query: str, candidates: List[str]) -> List[float]:
+    def rerank(self, query: str, candidates: List[str], batch_size: int = None) -> List[float]:
         """Score query-candidate pairs via cross-encoder."""
         if not candidates:
             return []
+        
+        batch_size = batch_size or self.batch_size
         pairs = [(query, c) for c in candidates]
-        return self._reranker.predict(pairs).tolist()
+        
+        if len(pairs) <= batch_size:
+            return self._reranker.predict(pairs).tolist()
+
+        all_scores = []
+        for i in range(0, len(pairs), batch_size):
+            chunk = pairs[i:i + batch_size]
+            scores = self._reranker.predict(chunk)
+            all_scores.extend(scores.tolist())
+        
+        return all_scores
     
     def cleanup(self):
         """Explicitly free model memory."""
-        del self._embedder
-        del self._reranker
+        if hasattr(self, '_embedder') and self._embedder is not None:
+            del self._embedder
+            self._embedder = None
+        
+        if hasattr(self, '_reranker') and self._reranker is not None:
+            del self._reranker
+            self._reranker = None
+        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()

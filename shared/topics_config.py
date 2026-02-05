@@ -1,7 +1,7 @@
 import json
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
-import redis.asyncio as redis
+import redis.asyncio as aioredis
 
 from shared.redisclient import RedisKeys
 
@@ -75,7 +75,7 @@ class TopicConfig:
     @classmethod
     async def load(
         cls, 
-        redis_client: redis.Redis, 
+        redis_client: aioredis.Redis, 
         user_name: str, 
         session_id: str
     ) -> "TopicConfig":
@@ -89,7 +89,7 @@ class TopicConfig:
     
     async def save(
         self, 
-        redis_client: redis.Redis, 
+        redis_client: aioredis.Redis, 
         user_name: str, 
         session_id: str
     ):
@@ -152,7 +152,7 @@ class TopicConfig:
             self._active_topics = get_active_topic_names(self._config)
         return self._active_topics
     
-    def normalize_topic(self, topic: str) -> str:
+    def normalize_topic(self, topic: str) -> Optional[str]:
         """Normalize extracted topic to canonical name."""
         if not topic:
             return None
@@ -208,9 +208,22 @@ class TopicConfig:
     
     def validate_hot_topics(self, hot_topics: List[str]) -> List[str]:
         """Filter hot topics to only include active ones."""
-        active = self.active_topics
-        valid = [t for t in hot_topics if t in active]
-        if len(valid) != len(hot_topics):
-            invalid = set(hot_topics) - set(valid)
-            logger.warning(f"Hot topics filtered out (not active): {invalid}")
+        if not hot_topics:
+            return []
+    
+        active = set(self.active_topics)
+        valid = []
+        invalid = []
+        
+        for topic in hot_topics:
+            canonical = self.normalize_topic(topic)
+            if canonical and canonical in active:
+                if canonical not in valid:
+                    valid.append(canonical)
+            else:
+                invalid.append(topic)
+        
+        if invalid:
+            logger.warning(f"Hot topics filtered out (not active or unknown): {invalid}")
+        
         return valid

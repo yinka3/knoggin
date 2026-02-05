@@ -3,18 +3,18 @@ import json
 from typing import List, Dict, Optional
 
 from loguru import logger
-import redis
+import redis.asyncio as aioredis
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
-from main.topics_config import TopicConfig
-from shared.redisclient import RedisKeys
+from shared.topics_config import TopicConfig
+from shared.redisclient import RedisKeys 
 
 
 
 class Tools:
     
     def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, 
-                 redis_client: redis.Redis, session_id: str, topic_config: TopicConfig = None):
+                redis_client: aioredis.Redis, session_id: str, topic_config: TopicConfig = None, search_config: dict = None):
         self.session_id = session_id
         self.store = store
         self.resolver = ent_resolver
@@ -23,17 +23,27 @@ class Tools:
         self.embedding_service = ent_resolver.embedding_service
         self.topic_config = topic_config
         self.active_topics = topic_config.active_topics if topic_config else []
+        self.search_cfg = search_config or {}
     
     def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
         return self.resolver.resolve_entity_name(entity)
     
-    async def _hydrate_evidence(self, evidence_ids: list[str]) -> list[dict]:
+
+    async def _hydrate_evidence(self, evidence_ids: list[str], timeout: float = 5.0) -> list[dict]:
         if not evidence_ids:
             return []
         
         content_key = RedisKeys.message_content(self.user_name, self.session_id)
-        raw_results = await self.redis.hmget(content_key, *evidence_ids)
+        raw_results = []
+        try:
+            raw_results = await asyncio.wait_for(
+                self.redis.hmget(content_key, *evidence_ids),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Redis hydrate timed out for {len(evidence_ids)} evidence IDs")
+            return []
         
         results = []
         for msg_id, raw in zip(evidence_ids, raw_results):
@@ -121,10 +131,6 @@ class Tools:
             role = data.get("role", "unknown")
             content = data.get("content", "") or ""
             
-            # if role != "user":
-            #     if len(content) > 200:
-            #         content = content[:200] + "...(truncated)"
-            
             pre_context.append({
                 "role": role,
                 "timestamp": data.get("timestamp", ""),
@@ -162,17 +168,21 @@ class Tools:
         return pre_context + [target_msg] + post_context
 
 
-    def _search_messages(self, query: str, k: int = 10) -> list[tuple[str, float]]:
+    def _search_messages(self, query: str, k: int) -> list[tuple[str, float]]:
+
+        vector_limit = self.search_cfg.get("vector_limit", 50)
+        fts_limit = self.search_cfg.get("fts_limit", 50)
+        rerank_candidates = self.search_cfg.get("rerank_candidates", 45)
 
         results = {}
         query_embedding = self.embedding_service.encode_single(query)
-        sem_results = self.store.search_messages_vector(query_embedding, limit=50)
+        sem_results = self.store.search_messages_vector(query_embedding, limit=vector_limit)
 
         for msg_id, score in sem_results:
             msg_key = f"msg_{msg_id}" if msg_id < 1_000_000_000 else f"turn_{msg_id - 1_000_000_000}"
             results[msg_key] = ("semantic", float(score))
         
-        fts_results = self.store.search_messages_fts(query, limit=50)
+        fts_results = self.store.search_messages_fts(query, limit=fts_limit)
         max_fts = max([s for _, s in fts_results]) if fts_results else 1.0
 
         for msg_id, raw_score in fts_results:
@@ -191,22 +201,25 @@ class Tools:
         if not results:
             return []
         
-        if len(results) > 1:
-            candidate_keys = list(results.keys())[:45]
-            texts = []
-            for msg_key in candidate_keys:
-                msg_id = int(msg_key.split("_")[1])
-                texts.append(self.store.get_message_text(msg_id))
-            
-            scores = self.embedding_service.rerank(query, texts)
-            reranked = sorted(zip(candidate_keys, scores), key=lambda x: x[1], reverse=True)
-            return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
+        try:
+            if len(results) > 1:
+                candidate_keys = list(results.keys())[:rerank_candidates]
+                texts = []
+                for msg_key in candidate_keys:
+                    msg_id = int(msg_key.split("_")[1])
+                    texts.append(self.store.get_message_text(msg_id))
+                
+                scores = self.embedding_service.rerank(query, texts)
+                reranked = sorted(zip(candidate_keys, scores), key=lambda x: x[1], reverse=True)
+                return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
+        except Exception as e:
+            logger.warning(f"Rerank failed, falling back to raw scores: {e}")
             
         # Fallback: single result
         sorted_results = sorted(results.items(), key=lambda x: x[1][1], reverse=True)[:k]
         return [(key, score) for key, (_, score) in sorted_results]
     
-    async def search_messages(self, query: str, limit: int = 8) -> List[Dict]:
+    async def search_messages(self, query: str, limit: int = None) -> List[Dict]:
         """
         Search the user's actual messages by keyword or phrase. 
         Use when you need their exact words, a direct quote, or when entity-based tools found nothing relevant. 
@@ -220,6 +233,7 @@ class Tools:
                 and surrounding context (adjacent turns for continuity).
         """
         loop = asyncio.get_running_loop()
+        limit = limit or self.search_cfg.get("default_message_limit", 8)
         results = await loop.run_in_executor(None, self._search_messages, query, limit)
         
         if not results:
@@ -301,7 +315,7 @@ class Tools:
         return output
         
 
-    async def search_entity(self, query: str, limit: int = 5) -> List[Dict]:
+    async def search_entity(self, query: str, limit: int = None) -> List[Dict]:
         """
         Find a person, place, or thing by name. 
         Returns their full profile (type, summary, aliases, topic) and their 5 strongest connections.
@@ -313,6 +327,7 @@ class Tools:
         
         Returns: List of matching entities with id, name, summary snippet, type.
         """
+        limit = limit or self.search_cfg.get("default_entity_limit", 5)
         results = self.store.search_entity(query, self.active_topics, limit)
     
         if not results:
@@ -340,7 +355,7 @@ class Tools:
         """
         canonical = self._resolve_entity_name(entity_name)
         if not canonical:
-            return []
+            return [{"error": f"Entity not found: '{entity_name}'"}]
         
         results = self.store.get_related_entities([canonical], active_topics=self.active_topics)
         results = self._normalize_output(results)
@@ -374,7 +389,9 @@ class Tools:
         """
         canonical = self._resolve_entity_name(entity_name)
         if not canonical:
-            return []
+            return [{"error": f"Entity not found: '{entity_name}'"}]
+        
+        hours = hours or self.search_cfg.get("default_activity_hours", 24)
         results = self.store.get_recent_activity(canonical, active_topics=self.active_topics, hours=hours)
         
         for r in results:
@@ -399,8 +416,13 @@ class Tools:
         """
         canonical_a = self._resolve_entity_name(entity_a)
         canonical_b = self._resolve_entity_name(entity_b)
-        if not canonical_a or not canonical_b:
-            return []
+        if not canonical_a and not canonical_b:
+            return [{"error": f"Neither entity found: '{entity_a}' and '{entity_b}'"}]
+        if not canonical_a:
+            return [{"error": f"Entity not found: '{entity_a}'"}]
+        if not canonical_b:
+            return [{"error": f"Entity not found: '{entity_b}'"}]
+            
 
         path, has_inactive_shortcut = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=self.active_topics)
         
@@ -413,17 +435,32 @@ class Tools:
         
         if has_inactive_shortcut:
             full_path, _ = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=None)
-    
+
             safe_path = []
             for step in full_path:
-                if step['topic'] in self.active_topics:
+                topic_a = step.get('topic_a', 'General')
+                topic_b = step.get('topic_b', 'General')
+                
+                both_active = topic_a in self.active_topics and topic_b in self.active_topics
+                
+                if both_active:
                     safe_path.append(step)
                 else:
+                    inactive_topics = []
+                    if topic_a not in self.active_topics:
+                        inactive_topics.append(topic_a)
+                    if topic_b not in self.active_topics:
+                        inactive_topics.append(topic_b)
+
                     safe_path.append({
-                        "canonical_name": step['canonical_name'],
-                        "topic": step['topic'],
-                        "status": "LOCKED (Inactive Topic)",
-                        "summary": "[REDACTED]" 
+                        "step": step.get('step'),
+                        "entity_a": step.get('entity_a'),
+                        "entity_b": step.get('entity_b'),
+                        "topic_a": topic_a,
+                        "topic_b": topic_b,
+                        "status": "LOCKED",
+                        "locked_reason": f"Inactive topic(s): {', '.join(inactive_topics)}",
+                        "evidence": []
                     })
                     
             return safe_path
@@ -469,7 +506,7 @@ class Tools:
         
         return raw
     
-    async def get_hierarchy(self, entity_name: str, direction: str = "both") -> Dict:
+    async def get_hierarchy(self, entity_name: str, direction: str = "both") -> List[Dict]:
         """
         Get hierarchy relationships for an entity.
         
@@ -482,11 +519,11 @@ class Tools:
         """
         canonical = self._resolve_entity_name(entity_name)
         if not canonical:
-            return {"error": f"Entity '{entity_name}' not found"}
+            return []
         
         entity_id = self.resolver.get_id(canonical)
         if not entity_id:
-            return {"error": f"Could not resolve '{canonical}' to ID"}
+            return []
         
         result = {
             "entity": canonical,
@@ -519,5 +556,5 @@ class Tools:
             children = self.store.get_child_entities(entity_id)
             result["children"] = children
         
-        return result
+        return [result]
 

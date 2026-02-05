@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, Depends, Request
 from api.state import AppState
 
@@ -20,7 +21,7 @@ async def health_check(state: AppState = Depends(get_app_state)):
         pass
     
     try:
-        state.resources.store.driver.verify_connectivity()
+        await asyncio.to_thread(state.resources.store.driver.verify_connectivity)
         checks["memgraph"] = True
     except Exception:
         pass

@@ -1,5 +1,7 @@
+import asyncio
 import os
-import redis.asyncio as async_redis
+from loguru import logger
+import redis.asyncio as aioredis
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,20 +17,46 @@ if not REDIS_PASSWORD:
 class AsyncRedisClient:
     """Singleton async Redis client."""
     _instance = None
+    _lock = asyncio.Lock()
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            pool = async_redis.ConnectionPool.from_url(
-                url=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}",
-                decode_responses=True,
-                max_connections=10
-            )
-            cls._instance.client = async_redis.Redis(connection_pool=pool)
-        return cls._instance
-
-    def get_client(self) -> async_redis.Redis:
-        return self.client
+    @classmethod
+    async def get_instance(cls) -> aioredis.Redis:
+        """Async-safe singleton accessor."""
+        async with cls._lock:
+            if cls._instance is None:
+                if not REDIS_PASSWORD:
+                    raise ValueError(
+                        "REDIS_PASSWORD not set in environment. "
+                        "Please set REDIS_PASSWORD in your .env file or environment variables."
+                    )
+                
+                try:
+                    pool = aioredis.ConnectionPool.from_url(
+                        url=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}",
+                        decode_responses=True,
+                        max_connections=10
+                    )
+                    cls._instance = aioredis.Redis(connection_pool=pool)
+                    
+                    await cls._instance.ping()
+                    logger.info(f"Redis connected: {REDIS_HOST}:{REDIS_PORT}")
+                    
+                except aioredis.ConnectionError as e:
+                    raise ConnectionError(
+                        f"Failed to connect to Redis at {REDIS_HOST}:{REDIS_PORT}. "
+                        f"Ensure Redis is running and credentials are correct. Error: {e}"
+                    )
+                    
+            return cls._instance
+    
+    @classmethod
+    async def close_redis(cls):
+        """Close the Redis connection pool."""
+        async with cls._lock:
+            if cls._instance is not None:
+                await cls._instance.close()
+                cls._instance = None
+                logger.info("Redis connection closed")
 
 
 class RedisKeys:
@@ -93,12 +121,12 @@ class RedisKeys:
         return f"last_activity:{user}:{session}"
     
     @staticmethod
-    def merge_ran(user: str, session: str) -> str:
-        return f"merge_ran:{user}:{session}"
-    
-    @staticmethod
     def merge_proposals(user: str, session: str) -> str:
         return f"merge_proposals:{user}:{session}"
+    
+    @staticmethod
+    def merge_undo(session: str, primary_id: int, secondary_id: int) -> str:
+        return f"merge_undo:{session}:{primary_id}:{secondary_id}"
     
     @staticmethod
     def user_profile_ran(user: str, session: str) -> str:
@@ -111,6 +139,14 @@ class RedisKeys:
     @staticmethod
     def job_pending(user: str, session: str, job_name: str) -> str:
         return f"pending:{user}:{session}:{job_name}"
+    
+    @staticmethod
+    def agents_default(user: str) -> str:
+        return f"agents:default:{user}"
+    
+    @staticmethod
+    def agents(user: str) -> str:
+        return f"agents:{user}"
     
     # ============ GLOBAL (no session) ============
     
@@ -130,6 +166,3 @@ class RedisKeys:
     def session_config(user: str) -> str:
         return f"session_config:{user}"
     
-    @staticmethod
-    def system_active_job_warning() -> str:
-        return "system:active_job_warning"

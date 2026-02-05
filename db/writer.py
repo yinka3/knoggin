@@ -91,18 +91,18 @@ class GraphWriter:
             logger.error(f"Failed to invalidate fact {fact_id}: {e}")
             return False
     
-    def delete_old_invalidated_facts(self, limit: int, threshsold: float, cutoff: datetime) -> int:
+    def delete_old_invalidated_facts(self, cutoff: datetime) -> int:
         """Delete Fact nodes invalidated before cutoff date."""
         query = """
-        CALL vector_search.search('entity_vec', $limit, $embedding)
-        YIELD node, similarity
-        WITH node, similarity
-        WHERE similarity >= $threshold
-        RETURN node.id as id, similarity
+        MATCH (f:Fact)
+        WHERE f.invalid_at IS NOT NULL 
+        AND f.invalid_at < $cutoff
+        DETACH DELETE f
+        RETURN count(*) as deleted
         """
         try:
             with self.driver.session() as session:
-                result = session.run(query, {"limit": limit, "threshold": threshsold, "cutoff": cutoff.isoformat()}).single()
+                result = session.run(query, {"cutoff": cutoff.isoformat()}).single()
                 deleted = result["deleted"] if result else 0
                 if deleted > 0:
                     logger.info(f"Deleted {deleted} old invalidated facts")
@@ -111,12 +111,12 @@ class GraphWriter:
             logger.error(f"Failed to delete old facts: {e}")
             return 0
     
-    def save_message_logs(self, messages: List[Dict]):
+    def save_message_logs(self, messages: List[Dict]) -> bool:
         """
         Persist message texts to the graph.
         """
         if not messages:
-            return
+            return True
         
         query = """
         UNWIND $batch AS msg
@@ -130,13 +130,12 @@ class GraphWriter:
         with self.driver.session() as session:
             try:
                 session.run(query, {"batch": messages}).consume()
+                logger.info(f"Saved {len(messages)} message logs to Memgraph.")
+                return True
             except Exception as e:
                 logger.error(f"Failed to save message logs: {e}")
                 return False
         
-        logger.info(f"Saved {len(messages)} message logs to Memgraph.")
-        return True
-    
 
     def write_batch(self, entities: List[Dict], relationships: List[Dict]):
         entity_params = []
@@ -219,6 +218,8 @@ class GraphWriter:
 
         with self.driver.session() as session:
             session.execute_write(_write)
+        
+        return True
     
     def update_entity_profile(
         self, 
@@ -279,6 +280,26 @@ class GraphWriter:
             if deleted > 0:
                 logger.info(f"Cleaned up {deleted} null-type entities")
             return deleted
+        
+    
+    def delete_entity(self, entity_id: int) -> bool:
+        """Delete a single entity, its facts, and all relationships."""
+        query = """
+        MATCH (e:Entity {id: $id})
+        OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
+        DETACH DELETE e, f
+        RETURN count(e) as deleted
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"id": entity_id}).single()
+                deleted = result["deleted"] if result else 0
+                if deleted > 0:
+                    logger.info(f"Deleted entity {entity_id} with facts")
+                return deleted > 0
+        except Exception as e:
+            logger.error(f"Failed to delete entity {entity_id}: {e}")
+            return False
 
     def bulk_delete_entities(self, entity_ids: List[int]) -> int:
         """DETACH DELETE entities by ID list. Returns count deleted."""
@@ -297,6 +318,28 @@ class GraphWriter:
             if deleted > 0:
                 logger.info(f"Bulk deleted {deleted} orphan entities")
             return deleted
+    
+    def update_entity_aliases(self, alias_updates: Dict[int, List[str]]):
+        """Append new aliases to existing entities."""
+        if not alias_updates:
+            return
+        
+        params = [{"id": eid, "new_aliases": aliases} for eid, aliases in alias_updates.items()]
+        
+        def _update(tx):
+            tx.run("""
+                UNWIND $batch AS data
+                MATCH (e:Entity {id: data.id})
+                WITH e, data, coalesce(e.aliases, []) AS existing
+                UNWIND existing + data.new_aliases AS alias
+                WITH e, collect(DISTINCT alias) AS all_aliases
+                SET e.aliases = all_aliases, e.last_updated = timestamp()
+            """, batch=params)
+        
+        with self.driver.session() as session:
+            session.execute_write(_update)
+        
+        logger.debug(f"Updated aliases for {len(alias_updates)} entities")
     
     def merge_entities(self, primary_id: int, secondary_id: int) -> bool:
         """
@@ -477,27 +520,6 @@ class GraphWriter:
         except Exception as e:
             logger.error(f"Failed to create preference: {e}")
             return False
-
-
-    def list_preferences(self, session_id: str, kind: str = None) -> List[Dict]:
-        where_kind = "AND p.kind = $kind" if kind else ""
-        query = f"""
-        MATCH (p:Preference {{session_id: $session_id}})
-        WHERE true {where_kind}
-        RETURN p.id AS id, p.content AS content, p.kind AS kind, p.created_at AS created_at
-        ORDER BY p.created_at DESC
-        """
-        params = {"session_id": session_id}
-        if kind:
-            params["kind"] = kind
-        
-        try:
-            with self.driver.session() as session:
-                result = session.run(query, params)
-                return [dict(record) for record in result]
-        except Exception as e:
-            logger.error(f"Failed to list preferences: {e}")
-            return []
 
 
     def delete_preference(self, pref_id: str) -> bool:

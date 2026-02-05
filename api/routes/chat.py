@@ -2,13 +2,16 @@ import json
 from datetime import datetime, timezone
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from loguru import logger
 from pydantic import BaseModel
 
 from api.state import AppState
 from agent.streaming import run_stream
-from schema.dtypes import MessageData
+from schema.dtypes import MessageData, AgentConfig
+from shared.config import get_config_value
+from shared.redisclient import RedisKeys
 
 router = APIRouter()
 
@@ -20,7 +23,6 @@ def get_app_state(request: Request) -> AppState:
 class ChatRequest(BaseModel):
     message: str
     hot_topics: Optional[List[str]] = None
-    timezone: Optional[str] = None
     model: Optional[str] = None
 
 
@@ -30,31 +32,58 @@ async def send_message(
     body: ChatRequest,
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_session(session_id)
+    context = await state.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
+    
+    sessions = await state.list_sessions()
+    session_meta = sessions.get(session_id, {})
+    agent_id = session_meta.get("agent_id") or await state.get_default_agent_id()
+    
+    agent = await state.get_agent(agent_id)
+    if not agent:
+        logger.warning(f"Agent {agent_id} not found, falling back to default")
+        agent_id = await state.get_default_agent_id()
+        agent = await state.get_agent(agent_id)
+        
+        session_meta["agent_id"] = agent_id
+        await state.resources.redis.hset(
+            RedisKeys.sessions(state.user_name),
+            session_id,
+            json.dumps(session_meta)
+        )
+    
+    agent_persona = agent.persona if agent else ""
+    
+    effective_model = body.model or context.model or (agent.model if agent else None)
     
     msg = MessageData(
         message=body.message,
         timestamp=datetime.now(timezone.utc)
     )
     await context.add(msg)
+
+    dev_settings = get_config_value("developer_settings", {})
+    limits = dev_settings.get("limits", {})
+    context_turns = limits.get("conversation_context_turns", 10)
     
     async def event_stream():
         final_response = None
         
         try:
-            history = await context.get_conversation_context(num_turns=10)
+            history = await context.get_conversation_context(num_turns=context_turns)
             
             formatted_history = [
                 {"role": turn["role"], "content": turn["content"], "timestamp": turn["timestamp"]}
                 for turn in history
             ]
-            effective_model = body.model or context.model
+
             async for event in run_stream(
                 user_query=body.message,
                 user_name=state.user_name,
                 session_id=session_id,
+                agent_id=agent_id,
+                agent_persona=agent_persona,
                 conversation_history=formatted_history,
                 hot_topics=body.hot_topics or [],
                 topic_config=context.topic_config,
@@ -66,6 +95,8 @@ async def send_message(
             ):
                 if event["event"] == "response":
                     final_response = event["data"]["content"]
+                elif event["event"] == "clarification":
+                    final_response = event["data"]["question"]
                 
                 yield f"event: {event['event']}\ndata: {json.dumps(event['data'])}\n\n"
             
@@ -76,14 +107,32 @@ async def send_message(
                 )
                 
         except Exception as e:
-            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+            error_payload = {
+                "message": str(e),
+                "msg_id": msg.id if msg.id != -1 else None,
+                "partial_response": final_response,
+                "retryable": True
+            }
+            
+            if final_response:
+                try:
+                    await context.add_assistant_turn(
+                        content=final_response,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    error_payload["response_saved"] = True
+                except Exception:
+                    error_payload["response_saved"] = False
+            
+            yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
     
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
         }
     )
 
@@ -91,10 +140,10 @@ async def send_message(
 @router.get("/{session_id}/history")
 async def get_history(
     session_id: str,
-    limit: int = 40,
+    limit: int = Query(40, ge=1, le=100),
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_session(session_id)
+    context = await state.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     

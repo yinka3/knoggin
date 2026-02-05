@@ -24,26 +24,18 @@ async def execute_command(
 ):
     command_name, args = parse_command(body.input)
     
-    if not command_name:
-        return {
-            "success": False,
-            "error": "Invalid command format. Commands must start with /"
-        }
+    REQUIRES_ACTIVE = {"/merge approve", "/merge undo"}
     
-    # Verify session exists
-    sessions = await state.list_sessions()
-    if body.session_id not in sessions:
-        return {
-            "success": False,
-            "error": f"Session not found: {body.session_id}"
-        }
+    if command_name in REQUIRES_ACTIVE:
+        context = await state.get_or_resume_session(body.session_id)
+        if not context:
+            return {"success": False, "error": "Session not found"}
+    else:
+        sessions = await state.list_sessions()
+        if body.session_id not in sessions:
+            return {"success": False, "error": "Session not found"}
     
-    ctx = CommandContext(
-        session_id=body.session_id,
-        args=args,
-        state=state
-    )
-    
+    ctx = CommandContext(session_id=body.session_id, args=args, state=state)
     result = await execute(command_name, ctx)
     return result
 

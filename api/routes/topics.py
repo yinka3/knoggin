@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from api.state import AppState
-from main.topics_config import TopicConfig
+from shared.topics_config import TopicConfig
 
 router = APIRouter()
 
@@ -30,13 +30,15 @@ class UpdateTopicRequest(BaseModel):
 
 async def get_topic_config(session_id: str, state: AppState) -> TopicConfig:
     """Load TopicConfig for a session."""
+    sessions = await state.list_sessions()
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
     topic_config = await TopicConfig.load(
         state.resources.redis,
         state.user_name,
         session_id
     )
-    if not topic_config.raw:
-        raise HTTPException(status_code=404, detail="Session not found")
     return topic_config
 
 @router.get("/{session_id}")

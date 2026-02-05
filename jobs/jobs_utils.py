@@ -1,3 +1,6 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import re
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
@@ -5,6 +8,7 @@ import numpy as np
 from rapidfuzz import fuzz
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 
+from db.store import MemGraphStore
 from schema.dtypes import Fact, FactMergeResult, ProfileUpdate
 
 
@@ -30,8 +34,8 @@ def find_duplicate_facts(
     if not facts_a or not facts_b:
         return []
     
-    active_a = [f for f in facts_a if f.invalid_at is None]
-    active_b = [f for f in facts_b if f.invalid_at is None]
+    active_a = [f for f in facts_a if f.invalid_at is None and f.embedding]
+    active_b = [f for f in facts_b if f.invalid_at is None and f.embedding]
     
     if not active_a or not active_b:
         return []
@@ -98,8 +102,9 @@ def process_extracted_facts(
             else:
                 logger.warning(f"SUPERSEDES target not found: '{old_text}' — adding new fact anyway")
             
-            if not _is_duplicate(new_text_clean, active_facts):
-                new_contents.append(new_text)
+            content_clean = re.sub(r"\s*\[MSG_?\d+\]\s*$", "", fact_str).strip()
+            if not _is_duplicate(content_clean, active_facts):
+                new_contents.append(fact_str)
             continue
 
         inv_match = re.search(r"^\[INVALIDATES:\s*(.+?)\](?:\s*\[MSG_?\d+\])?\s*$", fact_str)
@@ -114,9 +119,10 @@ def process_extracted_facts(
                 active_facts = [f for f in active_facts if f.id != matched_fact.id]
             continue
 
-        if not _is_duplicate(fact_str, active_facts):
+        content_clean = re.sub(r"\s*\[MSG_?\d+\]\s*$", "", fact_str).strip()
+        if not _is_duplicate(content_clean, active_facts):
             new_contents.append(fact_str)
-            logger.debug(f"Adding new conent of fact: {fact_str}")
+            logger.debug(f"Adding new content of fact: {fact_str}")
 
     return FactMergeResult(to_invalidate=to_invalidate, new_contents=new_contents)
 
@@ -229,6 +235,17 @@ def parse_merge_score(reasoning: str) -> Optional[float]:
         
     return None
 
+
+def format_recorded_date(recorded: str) -> str:
+    """Format ISO timestamp to YYYY-MM-DD, with fallback."""
+    if not recorded:
+        return "unknown"
+    try:
+        dt = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
+    except (ValueError, AttributeError):
+        return str(recorded)[:10]
+
 def format_vp04_input(
     entities: List[Dict],
     conversation_text: str
@@ -266,12 +283,7 @@ def format_vp04_input(
                 source = f.get("source_message")
                 
                 if recorded:
-                    try:
-                        from datetime import datetime
-                        dt = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
-                        recorded_str = dt.strftime("%Y-%m-%d")
-                    except (ValueError, AttributeError):
-                        recorded_str = str(recorded)[:10]
+                    recorded_str = format_recorded_date(f.get("recorded_at", ""))
                 else:
                     recorded_str = "unknown"
                 
@@ -309,9 +321,7 @@ def format_vp05_input(
         aliases = ent.get("aliases", [])
         facts = ent.get("facts", [])
         
-        lines.append(f"## {label}")
-        lines.append(f"Name: {name}")
-        lines.append(f"Type: {etype}")
+        lines.append(f"## {name} [{etype}]")
         
         if aliases:
             lines.append(f"Aliases: {', '.join(aliases)}")
@@ -326,12 +336,7 @@ def format_vp05_input(
                 source = f.get("source_message")
                 
                 if recorded:
-                    try:
-                        from datetime import datetime
-                        dt = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
-                        recorded_str = dt.strftime("%Y-%m-%d")
-                    except (ValueError, AttributeError):
-                        recorded_str = str(recorded)[:10]
+                   recorded_str = format_recorded_date(f.get("recorded_at", ""))
                 else:
                     recorded_str = "unknown"
                 
@@ -350,3 +355,48 @@ def format_vp05_input(
     output.extend(_format_entity(entity_b, "Entity B"))
     
     return "\n".join(output)
+
+
+async def enrich_facts_with_sources(
+    facts: List[Fact], 
+    store: MemGraphStore
+) -> List[Dict]:
+    """Enrich facts with timestamps and source message content."""
+    loop = asyncio.get_running_loop()
+    enriched = []
+    msg_id_to_indices = {}
+    
+    for i, fact in enumerate(facts):
+        entry = {
+            "content": fact.content,
+            "recorded_at": fact.valid_at.isoformat() if fact.valid_at else None,
+            "source_message": None
+        }
+        enriched.append(entry)
+        
+        if fact.source_msg_id:
+            if fact.source_msg_id not in msg_id_to_indices:
+                msg_id_to_indices[fact.source_msg_id] = []
+            msg_id_to_indices[fact.source_msg_id].append(i)
+    
+    if msg_id_to_indices:
+        sem = asyncio.Semaphore(2)
+        
+        async def fetch_one(msg_id):
+            async with sem:
+                try:
+                    return msg_id, await loop.run_in_executor(
+                        None, store.get_message_text, msg_id
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not fetch source for msg {msg_id}: {e}")
+                    return msg_id, None
+        
+        results = await asyncio.gather(*[fetch_one(mid) for mid in msg_id_to_indices])
+        
+        for msg_id, text in results:
+            if text:
+                for idx in msg_id_to_indices[msg_id]:
+                    enriched[idx]["source_message"] = text
+    
+    return enriched

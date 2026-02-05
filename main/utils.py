@@ -6,7 +6,7 @@ from loguru import logger
 from typing import Dict
 
 from wordfreq import word_frequency
-from main.topics_config import TopicConfig
+from shared.topics_config import TopicConfig
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
 
@@ -19,6 +19,7 @@ PRONOUNS = {
         "this", "that", "these", "those"
     }
 
+STOP_WORDS = SPACY_STOPS | SKLEARN_STOPS
 
 def handle_background_task_result(task: asyncio.Task):
     """Log any unhandled exceptions from background tasks."""
@@ -82,14 +83,14 @@ def extract_xml_content(text: str, tag: str) -> Optional[str]:
     if not text:
         return None
     
-    start_match = re.search(f"(?i)<{tag}>", text, re.IGNORECASE)
+    start_match = re.search(f"<{tag}>", text, re.IGNORECASE)
     if not start_match:
         return None
     
     content_start = start_match.end()
     remaining_text = text[content_start:]
     
-    end_match = re.search(f"(?i)</{tag}>", remaining_text)
+    end_match = re.search(f"</{tag}>", remaining_text, re.IGNORECASE)
     
     if end_match:
         return remaining_text[:end_match.start()].strip()
@@ -100,8 +101,7 @@ def extract_xml_content(text: str, tag: str) -> Optional[str]:
 
 def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
     """Filter garbage before it reaches VP-02."""
-
-    STOP_WORDS = SPACY_STOPS | SKLEARN_STOPS
+    
     if not name or len(name) < 2:
         return False
     
@@ -114,8 +114,11 @@ def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
     if not any(c.isalpha() for c in name):
         return False
     
-    if topic not in topic_config.raw and topic != "General":
-        return False
+    if topic and topic != "General":
+        normalized = topic_config.normalize_topic(topic)
+        if normalized == "General" and topic.lower() not in topic_config.alias_lookup:
+            logger.debug(f"Invalid topic '{topic}' for entity '{name}'")
+            return False
     
     return True
 
@@ -159,21 +162,21 @@ def format_vp01_input(
 ) -> str:
     
     lines = []
-    lines.append("## Label Schema")
+    lines.append("## Label Schema\n")
     lines.append(label_block)
 
-    lines = ["## Messages"]
+    lines.append("\n## Messages\n")
     for msg in messages:
         lines.append(f"[MSG {msg['id']}]: \"{msg['message']}\"")
     
-    lines.append("\n## Known Entities (from graph - do not override)")
+    lines.append("\n## Known Entities (from graph - do not override)\n")
     if known_ents:
         for span_text, eid in known_ents:
             lines.append(f"- \"{span_text}\" -> entity_id={eid}")
     else:
         lines.append("(none)")
     
-    lines.append("\n## GLiNER Extractions (can override if wrong)")
+    lines.append("\n## GLiNER Extractions (can override if wrong)\n")
     gliner_resolved = []
     for msg_id, span, label in gliner_ents:
         if span.lower() in covered_texts.get(msg_id, set()):
@@ -261,10 +264,10 @@ def format_vp02_input(
     messages: List[Dict],
     session_context: str
 ) -> str:
-    lines = []
     
+    lines = []
+    lines.append("## Known Entities")
     if known_entities:
-        lines.append("## Known Entities")
         for ent in known_entities:
             lines.append(f"{ent['canonical_name']}")
             if ent.get('facts'):
@@ -393,12 +396,12 @@ def parse_disambiguation(
 
 def _parse_mention_with_msg_id(raw: str) -> Tuple[str, Optional[int]]:
     """
-    Parse 'X (MSG_3)' -> ('X', 3)
-    Falls back to msg_id=0 if not found.
+   Parse 'X (MSG_3)' -> ('X', 3)
+    Handles variations: MSG_3, MSG 3, MSG3, msg_3
     """
     if not raw:
         return "", None
-    match = re.search(r"^(.+?)\s*\(MSG[_\s]?(\d+)\)$", raw.strip(), re.IGNORECASE)
+    match = re.search(r"^(.+?)\s*\(MSG[_\s]*(\d+)\)$", raw.strip(), re.IGNORECASE)
     if match:
         return match.group(1).strip(), int(match.group(2))
     
@@ -429,7 +432,7 @@ def format_vp03_input(
     lines.append("\n## Messages")
     if messages:
         for msg in messages:
-            lines.append(f"[MSG {msg['id']}]: \"{msg['message']}\"")
+            lines.append(f"[MSG {msg['id']}]: \"{msg['text']}\"")
     else:
         lines.append("(none)")
     
@@ -451,6 +454,7 @@ def parse_connection_response(text: str) -> List[MessageConnections]:
         return []
     
     connections = []
+    skipped = 0
     for line in content.split('\n'):
         line = line.strip()
         if not line:
@@ -459,10 +463,12 @@ def parse_connection_response(text: str) -> List[MessageConnections]:
         parts = [p.strip() for p in line.split('|')]
         
         if len(parts) < 2:
+            skipped += 1
             continue
             
         msg_match = re.search(r"MSG\s+(\d+)", parts[0], re.IGNORECASE)
         if not msg_match:
+            skipped += 1
             continue
         msg_id = msg_match.group(1)
         
@@ -491,6 +497,9 @@ def parse_connection_response(text: str) -> List[MessageConnections]:
                     "confidence": confidence,
                     "reason": reason
                 })
+    
+    if skipped > 0:
+        logger.debug(f"parse_connection_response: skipped {skipped} malformed lines")
 
     return build_connection_response(connections)
 

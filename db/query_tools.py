@@ -49,15 +49,19 @@ class GraphToolQueries:
             flat_msgs[..$msg_limit] as message_ids
         """
         
-        with self.driver.session() as session:
-            result = session.run(query, {"hot_topics": hot_topic_names, "msg_limit": msg_limit})
-            return {
-                record["topic"]: {
-                    "entities": record["entities"],
-                    "message_ids": record["message_ids"] or []
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"hot_topics": hot_topic_names, "msg_limit": msg_limit})
+                return {
+                    record["topic"]: {
+                        "entities": record["entities"],
+                        "message_ids": record["message_ids"] or []
+                    }
+                    for record in result
                 }
-                for record in result
-            }
+        except Exception as e:
+            logger.error(f"Failed to get hot topic context: {e}")
+            return {}
     
     def search_messages_fts(self, query: str, limit: int = 50) -> List[Tuple[int, float]]:
         """
@@ -126,39 +130,43 @@ class GraphToolQueries:
             "filter_topics": active_topics is not None
         }
         
-        with self.driver.session() as session:
-            result = session.run(cypher, params)
-            
-            entities = {}
-            for row in result:
-                eid = row["id"]
+        try:
+            with self.driver.session() as session:
+                result = session.run(cypher, params)
                 
-                if eid not in entities:
-                    entities[eid] = {
-                        "id": eid,
-                        "canonical_name": row["canonical_name"],
-                        "aliases": row["aliases"] or [],
-                        "type": row["type"],
-                        "facts": row["facts"] or [],
-                        "topic": row["topic"],
-                        "last_mentioned": row["last_mentioned"],
-                        "last_updated": row["last_updated"],
-                        "top_connections": [],
-                        "hierarchy": {
-                            "parent": row["parent_name"],
-                            "children_count": row["children_count"]
+                entities = {}
+                for row in result:
+                    eid = row["id"]
+                    
+                    if eid not in entities:
+                        entities[eid] = {
+                            "id": eid,
+                            "canonical_name": row["canonical_name"],
+                            "aliases": row["aliases"] or [],
+                            "type": row["type"],
+                            "facts": row["facts"] or [],
+                            "topic": row["topic"],
+                            "last_mentioned": row["last_mentioned"],
+                            "last_updated": row["last_updated"],
+                            "top_connections": [],
+                            "hierarchy": {
+                                "parent": row["parent_name"],
+                                "children_count": row["children_count"]
+                            }
                         }
-                    }
-                
-                if row["conn_name"] and len(entities[eid]["top_connections"]) < connections_limit:
-                    entities[eid]["top_connections"].append({
-                        "canonical_name": row["conn_name"],
-                        "aliases": row["conn_aliases"] or [],
-                        "facts": row["conn_facts"] or [],
-                        "weight": row["conn_weight"],
-                        "evidence_ids": (row["evidence_ids"] or [])[:evidence_limit]
-                    })
-            return list(entities.values())
+                    
+                    if row["conn_name"] and len(entities[eid]["top_connections"]) < connections_limit:
+                        entities[eid]["top_connections"].append({
+                            "canonical_name": row["conn_name"],
+                            "aliases": row["conn_aliases"] or [],
+                            "facts": row["conn_facts"] or [],
+                            "weight": row["conn_weight"],
+                            "evidence_ids": (row["evidence_ids"] or [])[:evidence_limit]
+                        })
+                return list(entities.values())
+        except Exception as e:
+            logger.error(f"Entity search failed: {e}")
+            return []
 
     def get_related_entities(self, entity_names: List[str], active_topics: List[str] = None, limit: int = 25):
         """
@@ -194,9 +202,13 @@ class GraphToolQueries:
             "filter_topics": active_topics is not None,
             "limit": limit
         }
-        with self.driver.session() as session:
-            res = session.run(query, params)
-            return [record.data() for record in res]
+        try:
+            with self.driver.session() as session:
+                res = session.run(query, params)
+                return [record.data() for record in res]
+        except Exception as e:
+            logger.error(f"Failed to get related entities: {e}")
+            return []
         
     
     def get_recent_activity(self, entity_name: str, active_topics: List[str] = None, hours: int = 24):
@@ -222,9 +234,13 @@ class GraphToolQueries:
             "filter_topics": active_topics is not None
         }
 
-        with self.driver.session() as session:
-            result = session.run(query, params)
-            return [record.data() for record in result]
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, params)
+                return [record.data() for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get recent activity for {entity_name}: {e}")
+            return []
     
     def _find_shortest_path(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[str], List[str], List[List[str]], bool] | None:
         """
@@ -255,12 +271,15 @@ class GraphToolQueries:
             "filter_topics": active_topics is not None
         }
         
-        with self.driver.session() as session:
-            record = session.run(query, params).single()
-            if not record:
-                return None
-            return record["names"], record["node_topics"], record["evidence_ids"], record["has_inactive"]
-
+        try:
+            with self.driver.session() as session:
+                record = session.run(query, params).single()
+                if not record:
+                    return None
+                return record["names"], record["node_topics"], record["evidence_ids"], record["has_inactive"]
+        except Exception as e:
+            logger.error(f"Shortest path search failed: {e}")
+            return None
 
     def _find_active_only_path(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[str], List[List[str]]] | None:
         """

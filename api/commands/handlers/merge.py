@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 
 from api.commands.registry import command, CommandContext
+from shared.redisclient import RedisKeys
 
 UNDO_TTL_SECONDS = 7200
 
@@ -9,7 +10,7 @@ UNDO_TTL_SECONDS = 7200
 @command("/merge list", description="List pending merge proposals")
 async def handle_merge_list(ctx: CommandContext) -> dict:
     redis = ctx.state.resources.redis
-    proposals_key = f"merge_proposals:{ctx.state.user_name}"
+    proposals_key = RedisKeys.merge_proposals(ctx.state.user_name, ctx.session_id)
     
     raw_proposals = await redis.lrange(proposals_key, 0, -1)
     
@@ -40,7 +41,7 @@ async def handle_merge_approve(ctx: CommandContext) -> dict:
     
     redis = ctx.state.resources.redis
     store = ctx.state.resources.store
-    proposals_key = f"merge_proposals:{ctx.state.user_name}"
+    proposals_key = RedisKeys.merge_proposals(ctx.state.user_name, ctx.session_id)
     
     raw_proposals = await redis.lrange(proposals_key, 0, -1)
     
@@ -64,7 +65,7 @@ async def handle_merge_approve(ctx: CommandContext) -> dict:
         "merged_at": datetime.now(timezone.utc).isoformat()
     }
     
-    undo_key = f"merge_undo:{primary_id}:{secondary_id}"
+    undo_key = RedisKeys.merge_undo(ctx.session_id, primary_id, secondary_id)
     await redis.setex(undo_key, UNDO_TTL_SECONDS, json.dumps(snapshot))
     
     success = store.merge_entities(primary_id, secondary_id)
@@ -99,7 +100,7 @@ async def handle_merge_reject(ctx: CommandContext) -> dict:
         raise ValueError("Index must be a number. Use /merge list to see proposals.")
     
     redis = ctx.state.resources.redis
-    proposals_key = f"merge_proposals:{ctx.state.user_name}"
+    proposals_key = RedisKeys.merge_proposals(ctx.state.user_name, ctx.session_id)
     
     raw_proposals = await redis.lrange(proposals_key, 0, -1)
     
@@ -132,7 +133,7 @@ async def handle_merge_undo(ctx: CommandContext) -> dict:
     
     # Scan for matching undo keys
     matches = []
-    async for key in redis.scan_iter(match="merge_undo:*"):
+    async for key in redis.scan_iter(match=f"merge_undo:{ctx.session_id}:*"):
         raw = await redis.get(key)
         if raw:
             snapshot = json.loads(raw)
@@ -206,5 +207,5 @@ async def handle_merge_undo(ctx: CommandContext) -> dict:
         "undone": True,
         "restored_entity": secondary_name,
         "primary_entity": snapshot["primary_name"],
-        "note": "Facts remain on primary entity"
+        "warning": f"{secondary_name} restored as empty entity. Facts and connections remain on {snapshot['primary_name']}."
     }

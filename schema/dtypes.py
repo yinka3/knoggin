@@ -1,6 +1,8 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, Optional, Union
+import json
+import time
+from typing import Dict, List, Literal, Optional, Set, Union
 
 
 @dataclass
@@ -82,8 +84,119 @@ class FactMergeResult:
     new_contents: List[str]
 
 
+@dataclass
+class BatchResult:
+    """Result of processing a batch of messages."""
+    entity_ids: List[int] = field(default_factory=list)
+    new_entity_ids: Set[int] = field(default_factory=set)
+    alias_updated_ids: Set[int] = field(default_factory=set)
+    alias_updates: Dict[int, List[str]] = field(default_factory=dict)
+    extraction_result: Optional[List[MessageConnections]] = None
+    message_embeddings: Dict[int, List[float]] = field(default_factory=dict)
+    success: bool = True
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        """Serialize for DLQ storage."""
+        return {
+            "entity_ids": self.entity_ids,
+            "new_entity_ids": list(self.new_entity_ids),
+            "alias_updated_ids": list(self.alias_updated_ids),
+            "extraction_result": [
+                {"message_id": mc.message_id, "entity_pairs": [
+                    {"entity_a": p.entity_a, "entity_b": p.entity_b, "confidence": p.confidence}
+                    for p in mc.entity_pairs
+                ]} for mc in (self.extraction_result or [])
+            ],
+            "message_embeddings": self.message_embeddings,
+            "success": self.success,
+            "error": self.error
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BatchResult":
+        """Deserialize from DLQ storage."""
+        extraction_result = None
+        if data.get("extraction_result"):
+            extraction_result = [
+                MessageConnections(
+                    message_id=mc["message_id"],
+                    entity_pairs=[
+                        EntityPair(entity_a=p["entity_a"], entity_b=p["entity_b"], confidence=p["confidence"])
+                        for p in mc["entity_pairs"]
+                    ]
+                ) for mc in data["extraction_result"]
+            ]
+        
+        return cls(
+            entity_ids=data.get("entity_ids", []),
+            new_entity_ids=set(data.get("new_entity_ids", [])),
+            alias_updated_ids=set(data.get("alias_updated_ids", [])),
+            extraction_result=extraction_result,
+            message_embeddings=data.get("message_embeddings", {}),
+            success=data.get("success", True),
+            error=data.get("error")
+        )
+
+
+@dataclass
+class DLQEntry:
+    messages: List[Dict]
+    session_text: str
+    error: str
+    attempt: int = 1
+    timestamp: float = field(default_factory=time.time)
+    batch_size: int = field(init=False)
+    
+    def __post_init__(self):
+        self.batch_size = len(self.messages)
+    
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+    
+    @classmethod
+    def from_json(cls, raw: str) -> "DLQEntry":
+        data = json.loads(raw)
+        return cls(**data)
+    
+    def is_transient(self, transient_errors: List[str]) -> bool:
+        return any(t in self.error for t in transient_errors)
+
 
 # ===== AGENT RESPONSE/RESULT TYPES =====
+
+@dataclass
+class AgentConfig:
+    id: str
+    name: str
+    persona: str
+    model: Optional[str] = None
+    is_default: bool = False
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "persona": self.persona,
+            "model": self.model,
+            "is_default": self.is_default,
+            "created_at": self.created_at.isoformat()
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "AgentConfig":
+        created = data.get("created_at")
+        if isinstance(created, str):
+            created = datetime.fromisoformat(created)
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            persona=data["persona"],
+            model=data.get("model"),
+            is_default=data.get("is_default", False),
+            created_at=created or datetime.now(timezone.utc)
+        )
 
 @dataclass
 class BaseResult:
@@ -128,22 +241,26 @@ class ClarificationRequest:
 
 AgentResponse = Union[ToolCall, List[ToolCall], FinalResponse, ClarificationRequest]
 
-@dataclass
-class TraceEntry:
-    step: int
-    state: str
-    tool: str
-    args: Dict
-    resolved_args: Dict
-    result_summary: str
-    result_count: int
-    duration_ms: float
-    error: Optional[str] = None
 
-@dataclass
-class QueryTrace:
-    trace_id: str
-    user_query: str
-    started_at: datetime
-    entries: List[TraceEntry] = field(default_factory=list)
+# ===============
+# Used during benchmarking  NOTE (dataclass is stale will need to update it)
+# ===============
+# @dataclass
+# class TraceEntry:
+#     step: int
+#     state: str
+#     tool: str
+#     args: Dict
+#     resolved_args: Dict
+#     result_summary: str
+#     result_count: int
+#     duration_ms: float
+#     error: Optional[str] = None
+
+# @dataclass
+# class QueryTrace:
+#     trace_id: str
+#     user_query: str
+#     started_at: datetime
+#     entries: List[TraceEntry] = field(default_factory=list)
 
