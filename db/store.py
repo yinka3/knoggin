@@ -219,6 +219,8 @@ class MemGraphStore:
     def list_preferences(self, session_id: str, kind: str = None) -> List[Dict]:
         return self._reader.list_preferences(session_id, kind)
     
+    def get_graph_stats(self) -> Dict[str, int]:
+        return self._reader.get_graph_stats()
 
     # ===== TOOL QUERY DELEGATIONS =====
 

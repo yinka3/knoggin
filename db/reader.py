@@ -565,3 +565,19 @@ class GraphReader:
         except Exception as e:
             logger.error(f"Failed to list preferences: {e}")
             return []
+    
+    def get_graph_stats(self) -> Dict[str, int]:
+        """Get aggregate counts for dashboard."""
+        query = """
+        MATCH (e:Entity) WITH count(e) as entities
+        MATCH (f:Fact) WHERE f.invalid_at IS NULL WITH entities, count(f) as facts
+        MATCH ()-[r:RELATED_TO]->() WITH entities, facts, count(r) as relationships
+        RETURN entities, facts, relationships
+        """
+        with self.driver.session() as session:
+            result = session.run(query).single()
+            return {
+                "entities": result["entities"] or 0,
+                "facts": result["facts"] or 0,
+                "relationships": result["relationships"] or 0
+            }
