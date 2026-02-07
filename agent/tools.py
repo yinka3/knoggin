@@ -558,3 +558,76 @@ class Tools:
         
         return [result]
 
+    async def save_memory(self, content: str, topic: str = "General") -> Dict:
+        """
+        Save a note to persistent session memory.
+        
+        Args:
+            content: The fact or note to remember
+            topic: Topic this memory belongs to (default: General)
+        
+        Returns:
+            Confirmation with memory ID, or error if limit reached.
+        """
+        if not content or not content.strip():
+            return {"error": "Empty memory content"}
+        
+        content = content.strip()
+        if len(content) > 200:
+            return {
+                "error": f"Memory too long ({len(content)} chars). Max 200. Condense and retry."
+            }
+        
+        normalized_topic = self.topic_config.normalize_topic(topic) if topic else "General"
+        if normalized_topic not in self.active_topics and normalized_topic != "General":
+            return {"error": f"Topic '{topic}' is not active. Use an active topic or 'General'."}
+        
+        memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, normalized_topic)
+        
+        existing = await self.redis.hgetall(memory_key)
+        if len(existing) >= 10:
+            return {
+                "error": f"Memory block '{normalized_topic}' is full (10/10). Use forget_memory to remove outdated entries first.",
+                "current_entries": len(existing)
+            }
+        
+        import uuid
+        from datetime import datetime, timezone
+        
+        memory_id = f"mem_{uuid.uuid4().hex[:8]}"
+        payload = json.dumps({
+            "content": content,
+            "topic": normalized_topic,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_session": self.session_id
+        })
+        
+        await self.redis.hset(memory_key, memory_id, payload)
+        
+        return {
+            "saved": True,
+            "memory_id": memory_id,
+            "topic": normalized_topic,
+            "content": content
+        }
+    
+    async def forget_memory(self, memory_id: str) -> Dict:
+        """
+        Remove a memory by ID.
+        
+        Args:
+            memory_id: The ID of the memory to remove
+        
+        Returns:
+            Confirmation or error if not found.
+        """
+        if not memory_id:
+            return {"error": "No memory_id provided"}
+        
+        for topic in list(self.active_topics) + ["General"]:
+            memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, topic)
+            removed = await self.redis.hdel(memory_key, memory_id)
+            if removed:
+                return {"removed": True, "memory_id": memory_id, "topic": topic}
+        
+        return {"error": f"Memory '{memory_id}' not found in any block"}

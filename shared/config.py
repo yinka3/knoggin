@@ -172,7 +172,9 @@ def get_default_config() -> dict:
                     "search_entity": 4,
                     "get_activity": 5,
                     "find_path": 5,
-                    "get_hierarchy": 5
+                    "get_hierarchy": 5,
+                    "save_memory": 2,
+                    "forget_memory": 2
                 }
             },
             

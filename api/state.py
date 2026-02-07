@@ -300,6 +300,15 @@ class AppState:
             RedisKeys.merge_proposals(user, session_id),
             RedisKeys.user_profile_ran(user, session_id),
         ]
+
+        memory_pattern = f"memory:{user}:{session_id}:*"
+        cursor = 0
+        while True:
+            cursor, keys = await redis.scan(cursor, match=memory_pattern, count=100)
+            if keys:
+                deleted += await redis.delete(*keys)
+            if cursor == 0:
+                break
         
         job_names = ["cleaner", "profile", "merger", "dlq", "archival"]
         for job in job_names:

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 from typing import AsyncGenerator, Dict, List, Optional, Union
 import uuid
@@ -20,7 +20,9 @@ from agent.internals import (
     execute_tool
 )
 from agent.formatters import (
-    format_entity_results, 
+    format_entity_results,
+    format_memory_context,
+    format_preferences_context, 
     format_retrieved_messages, 
     format_graph_results,
     format_path_results,
@@ -29,7 +31,7 @@ from agent.formatters import (
 from shared.service import LLMService
 from shared.topics_config import TopicConfig
 from shared.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
-from shared.schema.tool_schema import get_filtered_schemas
+from shared.schema.tool_schema import get_filtered_schemas, TOOL_SCHEMAS
 from shared.config import get_config_value
 from shared.events import emit
 
@@ -41,13 +43,19 @@ async def call_agent_streaming(
     last_result: Optional[Dict] = None,
     date: str = "",
     model: str = None,
-    tools: List[Dict] = None
+    tools: List[Dict] = None,
+    memory_context: str = "",
+    preferences_context: str = ""
 ) -> AsyncGenerator[Union[Dict, AgentResponse], None]:
     """
     Streaming version of call_agent.
     Yields token dicts for text, then final ToolCall/ClarificationRequest/FinalResponse.
     """
-    system_prompt = get_agent_prompt(user_name, date, ctx.agent_persona, ctx.agent_name)
+    system_prompt = get_agent_prompt(
+        user_name, date, ctx.agent_persona, ctx.agent_name,
+        memory_context=memory_context,
+        preferences_context=preferences_context
+    )
     user_message = build_user_message(ctx, last_result)
 
     content = ""
@@ -209,6 +217,17 @@ async def run_stream(
         if hot_topics:
             yield {"event": "status", "data": {"message": "Loading context..."}}
             ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=False)
+        
+        memory_blocks = await tools.get_memory_blocks(valid_hot_topics)
+        memory_context = format_memory_context(memory_blocks)
+
+        loop = asyncio.get_running_loop()
+        preferences = await loop.run_in_executor(
+            None,
+            store.list_preferences,
+            session_id
+        )
+        preferences_context = format_preferences_context(preferences)
 
         last_result = None
         try:
@@ -231,7 +250,11 @@ async def run_stream(
             # Collect tool calls while streaming tokens
             pending_tool_calls = []
             active_schemas = get_filtered_schemas(enabled_tools)
-            async for chunk in call_agent_streaming(llm, ctx, user_name, last_result, current_time, model, active_schemas):
+            async for chunk in call_agent_streaming(
+                llm, ctx, user_name, last_result, current_time, model, active_schemas,
+                memory_context=memory_context,
+                preferences_context=preferences_context
+            ):
                 
                 # Token - pass through to frontend
                 if isinstance(chunk, dict) and chunk.get("type") == "token":

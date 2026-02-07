@@ -219,6 +219,11 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         if data:
             return f"Path found: {len(data)} hops", len(data)
         return "No path", 0
+    
+    if tool_name in ("save_memory", "forget_memory"):
+        if "error" in result:
+            return f"Error: {result['error']}", 0
+        return "Memory updated", 1
 
     return "Completed", 1
 
@@ -229,7 +234,9 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         "get_connections": lambda: tools.get_connections(args.get("entity_name", "")),
         "get_recent_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
         "find_path": lambda: tools.find_path(args.get("entity_a", ""), args.get("entity_b", "")),
-        "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both"))
+        "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both")),
+        "save_memory": lambda: tools.save_memory(args.get("content", ""), args.get("topic", "General")),
+        "forget_memory": lambda: tools.forget_memory(args.get("memory_id", "")),
     }
 
     logger.info(f"[TOOL CALL] {name}: {json.dumps(args)}")

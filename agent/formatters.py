@@ -256,3 +256,40 @@ def format_hierarchy_results(results: List[Dict]) -> str:
         blocks.append(block)
     
     return "\n".join(blocks)
+
+def format_memory_context(blocks: dict) -> str:
+    """Format memory blocks for prompt injection."""
+    if not blocks:
+        return ""
+    
+    sections = []
+    for topic, entries in blocks.items():
+        if not entries:
+            continue
+        
+        lines = [f"[{topic}]"]
+        for entry in entries:
+            lines.append(f"  - ({entry['id']}) {entry['content']}")
+        sections.append("\n".join(lines))
+    
+    if not sections:
+        return ""
+    
+    return "\n".join(sections)
+
+
+def format_preferences_context(preferences: list) -> str:
+    """Format user-defined preferences for prompt injection."""
+    if not preferences:
+        return ""
+    
+    lines = []
+    for pref in preferences:
+        kind = pref.get("kind", "preference")
+        content = pref.get("content", "")
+        if kind == "ick":
+            lines.append(f"- AVOID: {content}")
+        else:
+            lines.append(f"- {content}")
+    
+    return "\n".join(lines)

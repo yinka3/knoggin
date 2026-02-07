@@ -149,6 +149,53 @@ TOOL_SCHEMAS = [
                 "required": ["question"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": (
+                "Save a piece of information to your persistent memory for this session. "
+                "Use sparingly — only for facts that will be valuable in future conversations. "
+                "Good: user preferences, key project decisions, important names/roles, stated goals. "
+                "Bad: transient details, things already in the knowledge graph, conversation-specific context. "
+                "Write memories as standalone facts, not references to 'this conversation'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The fact or note to remember. Keep concise — one clear statement."
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Topic this memory belongs to. Use 'General' for cross-cutting notes. Must be an active topic in the session."
+                    }
+                },
+                "required": ["content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_memory",
+            "description": (
+                "Remove a memory that is no longer accurate or relevant. "
+                "Use when the user corrects something you remembered, or when a fact becomes outdated."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The ID of the memory to remove. Visible in your memory context block."
+                    }
+                },
+                "required": ["memory_id"]
+            }
+        }
     }
 ]
 
@@ -159,6 +206,8 @@ ALL_TOOL_NAMES = [
     "get_hierarchy",
     "search_messages",
     "get_recent_activity",
+    "save_memory",
+    "forget_memory",
 ]
 
 def get_filtered_schemas(enabled_tools: list[str] | None = None) -> list[dict]:
