@@ -1,12 +1,12 @@
 from datetime import datetime, timezone
 import json
-from typing import Optional
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from api.state import AppState
 from shared.redisclient import RedisKeys
-
+from shared.schema.tool_schema import ALL_TOOL_NAMES
 router = APIRouter()
 
 def get_app_state(request: Request) -> AppState:
@@ -17,10 +17,12 @@ class CreateSessionRequest(BaseModel):
     topics_config: Optional[dict] = None
     model: Optional[str] = None
     agent_id: Optional[str] = None
+    enabled_tools: Optional[List[str]] = None
 
 class UpdateSessionRequest(BaseModel):
     model: Optional[str] = None
     agent_id: Optional[str] = None
+    enabled_tools: Optional[List[str]] = None
 
 @router.get("/")
 async def list_sessions(
@@ -73,6 +75,16 @@ async def create_session(
         model=body.model if body else None,
         agent_id=agent_id
     )
+
+    if body and body.enabled_tools is not None:
+        raw = await state.resources.redis.hget(RedisKeys.sessions(state.user_name), context.session_id)
+        metadata = json.loads(raw)
+        metadata["enabled_tools"] = body.enabled_tools
+        await state.resources.redis.hset(
+            RedisKeys.sessions(state.user_name),
+            context.session_id,
+            json.dumps(metadata)
+        )
     
     raw = await state.resources.redis.hget(RedisKeys.sessions(state.user_name), context.session_id)
     metadata = json.loads(raw)
@@ -103,6 +115,7 @@ async def get_session(
         "topics_config": metadata.get("topics_config"),
         "model": metadata.get("model"),
         "agent_id": metadata.get("agent_id"),
+        "enabled_tools": metadata.get("enabled_tools"),
         "is_active": session_id in state.active_sessions
     }
 
@@ -128,6 +141,13 @@ async def update_session(
             raise HTTPException(status_code=400, detail="Agent not found")
         metadata["agent_id"] = body.agent_id
     
+    if body.enabled_tools is not None:
+        
+        invalid = set(body.enabled_tools) - set(ALL_TOOL_NAMES)
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"Invalid tool names: {invalid}")
+        metadata["enabled_tools"] = body.enabled_tools
+    
     metadata["last_active"] = datetime.now(timezone.utc).isoformat()
     
     await state.resources.redis.hset(
@@ -140,7 +160,7 @@ async def update_session(
         if body.model is not None:
             state.active_sessions[session_id].model = body.model
     
-    return {"success": True, "model": metadata.get("model"), "agent_id": metadata.get("agent_id")}
+    return {"success": True, "model": metadata.get("model"), "agent_id": metadata.get("agent_id"), "enabled_tools": metadata.get("enabled_tools")}
 
 @router.delete("/{session_id}")
 async def delete_session(

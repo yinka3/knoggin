@@ -21,3 +21,15 @@ export async function getConfigStatus() {
   if (!res.ok) throw new Error('Failed to check config status')
   return res.json()
 }
+
+export async function getAvailableModels() {
+  const res = await fetch(`${API_BASE}/config/models`)
+  if (!res.ok) throw new Error('Failed to fetch models')
+  return res.json()
+}
+
+export async function getCuratedModels() {
+  const res = await fetch(`${API_BASE}/config/models/curated`)
+  if (!res.ok) throw new Error('Failed to fetch curated models')
+  return res.json()
+}

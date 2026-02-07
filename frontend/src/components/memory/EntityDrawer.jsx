@@ -3,7 +3,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { getProfile, listProfiles } from '@/api/profiles'
+import { getProfile } from '@/api/profiles'
 
 function SectionHeader({ children }) {
   return <h3 className="text-xs font-medium text-muted-foreground mb-3">{children}</h3>
@@ -53,17 +53,6 @@ export default function EntityDrawer({ entityId, open, onOpenChange, onEntityCli
 
     load()
   }, [entityId, open])
-
-  async function handleConnectionClick(name) {
-    try {
-      const result = await listProfiles({ q: name, limit: 1 })
-      if (result.entities?.length > 0) {
-        onEntityClick(result.entities[0].id)
-      }
-    } catch (err) {
-      console.error('Failed to find entity:', err)
-    }
-  }
 
   const lastMentioned = profile?.last_mentioned
     ? formatDistanceToNow(new Date(profile.last_mentioned), { addSuffix: true })
@@ -155,9 +144,9 @@ export default function EntityDrawer({ entityId, open, onOpenChange, onEntityCli
                   <SectionHeader>Connections ({profile.connections?.length || 0})</SectionHeader>
                   {profile.connections?.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
-                      {profile.connections.map((name, idx) => (
-                        <Pill key={idx} onClick={() => handleConnectionClick(name)}>
-                          {name}
+                      {profile.connections.map((conn, idx) => (
+                        <Pill key={idx} onClick={() => onEntityClick(conn.id)}>
+                          {conn.name}
                         </Pill>
                       ))}
                     </div>
@@ -174,8 +163,8 @@ export default function EntityDrawer({ entityId, open, onOpenChange, onEntityCli
                       {profile.hierarchy.parent && (
                         <div className="flex items-center gap-3">
                           <span className="text-xs text-muted-foreground w-16">Parent</span>
-                          <Pill onClick={() => handleConnectionClick(profile.hierarchy.parent)}>
-                            {profile.hierarchy.parent}
+                          <Pill onClick={() => onEntityClick(profile.hierarchy.parent.id)}>
+                            {profile.hierarchy.parent.name}
                           </Pill>
                         </div>
                       )}
@@ -184,8 +173,8 @@ export default function EntityDrawer({ entityId, open, onOpenChange, onEntityCli
                           <span className="text-xs text-muted-foreground w-16 pt-1">Children</span>
                           <div className="flex flex-wrap gap-2">
                             {profile.hierarchy.children.map((child, idx) => (
-                              <Pill key={idx} onClick={() => handleConnectionClick(child)}>
-                                {child}
+                              <Pill key={idx} onClick={() => onEntityClick(child.id)}>
+                                {child.name}
                               </Pill>
                             ))}
                           </div>

@@ -9,7 +9,7 @@ import os
 from db.query_tools import GraphToolQueries
 from db.reader import GraphReader
 from db.writer import GraphWriter
-from schema.dtypes import Fact
+from shared.schema.dtypes import Fact
 load_dotenv()
 
 MEMGRAPH_USER=os.environ.get("MEMGRAPH_USER")
@@ -186,7 +186,7 @@ class MemGraphStore:
     def get_parent_entities(self, entity_id: int) -> List[Dict]:
         return self._reader.get_parent_entities(entity_id)
 
-    def get_neighbor_entities(self, entity_id: int, limit: int = 5) -> List[str]:
+    def get_neighbor_entities(self, entity_id: int, limit: int = 5) -> List[Dict]:
         return self._reader.get_neighbor_entities(entity_id, limit)
 
     def get_child_entities(self, entity_id: int) -> List[Dict]:
@@ -221,6 +221,15 @@ class MemGraphStore:
     
     def get_graph_stats(self) -> Dict[str, int]:
         return self._reader.get_graph_stats()
+    
+    def get_entity_count_by_type(self) -> List[Dict]:
+        return self._reader.get_entity_count_by_type()
+    
+    def get_entity_count_by_topic(self) -> List[Dict]:
+        return self._reader.get_entity_count_by_topic()
+    
+    def get_top_connected_entities(self, limit: int = 10) -> List[Dict]:
+        return self._reader.get_top_connected_entities(limit)
 
     # ===== TOOL QUERY DELEGATIONS =====
 

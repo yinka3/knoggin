@@ -57,7 +57,7 @@ export default function TokenCounter({ value }) {
   const particles = Array.from({ length: 8 })
 
   return (
-    <div className="relative flex items-center gap-1.5 text-xs font-mono text-muted-foreground">
+    <div className="relative flex items-center gap-1.5 text-xs font-mono text-muted-foreground bg-muted/50 border border-border rounded-full px-2.5 py-1">
       <motion.span
         animate={showMilestone ? { scale: [1, 1.3, 1] } : {}}
         transition={{ duration: 0.4 }}

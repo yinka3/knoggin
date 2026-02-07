@@ -71,8 +71,8 @@ async def get_profile(
     )
     
     entity["hierarchy"] = {
-        "parent": parents[0]["canonical_name"] if parents else None,
-        "children": [c["canonical_name"] for c in children]
+        "parent": {"id": parents[0]["id"], "name": parents[0]["canonical_name"]} if parents else None,
+        "children": [{"id": c["id"], "name": c["canonical_name"]} for c in children]
     }
     
     return entity

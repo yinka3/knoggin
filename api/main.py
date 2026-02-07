@@ -21,7 +21,7 @@ from api.routes.stats import router as stats_router
 async def lifespan(app: FastAPI):
     logger.info("Starting Knoggin...")
     resources = await ResourceManager.initialize()
-    user_name = get_config_value("user_name") or "Adeyinka"
+    user_name = get_config_value("user_name") or "User"
     if not user_name:
         raise RuntimeError("user_name not configured")
     

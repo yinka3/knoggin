@@ -3,7 +3,7 @@ from loguru import logger
 from typing import Dict, List
 from neo4j import Driver, ManagedTransaction
 
-from schema.dtypes import Fact
+from shared.schema.dtypes import Fact
 
 
 class GraphWriter:

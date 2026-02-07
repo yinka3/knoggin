@@ -385,12 +385,12 @@ class MergeDetectionJob(BaseJob):
             else:
                 failed += 1
             
-            if dirty_ids:
-                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-                await ctx.redis.sadd(dirty_key, *[str(eid) for eid in dirty_ids])
-                logger.info(f"Queued {len(dirty_ids)} merged entities for immediate profile refinement")
-            
-            proposals_stored = await self._store_hitl_proposals(ctx, hitl, seen_ids)
+        if dirty_ids:
+            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
+            await ctx.redis.sadd(dirty_key, *[str(eid) for eid in dirty_ids])
+            logger.info(f"Queued {len(dirty_ids)} merged entities for immediate profile refinement")
+        
+        proposals_stored = await self._store_hitl_proposals(ctx, hitl, seen_ids)
 
         return f"{successful} merged, {failed} failed, {proposals_stored} HITL"
     

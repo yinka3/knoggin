@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from agent.orchestrator import run
 from db.store import MemGraphStore
 from main.context import Context
-from schema.dtypes import MessageData
+from shared.schema.dtypes import MessageData
 from log.logging_setup import setup_logging
 
 setup_logging(log_level="DEBUG", log_file="benchmark.log", colorize=True)

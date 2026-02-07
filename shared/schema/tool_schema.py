@@ -151,3 +151,28 @@ TOOL_SCHEMAS = [
         }
     }
 ]
+
+ALL_TOOL_NAMES = [
+    "search_entity",
+    "get_connections",
+    "find_path",
+    "get_hierarchy",
+    "search_messages",
+    "get_recent_activity",
+]
+
+def get_filtered_schemas(enabled_tools: list[str] | None = None) -> list[dict]:
+    """
+    Return tool schemas filtered to only enabled tools.
+    Always includes request_clarification (not user-toggleable).
+    If enabled_tools is None, returns all tools.
+    """
+    if enabled_tools is None:
+        return TOOL_SCHEMAS
+    
+    enabled_set = set(enabled_tools)
+    return [
+        schema for schema in TOOL_SCHEMAS
+        if schema["function"]["name"] in enabled_set
+        or schema["function"]["name"] == "request_clarification"
+    ]

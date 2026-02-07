@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from shared.resource import ResourceManager
 from agent.orchestrator import run
 from main.context import Context
-from schema.dtypes import MessageData
+from shared.schema.dtypes import MessageData
 from answer import answer_key
 from log.logging_setup import setup_logging
 

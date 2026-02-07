@@ -6,9 +6,9 @@ from rapidfuzz import fuzz, process
 from db.store import MemGraphStore
 from shared.embedding import EmbeddingService
 from main.utils import is_substring_match
-from schema.dtypes import Fact
+from shared.schema.dtypes import Fact
 from shared.events import emit_sync
-
+from jobs.jobs_utils import cosine_similarity
 
 class EntityResolver:
     
@@ -449,6 +449,18 @@ class EntityResolver:
                 )
 
                 if not passes_threshold:
+                    emb_a = self.get_embedding_for_id(primary_id)
+                    emb_b = self.get_embedding_for_id(neighbor_id)
+                    if emb_a and emb_b:
+                        
+                        cos_sim = cosine_similarity(emb_a, emb_b)
+                        if cos_sim >= 0.90:
+                            logger.info(
+                                f"Cosine-first candidate: ({primary_id}, {neighbor_id}) "
+                                f"names='{primary_name}'/'{neighbor_name}' cos={cos_sim:.3f}"
+                            )
+                            seen_pairs[pair_key] = (0, False)
+                            continue
                     continue
 
                 tokens_i = set(primary_name.lower().split()) - generic_tokens

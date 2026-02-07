@@ -10,7 +10,7 @@ from shared.topics_config import TopicConfig
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
 
-from schema.dtypes import EntityItem, EntityPair, MessageConnections, ResolutionEntry
+from shared.schema.dtypes import EntityItem, EntityPair, MessageConnections, ResolutionEntry
 
 
 PRONOUNS = {
@@ -109,6 +109,12 @@ def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
         return False
     
     if name.lower() in STOP_WORDS:
+        return False
+    
+    if name.lower() in PRONOUNS:
+        return False
+    
+    if is_generic_phrase(name):
         return False
     
     if not any(c.isalpha() for c in name):

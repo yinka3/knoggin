@@ -25,7 +25,7 @@ from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
 import uuid
 
-from schema.dtypes import Fact, MessageConnections, MessageData
+from shared.schema.dtypes import Fact, MessageConnections, MessageData
 from shared.events import emit
 from shared.redisclient import RedisKeys
 from shared.resource import ResourceManager
@@ -266,26 +266,41 @@ class Context:
         logger.info(f"Creating new USER entity for {user_name}")
         
         new_id = await self.get_next_ent_id()
+
+        user_aliases = get_config_value("user_aliases") or []
+        user_facts_raw = get_config_value("user_facts") or []
         
-        initial_fact_content = get_config_value("user_summary") or f"The primary user named {user_name}"
+        all_aliases = [user_name] + [a.strip() for a in user_aliases if a.strip()]
+        all_aliases = list(dict.fromkeys(all_aliases))  # dedupe, preserve order
 
         embedding = await loop.run_in_executor(
             self.executor,
-            partial(self.ent_resolver.register_entity, new_id, user_name, [user_name], "person", "Identity")
+            partial(self.ent_resolver.register_entity, new_id, user_name, all_aliases, "person", "Identity")
         )
 
-        # Create initial fact as Fact node
-        fact_embedding = self.embedding_service.encode_single(initial_fact_content)
-        
         facts: List[Fact] = []
+        now = datetime.now(timezone.utc)
+        
+        if user_facts_raw:
+            fact_contents = [f.strip() for f in user_facts_raw if f.strip()]
+        else:
+            fact_contents = [f"The primary user named {user_name}"]
 
-        facts.append(Fact(
-            id=str(uuid.uuid4()),
-            content=initial_fact_content,
-            valid_at=datetime.now(timezone.utc),
-            embedding=fact_embedding,
-            source_entity_id=new_id
-        ))
+        fact_embeddings_array = await loop.run_in_executor(
+            self.executor,
+            partial(self.embedding_service.encode, fact_contents)
+        )
+
+        fact_embeddings = [emb.tolist() for emb in fact_embeddings_array]
+        
+        for content, embedding_vec in zip(fact_contents, fact_embeddings):
+            facts.append(Fact(
+                id=str(uuid.uuid4()),
+                content=content,
+                valid_at=now,
+                embedding=embedding_vec,
+                source_entity_id=new_id
+            ))
         
         await loop.run_in_executor(
             self.executor,
@@ -299,7 +314,7 @@ class Context:
             "confidence": 1.0,
             "topic": "Identity",
             "embedding": embedding,
-            "aliases": [user_name]
+            "aliases": all_aliases
         }
 
         await loop.run_in_executor(
@@ -307,10 +322,12 @@ class Context:
             partial(self.store.write_batch, [user_entity], [])
         )
         
-        logger.info(f"User entity {user_name} (ID: {new_id}) written to graph")
+        logger.info(f"User entity {user_name} (ID: {new_id}) with {len(facts)} facts written to graph")
         await emit(self.session_id, "system", "user_entity_created", {
             "user_name": user_name,
-            "entity_id": new_id
+            "entity_id": new_id,
+            "aliases": all_aliases,
+            "facts_count": len(facts)
         })
         return new_id
     
@@ -326,8 +343,10 @@ class Context:
         if await self.profile_job.should_run(ctx):
             await self.profile_job.execute(ctx)
         
-        logger.info("Profile refinement done, waiting then moving on to merge detection...")
-        await asyncio.sleep(0.5)
+        merge_key = RedisKeys.merge_queue(self.user_name, self.session_id)
+        merge_count = await self.redis_client.scard(merge_key)
+        profile_flag = await self.redis_client.get(RedisKeys.profile_complete(self.user_name, self.session_id))
+        logger.info(f"Merge check: queue_size={merge_count}, profile_complete={profile_flag}")
 
         if await self.merge_job.should_run(ctx):
             await self.merge_job.execute(ctx)
@@ -351,8 +370,7 @@ class Context:
 
         return msg
 
-    async def add_to_conversation_log(self, role: str, content: str, timestamp: datetime, user_msg_id: int = None):
-        """Add a turn to the unified conversation log."""
+    async def add_to_conversation_log(self, role: str, content: str, timestamp: datetime, user_msg_id: int = None, metadata: dict = None):
         turn_id = await self.get_next_turn_id()
         turn_key = f"turn_{turn_id}"
         
@@ -363,6 +381,8 @@ class Context:
         }
         if user_msg_id is not None:
             payload["user_msg_id"] = user_msg_id
+        if metadata:
+            payload["metadata"] = metadata
         
         conv_key = RedisKeys.conversation(self.user_name, self.session_id)
         sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
@@ -394,12 +414,13 @@ class Context:
             f"turn_{turn_id}"
         )
     
-    async def add_assistant_turn(self, content: str, timestamp: datetime):
+    async def add_assistant_turn(self, content: str, timestamp: datetime, metadata: dict = None):
         """Add assistant turn to conversation log."""
         turn_id = await self.add_to_conversation_log(
             role="assistant",
             content=content,
-            timestamp=timestamp
+            timestamp=timestamp,
+            metadata=metadata
         )
         
         task = asyncio.create_task(
@@ -497,7 +518,8 @@ class Context:
                     "content": parsed["content"],
                     "timestamp": parsed["timestamp"],
                     "relative": f"[{date_str}]",
-                    "user_msg_id": parsed.get("user_msg_id")
+                    "user_msg_id": parsed.get("user_msg_id"),
+                    "metadata": parsed.get("metadata")
                 })
         
         return results
@@ -512,11 +534,11 @@ class Context:
         alias_updates: Dict[int, List[str]] = None
     ):
 
-        existing_candidates = list(set(entity_ids) - new_entity_ids)
-        
         loop = asyncio.get_running_loop()
         
-        validation_result = set()
+        valid_existing_ids = set()
+        existing_candidates = list(set(entity_ids) - new_entity_ids)
+
         if existing_candidates:
             validation_result = await loop.run_in_executor(
                 self.executor,
@@ -670,7 +692,6 @@ class Context:
 
         if "default_topics" in new_config:
             await self.update_topics_config(new_config["default_topics"])
-            self.nlp_pipe.refresh_topic_mappings()
             logger.info(f"Topics updated: {list(new_config['default_topics'].keys())}")
 
         ingest_cfg = dev_settings.get("ingestion", {})

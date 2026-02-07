@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import json
 from typing import AsyncGenerator, Dict, List, Optional, Union
 import uuid
-
+from zoneinfo import ZoneInfo
 from loguru import logger
 import redis.asyncio as aioredis
 
@@ -28,8 +28,8 @@ from agent.formatters import (
 )
 from shared.service import LLMService
 from shared.topics_config import TopicConfig
-from schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
-from schema.tool_schema import TOOL_SCHEMAS
+from shared.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
+from shared.schema.tool_schema import get_filtered_schemas
 from shared.config import get_config_value
 from shared.events import emit
 
@@ -39,15 +39,15 @@ async def call_agent_streaming(
     ctx: AgentContext,
     user_name: str,
     last_result: Optional[Dict] = None,
-    persona: str = "",
     date: str = "",
-    model: str = None
+    model: str = None,
+    tools: List[Dict] = None
 ) -> AsyncGenerator[Union[Dict, AgentResponse], None]:
     """
     Streaming version of call_agent.
     Yields token dicts for text, then final ToolCall/ClarificationRequest/FinalResponse.
     """
-    system_prompt = get_agent_prompt(user_name, date, persona)
+    system_prompt = get_agent_prompt(user_name, date, ctx.agent_persona, ctx.agent_name)
     user_message = build_user_message(ctx, last_result)
 
     content = ""
@@ -69,7 +69,7 @@ async def call_agent_streaming(
     async for chunk in llm.call_llm_with_tools_streaming(
         system=system_prompt,
         user=user_message,
-        tools=TOOL_SCHEMAS,
+        tools=tools if tools is not None else TOOL_SCHEMAS,
         model=model
     ):
         chunk_type = chunk.get("type")
@@ -138,6 +138,7 @@ async def run_stream(
     user_name: str,
     session_id: str,
     agent_id: str,
+    agent_name: str,
     agent_persona: str,
     conversation_history: List[Dict],
     hot_topics: List[str],
@@ -146,7 +147,9 @@ async def run_stream(
     store,
     ent_resolver,
     redis_client: aioredis.Redis,
-    model: str = None
+    model: str = None,
+    enabled_tools: List[str] = None,
+    user_timezone: str = None
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
     
@@ -185,6 +188,8 @@ async def run_stream(
             session_id=session_id,
             run_id=run_id,
             agent_id=agent_id,
+            agent_name=agent_name,
+            agent_persona=agent_persona,
             hot_topics=valid_hot_topics,
             active_topics=topic_config.active_topics,
             history=conversation_history
@@ -206,7 +211,11 @@ async def run_stream(
             ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=False)
 
         last_result = None
-        current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        try:
+            tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
+        except Exception:
+            tz = ZoneInfo("UTC")
+        current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
         usage_accumulator = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         
         while ctx.state.attempt_count < ctx.config.max_attempts:
@@ -221,8 +230,8 @@ async def run_stream(
 
             # Collect tool calls while streaming tokens
             pending_tool_calls = []
-            
-            async for chunk in call_agent_streaming(llm, ctx, user_name, last_result, agent_persona, current_time, model):
+            active_schemas = get_filtered_schemas(enabled_tools)
+            async for chunk in call_agent_streaming(llm, ctx, user_name, last_result, current_time, model, active_schemas):
                 
                 # Token - pass through to frontend
                 if isinstance(chunk, dict) and chunk.get("type") == "token":
@@ -347,7 +356,7 @@ async def run_stream(
                 evidence_ctx += f"Hierarchy:\n{format_hierarchy_results(ctx.evidence.hierarchy)}\n\n"
 
             summary = await llm.call_llm(
-                system=get_fallback_summary_prompt(user_name),
+                system=get_fallback_summary_prompt(user_name, ctx.agent_name),
                 user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
             )
 

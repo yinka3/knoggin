@@ -237,15 +237,14 @@ class BatchConsumer:
         return "\n".join(lines)
     
     def update_ingestion_settings(self, batch_size: int = None, batch_timeout: float = None, 
-                                  checkpoint_interval: int = None, session_window: int = None):
-        """Update ingestion parameters on the fly."""
-        if batch_size:
+                              checkpoint_interval: int = None, session_window: int = None):
+        if batch_size is not None:
             self.batch_size = batch_size
-        if batch_timeout:
+        if batch_timeout is not None:
             self.batch_timeout = batch_timeout
-        if checkpoint_interval:
+        if checkpoint_interval is not None:
             self.checkpoint_interval = checkpoint_interval
-        if session_window:
+        if session_window is not None:
             self.session_window = session_window
         
         logger.info(f"Consumer ingestion settings updated: batch={self.batch_size}, timeout={self.batch_timeout}")

@@ -23,7 +23,7 @@ from main.utils import (
     parse_connection_response, 
     parse_disambiguation
 )
-from schema.dtypes import (
+from shared.schema.dtypes import (
     BatchResult,
     MessageConnections,
     ResolutionEntry,
@@ -129,11 +129,11 @@ class BatchProcessor:
                 "existing": len([e for e in disambiguation if e.verdict == "EXISTING"])
             })
             
-            entity_ids, new_ids, alias_ids, entity_msg_map = await self._resolve(disambiguation, messages)
+            entity_ids, new_ids, alias_ids, entity_msg_map, alias_updates = await self._resolve(disambiguation, messages)
             result.entity_ids = entity_ids
             result.new_entity_ids = new_ids
             result.alias_updated_ids = alias_ids
-            
+            result.alias_updates = alias_updates
             user_id = self.ent_resolver.get_id(self.user_name)
             if user_id and user_id not in entity_ids:
                 entity_ids.append(user_id)
@@ -247,12 +247,13 @@ class BatchProcessor:
             profile = self.ent_resolver.entity_profiles.get(eid)
             if profile:
                 connections = self.store.get_neighbor_entities(eid, limit=5)
+                connected_names = [c["name"] for c in connections]
                 entity_facts = [f.content for f in facts_map.get(eid, [])]
 
                 known.append({
                     "canonical_name": profile["canonical_name"],
                     "facts": entity_facts,
-                    "connected_to": connections
+                    "connected_to": connected_names
                 })
                 logger.debug(f"Known entity added: {known[-1]["canonical_name"]} with {len(connections)} connections.")
         

@@ -3,7 +3,7 @@ from loguru import logger
 from typing import Dict, List, Optional, Set, Tuple
 from neo4j import Driver
 
-from schema.dtypes import Fact
+from shared.schema.dtypes import Fact
 
 
 class GraphReader:
@@ -294,18 +294,18 @@ class GraphReader:
             logger.error(f"Failed to get parents for entity {entity_id}: {e}")
             return []
 
-    def get_neighbor_entities(self, entity_id: int, limit: int = 5) -> List[str]:
+    def get_neighbor_entities(self, entity_id: int, limit: int = 5) -> List[Dict]:
         """Get canonical names of connected entities."""
         query = """
         MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity)
-        RETURN neighbor.canonical_name as name
+        RETURN neighbor.id as id, neighbor.canonical_name as name
         ORDER BY neighbor.last_mentioned DESC
         LIMIT $limit
         """
         try:
             with self.driver.session() as session:
                 result = session.run(query, {"entity_id": entity_id, "limit": limit})
-                return [record["name"] for record in result]
+                return [{"id": record["id"], "name": record["name"]} for record in result]
         except Exception as e:
             logger.error(f"Failed to get neighbor entities for {entity_id}: {e}")
             return []
@@ -576,8 +576,58 @@ class GraphReader:
         """
         with self.driver.session() as session:
             result = session.run(query).single()
+            if not result:
+                return {"entities": 0, "facts": 0, "relationships": 0}
             return {
                 "entities": result["entities"] or 0,
                 "facts": result["facts"] or 0,
                 "relationships": result["relationships"] or 0
             }
+    
+    def get_entity_count_by_type(self) -> List[Dict]:
+        """Get entity counts grouped by type for charts."""
+        query = """
+        MATCH (e:Entity)
+        WHERE e.type IS NOT NULL
+        RETURN e.type AS type, count(e) AS count
+        ORDER BY count DESC
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query)
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get entity count by type: {e}")
+            return []
+
+    def get_entity_count_by_topic(self) -> List[Dict]:
+        """Get entity counts grouped by topic for charts."""
+        query = """
+        MATCH (e:Entity)-[:BELONGS_TO]->(t:Topic)
+        RETURN t.name AS topic, count(e) AS count
+        ORDER BY count DESC
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query)
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get entity count by topic: {e}")
+            return []
+
+    def get_top_connected_entities(self, limit: int = 10) -> List[Dict]:
+        """Get entities with the most connections."""
+        query = """
+        MATCH (e:Entity)-[r:RELATED_TO]-()
+        WITH e, count(r) AS connections
+        ORDER BY connections DESC
+        LIMIT $limit
+        RETURN e.canonical_name AS name, e.type AS type, connections
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"limit": limit})
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get top connected entities: {e}")
+            return []

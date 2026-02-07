@@ -24,7 +24,8 @@ def get_default_config() -> dict:
     return {
         "_warning": "This file is auto-generated. Use the UI to modify settings. Manual edits may be overwritten.",
         "user_name": "",
-        "user_summary": None,
+        "user_aliases": [],
+        "user_facts": [],
         "configured_at": None,
         "default_topics": {
             "General": {
@@ -42,11 +43,74 @@ def get_default_config() -> dict:
                 "label_aliases": {}
             }
         },
+        "curated_models": [
+            {
+                "id": "anthropic/claude-sonnet-4.5",
+                "name": "Claude Sonnet 4.5",
+                "input_price": 3.00,
+                "output_price": 15.00
+            },
+            {
+                "id": "anthropic/claude-opus-4.5",
+                "name": "Claude Opus 4.5",
+                "input_price": 5.00,
+                "output_price": 25.00
+            },
+            {
+                "id": "x-ai/grok-4.1-fast",
+                "name": "Grok 4.1 Fast",
+                "input_price": 0.20,
+                "output_price": 0.50
+            },
+            {
+                "id": "openai/gpt-5.1",
+                "name": "GPT-5.1",
+                "input_price": 1.25,
+                "output_price": 10.00
+            },
+            {
+                "id": "google/gemini-3-pro-preview",
+                "name": "Gemini 3 Pro",
+                "input_price": 2.00,
+                "output_price": 12.00
+            },
+            {
+                "id": "anthropic/claude-haiku-4.5",
+                "name": "Claude Haiku 4.5",
+                "input_price": 1.00,
+                "output_price": 5.00
+            },
+            {
+                "id": "google/gemini-2.5-flash-lite-preview-09-2025",
+                "name": "Gemini 2.5 Flash Lite",
+                "input_price": 0.10,
+                "output_price": 0.40
+            },
+            {
+                "id": "google/gemini-2.5-flash",
+                "name": "Gemini 2.5 Flash",
+                "input_price": 0.30,
+                "output_price": 2.50
+            },
+            {
+                "id": "deepseek/deepseek-v3.1",
+                "name": "DeepSeek V3.1",
+                "input_price": 0.60,
+                "output_price": 1.70
+            },
+            {
+                "id": "openai/gpt-oss-120b:free",
+                "name": "GPT-OSS-120B",
+                "input_price": 0,
+                "output_price": 0
+            }
+        ],
         "llm": {
             "api_key": "",
             "reasoning_model": "google/gemini-2.5-flash",
             "agent_model": "google/gemini-3-flash-preview"
         },
+        
         "developer_settings": {
             
             "ingestion": {
@@ -168,6 +232,8 @@ def save_config(data: dict) -> bool:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=2)
+        
+        CONFIG_FILE.chmod(0o600)
         
         _config_cache = data
         _config_mtime = _get_file_mtime()

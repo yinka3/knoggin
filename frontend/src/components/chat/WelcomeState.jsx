@@ -2,20 +2,61 @@ import { useState, useEffect, useRef } from 'react'
 import { Brain, Sparkles, MessageSquare, Search, Zap, ArrowUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import greetings from '@/data/greetings.json'
 
-export default function WelcomeState({ onFirstMessage }) {
+function getGreeting() {
+  const hour = new Date().getHours()
+  if (hour < 6) return "You're Up Early"
+  if (hour < 12) return 'Good Morning'
+  if (hour < 17) return 'Good Afternoon'
+  if (hour < 21) return 'Good Evening'
+  return 'Late Night Mode'
+}
+
+function getSubtext() {
+  const hour = new Date().getHours()
+
+  let key
+  if (hour < 6) key = 'early_morning'
+  else if (hour < 12) key = 'morning'
+  else if (hour < 17) key = 'afternoon'
+  else if (hour < 21) key = 'evening'
+  else key = 'late_night'
+
+  const pool = greetings[key]
+  return pool[Math.floor(Math.random() * pool.length)]
+}
+
+export default function WelcomeState({ onFirstMessage, userName }) {
   const [isReady, setIsReady] = useState(false)
   const [inputValue, setInputValue] = useState('')
   const [isFocused, setIsFocused] = useState(false)
   const textareaRef = useRef(null)
+  const brainRef = useRef(null)
+  const [tilt, setTilt] = useState({ x: 0, y: 0 })
+  const [subtext] = useState(() => getSubtext())
 
-  // Transition from "Blueprint" to "Interactive" after 2.5s
   useEffect(() => {
     const timer = setTimeout(() => setIsReady(true), 2500)
     return () => clearTimeout(timer)
   }, [])
 
-  // Auto-resize textarea
+  function handleMouseMove(e) {
+    if (!brainRef.current) return
+    const rect = brainRef.current.getBoundingClientRect()
+    const centerX = rect.left + rect.width / 2
+    const centerY = rect.top + rect.height / 2
+
+    const x = (e.clientX - centerX) / (rect.width / 2)
+    const y = (e.clientY - centerY) / (rect.height / 2)
+
+    setTilt({ x: y * -15, y: x * 15 })
+  }
+
+  function handleMouseLeave() {
+    setTilt({ x: 0, y: 0 })
+  }
+
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
@@ -55,24 +96,39 @@ export default function WelcomeState({ onFirstMessage }) {
 
   return (
     <div className="h-full flex flex-col items-center justify-center p-8 relative overflow-hidden">
-      {/* BACKGROUND GRID (Subtle texture) */}
-      <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-5 pointer-events-none" />
-
-      {/* THE BRAIN CONTAINER (Original Sleek Version) */}
+      {/* THE BRAIN CONTAINER */}
       <div
         className={cn(
           'relative group cursor-pointer mb-8 transition-all duration-1000',
           isReady ? 'scale-100' : 'scale-95'
         )}
       >
-        {/* 1. IDLE/HOVER GLOW */}
+        {/* 1. ORBITING GLOW — wider spread, viewport-scaled blur */}
         <div
           className={cn(
-            'absolute inset-0 bg-primary/20 blur-3xl rounded-full transition-all duration-1000',
+            'absolute rounded-full transition-all duration-700',
+            'glow-orbit',
+            isReady ? 'opacity-30 group-hover:opacity-100 scale-100' : 'opacity-0 scale-50'
+          )}
+          style={{
+            inset: 'clamp(-48px, -3vw, -24px)',
+            filter: `blur(clamp(24px, 2.5vw, 48px))`,
+          }}
+        />
+
+        {/* Static ambient glow — wider spread, viewport-scaled blur */}
+        <div
+          className={cn(
+            'absolute bg-primary/20 rounded-full transition-all duration-1000',
+            'animate-pulse-slow',
             isReady
-              ? 'opacity-50 group-hover:opacity-80 scale-75 group-hover:scale-110'
+              ? 'opacity-50 group-hover:opacity-70 scale-100 group-hover:scale-110'
               : 'opacity-0 scale-50'
           )}
+          style={{
+            inset: 'clamp(-24px, -1.5vw, -8px)',
+            filter: `blur(clamp(40px, 3vw, 60px))`,
+          }}
         />
 
         {/* 2. BLUEPRINT GRID */}
@@ -80,23 +136,31 @@ export default function WelcomeState({ onFirstMessage }) {
           <div className="absolute inset-0 bg-grid-slate-200/50 opacity-20 animate-pulse rounded-3xl" />
         )}
 
-        {/* 3. THE ICON BOX (Sleek, Translucent Border) */}
+        {/* 3. THE ICON BOX */}
         <div
+          ref={brainRef}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={handleMouseLeave}
           className={cn(
             'relative p-6 rounded-3xl border transition-all duration-700 ease-out bg-background/50 backdrop-blur-sm',
             isReady
-              ? 'border-border/50 shadow-sm group-hover:shadow-xl group-hover:border-primary/30 group-hover:-translate-y-1'
+              ? 'border-border/50 shadow-sm group-hover:shadow-xl group-hover:border-primary/30'
               : 'border-primary/20 shadow-none'
           )}
+          style={{
+            transform: `perspective(500px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)`,
+            transition:
+              tilt.x === 0 && tilt.y === 0 ? 'transform 0.5s ease-out' : 'transform 0.1s ease-out',
+          }}
         >
           <Brain
             size={48}
-            strokeWidth={1.5} // Original thin lines
+            strokeWidth={1.5}
             className={cn(
               'transition-all duration-700',
               !isReady && 'text-primary/60 animate-blueprint',
               isReady &&
-                'text-muted-foreground/80 group-hover:text-primary group-hover:scale-110 group-hover:rotate-3'
+                'text-primary/70 group-hover:text-primary brain-hover drop-shadow-[0_0_8px_rgba(46,170,110,0.3)]'
             )}
           />
 
@@ -118,18 +182,18 @@ export default function WelcomeState({ onFirstMessage }) {
       {/* TEXT CONTENT */}
       <div className="animate-in fade-in slide-in-from-bottom-4 duration-1000 delay-500 fill-mode-backwards flex flex-col items-center w-full max-w-2xl z-10">
         <h1 className="text-2xl font-semibold tracking-tight mb-2 text-foreground">
-          Good Morning, Yinka
+          {getGreeting()}
+          {userName ? `, ${userName}` : ''}
         </h1>
-        <p className="text-muted-foreground text-center max-w-[400px] mb-8 leading-relaxed">
-          {isReady ? 'System Online. Ready to recall.' : 'Initializing neural pathways...'}
+        <p className="text-muted-foreground text-center max-w-[400px] mb-4 leading-relaxed">
+          {isReady ? subtext : 'Initializing neural pathways...'}
         </p>
 
-        {/* INPUT BAR: High Visibility (Solid Background + Border) */}
+        {/* INPUT BAR */}
         <div
           className={cn(
             'w-full relative flex items-end gap-2 p-2 rounded-2xl border transition-all duration-300 mb-8',
             isReady ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4',
-            // VISIBILITY FIX: Solid background (bg-background) and clear border (border-input)
             isFocused
               ? 'bg-background border-primary/50 ring-2 ring-primary/10 shadow-md'
               : 'bg-background border-input hover:border-accent'
@@ -162,7 +226,7 @@ export default function WelcomeState({ onFirstMessage }) {
         </div>
       </div>
 
-      {/* SUGGESTION CARDS: Solid & Visible */}
+      {/* SUGGESTION CARDS */}
       <div
         className={cn(
           'grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl transition-all duration-1000 delay-700',
@@ -173,7 +237,6 @@ export default function WelcomeState({ onFirstMessage }) {
           <Button
             key={i}
             variant="outline"
-            // VISIBILITY FIX: Solid background (bg-card), explicit border, hover effects
             className="h-auto py-4 px-4 flex flex-col items-center gap-3 bg-card border-border hover:border-primary/50 hover:bg-accent/50 transition-all duration-300 group shadow-sm"
             onClick={() => onFirstMessage(s.prompt)}
           >

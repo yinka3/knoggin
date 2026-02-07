@@ -33,9 +33,9 @@ export function SessionProvider({ children }) {
     setConfigModalOpen(true)
   }
 
-  async function createSessionWithConfig(topicsConfig) {
+  async function createSessionWithConfig(topicsConfig, agentId = null) {
     try {
-      const data = await apiCreateSession(topicsConfig)
+      const data = await apiCreateSession(topicsConfig, agentId)
       await loadSessions()
       setCurrentSessionId(data.session_id)
       navigate(`/chat/${data.session_id}`)

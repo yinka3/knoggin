@@ -11,11 +11,14 @@ export default function MessageList({
   streamingContent,
   currentToolCalls,
   currentThinking,
+  agentName = 'Assistant',
 }) {
   const bottomRef = useRef(null)
   const scrollAreaRef = useRef(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
   const [userScrolled, setUserScrolled] = useState(false)
+  const [showOrb, setShowOrb] = useState(false)
+  const orbTimerRef = useRef(null)
 
   const scrollToBottom = (instant = false) => {
     bottomRef.current?.scrollIntoView({
@@ -58,6 +61,22 @@ export default function MessageList({
     }
   }, [streaming])
 
+  useEffect(() => {
+    const shouldShowOrb =
+      streaming && !currentThinking && currentToolCalls?.length === 0 && !streamingContent
+
+    if (shouldShowOrb) {
+      orbTimerRef.current = setTimeout(() => setShowOrb(true), 350)
+    } else {
+      if (orbTimerRef.current) clearTimeout(orbTimerRef.current)
+      setShowOrb(false)
+    }
+
+    return () => {
+      if (orbTimerRef.current) clearTimeout(orbTimerRef.current)
+    }
+  }, [streaming, currentThinking, currentToolCalls, streamingContent])
+
   return (
     <div className="relative h-full">
       <ScrollArea ref={scrollAreaRef} className="h-full pr-4">
@@ -69,14 +88,9 @@ export default function MessageList({
                 className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
               >
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span className="font-medium">{msg.role === 'user' ? 'You' : 'STELLA'}</span>
+                  <span className="font-medium">{msg.role === 'user' ? 'You' : agentName}</span>
                   <span>{formatTimestamp(msg.timestamp)}</span>
                 </div>
-
-                {/* Collapsed ThinkingBox for historical messages */}
-                {msg.role === 'assistant' && msg.toolCalls?.length > 0 && (
-                  <ThinkingBox toolCalls={msg.toolCalls} streaming={false} defaultOpen={false} />
-                )}
 
                 <div
                   className={
@@ -86,7 +100,17 @@ export default function MessageList({
                   }
                 >
                   {msg.role === 'assistant' ? (
-                    <MarkdownRenderer content={msg.content} />
+                    <>
+                      {(msg.toolCalls || msg.tool_calls) && (
+                        <ThinkingBox
+                          toolCalls={msg.toolCalls || msg.tool_calls}
+                          streaming={false}
+                          currentThinking={null}
+                          defaultOpen={false}
+                        />
+                      )}
+                      <MarkdownRenderer content={msg.content} />
+                    </>
                   ) : (
                     <span className="whitespace-pre-wrap">{msg.content}</span>
                   )}
@@ -94,30 +118,27 @@ export default function MessageList({
               </div>
             ))}
 
-            {/* Show orb when streaming but nothing else yet */}
-            {streaming &&
-              !currentThinking &&
-              currentToolCalls?.length === 0 &&
-              !streamingContent && (
-                <div className="flex flex-col gap-1 items-start">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="font-medium">STELLA</span>
-                  </div>
-                  <div className="flex items-center gap-3 py-3">
-                    <ThinkingOrb size={22} />
-                    <span className="text-muted-foreground text-sm">Thinking...</span>
-                  </div>
+            {/* Show orb when streaming but nothing else yet — delayed to avoid flash */}
+            {showOrb && (
+              <div className="flex flex-col gap-1 items-start animate-in fade-in duration-300">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="font-medium">{agentName}</span>
                 </div>
-              )}
+                <div className="flex items-center gap-3 py-3">
+                  <ThinkingOrb size={22} />
+                  <span className="text-muted-foreground text-sm">Thinking...</span>
+                </div>
+              </div>
+            )}
 
             {/* Live streaming section */}
             {streaming && (currentToolCalls?.length > 0 || currentThinking || streamingContent) && (
               <div className="flex flex-col gap-1 items-start">
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span className="font-medium">STELLA</span>
+                  <span className="font-medium">{agentName}</span>
                 </div>
 
-                {/* ThinkingBox - collapses when streaming content arrives */}
+                {/* ThinkingBox — auto-collapses when streaming content arrives */}
                 {(currentToolCalls?.length > 0 || currentThinking) && (
                   <ThinkingBox
                     toolCalls={currentToolCalls}

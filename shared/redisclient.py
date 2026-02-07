@@ -141,12 +141,8 @@ class RedisKeys:
         return f"pending:{user}:{session}:{job_name}"
     
     @staticmethod
-    def agents_default(user: str) -> str:
-        return f"agents:default:{user}"
-    
-    @staticmethod
-    def agents(user: str) -> str:
-        return f"agents:{user}"
+    def agent_memory(user: str, session: str, topic: str) -> str:
+        return f"memory:{user}:{session}:{topic}"
     
     # ============ GLOBAL (no session) ============
     
@@ -165,4 +161,12 @@ class RedisKeys:
     @staticmethod
     def session_config(user: str) -> str:
         return f"session_config:{user}"
+    
+    @staticmethod
+    def agents_default(user: str) -> str:
+        return f"agents:default:{user}"
+    
+    @staticmethod
+    def agents(user: str) -> str:
+        return f"agents:{user}"
     

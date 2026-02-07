@@ -84,11 +84,12 @@ class AgentContext:
     config: AgentConfig
     state: AgentState
     evidence: RetrievedEvidence
-    
     user_query: str = ""
     session_id: str = ""
     run_id: str = ""
     agent_id: str = ""
+    agent_name: str = "STELLA"
+    agent_persona: str = ""
     history: List[Dict] = field(default_factory=list)
     hot_topics: List[str] = field(default_factory=list)
     active_topics: List[str] = field(default_factory=list)

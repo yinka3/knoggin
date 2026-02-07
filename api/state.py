@@ -6,7 +6,7 @@ import uuid
 from loguru import logger
 from main.context import Context
 from shared.topics_config import TopicConfig
-from schema.dtypes import AgentConfig
+from shared.schema.dtypes import AgentConfig
 from shared.redisclient import RedisKeys
 from shared.resource import ResourceManager
 from shared.config import load_config

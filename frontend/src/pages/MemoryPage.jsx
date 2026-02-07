@@ -97,7 +97,7 @@ export default function MemoryPage() {
           )}
         </div>
         <p className="text-sm text-muted-foreground mb-4">
-          People, places, and things STELLA remembers
+          People, places, and things your agent remembers
         </p>
         <div className="relative">
           <Search
@@ -128,7 +128,7 @@ export default function MemoryPage() {
             </p>
             {!debouncedSearch && (
               <p className="text-sm text-muted-foreground mt-1">
-                Start chatting and STELLA will remember things for you
+                Start chatting and your agent will remember things for you
               </p>
             )}
           </div>
@@ -136,7 +136,11 @@ export default function MemoryPage() {
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {entities.map(entity => (
-                <EntityCard key={entity.id} entity={entity} onClick={handleCardClick} />
+                <EntityCard
+                  key={entity.id}
+                  entity={entity}
+                  onClick={() => handleCardClick(entity.id)}
+                />
               ))}
             </div>
 

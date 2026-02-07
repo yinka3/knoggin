@@ -15,7 +15,7 @@ from shared.service import LLMService
 from main.entity_resolve import EntityResolver
 from main.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
 from jobs.jobs_utils import enrich_facts_with_sources, extract_fact_with_source, format_vp04_input, process_extracted_facts, parse_new_facts
-from schema.dtypes import Fact, FactMergeResult
+from shared.schema.dtypes import Fact, FactMergeResult
 from shared.events import emit
 from shared.redisclient import RedisKeys
 

@@ -20,6 +20,9 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { getConfig } from '@/api/config'
 import { Loader2, Sparkles } from 'lucide-react'
+import { listAgents } from '@/api/agents'
+import { Bot } from 'lucide-react'
+import { toast } from 'sonner'
 
 const DEFAULT_CONFIG = {
   General: {
@@ -47,6 +50,9 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
   const [generatedConfig, setGeneratedConfig] = useState(null)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState(null)
+  const [agents, setAgents] = useState([])
+  const [selectedAgentId, setSelectedAgentId] = useState(null)
+  const [loadingAgents, setLoadingAgents] = useState(false)
 
   useEffect(() => {
     if (open) {
@@ -55,6 +61,18 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
         .then(config => setDefaultTopics(config.default_topics || null))
         .catch(err => console.error('Failed to load default topics:', err))
         .finally(() => setLoadingDefaults(false))
+
+      setLoadingAgents(true)
+      listAgents()
+        .then(data => {
+          setAgents(data.agents || [])
+          const defaultAgent = data.agents?.find(a => a.is_default)
+          if (defaultAgent) {
+            setSelectedAgentId(defaultAgent.id)
+          }
+        })
+        .catch(err => console.error('Failed to load agents:', err))
+        .finally(() => setLoadingAgents(false))
     }
   }, [open])
 
@@ -67,6 +85,9 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
     setError(null)
     setDefaultTopics(null)
     setLoadingDefaults(false)
+    setAgents([])
+    setSelectedAgentId(null)
+    setLoadingAgents(false)
   }
 
   function handleOpenChange(open) {
@@ -81,27 +102,15 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
     setError(null)
 
     try {
-      // TODO: Call API endpoint
-      // const res = await fetch('/topics/generate', {
+      // TODO: Wire to POST /topics/generate { description }
+      // const res = await fetch(`${API_BASE}/topics/generate`, {
       //   method: 'POST',
       //   headers: { 'Content-Type': 'application/json' },
       //   body: JSON.stringify({ description })
       // })
       // const data = await res.json()
       // setGeneratedConfig(data.config)
-
-      // Placeholder for now
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      setGeneratedConfig({
-        General: { active: true, labels: [], hierarchy: {}, aliases: [], label_aliases: {} },
-        'Job Search': {
-          active: true,
-          labels: ['Company', 'Role', 'Contact', 'Interview'],
-          hierarchy: {},
-          aliases: ['jobs', 'career'],
-          label_aliases: {},
-        },
-      })
+      setError('Topic generation is not yet available.')
     } catch (err) {
       setError('Failed to generate config. Please try again.')
     } finally {
@@ -116,7 +125,11 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
 
     if (mode === 'copy' && selectedSessionId) {
       const session = sessions.find(s => s.session_id === selectedSessionId)
-      return session?.topics_config || DEFAULT_CONFIG
+      const config = session?.topics_config
+      if (!config) {
+        toast.warning('Selected session has no topic config — using defaults')
+      }
+      return config || DEFAULT_CONFIG
     }
 
     if (mode === 'generate' && generatedConfig) {
@@ -129,7 +142,7 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
   function handleCreate() {
     const config = getSelectedConfig()
     if (config) {
-      onCreateSession(config)
+      onCreateSession(config, selectedAgentId)
       handleOpenChange(false)
     }
   }
@@ -148,6 +161,38 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
             Set up topics for this chat session
           </DialogDescription>
         </DialogHeader>
+
+        {/* Agent Selection */}
+        <div className="pb-4 border-b border-border">
+          <Label className="text-muted-foreground text-sm mb-2 block">Agent</Label>
+          {loadingAgents ? (
+            <div className="flex items-center gap-2 text-muted-foreground text-sm">
+              <span className="w-3 h-3 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin" />
+              Loading agents...
+            </div>
+          ) : (
+            <Select value={selectedAgentId || ''} onValueChange={setSelectedAgentId}>
+              <SelectTrigger className="w-full bg-muted border-border">
+                <SelectValue placeholder="Select an agent" />
+              </SelectTrigger>
+              <SelectContent className="bg-popover border-border">
+                {agents.map(agent => (
+                  <SelectItem key={agent.id} value={agent.id}>
+                    <div className="flex items-center gap-2">
+                      <Bot size={14} className="text-muted-foreground" />
+                      <span>{agent.name}</span>
+                      {agent.is_default && (
+                        <Badge variant="secondary" className="text-[10px] ml-1">
+                          default
+                        </Badge>
+                      )}
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
 
         <RadioGroup value={mode} onValueChange={setMode} className="space-y-3 py-4">
           {/* Option 1: Defaults */}
@@ -211,22 +256,18 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
           </div>
 
           {/* Option 3: Generate */}
-          <div
-            className={`flex items-start space-x-3 rounded-lg border p-4 cursor-pointer transition-colors ${
-              mode === 'generate'
-                ? 'border-accent bg-muted/50'
-                : 'border-border hover:border-muted-foreground'
-            }`}
-            onClick={() => setMode('generate')}
-          >
-            <RadioGroupItem value="generate" id="generate" className="mt-1" />
+          <div className="flex items-start space-x-3 rounded-lg border border-border p-4 opacity-50 cursor-not-allowed">
+            <RadioGroupItem value="generate" id="generate" className="mt-1" disabled />
             <div className="flex-1 space-y-3">
               <Label
                 htmlFor="generate"
-                className="text-foreground cursor-pointer flex items-center gap-2"
+                className="text-muted-foreground cursor-not-allowed flex items-center gap-2"
               >
                 Generate from description
-                <Sparkles size={14} className="text-accent" />
+                <Sparkles size={14} className="text-muted-foreground" />
+                <Badge variant="outline" className="text-[10px]">
+                  Coming soon
+                </Badge>
               </Label>
 
               {mode === 'generate' && (

@@ -1,9 +1,9 @@
-def get_agent_prompt(user_name: str, current_time: str = "", persona: str = "") -> str:
+def get_agent_prompt(user_name: str, current_time: str = "", persona: str = "", agent_name: str = "STELLA") -> str:
     date_context = f"Current time: {current_time}." if current_time else ""
     
     voice = persona if persona else "Warm and direct. Match their energy. No corporate filler."
 
-    return f"""You are STELLA. You remember everything {user_name} has told you.
+    return f"""You are {agent_name}. You remember everything {user_name} has told you.
 
 {date_context}
 
@@ -37,5 +37,5 @@ Briefly plan:
 {user_name} is about to speak."""
 
 
-def get_fallback_summary_prompt(user_name: str) -> str:
+def get_fallback_summary_prompt(user_name: str, agent_name: str = "STELLA") -> str:
     return f"""Summarize the findings for {user_name}. Be direct. State facts found or explicitly state what is missing. No apologies, no meta-talk about tools."""

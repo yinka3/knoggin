@@ -1,9 +1,7 @@
-// src/pages/SettingsPage.jsx
 import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Select,
@@ -13,33 +11,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Lock, Save, ChevronDown, ChevronRight, Plus, X, Trash2, Eye, EyeOff } from 'lucide-react'
-import { getConfig, updateConfig } from '@/api/config'
+import { getConfig, updateConfig, getAvailableModels } from '@/api/config'
 import { toast } from 'sonner'
-
-const REASONING_MODELS = [
-  { value: 'google/gemini-2.5-flash', label: 'gemini-2.5-flash', tier: 'default' },
-  { value: 'google/gemini-2.5-flash-lite', label: 'gemini-2.5-flash-lite', tier: 'budget' },
-]
-
-const AGENT_MODELS = [
-  { value: 'google/gemini-3-flash-preview', label: 'gemini-3-flash-preview', tier: 'default' },
-  { value: 'deepseek/deepseek-v3.2', label: 'deepseek-v3.2', tier: 'budget' },
-  { value: 'x-ai/grok-4.1-fast', label: 'grok-4.1-fast', tier: 'budget' },
-  { value: 'anthropic/claude-sonnet-4.5', label: 'claude-sonnet-4.5', tier: 'premium' },
-]
-
-function TierBadge({ tier }) {
-  const styles = {
-    default: 'bg-muted text-muted-foreground',
-    budget: 'bg-primary/20 text-primary',
-    premium: 'bg-amber-500/20 text-amber-400',
-  }
-  return (
-    <Badge variant="secondary" className={`text-[10px] ml-auto rounded-full ${styles[tier]}`}>
-      {tier}
-    </Badge>
-  )
-}
 
 function SectionHeader({ children, description }) {
   return (
@@ -56,20 +29,22 @@ export default function SettingsPage() {
   const [error, setError] = useState(null)
 
   const [userName, setUserName] = useState('')
-  const [userSummary, setUserSummary] = useState('')
+  const [userAliases, setUserAliases] = useState('')
+
   const [reasoningModel, setReasoningModel] = useState('')
   const [agentModel, setAgentModel] = useState('')
   const [defaultTopics, setDefaultTopics] = useState({})
   const [expandedTopic, setExpandedTopic] = useState(null)
 
+  const [reasoningModels, setReasoningModels] = useState([])
+  const [agentModels, setAgentModels] = useState([])
+  const [modelsLoading, setModelsLoading] = useState(false)
+
   const [addingTopic, setAddingTopic] = useState(false)
   const [newTopicName, setNewTopicName] = useState('')
   const [showSkeleton, setShowSkeleton] = useState(false)
-  const [agentName, setAgentName] = useState('')
-  const [systemPrompt, setSystemPrompt] = useState('')
+
   const [openrouterKey, setOpenrouterKey] = useState('')
-  const [directProvider, setDirectProvider] = useState('')
-  const [directApiKey, setDirectApiKey] = useState('')
   const [showKeys, setShowKeys] = useState(false)
 
   useEffect(() => {
@@ -83,21 +58,25 @@ export default function SettingsPage() {
   useEffect(() => {
     async function load() {
       try {
-        const config = await getConfig()
+        const [config, models] = await Promise.all([
+          getConfig(),
+          getAvailableModels().catch(() => ({ reasoning: [], agent: [] })),
+        ])
+
         setUserName(config.user_name || '')
-        setUserSummary(config.user_summary || '')
-        setReasoningModel(config.reasoning_model || '')
-        setAgentModel(config.agent_model || '')
+        setUserAliases((config.user_aliases || []).join(', '))
+        setReasoningModel(config.llm?.reasoning_model || '')
+        setAgentModel(config.llm?.agent_model || '')
         setDefaultTopics(config.default_topics || {})
-        setAgentName(config.agent_name || '')
-        setSystemPrompt(config.system_prompt || '')
-        setOpenrouterKey(config.openrouter_api_key || '')
-        setDirectProvider(config.direct_provider || '')
-        setDirectApiKey(config.direct_api_key || '')
+        setOpenrouterKey(config.llm?.api_key || '')
+
+        setReasoningModels(models.reasoning || [])
+        setAgentModels(models.agent || [])
       } catch (err) {
         setError(err.message)
       } finally {
         setLoading(false)
+        setModelsLoading(false)
       }
     }
     load()
@@ -107,19 +86,22 @@ export default function SettingsPage() {
     setSaving(true)
 
     try {
+      const aliasesArray = userAliases
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+
       await updateConfig({
-        user_summary: userSummary || null,
-        reasoning_model: reasoningModel,
-        agent_model: agentModel,
+        user_aliases: aliasesArray,
         default_topics: defaultTopics,
-        agent_name: agentName || null,
-        system_prompt: systemPrompt || null,
-        openrouter_api_key: openrouterKey || null,
-        direct_provider: directProvider || null,
-        direct_api_key: directApiKey || null,
+        llm: {
+          api_key: openrouterKey || null,
+          reasoning_model: reasoningModel || null,
+          agent_model: agentModel || null,
+        },
       })
       toast.success('Settings saved', {
-        description: 'Model changes applied to active sessions',
+        description: 'Changes applied to active sessions',
       })
     } catch (err) {
       toast.error('Failed to save settings', {
@@ -185,8 +167,9 @@ export default function SettingsPage() {
 
           {/* Profile Section */}
           <section>
-            <SectionHeader description="Your identity for STELLA">Profile</SectionHeader>
+            <SectionHeader description="Your identity for Knoggin">Profile</SectionHeader>
             <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
+              {/* Name - Locked */}
               <div className="space-y-2">
                 <Label htmlFor="name" className="text-muted-foreground flex items-center gap-2">
                   Name
@@ -200,38 +183,50 @@ export default function SettingsPage() {
                 />
               </div>
 
+              {/* Aliases */}
               <div className="space-y-2">
-                <Label htmlFor="summary" className="text-muted-foreground">
-                  Summary
+                <Label htmlFor="aliases" className="text-muted-foreground">
+                  Aliases
                 </Label>
-                <textarea
-                  id="summary"
-                  value={userSummary}
-                  onChange={e => setUserSummary(e.target.value)}
-                  placeholder="A brief description about yourself for the agent..."
-                  rows={3}
-                  className="w-full bg-muted border border-border rounded-xl px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
+                <Input
+                  id="aliases"
+                  value={userAliases}
+                  onChange={e => setUserAliases(e.target.value)}
+                  placeholder="Nicknames, handles (comma-separated)"
+                  className="bg-muted border-border rounded-xl"
                 />
+                <p className="text-[11px] text-muted-foreground">
+                  Comma-separated names your agent should recognize as you
+                </p>
               </div>
             </div>
           </section>
 
           {/* Models Section */}
           <section>
-            <SectionHeader description="Choose which models power STELLA">Models</SectionHeader>
+            <SectionHeader description="Choose which models power your agent">Models</SectionHeader>
             <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
               <div className="space-y-2">
                 <Label className="text-muted-foreground">Reasoning Model</Label>
                 <Select value={reasoningModel} onValueChange={setReasoningModel}>
                   <SelectTrigger className="bg-muted border-border rounded-xl">
-                    <SelectValue placeholder="Select model" />
+                    <SelectValue
+                      placeholder={modelsLoading ? 'Loading models...' : 'Select model'}
+                    />
                   </SelectTrigger>
-                  <SelectContent className="bg-popover border-border rounded-xl">
-                    {REASONING_MODELS.map(model => (
-                      <SelectItem key={model.value} value={model.value} className="rounded-lg">
+                  <SelectContent className="bg-popover border-border rounded-xl max-h-64">
+                    {reasoningModels.length === 0 && !modelsLoading && (
+                      <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                        No models available
+                      </div>
+                    )}
+                    {reasoningModels.map(model => (
+                      <SelectItem key={model.id} value={model.id} className="rounded-lg">
                         <span className="flex items-center gap-2 w-full">
-                          {model.label}
-                          <TierBadge tier={model.tier} />
+                          {model.name}
+                          <span className="text-[10px] text-muted-foreground ml-auto">
+                            ${model.prompt_price}/M
+                          </span>
                         </span>
                       </SelectItem>
                     ))}
@@ -243,14 +238,23 @@ export default function SettingsPage() {
                 <Label className="text-muted-foreground">Agent Model</Label>
                 <Select value={agentModel} onValueChange={setAgentModel}>
                   <SelectTrigger className="bg-muted border-border rounded-xl">
-                    <SelectValue placeholder="Select model" />
+                    <SelectValue
+                      placeholder={modelsLoading ? 'Loading models...' : 'Select model'}
+                    />
                   </SelectTrigger>
-                  <SelectContent className="bg-popover border-border rounded-xl">
-                    {AGENT_MODELS.map(model => (
-                      <SelectItem key={model.value} value={model.value} className="rounded-lg">
+                  <SelectContent className="bg-popover border-border rounded-xl max-h-64">
+                    {agentModels.length === 0 && !modelsLoading && (
+                      <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                        No models available
+                      </div>
+                    )}
+                    {agentModels.map(model => (
+                      <SelectItem key={model.id} value={model.id} className="rounded-lg">
                         <span className="flex items-center gap-2 w-full">
-                          {model.label}
-                          <TierBadge tier={model.tier} />
+                          {model.name}
+                          <span className="text-[10px] text-muted-foreground ml-auto">
+                            ${model.prompt_price}/M
+                          </span>
                         </span>
                       </SelectItem>
                     ))}
@@ -260,48 +264,12 @@ export default function SettingsPage() {
             </div>
           </section>
 
-          {/* Agent Section */}
-          <section>
-            <SectionHeader description="Customize your AI assistant">Agent</SectionHeader>
-            <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
-              <div className="space-y-2">
-                <Label htmlFor="agentName" className="text-muted-foreground">
-                  Agent Name
-                </Label>
-                <Input
-                  id="agentName"
-                  value={agentName}
-                  onChange={e => setAgentName(e.target.value)}
-                  placeholder="STELLA"
-                  className="bg-muted border-border rounded-xl"
-                />
-                <p className="text-[11px] text-muted-foreground">
-                  Use {'{agent_name}'} in the system prompt to reference this
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="systemPrompt" className="text-muted-foreground">
-                  System Prompt
-                </Label>
-                <textarea
-                  id="systemPrompt"
-                  value={systemPrompt}
-                  onChange={e => setSystemPrompt(e.target.value)}
-                  placeholder="You are {agent_name}, a personal knowledge management assistant..."
-                  rows={8}
-                  className="w-full bg-muted border border-border rounded-xl px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
-                />
-              </div>
-            </div>
-          </section>
-
           {/* API Keys Section */}
           <section>
             <SectionHeader description="Configure LLM provider access">API Keys</SectionHeader>
             <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
               <div className="flex items-center justify-between">
-                <Label className="text-muted-foreground">Show Keys</Label>
+                <Label className="text-muted-foreground">Show Key</Label>
                 <button
                   type="button"
                   onClick={() => setShowKeys(!showKeys)}
@@ -323,57 +291,17 @@ export default function SettingsPage() {
                   placeholder="sk-or-..."
                   className="bg-muted border-border rounded-xl font-mono text-sm"
                 />
-              </div>
-
-              <div className="border-t border-border pt-4 space-y-4">
-                <p className="text-xs text-muted-foreground">
-                  Optional: Use a direct provider instead of OpenRouter
+                <p className="text-[11px] text-muted-foreground">
+                  Get your key at{' '}
+                  <a
+                    href="https://openrouter.ai/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    openrouter.ai/keys
+                  </a>
                 </p>
-
-                <div className="space-y-2">
-                  <Label className="text-muted-foreground">Provider</Label>
-                  <Select value={directProvider} onValueChange={setDirectProvider}>
-                    <SelectTrigger className="bg-muted border-border rounded-xl">
-                      <SelectValue placeholder="None" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-popover border-border rounded-xl">
-                      <SelectItem value="none" className="rounded-lg">
-                        None
-                      </SelectItem>
-                      <SelectItem value="openai" className="rounded-lg">
-                        OpenAI
-                      </SelectItem>
-                      <SelectItem value="anthropic" className="rounded-lg">
-                        Anthropic
-                      </SelectItem>
-                      <SelectItem value="google" className="rounded-lg">
-                        Google
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {directProvider && (
-                  <div className="space-y-2">
-                    <Label htmlFor="directApiKey" className="text-muted-foreground">
-                      {directProvider.charAt(0).toUpperCase() + directProvider.slice(1)} API Key
-                    </Label>
-                    <Input
-                      id="directApiKey"
-                      type={showKeys ? 'text' : 'password'}
-                      value={directApiKey}
-                      onChange={e => setDirectApiKey(e.target.value)}
-                      placeholder={
-                        directProvider === 'openai'
-                          ? 'sk-...'
-                          : directProvider === 'anthropic'
-                            ? 'sk-ant-...'
-                            : '...'
-                      }
-                      className="bg-muted border-border rounded-xl font-mono text-sm"
-                    />
-                  </div>
-                )}
               </div>
             </div>
           </section>

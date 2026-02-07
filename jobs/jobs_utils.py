@@ -9,7 +9,7 @@ from rapidfuzz import fuzz
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 
 from db.store import MemGraphStore
-from schema.dtypes import Fact, FactMergeResult, ProfileUpdate
+from shared.schema.dtypes import Fact, FactMergeResult, ProfileUpdate
 
 
 

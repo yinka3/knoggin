@@ -6,7 +6,7 @@ export async function getHistory(sessionId, limit = 40) {
   return res.json()
 }
 
-export async function sendMessage(sessionId, message, hotTopics = [], onEvent) {
+export async function sendMessage(sessionId, message, hotTopics = [], onEvent, signal = null) {
   const res = await fetch(`${API_BASE}/chat/${sessionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -15,6 +15,7 @@ export async function sendMessage(sessionId, message, hotTopics = [], onEvent) {
       hot_topics: hotTopics,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     }),
+    signal,
   })
 
   if (!res.ok) {
