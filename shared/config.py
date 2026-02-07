@@ -174,7 +174,8 @@ def get_default_config() -> dict:
                     "find_path": 5,
                     "get_hierarchy": 5,
                     "save_memory": 2,
-                    "forget_memory": 2
+                    "forget_memory": 2,
+                    "search_files": 3
                 }
             },
             

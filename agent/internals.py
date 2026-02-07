@@ -200,6 +200,9 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             ctx.evidence.hierarchy.append(data)
         elif isinstance(data, list):
             ctx.evidence.hierarchy.extend(data)
+    elif tool_name == "search_files":
+        if isinstance(data, list) and data and "error" not in data[0]:
+            _merge_unique(ctx.evidence.messages, data, lambda x: f"{x.get('file_id')}_{x.get('chunk_index')}")
 
 
 def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
@@ -224,6 +227,12 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         if "error" in result:
             return f"Error: {result['error']}", 0
         return "Memory updated", 1
+    
+    if tool_name == "search_files":
+        count = len(data) if isinstance(data, list) else 0
+        if count > 0 and "error" not in (data[0] if data else {}):
+            return f"Found {count} relevant chunks", count
+        return "No results", 0
 
     return "Completed", 1
 
@@ -237,6 +246,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both")),
         "save_memory": lambda: tools.save_memory(args.get("content", ""), args.get("topic", "General")),
         "forget_memory": lambda: tools.forget_memory(args.get("memory_id", "")),
+        "search_files": lambda: tools.search_files(args.get("query", ""), args.get("file_name"), args.get("limit", 5)),
     }
 
     logger.info(f"[TOOL CALL] {name}: {json.dumps(args)}")

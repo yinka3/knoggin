@@ -4,7 +4,8 @@ def get_agent_prompt(
     persona: str = "", 
     agent_name: str = "STELLA",
     memory_context: str = "",
-    preferences_context: str = ""
+    preferences_context: str = "",
+    files_context: str = ""
 ) -> str:
     date_context = f"Current time: {current_time}." if current_time else ""
     voice = persona if persona else "Warm and direct. Match their energy. No corporate filler."
@@ -24,6 +25,9 @@ def get_agent_prompt(
                 f"{memory_context}\n"
                 f"</your_memory>\n"
             )
+        
+        if files_context:
+            memory_section += f"<uploaded_files>\nFiles available in this session. Use search_files to query them.\n{files_context}\n</uploaded_files>\n"
         
         memory_section += "</persistent_context>\n"
 

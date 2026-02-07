@@ -13,6 +13,7 @@ import TopicsDrawer from '../components/chat/TopicsDrawer'
 import TokenCounter from '../components/chat/TokenCounter'
 import WelcomeState from '../components/chat/WelcomeState'
 import AgentSelector from '../components/chat/AgentSelector'
+import FilesDrawer from '../components/chat/FilesDrawer'
 import { listAgents } from '@/api/agents'
 
 export default function ChatPage() {
@@ -156,6 +157,7 @@ export default function ChatPage() {
           </div>
           <div className="flex items-center gap-4">
             <TokenCounter value={totalTokens} />
+            <FilesDrawer sessionId={sessionId} />
             <TopicsDrawer sessionId={sessionId} />
           </div>
         </div>

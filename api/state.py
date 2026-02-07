@@ -309,7 +309,23 @@ class AppState:
                 deleted += await redis.delete(*keys)
             if cursor == 0:
                 break
-        
+            
+        if session_id in self.active_sessions:
+            ctx = self.active_sessions[session_id]
+            if ctx.file_rag:
+                ctx.file_rag.cleanup_session()
+        else:
+            import os
+            from shared.file_rag import FileRAGService
+            upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
+            temp_rag = FileRAGService(
+                session_id=session_id,
+                chroma_client=self.resources.chroma,
+                embedding_service=self.resources.embedding,
+                upload_dir=upload_dir,
+            )
+            temp_rag.cleanup_session()
+
         job_names = ["cleaner", "profile", "merger", "dlq", "archival"]
         for job in job_names:
             direct_keys.append(RedisKeys.job_last_run(job, user, session_id))

@@ -84,6 +84,7 @@ export default function InputBar({
 
         {/* Compact toolbar */}
         <div className="flex items-center gap-1 px-3 py-1.5 border-t border-border/50">
+          <div className="w-px h-3.5 bg-border/50 mx-0.5" />
           <ToolToggles enabledTools={enabledTools} onToggle={onToolsChange} disabled={disabled} />
           <div className="w-px h-3.5 bg-border/50 mx-0.5" />
           <ModelSelector

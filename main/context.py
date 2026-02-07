@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import os
 import redis.asyncio as aioredis
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
@@ -24,7 +25,7 @@ from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
 import uuid
-
+from shared.file_rag import FileRAGService
 from shared.schema.dtypes import Fact, MessageConnections, MessageData
 from shared.events import emit
 from shared.redisclient import RedisKeys
@@ -39,6 +40,7 @@ class Context:
         self.redis_client: aioredis.Redis = redis_client
         self.model: Optional[str] = None
         self.llm: LLMService = None
+        self.file_rag: FileRAGService = None
         
         self.store: MemGraphStore = None
         self.nlp_pipe: NLPPipeline = None
@@ -161,6 +163,14 @@ class Context:
             session_window=session_window
         )
         instance.consumer.start()
+
+        upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
+        instance.file_rag = FileRAGService(
+            session_id=instance.session_id,
+            chroma_client=resources.chroma,
+            embedding_service=resources.embedding,
+            upload_dir=upload_dir,
+        )
         
         jobs_cfg = dev_settings.get("jobs", {})
         

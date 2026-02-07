@@ -28,6 +28,7 @@ from agent.formatters import (
     format_path_results,
     format_hierarchy_results
 )
+from shared.file_rag import FileRAGService
 from shared.service import LLMService
 from shared.topics_config import TopicConfig
 from shared.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
@@ -157,6 +158,7 @@ async def run_stream(
     redis_client: aioredis.Redis,
     model: str = None,
     enabled_tools: List[str] = None,
+    file_rag = None,
     user_timezone: str = None
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
@@ -212,7 +214,10 @@ async def run_stream(
         })
 
         search_cfg = dev_settings.get("search", {})
-        tools = Tools(user_name, store, ent_resolver, redis_client, session_id, topic_config, search_config=search_cfg)
+        tools = Tools(
+            user_name, store, ent_resolver, redis_client, session_id, 
+            topic_config, search_config=search_cfg, file_rag=file_rag
+        )
 
         if hot_topics:
             yield {"event": "status", "data": {"message": "Loading context..."}}

@@ -6,6 +6,7 @@ from loguru import logger
 import redis.asyncio as aioredis
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
+from shared.file_rag import FileRAGService
 from shared.topics_config import TopicConfig
 from shared.redisclient import RedisKeys 
 
@@ -14,7 +15,8 @@ from shared.redisclient import RedisKeys
 class Tools:
     
     def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, 
-                redis_client: aioredis.Redis, session_id: str, topic_config: TopicConfig = None, search_config: dict = None):
+                redis_client: aioredis.Redis, session_id: str, topic_config: TopicConfig = None, 
+                search_config: dict = None, file_rag: FileRAGService =None):
         self.session_id = session_id
         self.store = store
         self.resolver = ent_resolver
@@ -22,6 +24,7 @@ class Tools:
         self.redis = redis_client
         self.embedding_service = ent_resolver.embedding_service
         self.topic_config = topic_config
+        self.file_rag = file_rag
         self.active_topics = topic_config.active_topics if topic_config else []
         self.search_cfg = search_config or {}
     
@@ -631,3 +634,86 @@ class Tools:
                 return {"removed": True, "memory_id": memory_id, "topic": topic}
         
         return {"error": f"Memory '{memory_id}' not found in any block"}
+    
+    
+    async def search_files(self, query: str, file_name: str = None, limit: int = 5) -> List[Dict]:
+        """
+        Search uploaded session files for relevant content.
+        
+        Args:
+            query: What to search for
+            file_name: Optional filename to restrict search to
+            limit: Max chunks to return
+        
+        Returns:
+            List of matching chunks with file name, content, and relevance score.
+        """
+        if not self.file_rag:
+            return [{"error": "No file service available for this session"}]
+        
+        files = []
+        if self.file_rag:
+            files = self.file_rag.list_files()
+    
+        if not files:
+            return [{"error": "No files uploaded to this session"}]
+        
+        file_filter = None
+        if file_name:
+            for f in files:
+                if f["original_name"].lower() == file_name.lower():
+                    file_filter = f["file_id"]
+                    break
+            if not file_filter:
+                available = [f["original_name"] for f in files]
+                return [{"error": f"File '{file_name}' not found. Available: {', '.join(available)}"}]
+        
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(
+            None,
+            lambda: self.file_rag.search(query, n_results=limit, file_filter=file_filter)
+        )
+        
+        if not results:
+            return [{"info": "No relevant content found in uploaded files"}]
+        
+        return results
+    
+    async def get_memory_blocks(self, hot_topics: List[str]) -> Dict[str, List[Dict]]:
+        """
+        Fetch memory blocks for prompt injection.
+        Always includes General. Adds hot topic blocks.
+        """
+        topics_to_fetch = ["General"]
+        for t in hot_topics:
+            if t != "General" and t not in topics_to_fetch:
+                topics_to_fetch.append(t)
+        
+        blocks = {}
+        
+        for topic in topics_to_fetch:
+            memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, topic)
+            raw = await self.redis.hgetall(memory_key)
+            
+            if not raw:
+                continue
+            
+            entries = []
+            for mem_id, payload in raw.items():
+                data = json.loads(payload)
+                entries.append({
+                    "id": mem_id,
+                    "content": data["content"],
+                    "created_at": data.get("created_at", "")
+                })
+            
+            entries.sort(key=lambda x: x["created_at"])
+            blocks[topic] = entries
+        
+        return blocks
+
+    def get_file_manifest(self) -> List[Dict]:
+        """Get list of uploaded files for prompt context."""
+        if not self.file_rag:
+            return []
+        return self.file_rag.list_files()

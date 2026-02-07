@@ -16,7 +16,7 @@ from api.routes.config import router as config_router
 from api.routes.debug import router as debug_router
 from api.routes.agents import router as agents_router
 from api.routes.stats import router as stats_router
-
+from api.routes.files import router as files_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Knoggin...")
@@ -55,3 +55,4 @@ app.include_router(agents_router, prefix="/agents", tags=["agents"])
 app.include_router(config_router, prefix="/config", tags=["config"])
 app.include_router(debug_router, prefix="/debug", tags=["debug"])
 app.include_router(stats_router, prefix="/stats", tags=["stats"])
+app.include_router(files_router, prefix="/files", tags=["files"])

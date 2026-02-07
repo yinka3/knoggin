@@ -196,6 +196,36 @@ TOOL_SCHEMAS = [
                 "required": ["memory_id"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": (
+                "Search through files the user has uploaded to this session. "
+                "Use when the user asks about content in their uploaded documents, code files, or PDFs. "
+                "Returns the most relevant chunks with file name and location. "
+                "Only works if files have been uploaded — check the file context in your prompt first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for in the uploaded files."
+                    },
+                    "file_name": {
+                        "type": "string",
+                        "description": "Optional: restrict search to a specific file by name."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max chunks to return (default 5)."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
 
@@ -208,6 +238,7 @@ ALL_TOOL_NAMES = [
     "get_recent_activity",
     "save_memory",
     "forget_memory",
+    "search_files",
 ]
 
 def get_filtered_schemas(enabled_tools: list[str] | None = None) -> list[dict]:

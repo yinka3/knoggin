@@ -11,6 +11,9 @@ const TOOLS = [
   { id: 'get_hierarchy', name: 'Hierarchy' },
   { id: 'search_messages', name: 'Search Messages' },
   { id: 'get_recent_activity', name: 'Recent Activity' },
+  { id: 'save_memory', name: 'Save Memory' },
+  { id: 'forget_memory', name: 'Forget Memory' },
+  { id: 'search_files', name: 'Search Files' },
 ]
 
 export default function ToolToggles({ enabledTools, onToggle, disabled }) {

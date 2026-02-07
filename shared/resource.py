@@ -1,6 +1,7 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import os
 from gliner import GLiNER
 from loguru import logger
 import redis.asyncio as aioredis
@@ -12,6 +13,7 @@ from shared.config import get_config_value
 from shared.embedding import EmbeddingService
 from shared.redisclient import AsyncRedisClient
 from shared.service import LLMService
+import chromadb
 
 class ResourceManager:
     _instance = None
@@ -25,6 +27,7 @@ class ResourceManager:
         self.executor: ThreadPoolExecutor = None
         self.gliner: GLiNER = None
         self.spacy: spacy.Language = None
+        self.chroma: chromadb.ClientAPI = None
 
     @classmethod
     async def initialize(cls) -> "ResourceManager":
@@ -54,6 +57,10 @@ class ResourceManager:
                 )
                 
                 instance.embedding = EmbeddingService(device=device)
+
+                chroma_path = os.path.join(os.getenv("CONFIG_DIR", "./config"), "chroma_db")
+                instance.chroma = chromadb.PersistentClient(path=chroma_path)
+                logger.info(f"ChromaDB initialized at {chroma_path}")
 
                 exclude = ["ner", "lemmatizer", "attribute_ruler"]
                 nlp = spacy.load("en_core_web_md", exclude=exclude)
@@ -101,6 +108,7 @@ class ResourceManager:
                 pass
             self.embedding = None
         
+        self.chroma = None
         self.gliner = None
         self.spacy = None
         
@@ -119,6 +127,7 @@ class ResourceManager:
         if self.embedding:
             self.embedding.cleanup()
         
+        self.chroma = None
         logger.info("ResourceManager shutdown complete")
         
         self.__class__._instance = None

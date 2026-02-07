@@ -293,3 +293,15 @@ def format_preferences_context(preferences: list) -> str:
             lines.append(f"- {content}")
     
     return "\n".join(lines)
+
+def format_files_context(files: list) -> str:
+    """Format file manifest for prompt injection."""
+    if not files:
+        return ""
+    
+    lines = []
+    for f in files:
+        size_kb = f.get("size_bytes", 0) / 1024
+        lines.append(f"- {f['original_name']} ({size_kb:.0f}KB, {f['chunk_count']} chunks)")
+    
+    return "\n".join(lines)

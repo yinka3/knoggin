@@ -99,6 +99,7 @@ async def send_message(
                 redis_client=state.resources.redis,
                 model=effective_model,
                 enabled_tools=enabled_tools,
+                file_rag=context.file_rag,
                 user_timezone=body.timezone
             ):
                 
