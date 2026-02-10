@@ -11,6 +11,7 @@ from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
 from shared.config import get_config_value
 from shared.embedding import EmbeddingService
+from shared.mcp_client import MCPClientManager
 from shared.redisclient import AsyncRedisClient
 from shared.service import LLMService
 import chromadb
@@ -28,6 +29,7 @@ class ResourceManager:
         self.gliner: GLiNER = None
         self.spacy: spacy.Language = None
         self.chroma: chromadb.ClientAPI = None
+        self.mcp_manager: MCPClientManager = None
 
     @classmethod
     async def initialize(cls) -> "ResourceManager":
@@ -73,6 +75,9 @@ class ResourceManager:
                 logger.info("Loaded GLiNER large-v2.1")
                 instance.gliner = model
 
+                mcp_config = get_config_value("mcp") or {"servers": {}}
+                instance.mcp_manager = await MCPClientManager.create(mcp_config)
+
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
                 return instance
@@ -108,6 +113,13 @@ class ResourceManager:
                 pass
             self.embedding = None
         
+        if self.mcp_manager:
+            try:
+                await self.mcp_manager.shutdown()
+            except Exception:
+                pass
+            self.mcp_manager = None
+        
         self.chroma = None
         self.gliner = None
         self.spacy = None
@@ -126,6 +138,9 @@ class ResourceManager:
         
         if self.embedding:
             self.embedding.cleanup()
+        
+        if self.mcp_manager:
+            await self.mcp_manager.shutdown()
         
         self.chroma = None
         logger.info("ResourceManager shutdown complete")

@@ -16,7 +16,7 @@ class Tools:
     
     def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, 
                 redis_client: aioredis.Redis, session_id: str, topic_config: TopicConfig = None, 
-                search_config: dict = None, file_rag: FileRAGService =None):
+                search_config: dict = None, file_rag: FileRAGService =None, mcp_manager=None):
         self.session_id = session_id
         self.store = store
         self.resolver = ent_resolver
@@ -27,6 +27,7 @@ class Tools:
         self.file_rag = file_rag
         self.active_topics = topic_config.active_topics if topic_config else []
         self.search_cfg = search_config or {}
+        self.mcp_manager = mcp_manager
     
     def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""

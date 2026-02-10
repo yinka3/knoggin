@@ -1,8 +1,10 @@
+import json
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from api.state import AppState
+from shared.redisclient import RedisKeys
 
 router = APIRouter()
 
@@ -120,3 +122,34 @@ async def set_default_agent(
     if not success:
         raise HTTPException(status_code=404, detail="Agent not found")
     return {"success": True}
+
+@router.get("/memory/{session_id}")
+async def get_session_memory(
+    session_id: str,
+    state: AppState = Depends(get_app_state)
+):
+    context = await state.get_or_resume_session(session_id)
+    if not context:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    topics = list(context.topic_config.raw.keys()) + ["General"]
+    blocks = {}
+    
+    for topic in topics:
+        key = RedisKeys.agent_memory(context.user_name, session_id, topic)
+        raw = await context.redis_client.hgetall(key)
+        if raw:
+            entries = []
+            for mem_id, payload in raw.items():
+                data = json.loads(payload)
+                entries.append({
+                    "id": mem_id,
+                    "content": data["content"],
+                    "topic": data.get("topic", topic),
+                    "created_at": data.get("created_at", ""),
+                })
+            entries.sort(key=lambda x: x["created_at"])
+            blocks[topic] = entries
+    
+    total = sum(len(v) for v in blocks.values())
+    return {"blocks": blocks, "total": total}

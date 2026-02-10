@@ -29,6 +29,7 @@ from agent.formatters import (
     format_hierarchy_results
 )
 from shared.file_rag import FileRAGService
+from shared.mcp_bridge import mcp_tools_to_schemas
 from shared.service import LLMService
 from shared.topics_config import TopicConfig
 from shared.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
@@ -159,7 +160,8 @@ async def run_stream(
     model: str = None,
     enabled_tools: List[str] = None,
     file_rag = None,
-    user_timezone: str = None
+    user_timezone: str = None,
+    mcp_manager=None
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
     
@@ -216,7 +218,8 @@ async def run_stream(
         search_cfg = dev_settings.get("search", {})
         tools = Tools(
             user_name, store, ent_resolver, redis_client, session_id, 
-            topic_config, search_config=search_cfg, file_rag=file_rag
+            topic_config, search_config=search_cfg, file_rag=file_rag,
+            mcp_manager=mcp_manager
         )
 
         if hot_topics:
@@ -255,6 +258,8 @@ async def run_stream(
             # Collect tool calls while streaming tokens
             pending_tool_calls = []
             active_schemas = get_filtered_schemas(enabled_tools)
+            if mcp_manager:
+                active_schemas = active_schemas + mcp_tools_to_schemas(mcp_manager.get_all_tools())
             async for chunk in call_agent_streaming(
                 llm, ctx, user_name, last_result, current_time, model, active_schemas,
                 memory_context=memory_context,

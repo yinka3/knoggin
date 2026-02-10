@@ -13,6 +13,7 @@ from agent.formatters import (
     format_hot_topic_context,
 )
 from agent.tools import Tools
+from shared.mcp_client import parse_mcp_tool_name
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class AgentConfig:
         ("get_recent_activity", 5),
         ("find_path", 5),
         ("get_hierarchy", 5),
+        ("mcp__*", 3),
     )
     
     def get_tool_limit(self, tool_name: str, default: int = 6) -> int:
@@ -237,6 +239,14 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
     return "Completed", 1
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
+    parsed = parse_mcp_tool_name(name)
+    if parsed:
+        server_name, tool_name = parsed
+        if not tools.mcp_manager:
+            return {"error": "MCP not configured"}
+        logger.info(f"[MCP TOOL CALL] {server_name}.{tool_name}: {json.dumps(args)}")
+        return await tools.mcp_manager.call_tool(server_name, tool_name, args)
+    
     dispatch = {
         "search_messages": lambda: tools.search_messages(args.get("query", ""), min(args.get("limit", 8), 8)),
         "search_entity": lambda: tools.search_entity(args.get("query", ""), min(args.get("limit", 5), 5)),

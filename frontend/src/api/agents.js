@@ -65,3 +65,9 @@ export async function setDefaultAgent(agentId) {
   }
   return res.json()
 }
+
+export async function getSessionMemory(sessionId) {
+  const res = await fetch(`${API_BASE}/agents/memory/${sessionId}`)
+  if (!res.ok) throw new Error('Failed to load memory')
+  return res.json()
+}

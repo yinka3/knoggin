@@ -100,7 +100,8 @@ async def send_message(
                 model=effective_model,
                 enabled_tools=enabled_tools,
                 file_rag=context.file_rag,
-                user_timezone=body.timezone
+                user_timezone=body.timezone,
+                mcp_manager=context.mcp_manager
             ):
                 
                 if event["event"] == "tool_start":
@@ -156,7 +157,8 @@ async def send_message(
                     await context.add_assistant_turn(
                         content=final_response,
                         timestamp=datetime.now(timezone.utc),
-                        metadata=metadata or None
+                        metadata=metadata or None,
+                        user_msg_id=msg.id
                     )
                     error_payload["response_saved"] = True
                 except Exception:

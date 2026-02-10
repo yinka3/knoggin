@@ -110,7 +110,11 @@ def get_default_config() -> dict:
             "reasoning_model": "google/gemini-2.5-flash",
             "agent_model": "google/gemini-3-flash-preview"
         },
-        
+        "mcp": {
+            "servers": {},
+            "tool_timeout": 15.0,
+            "max_mcp_calls_per_run": 3
+        },
         "developer_settings": {
             
             "ingestion": {

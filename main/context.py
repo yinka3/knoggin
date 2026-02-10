@@ -41,6 +41,7 @@ class Context:
         self.model: Optional[str] = None
         self.llm: LLMService = None
         self.file_rag: FileRAGService = None
+        self.mcp_manager = None
         
         self.store: MemGraphStore = None
         self.nlp_pipe: NLPPipeline = None
@@ -82,6 +83,7 @@ class Context:
         instance.model = model
         instance.redis_client = resources.redis
         instance.embedding_service = resources.embedding
+        instance.mcp_manager = resources.mcp_manager
         
         await resources.redis.hset(
             RedisKeys.session_config(user_name),
@@ -424,8 +426,8 @@ class Context:
             f"turn_{turn_id}"
         )
     
-    async def add_assistant_turn(self, content: str, timestamp: datetime, metadata: dict = None):
-        """Add assistant turn to conversation log."""
+    async def add_assistant_turn(self, content: str, timestamp: datetime, metadata: dict = None, user_msg_id: int = None):
+        """Add assistant turn to conversation log, optionally extract."""
         turn_id = await self.add_to_conversation_log(
             role="assistant",
             content=content,
@@ -437,7 +439,46 @@ class Context:
             self._persist_assistant_embedding(turn_id, content, timestamp)
         )
         task.add_done_callback(handle_background_task_result)
+        
+        # Classify and conditionally push to extraction buffer
+        if user_msg_id is not None:
+            task2 = asyncio.create_task(
+                self._maybe_extract_assistant(content, user_msg_id)
+            )
+            task2.add_done_callback(handle_background_task_result)
 
+
+    async def _maybe_extract_assistant(self, content: str, user_msg_id: int):
+        """Classify assistant response and push to extraction if worthy."""
+        if not content or len(content.strip()) < 50:
+            return
+        
+        result = await self.llm.call_llm(
+            system=(
+                "Does this AI assistant response contain specific factual information "
+                "about named people, projects, tools, organizations, or technical decisions "
+                "worth storing in a knowledge graph? Respond with only YES or NO."
+            ),
+            user=content[:1500],
+            reasoning="low"
+        )
+        
+        if not result or not result.strip().upper().startswith("YES"):
+            return
+        
+        assistant_msg_id = await self.get_next_msg_id()
+        buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
+        
+        await self.redis_client.rpush(buffer_key, json.dumps({
+            "id": assistant_msg_id,
+            "message": content,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "role": "assistant",
+            "parent_msg_id": user_msg_id
+        }))
+        
+        self.consumer.signal()
+        logger.info(f"Queued assistant msg_{assistant_msg_id} for extraction (parent: msg_{user_msg_id})")
 
     async def _persist_assistant_embedding(self, turn_id: int, content: str, timestamp: datetime):
         """Background task: compute embedding and write to graph with retry."""
