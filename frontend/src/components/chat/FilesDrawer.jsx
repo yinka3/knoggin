@@ -6,6 +6,7 @@ import { Paperclip, Upload, Trash2, File, FileCode, FileText, Loader2 } from 'lu
 import { uploadFile, listFiles, deleteFile } from '@/api/files'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { formatDate, formatSize } from '@/lib/format'
 
 const ALLOWED_EXT = [
   '.txt',
@@ -50,22 +51,6 @@ function getFileIcon(ext) {
   return FileText
 }
 
-function formatSize(bytes) {
-  if (bytes < 1024) return `${bytes}B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
-}
-
-function formatDate(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return d.toLocaleDateString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
 
 export default function FilesDrawer({ sessionId }) {
   const [open, setOpen] = useState(false)

@@ -1,9 +1,8 @@
-const API_BASE = 'http://localhost:8000'
+import { apiGet } from './fetch'
+import { API_BASE } from './config-base'
 
-export async function getHistory(sessionId, limit = 40) {
-  const res = await fetch(`${API_BASE}/chat/${sessionId}/history?limit=${limit}`)
-  if (!res.ok) throw new Error('Failed to load history')
-  return res.json()
+export function getHistory(sessionId, limit = 40) {
+  return apiGet(`/chat/${sessionId}/history?limit=${limit}`)
 }
 
 export async function sendMessage(sessionId, message, hotTopics = [], onEvent, signal = null) {

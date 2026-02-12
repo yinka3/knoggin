@@ -1,35 +1,45 @@
-const API_BASE = 'http://localhost:8000'
+import { apiGet, apiPost, apiPatch, apiDelete } from './fetch'
 
-export async function getConfig() {
-  const res = await fetch(`${API_BASE}/config/`)
-  if (!res.ok) throw new Error('Failed to load config')
-  return res.json()
+export function getConfig() {
+  return apiGet('/config/')
 }
 
-export async function updateConfig(data) {
-  const res = await fetch(`${API_BASE}/config/`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  })
-  if (!res.ok) throw new Error('Failed to save config')
-  return res.json()
+export function updateConfig(data) {
+  return apiPatch('/config/', data)
 }
 
-export async function getConfigStatus() {
-  const res = await fetch(`${API_BASE}/config/status`)
-  if (!res.ok) throw new Error('Failed to check config status')
-  return res.json()
+export function getConfigStatus() {
+  return apiGet('/config/status')
 }
 
-export async function getAvailableModels() {
-  const res = await fetch(`${API_BASE}/config/models`)
-  if (!res.ok) throw new Error('Failed to fetch models')
-  return res.json()
+export function getAvailableModels() {
+  return apiGet('/config/models')
 }
 
-export async function getCuratedModels() {
-  const res = await fetch(`${API_BASE}/config/models/curated`)
-  if (!res.ok) throw new Error('Failed to fetch curated models')
-  return res.json()
+export function getCuratedModels() {
+  return apiGet('/config/models/curated')
+}
+
+export function getTools() {
+  return apiGet('/config/tools')
+}
+
+export function getMCPPresets() {
+  return apiGet('/config/mcp/presets')
+}
+
+export function getMCPServers() {
+  return apiGet('/config/mcp/servers')
+}
+
+export function addMCPServer(data) {
+  return apiPost('/config/mcp/servers', data)
+}
+
+export function removeMCPServer(name) {
+  return apiDelete(`/config/mcp/servers/${encodeURIComponent(name)}`)
+}
+
+export function toggleMCPServer(name) {
+  return apiPost(`/config/mcp/servers/${encodeURIComponent(name)}/toggle`)
 }

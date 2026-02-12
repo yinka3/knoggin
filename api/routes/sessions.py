@@ -76,6 +76,8 @@ async def create_session(
         agent_id=agent_id
     )
 
+    await state.resources.redis.delete(f"topic_gen_count:{state.user_name}")
+
     if body and body.enabled_tools is not None:
         raw = await state.resources.redis.hget(RedisKeys.sessions(state.user_name), context.session_id)
         metadata = json.loads(raw)

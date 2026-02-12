@@ -112,7 +112,11 @@ def format_entity_results(entities: List[Dict], evidence_limit: int = 5) -> str:
                 weight = conn.get("weight", 0)
                 
                 alias_str = f" (aka {', '.join(conn_aliases)})" if conn_aliases else ""
-                block += f"  -> {conn_name}{alias_str} | weight: {weight}\n"
+                conn_context = conn.get("context")
+                if conn_context:
+                    block += f"  -> {conn_name}{alias_str} | Context: {conn_context} | weight: {weight}\n"
+                else:
+                    block += f"  -> {conn_name}{alias_str} | weight: {weight}\n"
                 
                 for ev in conn.get("evidence", [])[:evidence_limit]:
                     msg = ev.get("message", "")
@@ -138,6 +142,9 @@ def format_graph_results(results: List[Dict]) -> str:
             last_seen = _format_timestamp(r.get("last_seen"))
             
             block = f"--- {source} -> {target} ---\n"
+            context = r.get("context")
+            if context:
+                block += f"Description: {context}\n"
             target_facts = r.get("target_facts", [])
             if target_facts:
                 block += f"Facts: {' | '.join(target_facts[:3])}\n"

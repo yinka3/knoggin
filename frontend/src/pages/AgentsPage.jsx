@@ -5,14 +5,32 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Plus, Star, Pencil, Trash2, Bot } from 'lucide-react'
 import { listAgents, createAgent, updateAgent, deleteAgent, setDefaultAgent } from '@/api/agents'
+import { getAvailableModels } from '@/api/config'
 import { toast } from 'sonner'
 
 function AgentCard({ agent, onEdit, onDelete, onSetDefault }) {
@@ -83,14 +101,18 @@ export default function AgentsPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingAgent, setEditingAgent] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState(null)
 
-  // Form state
   const [name, setName] = useState('')
   const [persona, setPersona] = useState('')
   const [model, setModel] = useState('')
+  const [agentModels, setAgentModels] = useState([])
 
   useEffect(() => {
     loadAgents()
+    getAvailableModels()
+      .then(m => setAgentModels(m.agent || []))
+      .catch(() => {})
   }, [])
 
   async function loadAgents() {
@@ -153,14 +175,19 @@ export default function AgentsPage() {
   }
 
   async function handleDelete(agent) {
-    if (!confirm(`Delete "${agent.name}"? This cannot be undone.`)) return
+    setDeleteTarget(agent)
+  }
 
+  async function confirmDelete() {
+    if (!deleteTarget) return
     try {
-      await deleteAgent(agent.id)
+      await deleteAgent(deleteTarget.id)
       toast.success('Agent deleted')
       await loadAgents()
     } catch (err) {
       toast.error(err.message)
+    } finally {
+      setDeleteTarget(null)
     }
   }
 
@@ -266,19 +293,25 @@ export default function AgentsPage() {
               </p>
             </div>
 
-            <div className="space-y-2">
+             <div className="space-y-2">
               <Label htmlFor="model" className="text-muted-foreground">
                 Model Override <span className="text-muted-foreground/50">(optional)</span>
               </Label>
-              <Input
-                id="model"
-                value={model}
-                onChange={e => setModel(e.target.value)}
-                placeholder="Leave empty to use default"
-                className="bg-muted border-border rounded-xl font-mono text-sm"
-              />
+              <Select value={model || '__default__'} onValueChange={v => setModel(v === '__default__' ? '' : v)}>
+                <SelectTrigger className="bg-muted border-border rounded-xl">
+                  <SelectValue placeholder="Use global agent model" />
+                </SelectTrigger>
+                <SelectContent className="bg-background border-border">
+                  <SelectItem value="__default__">Use global agent model</SelectItem>
+                  {agentModels.map(m => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name || m.id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <p className="text-[11px] text-muted-foreground">
-                Specify a model or leave empty to use the global agent model
+                Select a model or leave as default to use the global agent model
               </p>
             </div>
           </div>
@@ -293,6 +326,26 @@ export default function AgentsPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={!!deleteTarget} onOpenChange={open => !open && setDeleteTarget(null)}>
+        <AlertDialogContent className="bg-background border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Agent</AlertDialogTitle>
+            <AlertDialogDescription>
+              Delete "{deleteTarget?.name}"? This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

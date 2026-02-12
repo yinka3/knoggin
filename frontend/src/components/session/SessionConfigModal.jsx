@@ -23,6 +23,7 @@ import { Loader2, Sparkles } from 'lucide-react'
 import { listAgents } from '@/api/agents'
 import { Bot } from 'lucide-react'
 import { toast } from 'sonner'
+import { generateTopicsFromDescription } from '@/api/topics'
 
 const DEFAULT_CONFIG = {
   General: {
@@ -51,6 +52,7 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState(null)
   const [agents, setAgents] = useState([])
+  const [attemptsRemaining, setAttemptsRemaining] = useState(3)
   const [selectedAgentId, setSelectedAgentId] = useState(null)
   const [loadingAgents, setLoadingAgents] = useState(false)
 
@@ -96,23 +98,20 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
   }
 
   async function handleGenerate() {
-    if (!description.trim()) return
+    if (!description.trim() || attemptsRemaining <= 0) return
 
     setGenerating(true)
     setError(null)
 
     try {
-      // TODO: Wire to POST /topics/generate { description }
-      // const res = await fetch(`${API_BASE}/topics/generate`, {
-      //   method: 'POST',
-      //   headers: { 'Content-Type': 'application/json' },
-      //   body: JSON.stringify({ description })
-      // })
-      // const data = await res.json()
-      // setGeneratedConfig(data.config)
-      setError('Topic generation is not yet available.')
+      const data = await generateTopicsFromDescription(description.trim())
+      setGeneratedConfig(data.topics)
+      setAttemptsRemaining(data.attempts_remaining)
     } catch (err) {
-      setError('Failed to generate config. Please try again.')
+      if (err.message.includes('limit reached')) {
+        setAttemptsRemaining(0)
+      }
+      setError(err.message || 'Failed to generate config.')
     } finally {
       setGenerating(false)
     }
@@ -256,18 +255,22 @@ export default function SessionConfigModal({ open, onOpenChange, sessions, onCre
           </div>
 
           {/* Option 3: Generate */}
-          <div className="flex items-start space-x-3 rounded-lg border border-border p-4 opacity-50 cursor-not-allowed">
-            <RadioGroupItem value="generate" id="generate" className="mt-1" disabled />
+          <div
+            className={`flex items-start space-x-3 rounded-lg border p-4 cursor-pointer transition-colors ${
+              mode === 'generate'
+                ? 'border-accent bg-muted/50'
+                : 'border-border hover:border-muted-foreground'
+            }`}
+            onClick={() => setMode('generate')}
+          >
+            <RadioGroupItem value="generate" id="generate" className="mt-1" />
             <div className="flex-1 space-y-3">
               <Label
                 htmlFor="generate"
-                className="text-muted-foreground cursor-not-allowed flex items-center gap-2"
+                className="text-foreground cursor-pointer flex items-center gap-2"
               >
                 Generate from description
-                <Sparkles size={14} className="text-muted-foreground" />
-                <Badge variant="outline" className="text-[10px]">
-                  Coming soon
-                </Badge>
+                <Sparkles size={14} className="text-primary" />
               </Label>
 
               {mode === 'generate' && (

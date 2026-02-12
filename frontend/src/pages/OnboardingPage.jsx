@@ -3,9 +3,23 @@ import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Brain, Eye, EyeOff, X, Plus, Check, ExternalLink } from 'lucide-react'
+import {
+  Brain,
+  Eye,
+  EyeOff,
+  X,
+  Zap,
+  Layers,
+  ArrowRight,
+  Loader2,
+  Check,
+  ExternalLink,
+  Trash2,
+} from 'lucide-react'
 import { updateConfig, getConfigStatus } from '@/api/config'
+import { getQuestions, generateTopics, saveTopics, runExtraction } from '@/api/onboarding'
 import { cn } from '@/lib/utils'
+import TopicEditor from '@/components/TopicEditor'
 
 function StepDots({ current, total }) {
   return (
@@ -22,18 +36,29 @@ function StepDots({ current, total }) {
     </div>
   )
 }
-
 export default function OnboardingPage() {
   const navigate = useNavigate()
   const [step, setStep] = useState(1)
   const [userName, setUserName] = useState('')
   const [apiKey, setApiKey] = useState('')
-  const [aliases, setAliases] = useState('')
-  const [facts, setFacts] = useState([])
-  const [newFact, setNewFact] = useState('')
+  const [showKey, setShowKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
-  const [showKey, setShowKey] = useState(false)
+  const [seedPath, setSeedPath] = useState(null)
+  const [questions, setQuestions] = useState([])
+  const [currentQuestion, setCurrentQuestion] = useState(0)
+  const [answers, setAnswers] = useState({})
+  const [direction, setDirection] = useState('forward')
+
+  const stepAnimation = `space-y-6 animate-in fade-in ${direction === 'forward' ? 'slide-in-from-right-4' : 'slide-in-from-left-4'} duration-300`
+  const [generatingTopics, setGeneratingTopics] = useState(false)
+  const [topics, setTopics] = useState({})
+
+  const [extracting, setExtracting] = useState(false)
+  const [extractionStage, setExtractionStage] = useState(0)
+  const [extractionResult, setExtractionResult] = useState(null)
+  const [extractionError, setExtractionError] = useState(null)
+  const [extractionComplete, setExtractionComplete] = useState(false)
 
   useEffect(() => {
     getConfigStatus().then(status => {
@@ -50,66 +75,127 @@ export default function OnboardingPage() {
   }
 
   function handleNext() {
-    if (step === 3) {
-      handleSubmit()
-    } else if (step === 4) {
-      navigate('/chat')
-    } else {
-      setStep(s => s + 1)
-    }
+    setDirection('forward')
+    setStep(s => s + 1)
   }
 
   function handleBack() {
+    setDirection('back')
     setStep(s => s - 1)
     setError(null)
   }
 
-  function handleSkip() {
-    handleSubmit()
+  async function handleSelectPath(path) {
+    setDirection('forward')
+    setSeedPath(path)
+    try {
+      const data = await getQuestions(path)
+      setQuestions(data.questions)
+      setCurrentQuestion(0)
+      setStep(4)
+    } catch (err) {
+      setError(err.message)
+    }
   }
 
-  async function handleSubmit() {
+  async function handleSkipSeeding() {
+    setDirection('forward')
     setSaving(true)
-    setError(null)
-
     try {
-      const aliasArray = aliases
-        .split(',')
-        .map(a => a.trim())
-        .filter(Boolean)
-
       await updateConfig({
         user_name: userName.trim(),
-        user_aliases: aliasArray,
-        user_facts: facts,
         llm: { api_key: apiKey.trim() },
         configured_at: new Date().toISOString(),
       })
-
-      setStep(4)
+      setStep(6)
+      setExtracting(false)
     } catch (err) {
-      setError(err.message || 'Failed to save configuration')
+      setError(err.message)
     } finally {
       setSaving(false)
     }
   }
 
-  function handleAddFact() {
-    if (newFact.trim()) {
-      setFacts([...facts, newFact.trim()])
-      setNewFact('')
+  function handleQuestionNext(skip = false) {
+    setDirection('forward')
+    if (currentQuestion < questions.length - 1) {
+      setCurrentQuestion(c => c + 1)
+    } else {
+      handleGenerateTopics()
     }
   }
 
-  function handleRemoveFact(index) {
-    setFacts(facts.filter((_, i) => i !== index))
+  function handleQuestionBack() {
+    setDirection('back')
+    if (currentQuestion > 0) {
+      setCurrentQuestion(c => c - 1)
+    } else {
+      setStep(3)
+    }
   }
 
-  function handleFactKeyDown(e) {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      handleAddFact()
+  async function handleGenerateTopics() {
+    setStep(5)
+    setGeneratingTopics(true)
+    setError(null)
+
+    try {
+      await updateConfig({
+        user_name: userName.trim(),
+        llm: { api_key: apiKey.trim() },
+      })
+
+      const responses = questions
+        .filter(q => answers[q.id]?.trim())
+        .map(q => ({ question: q.question, answer: answers[q.id] }))
+
+      const data = await generateTopics(responses)
+      setTopics(data.topics)
+    } catch (err) {
+      setError(err.message)
+      setStep(4)
+    } finally {
+      setGeneratingTopics(false)
     }
+  }
+
+  async function handleSaveAndExtract() {
+    setStep(6)
+    setExtracting(true)
+    setExtractionStage(0)
+    setExtractionError(null)
+
+    const ticker = setInterval(() => {
+      setExtractionStage(s => Math.min(s + 1, 4))
+    }, 1200)
+
+    try {
+      await saveTopics(topics)
+
+      const responses = questions
+        .filter(q => answers[q.id]?.trim())
+        .map(q => ({ question: q.question, answer: answers[q.id] }))
+
+      const result = await runExtraction(responses)
+      setExtractionResult(result)
+
+      clearInterval(ticker)
+      setExtractionStage(4)
+      await new Promise(r => setTimeout(r, 400))
+      setExtractionComplete(true)
+      await new Promise(r => setTimeout(r, 400))
+      setExtracting(false)
+    } catch (err) {
+      clearInterval(ticker)
+      setExtractionError(err.message)
+      setExtracting(false)
+    }
+  }
+
+  function handleRetryExtraction() {
+    setExtractionError(null)
+    setExtractionComplete(false)
+    handleSaveAndExtract()
   }
 
   function handleKeyDown(e) {
@@ -131,12 +217,12 @@ export default function OnboardingPage() {
                 </div>
               </div>
             )}
-            <StepDots current={step} total={4} />
+            {step <= 3 && <StepDots current={step} total={3} />}
           </div>
 
           {/* Step 1: Welcome + Name */}
           {step === 1 && (
-            <div className="space-y-6 animate-in fade-in duration-300">
+            <div className={stepAnimation}>
               <div className="text-center">
                 <h1 className="text-2xl font-semibold text-foreground mb-2">Welcome to Knoggin</h1>
                 <p className="text-muted-foreground">
@@ -163,7 +249,7 @@ export default function OnboardingPage() {
 
           {/* Step 2: API Key */}
           {step === 2 && (
-            <div className="space-y-6 animate-in fade-in duration-300">
+            <div className={stepAnimation}>
               <div className="text-center">
                 <h1 className="text-2xl font-semibold text-foreground mb-2">Connect your brain</h1>
                 <p className="text-muted-foreground">
@@ -215,90 +301,275 @@ export default function OnboardingPage() {
 
           {/* Step 3: Aliases + Facts */}
           {step === 3 && (
-            <div className="space-y-6 animate-in fade-in duration-300">
+            <div className={stepAnimation}>
               <div className="text-center">
                 <h1 className="text-2xl font-semibold text-foreground mb-2">
-                  Help me remember you
+                  How would you like to start?
                 </h1>
                 <p className="text-muted-foreground">
-                  Optional — you can always add this later in Settings.
+                  You can seed your knowledge graph now or start with a blank slate.
                 </p>
               </div>
 
-              {/* Aliases */}
-              <div className="space-y-2">
-                <Label htmlFor="aliases" className="text-muted-foreground">
-                  Other names you go by
-                </Label>
-                <Input
-                  id="aliases"
-                  value={aliases}
-                  onChange={e => setAliases(e.target.value)}
-                  placeholder="Nicknames, handles (comma-separated)"
-                  className="bg-muted border-border rounded-xl"
-                />
-              </div>
-
-              {/* Facts */}
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">Things I should know about you</Label>
-
-                {/* Existing facts */}
-                {facts.length > 0 && (
-                  <div className="space-y-2 mb-3">
-                    {facts.map((fact, i) => (
-                      <div
-                        key={i}
-                        className="flex items-center gap-2 bg-muted rounded-lg px-3 py-2 text-sm group"
-                      >
-                        <span className="flex-1 text-foreground">{fact}</span>
-                        <button
-                          onClick={() => handleRemoveFact(i)}
-                          className="text-muted-foreground hover:text-destructive transition-colors opacity-0 group-hover:opacity-100"
-                        >
-                          <X size={16} />
-                        </button>
-                      </div>
-                    ))}
+              <div className="space-y-3">
+                {/* Seed - Guided */}
+                <button
+                  onClick={() => handleSelectPath('guided')}
+                  className="w-full text-left p-4 rounded-xl border border-border hover:border-primary/50 hover:bg-muted/30 hover:scale-[1.02] transition-all duration-200 group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
+                      <Zap size={20} className="text-primary" />
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-foreground group-hover:text-primary transition-colors">
+                        Quick seed
+                      </span>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        3 questions to get your graph started
+                      </p>
+                    </div>
                   </div>
-                )}
+                </button>
 
-                {/* Add new fact */}
-                <div className="flex gap-2">
-                  <Input
-                    value={newFact}
-                    onChange={e => setNewFact(e.target.value)}
-                    onKeyDown={handleFactKeyDown}
-                    placeholder="I'm a software engineer..."
-                    className="bg-muted border-border rounded-xl flex-1"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    onClick={handleAddFact}
-                    disabled={!newFact.trim()}
-                    className="rounded-xl shrink-0"
-                  >
-                    <Plus size={18} />
-                  </Button>
-                </div>
+                {/* Seed - Structured */}
+                <button
+                  onClick={() => handleSelectPath('structured')}
+                  className="w-full text-left p-4 rounded-xl border border-border hover:border-primary/50 hover:bg-muted/30 hover:scale-[1.02] transition-all duration-200 group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
+                      <Layers size={20} className="text-primary" />
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-foreground group-hover:text-primary transition-colors">
+                        Deep seed
+                      </span>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        6 questions for a richer starting graph
+                      </p>
+                    </div>
+                  </div>
+                </button>
+
+                {/* Skip */}
+                <button
+                  onClick={handleSkipSeeding}
+                  className="w-full text-left p-4 rounded-xl border border-border/50 hover:border-border hover:bg-muted/20 hover:scale-[1.01] transition-all duration-200 group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-lg bg-muted group-hover:bg-muted/80 transition-colors">
+                      <ArrowRight size={20} className="text-muted-foreground" />
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-muted-foreground group-hover:text-foreground transition-colors">
+                        Jump right in
+                      </span>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Start with a blank graph, build it through conversation
+                      </p>
+                    </div>
+                  </div>
+                </button>
               </div>
             </div>
           )}
 
-          {/* Step 4: Success */}
-          {step === 4 && (
-            <div className="space-y-6 animate-in fade-in duration-300 text-center">
-              <div className="flex justify-center">
-                <div className="p-4 rounded-full bg-primary/20">
-                  <Check size={40} className="text-primary" />
+          {/* Step 4: Questions */}
+          {step === 4 && questions.length > 0 && (
+            <div className={stepAnimation}>
+              {/* Question counter stays outside the keyed block */}
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-muted-foreground font-mono">
+                  {currentQuestion + 1} / {questions.length}
+                </span>
+                <div className="flex-1 mx-4 h-1 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary rounded-full transition-all duration-500"
+                    style={{ width: `${((currentQuestion + 1) / questions.length) * 100}%` }}
+                  />
                 </div>
               </div>
-              <div>
-                <h1 className="text-2xl font-semibold text-foreground mb-2">You're all set</h1>
-                <p className="text-muted-foreground">Let's start building your second brain.</p>
+
+              {/* Question content — keyed for remount animation */}
+              <div
+                key={currentQuestion}
+                className={`space-y-4 animate-in fade-in ${direction === 'forward' ? 'slide-in-from-right-3' : 'slide-in-from-left-3'} duration-200`}
+              >
+                <p className="text-base text-foreground leading-relaxed">
+                  {questions[currentQuestion].question}
+                </p>
+
+                <textarea
+                  value={answers[questions[currentQuestion].id] || ''}
+                  onChange={e =>
+                    setAnswers(prev => ({
+                      ...prev,
+                      [questions[currentQuestion].id]: e.target.value,
+                    }))
+                  }
+                  placeholder="Type your answer..."
+                  rows={4}
+                  autoFocus
+                  className="w-full bg-muted border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/30 transition-colors"
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && e.metaKey) handleQuestionNext()
+                  }}
+                />
+
+                <p className="text-[10px] text-muted-foreground text-right">
+                  ⌘ + Enter to continue
+                </p>
               </div>
+
+              {/* Navigation */}
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="ghost"
+                  onClick={handleQuestionBack}
+                  disabled={currentQuestion === 0}
+                  className="text-muted-foreground"
+                >
+                  Back
+                </Button>
+                <div className="flex-1" />
+                <Button
+                  variant="ghost"
+                  onClick={() => handleQuestionNext(true)}
+                  className="text-muted-foreground"
+                >
+                  Skip
+                </Button>
+                <Button
+                  onClick={() => handleQuestionNext()}
+                  disabled={!answers[questions[currentQuestion].id]?.trim()}
+                  className="rounded-xl px-6"
+                >
+                  {currentQuestion === questions.length - 1 ? 'Generate Topics' : 'Next'}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {step === 5 && (
+            <div className={stepAnimation}>
+              {generatingTopics ? (
+                <div className="text-center py-8">
+                  <Loader2 size={24} className="mx-auto mb-3 text-primary animate-spin" />
+                  <p className="text-sm text-muted-foreground">Analyzing your responses...</p>
+                </div>
+              ) : (
+                <>
+                  <div className="text-center">
+                    <h1 className="text-2xl font-semibold text-foreground mb-2">Your topics</h1>
+                    <p className="text-muted-foreground">
+                      Generated from your answers. Edit, add, or remove before continuing.
+                    </p>
+                  </div>
+
+                  {/* Topic editor */}
+                  <TopicEditor
+                    topics={topics}
+                    onChange={setTopics}
+                    protectedNames={['General', 'Identity']}
+                    maxHeight="18rem"
+                  />
+
+                  <div className="flex items-center gap-3">
+                    <Button
+                      variant="ghost"
+                      onClick={() => setStep(4)}
+                      className="text-muted-foreground"
+                    >
+                      Back
+                    </Button>
+                    <div className="flex-1" />
+                    <Button onClick={handleSaveAndExtract} className="rounded-xl px-6">
+                      Looks good
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {step === 6 && (
+            <div className={`${stepAnimation} text-center`}>
+              {extractionError ? (
+                <>
+                  <div className="flex justify-center">
+                    <div className="p-4 rounded-full bg-destructive/20">
+                      <X size={40} className="text-destructive" />
+                    </div>
+                  </div>
+                  <div>
+                    <h1 className="text-2xl font-semibold text-foreground mb-2">
+                      Something went wrong
+                    </h1>
+                    <p className="text-muted-foreground text-sm">{extractionError}</p>
+                  </div>
+                  <Button onClick={handleRetryExtraction} className="rounded-xl px-6">
+                    Try again
+                  </Button>
+                </>
+              ) : extracting ? (
+                <>
+                  <div className="flex justify-center">
+                    <div className="p-4 rounded-full bg-primary/10">
+                      <Loader2 size={40} className="text-primary animate-spin" />
+                    </div>
+                  </div>
+                  <div>
+                    <h1 className="text-2xl font-semibold text-foreground mb-2">
+                      Building your graph
+                    </h1>
+                    <p
+                      key={extractionStage}
+                      className="text-muted-foreground text-sm h-5 animate-in fade-in duration-500"
+                    >
+                      {
+                        [
+                          'Analyzing your responses...',
+                          'Extracting entities...',
+                          'Finding connections...',
+                          'Creating profiles...',
+                          'Almost there...',
+                        ][extractionStage]
+                      }
+                    </p>
+                  </div>
+                  {/* Fake progress bar */}
+                  <div className="w-48 mx-auto h-1 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-primary rounded-full transition-all duration-1000 ease-out"
+                      style={{
+                        width: extractionComplete
+                          ? '100%'
+                          : `${Math.min(((extractionStage + 1) / 5) * 100, 90)}%`,
+                      }}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex justify-center">
+                    <div className="p-4 rounded-full bg-primary/20 animate-in zoom-in-50 duration-500">
+                      <Check size={40} className="text-primary" />
+                    </div>
+                  </div>
+                  <div>
+                    <h1 className="text-2xl font-semibold text-foreground mb-2">You're all set</h1>
+                    <p className="text-muted-foreground">
+                      {extractionResult
+                        ? `Found ${extractionResult.entities_created} entities and ${extractionResult.connections_created} connections.`
+                        : "Let's start building your second brain."}
+                    </p>
+                  </div>
+                  <Button onClick={() => navigate('/chat')} className="rounded-xl px-6">
+                    Start chatting
+                  </Button>
+                </>
+              )}
             </div>
           )}
 
@@ -310,45 +581,27 @@ export default function OnboardingPage() {
           )}
 
           {/* Footer / Navigation */}
-          <div className="mt-8 flex items-center gap-3">
-            {step > 1 && step < 4 && (
+          {step <= 2 && (
+            <div className="mt-8 flex items-center gap-3">
+              {step > 1 && (
+                <Button
+                  variant="ghost"
+                  onClick={handleBack}
+                  disabled={saving}
+                  className="text-muted-foreground"
+                >
+                  Back
+                </Button>
+              )}
+              <div className="flex-1" />
               <Button
-                variant="ghost"
-                onClick={handleBack}
-                disabled={saving}
-                className="text-muted-foreground"
+                onClick={handleNext}
+                disabled={!canProceed() || saving}
+                className="rounded-xl px-6"
               >
-                Back
+                Continue
               </Button>
-            )}
-
-            <div className="flex-1" />
-
-            {step === 3 && (
-              <Button
-                variant="ghost"
-                onClick={handleSkip}
-                disabled={saving}
-                className="text-muted-foreground"
-              >
-                Skip
-              </Button>
-            )}
-
-            <Button
-              onClick={handleNext}
-              disabled={!canProceed() || saving}
-              className="rounded-xl px-6"
-            >
-              {saving ? 'Saving...' : step === 4 ? 'Start chatting' : 'Continue'}
-            </Button>
-          </div>
-
-          {/* Settings hint on step 2 */}
-          {step === 2 && (
-            <p className="mt-6 text-xs text-center text-muted-foreground">
-              You can change models and other settings later in Settings.
-            </p>
+            </div>
           )}
         </div>
       </div>

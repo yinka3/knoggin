@@ -16,6 +16,7 @@ class Scheduler:
     """
     
     CHECK_INTERVAL = 30
+    JOB_EXECUTION_TIMEOUT = 300
     
     def __init__(self, user_name: str, session_id: str, redis: aioredis.Redis):
         self.user_name = user_name
@@ -142,7 +143,10 @@ class Scheduler:
         logger.info(f"Executing job: {job.name}")
         await emit(ctx.session_id, "job", "started", {"name": job.name})
         try:
-            result = await job.execute(ctx)
+            result = await asyncio.wait_for(
+                job.execute(ctx), 
+                timeout=self.JOB_EXECUTION_TIMEOUT
+            )
             await emit(ctx.session_id, "job", "completed", {
                 "name": job.name,
                 "success": result.success,
@@ -155,7 +159,11 @@ class Scheduler:
             
             if result.reschedule_seconds:
                 asyncio.create_task(self._delayed_run(job, result.reschedule_seconds))
-                
+        
+        except asyncio.TimeoutError:
+            logger.error(f"Job {job.name} timed out after {self.JOB_EXECUTION_TIMEOUT}s")
+            await emit(ctx.session_id, "job", "timeout", {"name": job.name})
+            
         except Exception as e:
             await emit(ctx.session_id, "job", "failed", {
                 "name": job.name,

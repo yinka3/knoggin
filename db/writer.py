@@ -203,12 +203,14 @@ class GraphWriter:
                         r.weight = 1, 
                         r.confidence = rel.confidence,
                         r.last_seen = timestamp(), 
-                        r.message_ids = [rel.message_id]
+                        r.message_ids = [rel.message_id],
+                        r.context = rel.context
                         
                     ON MATCH SET 
                         r.weight = r.weight + 1,
                         r.confidence = CASE WHEN rel.confidence > r.confidence THEN rel.confidence ELSE r.confidence END,
-                        r.last_seen = timestamp()
+                        r.last_seen = timestamp(),
+                        r.context = CASE WHEN rel.context IS NOT NULL THEN rel.context ELSE r.context END
                     
                     WITH r, rel
                     UNWIND coalesce(r.message_ids, []) + [rel.message_id] AS mid

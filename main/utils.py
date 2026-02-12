@@ -173,7 +173,12 @@ def format_vp01_input(
 
     lines.append("\n## Messages\n")
     for msg in messages:
-        lines.append(f"[MSG {msg['id']}]: \"{msg['message']}\"")
+        label = msg.get("role_label")
+        if not label:
+            label = "USER" if msg.get("role") == "user" else "AGENT"
+            
+        content = msg.get("message") or msg.get("content") or ""
+        lines.append(f"[MSG {msg['id']}] [{label}]: \"{content}\"")
     
     lines.append("\n## Known Entities (from graph - do not override)\n")
     if known_ents:
@@ -291,7 +296,12 @@ def format_vp02_input(
     if messages:
         lines.append("\n## Messages")
         for msg in messages:
-            lines.append(f"[MSG {msg['id']}]: \"{msg['text']}\"")
+            label = msg.get("role_label")
+            if not label:
+                label = "USER" if msg.get("role") == "user" else "AGENT"
+            
+            content = msg.get("message") or msg.get("content") or msg.get("text") or ""
+            lines.append(f"[MSG {msg['id']}] [{label}]: \"{content}\"")
     
     if session_context:
         lines.append("\n## Session Context")
@@ -438,7 +448,12 @@ def format_vp03_input(
     lines.append("\n## Messages")
     if messages:
         for msg in messages:
-            lines.append(f"[MSG {msg['id']}]: \"{msg['text']}\"")
+            label = msg.get("role_label")
+            if not label:
+                label = "USER" if msg.get("role") == "user" else "AGENT"
+            
+            content = msg.get("message") or msg.get("content") or msg.get("text") or ""
+            lines.append(f"[MSG {msg['id']}] [{label}]: \"{content}\"")
     else:
         lines.append("(none)")
     

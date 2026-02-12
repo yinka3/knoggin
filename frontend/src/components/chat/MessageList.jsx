@@ -84,7 +84,7 @@ export default function MessageList({
           <div className="space-y-4 pb-4">
             {messages.map((msg, idx) => (
               <div
-                key={idx}
+                key={`${msg.role}-${msg.timestamp}`}
                 className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
               >
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">

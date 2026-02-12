@@ -17,6 +17,9 @@ from api.routes.debug import router as debug_router
 from api.routes.agents import router as agents_router
 from api.routes.stats import router as stats_router
 from api.routes.files import router as files_router
+from api.mcp_server import create_mcp_app
+from api.onboarding import router as onboarding_router
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Knoggin...")
@@ -36,6 +39,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Knoggin", lifespan=lifespan)
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,7 +48,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+mcp_server = create_mcp_app(lambda: app.state.app_state.resources)
+app.mount("/mcp", mcp_server.streamable_http_app())
 
+
+app.include_router(onboarding_router, prefix="/onboarding", tags=["onboarding"])
 app.include_router(health_router, tags=["health"])
 app.include_router(sessions_router, prefix="/sessions", tags=["sessions"])
 app.include_router(chat_router, prefix="/chat", tags=["chat"])

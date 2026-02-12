@@ -1,20 +1,9 @@
-const API_BASE = 'http://localhost:8000'
+import { apiGet, apiPost } from './fetch'
 
-export async function executeCommand(command, args = {}) {
-  const res = await fetch(`${API_BASE}/commands/execute`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command, args }),
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || 'Failed to execute command')
-  }
-  return res.json()
+export function executeCommand(sessionId, input) {
+  return apiPost('/commands/execute', { session_id: sessionId, input })
 }
 
-export async function getAutocomplete(input) {
-  const res = await fetch(`${API_BASE}/commands/autocomplete?input=${encodeURIComponent(input)}`)
-  if (!res.ok) throw new Error('Failed to get autocomplete')
-  return res.json()
+export function getAutocomplete(prefix) {
+  return apiGet(`/commands/autocomplete?prefix=${encodeURIComponent(prefix)}`)
 }

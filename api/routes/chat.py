@@ -135,7 +135,8 @@ async def send_message(
                 await context.add_assistant_turn(
                     content=final_response,
                     timestamp=datetime.now(timezone.utc),
-                    metadata=metadata or None
+                    metadata=metadata or None,
+                    user_msg_id=msg.id
                 )
                 
         except Exception as e:

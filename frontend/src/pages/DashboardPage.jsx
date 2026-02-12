@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { MessageSquare, Bot, Users, FileText, GitBranch, Brain, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { getStats, getStatsBreakdown } from '@/api/stats'
 import { PieChart, Pie, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { motion } from 'motion/react'
+import { useSocket } from '@/context/SocketContext'
+import { toast } from 'sonner'
 
 const COLORS = [
   '#2eaa6e',
@@ -113,6 +115,31 @@ export default function DashboardPage() {
   useEffect(() => {
     loadData()
   }, [])
+
+  const debounceRef = useRef(null)
+  const debouncedLoad = useCallback(() => {
+    clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => loadData(), 2000)
+  }, [])
+
+  useSocket('facts_changed', () => {
+    toast.info('New facts extracted', { description: 'Refreshing dashboard...' })
+    debouncedLoad()
+  })
+
+  useSocket('entities_merged', (data) => {
+    toast.success('Entities merged', { 
+      description: `${data.data.primary} ← ${data.data.secondary}` 
+    })
+    debouncedLoad()
+  })
+  
+  useSocket('profiles_refined', (data) => {
+     toast.info('Profiles refined', {
+       description: `Updated ${data.data.count} entities`
+     })
+     debouncedLoad()
+  })
 
   const maxConnections = breakdown?.top_connected?.[0]?.connections || 1
 

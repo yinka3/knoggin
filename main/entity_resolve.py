@@ -99,8 +99,36 @@ class EntityResolver:
     def get_id(self, name: str) -> Optional[int]:
         if not name:
             return None
+            
+        lower_name = name.lower()
+        
         with self._lock:
-            return self._name_to_id.get(name.lower())
+            stored_id = self._name_to_id.get(lower_name)
+            if stored_id:
+                return stored_id
+
+        found = self.store.get_entities_by_names([name])
+        if found:
+            entity = found[0]
+            eid = entity["id"]
+            
+            with self._lock:
+                self._name_to_id[lower_name] = eid
+                if entity.get("aliases"):
+                    for a in entity["aliases"]:
+                        self._name_to_id[a.lower()] = eid
+                
+                if eid not in self.entity_profiles:
+                    self.entity_profiles[eid] = {
+                        "canonical_name": entity.get("canonical_name", name),
+                        "type": entity.get("type"),
+                        "topic": "General",
+                        "session_id": None
+                    }
+                        
+            return eid
+            
+        return None
     
     def get_profiles(self) -> Dict[int, Dict]:
         with self._lock:

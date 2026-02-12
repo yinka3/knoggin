@@ -86,7 +86,7 @@ class MergeDetectionJob(BaseJob):
     
     
     async def _get_merge_judgment(self, candidate: dict, session_id: str = None) -> Optional[float]:
-        system = get_merge_judgment_prompt(self.user_name)
+        system = get_merge_judgment_prompt()
         
         enriched_facts_a = await enrich_facts_with_sources(candidate.get("facts_a", []), self.store)
         enriched_facts_b = await enrich_facts_with_sources(candidate.get("facts_b", []), self.store)

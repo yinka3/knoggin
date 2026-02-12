@@ -440,7 +440,6 @@ class Context:
         )
         task.add_done_callback(handle_background_task_result)
         
-        # Classify and conditionally push to extraction buffer
         if user_msg_id is not None:
             task2 = asyncio.create_task(
                 self._maybe_extract_assistant(content, user_msg_id)
@@ -455,9 +454,9 @@ class Context:
         
         result = await self.llm.call_llm(
             system=(
-                "Does this AI assistant response contain specific factual information "
-                "about named people, projects, tools, organizations, or technical decisions "
-                "worth storing in a knowledge graph? Respond with only YES or NO."
+                """Does this response contain specific facts about people, projects, concepts, or organizations,
+                OR does it establish a new relationship, status, or conclusion (e.g. 'X is incompatible with Y',
+                'Z has been decided') worth remembering? Respond with only YES or NO."""
             ),
             user=content[:1500],
             reasoning="low"
@@ -559,7 +558,7 @@ class Context:
         for turn_id, data in zip(turn_ids, turn_data):
             if data:
                 parsed = json.loads(data)
-                role_label = "User" if parsed["role"] == "user" else "AGENT"
+                role_label = "USER" if parsed["role"] == "user" else "AGENT"
                 ts = datetime.fromisoformat(parsed['timestamp'])
                 date_str = ts.strftime("%Y-%m-%d %H:%M")
                 results.append({

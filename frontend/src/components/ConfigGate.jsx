@@ -23,12 +23,15 @@ export default function ConfigGate({ children }) {
   const location = useLocation()
 
   useEffect(() => {
+    console.log('ConfigGate: checking status for', location.pathname)
     getConfigStatus()
       .then(status => {
+        console.log('ConfigGate: status received', status)
         setConfigured(status.configured)
         setChecked(true)
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error('ConfigGate: connection failed', err)
         setConfigured(false)
         setChecked(true)
       })
@@ -36,14 +39,28 @@ export default function ConfigGate({ children }) {
 
   useEffect(() => {
     if (!checked) return
+    console.log('ConfigGate: evaluating redirect', { checked, configured, path: location.pathname })
+    
     if (!configured && location.pathname !== '/onboarding') {
+      console.log('ConfigGate: redirecting to onboarding')
       navigate('/onboarding', { replace: true })
     }
     if (configured && location.pathname === '/onboarding') {
+      console.log('ConfigGate: redirecting to chat')
       navigate('/chat', { replace: true })
     }
-  }, [checked, configured])
+  }, [checked, configured, location.pathname, navigate])
 
   if (!checked) return <LoadingScreen />
+
+  // Prevent flash of content/redirects if we're about to redirect
+  if (!configured && location.pathname !== '/onboarding') {
+    return <LoadingScreen />
+  }
+
+  if (configured && location.pathname === '/onboarding') {
+    return <LoadingScreen />
+  }
+
   return children
 }

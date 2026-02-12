@@ -387,7 +387,7 @@ export default function DebugPage() {
             )}
           </div>
         ) : (
-          filteredEvents.map((event, idx) => <EventRow key={idx} event={event} />)
+          filteredEvents.map((event, idx) => <EventRow key={`${event.component}-${event.event}-${event.timestamp || idx}`} event={event} />)
         )}
       </div>
 

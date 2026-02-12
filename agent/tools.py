@@ -9,6 +9,7 @@ from db.store import MemGraphStore
 from shared.file_rag import FileRAGService
 from shared.topics_config import TopicConfig
 from shared.redisclient import RedisKeys 
+from shared.events import emit
 
 
 
@@ -608,6 +609,11 @@ class Tools:
         
         await self.redis.hset(memory_key, memory_id, payload)
         
+        await emit(self.session_id, "agent", "memory_saved", {
+            "topic": normalized_topic,
+            "memory_id": memory_id
+        })
+        
         return {
             "saved": True,
             "memory_id": memory_id,
@@ -632,6 +638,10 @@ class Tools:
             memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, topic)
             removed = await self.redis.hdel(memory_key, memory_id)
             if removed:
+                await emit(self.session_id, "agent", "memory_forgotten", {
+                    "topic": topic,
+                    "memory_id": memory_id
+                })
                 return {"removed": True, "memory_id": memory_id, "topic": topic}
         
         return {"error": f"Memory '{memory_id}' not found in any block"}

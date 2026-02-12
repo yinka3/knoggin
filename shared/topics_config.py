@@ -10,6 +10,8 @@ def build_label_block(topics_config: dict) -> str:
     """Formats topics config into prompt-friendly label list for VP-01."""
     lines = []
     for topic, config in topics_config.items():
+        if topic == "Identity":
+            continue
         labels = config.get("labels", [])
         if labels:
             lines.append(f"Topic: {topic}")

@@ -104,7 +104,7 @@ def build_user_message(ctx: AgentContext, last_result: Optional[Dict] = None) ->
         recent = ctx.history[-ctx.config.max_history_turns:]
         msg += "**Recent conversation:**\n"
         for turn in recent:
-            role = "User" if turn["role"] == "user" else "AGENT"
+            role = "USER" if turn["role"] == "user" else "AGENT"
             ts = turn.get("timestamp")
             if ts:
                 try:

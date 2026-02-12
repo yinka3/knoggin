@@ -17,6 +17,85 @@ DEFAULT_REASONING_MODEL = "google/gemini-2.5-flash"
 DEFAULT_AGENT_MODEL = "google/gemini-3-flash-preview"
 DEFAULT_TOPICS = ["General"]
 
+MCP_SERVER_PRESETS = [
+    {
+        "id": "google-workspace",
+        "name": "Google Workspace",
+        "description": "Gmail, Calendar, Drive & Docs",
+        "command": "uvx",
+        "args": ["google-workspace-mcp"],
+        "env_vars": [
+            {"key": "GOOGLE_CLIENT_ID", "label": "Client ID", "placeholder": "your-client-id.apps.googleusercontent.com"},
+            {"key": "GOOGLE_CLIENT_SECRET", "label": "Client Secret", "placeholder": "GOCSPX-..."},
+            {"key": "GOOGLE_REFRESH_TOKEN", "label": "Refresh Token", "placeholder": "1//0..."},
+        ],
+        "tags": ["gmail", "calendar", "drive", "docs", "google"],
+        "help_url": "https://console.cloud.google.com/apis/credentials",
+        "help_label": "Google Cloud Console → Create OAuth credentials",
+    },
+    {
+        "id": "google-maps",
+        "name": "Google Maps",
+        "description": "Location search, directions & geocoding",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-google-maps"],
+        "env_vars": [
+            {"key": "GOOGLE_MAPS_API_KEY", "label": "Maps API Key", "placeholder": "AIza..."},
+        ],
+        "tags": ["maps", "location", "directions", "google"],
+        "help_url": "https://console.cloud.google.com/apis/credentials",
+        "help_label": "Google Cloud Console → Create API key with Maps enabled",
+    },
+    {
+        "id": "github",
+        "name": "GitHub",
+        "description": "Repos, issues, PRs & code search",
+        "command": "uvx",
+        "args": ["mcp-server-github"],
+        "env_vars": [
+            {"key": "GITHUB_TOKEN", "label": "Personal Access Token", "placeholder": "ghp_..."},
+        ],
+        "tags": ["github", "git", "code", "repos"],
+        "help_url": "https://github.com/settings/tokens",
+        "help_label": "GitHub → Settings → Developer settings → Personal access tokens",
+    },
+    {
+        "id": "brave-search",
+        "name": "Brave Search",
+        "description": "Web & local search",
+        "command": "uvx",
+        "args": ["mcp-server-brave-search"],
+        "env_vars": [
+            {"key": "BRAVE_API_KEY", "label": "Brave API Key", "placeholder": "BSA..."},
+        ],
+        "tags": ["search", "web", "brave"],
+        "help_url": "https://brave.com/search/api/",
+        "help_label": "Brave Search API → Get API key",
+    },
+    {
+        "id": "filesystem",
+        "name": "Filesystem",
+        "description": "Read, write & search local files",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home"],
+        "env_vars": [],
+        "tags": ["files", "filesystem", "local"],
+    },
+    {
+        "id": "slack",
+        "name": "Slack",
+        "description": "Channels, messages & users",
+        "command": "uvx",
+        "args": ["mcp-server-slack"],
+        "env_vars": [
+            {"key": "SLACK_BOT_TOKEN", "label": "Bot Token", "placeholder": "xoxb-..."},
+        ],
+        "tags": ["slack", "messaging", "chat"],
+        "help_url": "https://api.slack.com/apps",
+        "help_label": "Slack API → Create app → Bot token",
+    },
+]
+
 _config_cache: Optional[dict] = None
 _config_mtime: Optional[float] = None
 

@@ -1,30 +1,19 @@
 import { useState } from 'react'
-import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import { Wrench } from 'lucide-react'
-
-const TOOLS = [
-  { id: 'search_entity', name: 'Search Entity' },
-  { id: 'get_connections', name: 'Connections' },
-  { id: 'find_path', name: 'Find Path' },
-  { id: 'get_hierarchy', name: 'Hierarchy' },
-  { id: 'search_messages', name: 'Search Messages' },
-  { id: 'get_recent_activity', name: 'Recent Activity' },
-  { id: 'save_memory', name: 'Save Memory' },
-  { id: 'forget_memory', name: 'Forget Memory' },
-  { id: 'search_files', name: 'Search Files' },
-]
+import { useTools } from '@/context/ToolsContext'
 
 export default function ToolToggles({ enabledTools, onToggle, disabled }) {
   const [open, setOpen] = useState(false)
+  const { tools } = useTools()
 
-  const allEnabled = !enabledTools || enabledTools.length === TOOLS.length
-  const enabledSet = new Set(enabledTools || TOOLS.map(t => t.id))
+  const allEnabled = !enabledTools || enabledTools.length === tools.length
+  const enabledSet = new Set(enabledTools || tools.map(t => t.id))
   const enabledCount = enabledSet.size
 
   function handleToggle(toolId) {
-    const current = enabledTools || TOOLS.map(t => t.id)
+    const current = enabledTools || tools.map(t => t.id)
     const next = current.includes(toolId)
       ? current.filter(id => id !== toolId)
       : [...current, toolId]
@@ -32,7 +21,7 @@ export default function ToolToggles({ enabledTools, onToggle, disabled }) {
   }
 
   function handleToggleAll() {
-    onToggle(allEnabled ? [] : TOOLS.map(t => t.id))
+    onToggle(allEnabled ? [] : tools.map(t => t.id))
   }
 
   return (
@@ -61,12 +50,12 @@ export default function ToolToggles({ enabledTools, onToggle, disabled }) {
           </button>
         </div>
         <div className="space-y-0.5">
-          {TOOLS.map(tool => (
+          {tools.map(tool => (
             <div
               key={tool.id}
               className="flex items-center justify-between gap-2 py-1 px-1 rounded hover:bg-muted/30 transition-colors"
             >
-              <span className="text-xs text-foreground">{tool.name}</span>
+              <span className="text-xs text-foreground">{tool.name || tool.id}</span>
               <Switch
                 checked={enabledSet.has(tool.id)}
                 onCheckedChange={() => handleToggle(tool.id)}

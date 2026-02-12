@@ -3,9 +3,10 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Search } from 'lucide-react'
-import { listProfiles } from '@/api/profiles'
+import { getProfiles } from '@/api/profiles'
 import EntityCard from '@/components/memory/EntityCard'
 import EntityDrawer from '@/components/memory/EntityDrawer'
+import useDelayedLoading from '@/hooks/useDelayedLoading'
 
 const PAGE_SIZE = 20
 
@@ -16,7 +17,7 @@ export default function MemoryPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
-  const [showSkeleton, setShowSkeleton] = useState(false)
+  const showSkeleton = useDelayedLoading(loading)
   const [selectedEntityId, setSelectedEntityId] = useState(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
 
@@ -27,13 +28,7 @@ export default function MemoryPage() {
     return () => clearTimeout(timer)
   }, [search])
 
-  useEffect(() => {
-    if (loading) {
-      const timer = setTimeout(() => setShowSkeleton(true), 150)
-      return () => clearTimeout(timer)
-    }
-    setShowSkeleton(false)
-  }, [loading])
+
 
   const fetchEntities = useCallback(
     async (offset = 0, append = false) => {
@@ -45,9 +40,9 @@ export default function MemoryPage() {
 
       try {
         const params = { limit: PAGE_SIZE, offset }
-        if (debouncedSearch) params.q = debouncedSearch
+        if (debouncedSearch) params.search = debouncedSearch
 
-        const data = await listProfiles(params)
+        const data = await getProfiles(params)
 
         if (append) {
           setEntities(prev => [...prev, ...data.entities])
@@ -80,6 +75,7 @@ export default function MemoryPage() {
 
   function handleEntityClick(entityId) {
     setSelectedEntityId(entityId)
+    setDrawerOpen(true)
   }
 
   const hasMore = entities.length < total

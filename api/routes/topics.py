@@ -1,7 +1,9 @@
+import json
 from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, Request
+from loguru import logger
 from pydantic import BaseModel
-
+from main.prompts import get_topic_generation_prompt
 from api.state import AppState
 from shared.topics_config import TopicConfig
 
@@ -27,6 +29,8 @@ class UpdateTopicRequest(BaseModel):
     label_aliases: Optional[Dict[str, str]] = None
     active: Optional[bool] = None
 
+class GenerateFromDescriptionRequest(BaseModel):
+    description: str
 
 async def get_topic_config(session_id: str, state: AppState) -> TopicConfig:
     """Load TopicConfig for a session."""
@@ -168,3 +172,80 @@ async def delete_topic(
         await state.active_sessions[session_id].update_topics_config(topic_config.raw)
     
     return {"success": True, "deleted": topic_name}
+
+@router.post("/generate")
+async def generate_topics_from_description(
+    body: GenerateFromDescriptionRequest,
+    state: AppState = Depends(get_app_state)
+):
+    if not body.description.strip():
+        raise HTTPException(status_code=400, detail="Description is empty")
+
+    limit_key = f"topic_gen_count:{state.user_name}"
+    count = await state.resources.redis.get(limit_key)
+    count = int(count) if count else 0
+
+    if count >= 3:
+        raise HTTPException(status_code=429, detail="Generation limit reached (3 attempts). Create the session or start a new configuration.")
+
+    system = get_topic_generation_prompt()
+
+    try:
+        raw = await state.resources.llm_service.call_llm(system, body.description.strip())
+    except Exception as e:
+        logger.error(f"Topic generation from description failed: {e}")
+        raise HTTPException(status_code=500, detail="Topic generation failed")
+
+    if not raw:
+        raise HTTPException(status_code=500, detail="LLM returned empty response")
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+    if cleaned.endswith("```"):
+        cleaned = cleaned.rsplit("```", 1)[0]
+    cleaned = cleaned.strip()
+
+    try:
+        generated = json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.error(f"Failed to parse topic generation output: {cleaned[:500]}")
+        raise HTTPException(status_code=500, detail="Failed to parse generated topics")
+
+    generated.pop("General", None)
+    generated.pop("Identity", None)
+
+    if len(generated) > 6:
+        keys = list(generated.keys())[:6]
+        generated = {k: generated[k] for k in keys}
+
+    for name, config in generated.items():
+        config.setdefault("labels", [])
+        config.setdefault("aliases", [])
+        config.setdefault("label_aliases", {})
+        config.setdefault("hierarchy", {})
+        config.setdefault("active", True)
+
+    defaults = {
+        "General": {
+            "active": True,
+            "labels": [],
+            "hierarchy": {},
+            "aliases": [],
+            "label_aliases": {}
+        },
+        "Identity": {
+            "active": True,
+            "labels": ["person"],
+            "hierarchy": {},
+            "aliases": [],
+            "label_aliases": {}
+        }
+    }
+
+    merged = {**defaults, **generated}
+
+    # Increment counter
+    await state.resources.redis.incr(limit_key)
+
+    return {"topics": merged, "attempts_remaining": 2 - count}

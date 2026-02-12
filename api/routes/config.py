@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from api.state import AppState
-from shared.config import get_default_config, load_config, save_config
+from shared.config import get_default_config, load_config, save_config, MCP_SERVER_PRESETS
+import httpx
+from datetime import datetime, timedelta
 
 router = APIRouter()
 
@@ -106,6 +108,14 @@ class ConfigUpdate(BaseModel):
     curated_models: Optional[List[dict]] = None
 
 
+class MCPServerCreate(BaseModel):
+    name: str
+    command: str = "uvx"
+    args: list = []
+    env: dict = None
+    enabled: bool = True
+    allowed_tools: list = None
+
 
 def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -142,6 +152,190 @@ async def get_config_status():
         "configured": has_api_key and has_user_name,
         "has_api_key": has_api_key,
         "has_user_name": has_user_name
+    }
+
+@router.get("/tools")
+async def get_tools(request: Request):
+    """
+    Return a comprehensive list of available tools.
+    Combines standard Knoggin tools with dynamic MCP tools.
+    """
+    standard_tools = [
+        {"id": "search_entity", "name": "Search Entity", "source": "knoggin", "group": "Memory"},
+        {"id": "save_memory", "name": "Save Memory", "source": "knoggin", "group": "Memory"},
+        {"id": "forget_memory", "name": "Forget Memory", "source": "knoggin", "group": "Memory"},
+        {"id": "get_connections", "name": "Connections", "source": "knoggin", "group": "Graph"},
+        {"id": "find_path", "name": "Find Path", "source": "knoggin", "group": "Graph"},
+        {"id": "get_hierarchy", "name": "Hierarchy", "source": "knoggin", "group": "Graph"},
+        {"id": "search_messages", "name": "Search Messages", "source": "knoggin", "group": "History"},
+        {"id": "get_recent_activity", "name": "Recent Activity", "source": "knoggin", "group": "History"},
+        {"id": "search_files", "name": "Search Files", "source": "knoggin", "group": "RAG"},
+    ]
+    
+    mcp_tools = []
+    if request.app.state.app_state.resources.mcp_manager:
+        raw_mcp = request.app.state.app_state.resources.mcp_manager.get_all_tools()
+        for tool in raw_mcp:
+            name = tool.get("namespaced")
+            if not name: continue
+            
+            # Parse namespaces: mcp__server__tool_name
+            parts = name.split("__", 2)
+            if len(parts) == 3:
+                server = parts[1]
+                display_name = parts[2].replace("_", " ").title()
+                group = f"MCP: {server.title()}"
+            else:
+                server = "external"
+                display_name = name
+                group = "MCP: External"
+            
+            mcp_tools.append({
+                "id": name,
+                "name": display_name,
+                "source": "mcp",
+                "server": server,
+                "group": group,
+                "description": tool.get("description", "")
+            })
+            
+    return {
+        "tools": standard_tools + mcp_tools
+    }
+
+
+
+
+@router.get("/mcp/presets")
+async def get_mcp_presets():
+    """Return curated list of MCP server presets."""
+    return {"presets": MCP_SERVER_PRESETS}
+
+
+@router.get("/mcp/servers")
+async def get_mcp_servers(request: Request):
+    """Return all configured MCP servers with live connection status."""
+    state: AppState = request.app.state.app_state
+    mcp = state.resources.mcp_manager
+    
+    if not mcp:
+        return {"servers": []}
+    
+    status = mcp.get_status()
+    config = load_config() or get_default_config()
+    server_configs = config.get("mcp", {}).get("servers", {})
+    
+    servers = []
+    for name, live in status.items():
+        cfg = server_configs.get(name, {})
+        servers.append({
+            "name": name,
+            "command": cfg.get("command", "uvx"),
+            "args": cfg.get("args", []),
+            "transport": cfg.get("transport", "stdio"),
+            "enabled": live["enabled"],
+            "connected": live["connected"],
+            "tool_count": live["tool_count"],
+            "tools": live["tools"],
+            "last_error": live["last_error"],
+        })
+    
+    return {"servers": servers}
+
+
+@router.post("/mcp/servers")
+async def add_mcp_server(body: MCPServerCreate, request: Request):
+    """Add a new MCP server, save to config, and optionally connect."""
+    state: AppState = request.app.state.app_state
+    mcp = state.resources.mcp_manager
+    
+    if not mcp:
+        raise HTTPException(status_code=500, detail="MCP manager not initialized")
+    
+    server_config = {
+        "command": body.command,
+        "args": body.args,
+        "enabled": body.enabled,
+        "transport": "stdio",
+    }
+    if body.env:
+        server_config["env"] = body.env
+    if body.allowed_tools:
+        server_config["allowed_tools"] = body.allowed_tools
+    
+    result = await mcp.add_server(body.name, server_config, connect=body.enabled)
+    
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    
+    config = load_config() or get_default_config()
+    if "mcp" not in config:
+        config["mcp"] = {"servers": {}}
+    config["mcp"]["servers"][body.name] = server_config
+    save_config(config)
+    
+    return result
+
+
+@router.delete("/mcp/servers/{name}")
+async def remove_mcp_server(name: str, request: Request):
+    """Disconnect and remove an MCP server."""
+    state: AppState = request.app.state.app_state
+    mcp = state.resources.mcp_manager
+    
+    if not mcp:
+        raise HTTPException(status_code=500, detail="MCP manager not initialized")
+    
+    success = await mcp.remove_server(name)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    
+    config = load_config() or get_default_config()
+    mcp_cfg = config.get("mcp", {})
+    servers = mcp_cfg.get("servers", {})
+    servers.pop(name, None)
+    save_config(config)
+    
+    return {"removed": name}
+
+
+@router.post("/mcp/servers/{name}/toggle")
+async def toggle_mcp_server(name: str, request: Request):
+    """Enable or disable an MCP server."""
+    state: AppState = request.app.state.app_state
+    mcp = state.resources.mcp_manager
+    
+    if not mcp:
+        raise HTTPException(status_code=500, detail="MCP manager not initialized")
+    
+    status = mcp.get_status()
+    if name not in status:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    
+    currently_enabled = status[name]["enabled"]
+    
+    if currently_enabled:
+        success = await mcp.disable_server(name)
+    else:
+        success = await mcp.enable_server(name)
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Toggle failed")
+    
+    # Persist the change
+    config = load_config() or get_default_config()
+    mcp_cfg = config.get("mcp", {}).get("servers", {})
+    if name in mcp_cfg:
+        mcp_cfg[name]["enabled"] = not currently_enabled
+        save_config(config)
+    
+    new_status = mcp.get_status().get(name, {})
+    return {
+        "name": name,
+        "enabled": not currently_enabled,
+        "connected": new_status.get("connected", False),
+        "tool_count": new_status.get("tool_count", 0),
+        "tools": new_status.get("tools", []),
     }
 
 @router.patch("/")
@@ -187,8 +381,7 @@ async def get_available_models():
     Returns separate lists for reasoning (with thinking) and agent (with tools) models.
     Results are cached in-memory for 1 hour.
     """
-    import httpx
-    from datetime import datetime, timedelta
+
     
     # Simple in-memory cache
     cache_key = "_models_cache"

@@ -77,6 +77,7 @@ class ResourceManager:
 
                 mcp_config = get_config_value("mcp") or {"servers": {}}
                 instance.mcp_manager = await MCPClientManager.create(mcp_config)
+                logger.info("MCP manager initialized")
 
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")

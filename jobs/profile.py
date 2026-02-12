@@ -58,7 +58,35 @@ class ProfileRefinementJob(BaseJob):
 
     async def should_run(self, ctx: JobContext) -> bool:
         dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-        return await ctx.redis.scard(dirty_key) > 0
+        count = await ctx.redis.scard(dirty_key)
+        
+        if count == 0:
+            return False
+            
+        if count >= self.volume_threshold:
+            logger.info(f"Profile trigger: Volume threshold met ({count} >= {self.volume_threshold})")
+            await emit(ctx.session_id, "job", "profile_trigger_volume", {
+                "trigger": "volume",
+                "dirty_count": count,
+                "threshold": self.volume_threshold
+            })
+            return True
+            
+        if ctx.idle_seconds >= self.idle_threshold:
+            logger.info(f"Profile trigger: Idle threshold met ({ctx.idle_seconds:.1f}s >= {self.idle_threshold}s)")
+            await emit(ctx.session_id, "job", "profile_trigger_idle", {
+                "trigger": "idle",
+                "idle_seconds": ctx.idle_seconds,
+                "threshold": self.idle_threshold,
+                "dirty_count": count
+            })
+            return True
+        
+        await emit(ctx.session_id, "job", "profile_skipped", {
+            "dirty_count": count,
+            "idle_seconds": ctx.idle_seconds
+        })
+        return False
     
     
     async def _maybe_refine_user(self, ctx: JobContext, curr_msg_id: int) -> bool:
@@ -133,7 +161,7 @@ class ProfileRefinementJob(BaseJob):
             parsed = json.loads(data)
             ts = datetime.fromisoformat(parsed['timestamp'])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
-            role_label = "User" if parsed["role"] == "user" else "AGENT"
+            role_label = "USER" if parsed["role"] == "user" else "AGENT"
             
             if parsed["role"] == "user" and parsed.get("user_msg_id") is not None:
                 formatted = f"[MSG_{parsed['user_msg_id']}] [{date_str}] [{role_label}]: {parsed['content']}"

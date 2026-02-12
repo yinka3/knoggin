@@ -231,8 +231,6 @@ class BatchConsumer:
         lines = []
         for turn in conversation:
             content = turn["content"]
-            if turn["role"] == "assistant" and len(content) > 200:
-                content = content[:200] + "..."
             lines.append(f"[{turn['role_label']}]: {content}")
         return "\n".join(lines)
     

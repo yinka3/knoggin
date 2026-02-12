@@ -154,7 +154,7 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
         )}
 
         {toolCalls.map((tc, idx) => (
-          <div key={idx}>
+          <div key={`${tc.tool}-${tc.startTime}`}>
             {idx > 0 && <Separator className="my-2 bg-border/50" />}
             <ToolCallItem tc={tc} isLast={idx === toolCalls.length - 1} streaming={streaming} />
           </div>

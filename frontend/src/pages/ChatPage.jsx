@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
 import { useChat } from '../hooks/useChat'
+import { useSocket } from '@/context/SocketContext'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getConfig } from '@/api/config'
 import { getSession, updateSession } from '@/api/sessions'
@@ -10,18 +11,19 @@ import { toast } from 'sonner'
 import InputBar from '../components/chat/InputBar'
 import MessageList from '../components/chat/MessageList'
 import TopicsDrawer from '../components/chat/TopicsDrawer'
+import { useTools } from '@/context/ToolsContext'
 import TokenCounter from '../components/chat/TokenCounter'
 import WelcomeState from '../components/chat/WelcomeState'
 import AgentSelector from '../components/chat/AgentSelector'
 import FilesDrawer from '../components/chat/FilesDrawer'
 import MemoryDrawer from '../components/chat/MemoryDrawer'
 import { listAgents } from '@/api/agents'
+import useDelayedLoading from '@/hooks/useDelayedLoading'
 
 export default function ChatPage() {
   const { sessionId } = useParams()
   const { createSession, setCurrentSessionId, loadSessions } = useSession()
-  const [showSkeleton, setShowSkeleton] = useState(false)
-  const [enabledTools, setEnabledTools] = useState(null)
+  const { enabledTools, setEnabledTools } = useTools()
   const [currentAgentId, setCurrentAgentId] = useState(null)
   const [currentAgentName, setCurrentAgentName] = useState('Assistant')
   const [currentModel, setCurrentModel] = useState(null)
@@ -37,9 +39,24 @@ export default function ChatPage() {
     loadHistory,
     send,
   } = useChat(sessionId)
+  const showSkeleton = useDelayedLoading(loading)
 
   const navigate = useNavigate()
   const location = useLocation()
+
+  useSocket('user_profile_refined', (data) => {
+    toast.success('Your profile has been refined', {
+      description: `Updated ${data.data.facts_created} facts based on recent chat.`
+    })
+  })
+
+  useSocket('facts_changed', (data) => {
+    if (data.data.created > 0) {
+      toast.info('Knowledge Graph Updated', {
+        description: `Extracted ${data.data.created} new facts.`
+      })
+    }
+  })
 
   useEffect(() => {
     if (sessionId) {
@@ -116,13 +133,7 @@ export default function ChatPage() {
     }
   }
 
-  useEffect(() => {
-    if (loading) {
-      const timer = setTimeout(() => setShowSkeleton(true), 150)
-      return () => clearTimeout(timer)
-    }
-    setShowSkeleton(false)
-  }, [loading])
+
 
   async function handleFirstMessage(message) {
     try {

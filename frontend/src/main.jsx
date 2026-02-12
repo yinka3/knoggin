@@ -13,12 +13,16 @@ import AgentsPage from './pages/AgentsPage'
 import DebugPage from './pages/DebugPage'
 import DashboardPage from './pages/DashboardPage'
 import DeveloperSettingsPage from './pages/DeveloperSettingsPage'
+import { SocketProvider } from './context/SocketContext'
+import { ToolsProvider } from './context/ToolsContext'
 import './index.css'
 
 function AppRoutes() {
   return (
     <SessionProvider>
-      <Layout>
+      <SocketProvider>
+        <ToolsProvider>
+          <Layout>
         <Routes>
           <Route path="/" element={<Navigate to="/chat" replace />} />
           <Route path="/chat" element={<ChatPage />} />
@@ -30,7 +34,9 @@ function AppRoutes() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/developer" element={<DeveloperSettingsPage />} />
         </Routes>
-      </Layout>
+          </Layout>
+        </ToolsProvider>
+      </SocketProvider>
     </SessionProvider>
   )
 }

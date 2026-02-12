@@ -116,7 +116,7 @@ export default function EntityDrawer({ entityId, open, onOpenChange, onEntityCli
                     <>
                       <ul className="space-y-2">
                         {visibleFacts.map((fact, idx) => (
-                          <li key={idx} className="text-sm text-foreground leading-relaxed">
+                          <li key={fact.id || idx} className="text-sm text-foreground leading-relaxed">
                             {fact.content}
                           </li>
                         ))}
@@ -144,8 +144,8 @@ export default function EntityDrawer({ entityId, open, onOpenChange, onEntityCli
                   <SectionHeader>Connections ({profile.connections?.length || 0})</SectionHeader>
                   {profile.connections?.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
-                      {profile.connections.map((conn, idx) => (
-                        <Pill key={idx} onClick={() => onEntityClick(conn.id)}>
+                      {profile.connections.map((conn) => (
+                        <Pill key={conn.id} onClick={() => onEntityClick(conn.id)}>
                           {conn.name}
                         </Pill>
                       ))}
@@ -172,8 +172,8 @@ export default function EntityDrawer({ entityId, open, onOpenChange, onEntityCli
                         <div className="flex items-start gap-3">
                           <span className="text-xs text-muted-foreground w-16 pt-1">Children</span>
                           <div className="flex flex-wrap gap-2">
-                            {profile.hierarchy.children.map((child, idx) => (
-                              <Pill key={idx} onClick={() => onEntityClick(child.id)}>
+                            {profile.hierarchy.children.map((child) => (
+                              <Pill key={child.id} onClick={() => onEntityClick(child.id)}>
                                 {child.name}
                               </Pill>
                             ))}

@@ -29,11 +29,14 @@ import {
 import { deleteSession } from '@/api/sessions'
 import { toast } from 'sonner'
 import { AnimatePresence, motion } from 'motion/react'
+import ToolsDrawer from '../tools/ToolsDrawer'
+import { Hammer } from 'lucide-react'
 
 export default function Sidebar({ isOpen, onToggle }) {
   const { sessions, currentSessionId, createSession, selectSession, loadSessions, loading } =
     useSession()
   const [deleteTarget, setDeleteTarget] = useState(null)
+  const [toolsOpen, setToolsOpen] = useState(false)
   const location = useLocation()
 
   function handleDeleteClick(e, sessionId) {
@@ -173,6 +176,22 @@ export default function Sidebar({ isOpen, onToggle }) {
             </span>
           </button>
         </Link>
+
+        {/* TOOLS BUTTON */}
+        <button
+          onClick={() => setToolsOpen(true)}
+          className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative text-muted-foreground hover:text-foreground hover:bg-muted/50`}
+        >
+          <Hammer
+            size={18}
+            className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:rotate-12 group-hover:text-primary"
+          />
+          <span
+            className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+          >
+            Tools
+          </span>
+        </button>
 
         {/* DEBUG BUTTON */}
         <Link to="/debug" className="w-full">
@@ -329,6 +348,7 @@ export default function Sidebar({ isOpen, onToggle }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <ToolsDrawer open={toolsOpen} onOpenChange={setToolsOpen} />
     </div>
   )
 }

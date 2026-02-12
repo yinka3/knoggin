@@ -1,4 +1,4 @@
-const WS_BASE = 'ws://localhost:8000'
+import { WS_BASE } from './config-base'
 
 export function createDebugConnection(
   sessionId,

@@ -259,6 +259,50 @@ class MCPClientManager:
         logger.info(f"[MCP] Disabled server '{server_name}'")
         return True
 
+    async def add_server(self, name: str, config: dict, connect: bool = True) -> dict:
+        """Add a new server at runtime. Returns status dict."""
+        if name in self._servers:
+            return {"error": f"Server '{name}' already exists"}
+
+        conn = MCPServerConnection(name, config)
+        self._servers[name] = conn
+
+        if connect and conn.enabled:
+            success = await self._connect_server(conn)
+            if not success:
+                return {
+                    "name": name,
+                    "connected": False,
+                    "error": conn.last_error
+                }
+
+        return {
+            "name": name,
+            "connected": conn.connected,
+            "tool_count": len(conn.tools),
+            "tools": [t["name"] for t in conn.tools]
+        }
+
+    async def remove_server(self, name: str) -> bool:
+        """Disconnect and remove a server."""
+        conn = self._servers.get(name)
+        if not conn:
+            return False
+
+        if conn.exit_stack:
+            try:
+                await conn.exit_stack.aclose()
+            except Exception:
+                pass
+
+        stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == name]
+        for k in stale_keys:
+            del self._tool_registry[k]
+
+        del self._servers[name]
+        logger.info(f"[MCP] Removed server '{name}'")
+        return True
+
     async def shutdown(self):
         for name, conn in self._servers.items():
             if conn.exit_stack:

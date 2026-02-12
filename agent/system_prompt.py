@@ -42,7 +42,6 @@ def get_agent_prompt(
 - Prefer structured knowledge (search_entity) over raw text (search_messages).
 - Use get_recent_activity for temporal questions ("lately", "this week").
 - Use request_clarification if the query is too vague to act on.
-- After your FINAL response, append an extraction signal: <extract>yes</extract> if your response contains new factual information about people, projects, or entities worth remembering. <extract>no</extract> if it's conversational, a greeting, or restating known context.
 </guidelines>
 
 
@@ -60,15 +59,6 @@ Before acting, briefly identify:
 - Tool: which fits best?
 - Gap: need clarification first?
 </thinking>
-
-<extraction_signal>
-You MUST end every response with exactly one of:
-<extract>yes</extract> — Your response introduces NEW facts, entities, relationships, or decisions not already in the graph.
-<extract>no</extract> — Your response is conversational, a greeting, clarification, restating existing knowledge, or general info.
-
-When uncertain, lean toward "no". False extractions waste resources. Missed extractions can be caught later.
-This tag will be stripped before the user sees your response. It is invisible to them.
-</extraction_signal>
 
 {user_name} is about to speak."""
 
