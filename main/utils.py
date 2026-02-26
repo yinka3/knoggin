@@ -10,7 +10,7 @@ from shared.topics_config import TopicConfig
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
 
-from shared.schema.dtypes import EntityItem, EntityPair, MessageConnections, ResolutionEntry
+from shared.schema.dtypes import EntityItem, EntityPair, MessageConnections
 
 
 PRONOUNS = {
@@ -100,7 +100,7 @@ def extract_xml_content(text: str, tag: str) -> Optional[str]:
 
 
 def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
-    """Filter garbage before it reaches VP-02."""
+    """Filter invalid mentions before resolution."""
     
     if not name or len(name) < 2:
         return False
@@ -128,35 +128,6 @@ def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
     
     return True
 
-
-def dedupe_entries( entries: List[ResolutionEntry]) -> List[ResolutionEntry]:
-    """Merge NEW entries with identical canonical_name and type."""
-    existing = []
-    new_entries: Dict[str, ResolutionEntry] = {}
-    
-    for entry in entries:
-        if entry.verdict == "EXISTING":
-            existing.append(entry)
-            continue
-        
-        c_name = entry.canonical_name
-        if not c_name:
-            if entry.mentions and entry.mentions[0]:
-                c_name = entry.mentions[0]
-            else:
-                logger.warning(f"Skipping entry with no name: {entry}")
-                continue
-
-        key = c_name.strip().lower()
-        if key in new_entries:
-            new_entries[key].msg_ids.extend(entry.msg_ids)
-            for m in entry.mentions:
-                if m not in new_entries[key].mentions:
-                    new_entries[key].mentions.append(m)
-        else:
-            new_entries[key] = entry
-    
-    return existing + list(new_entries.values())
 
 def format_vp01_input(
     messages: List[Dict],
@@ -211,7 +182,7 @@ def format_vp01_input(
     
     return "\n".join(lines)
 
-def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[List[EntityItem]]:
+def parse_entities(reasoning: str, min_confidence: float = 0.8, topic_config: TopicConfig = None) -> Optional[List[EntityItem]]:
     """Parse <entities> block from VP-01 output. Expects: msg_id | name | label | topic | confidence
     Falls back to: msg_id | name | label | confidence (topic defaults to General)"""
     content = extract_xml_content(reasoning, "entities")
@@ -232,9 +203,16 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[List
         if len(parts) == 5:
             msg_id_str, name, label, topic, conf_str = [p.strip() for p in parts]
         elif len(parts) == 4:
-            msg_id_str, name, label, conf_str = [p.strip() for p in parts]
-            topic = "General"  # Default when missing
-            logger.warning(f"VP-01 missing topic field, defaulting to General: {name}")
+            msg_id_str, name, field3, conf_str = [p.strip() for p in parts]
+            
+            if topic_config and field3.lower() in topic_config.alias_lookup:
+                label = ""
+                topic = field3
+                logger.debug(f"VP-01 missing label, inferred topic from field3: {name} -> {topic}")
+            else:
+                label = field3
+                topic = "General"
+                logger.warning(f"VP-01 missing topic field, defaulting to General: {name}")
         else:
             malformed += 1
             continue
@@ -268,161 +246,6 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8) -> Optional[List
         return None
     
     return entities
-
-def format_vp02_input(
-    known_entities: List[Dict],
-    mentions: List[Tuple[int, str, str, str]],
-    messages: List[Dict],
-    session_context: str
-) -> str:
-    
-    lines = []
-    lines.append("## Known Entities")
-    if known_entities:
-        for ent in known_entities:
-            lines.append(f"{ent['canonical_name']}")
-            if ent.get('facts'):
-                lines.append(f"  Facts: {' | '.join(ent['facts'])}")
-            if ent.get('connected_to'):
-                lines.append(f"  Connected to: {', '.join(ent['connected_to'])}")
-    else:
-        lines.append("(none)")
-    
-    if mentions:
-        lines.append("\n## Mentions")
-        for msg_id, name, typ, topic in mentions:
-            lines.append(f"MSG {msg_id} | {name} | {typ} | {topic}")
-    
-    if messages:
-        lines.append("\n## Messages")
-        for msg in messages:
-            label = msg.get("role_label")
-            if not label:
-                label = "USER" if msg.get("role") == "user" else "AGENT"
-            
-            content = msg.get("message") or msg.get("content") or msg.get("text") or ""
-            lines.append(f"[MSG {msg['id']}] [{label}]: \"{content}\"")
-    
-    if session_context:
-        lines.append("\n## Session Context")
-        lines.append(session_context)
-    
-    return "\n".join(lines)
-
-def parse_disambiguation(
-    reasoning: str, 
-    mentions: List[Tuple[int, str, str, str]]
-) -> List[ResolutionEntry]:
-    """
-    Parse VP-02 <resolution> block into list of Resolution Entry.
-    """
-    content = extract_xml_content(reasoning, "resolution")
-    if not content:
-        lines = reasoning.strip().split("\n")
-        resolution_lines = [
-            l.strip() for l in lines 
-            if l.strip().startswith(("EXISTING", "NEW_SINGLE", "NEW_GROUP"))
-        ]
-        if resolution_lines:
-            content = "\n".join(resolution_lines)
-    
-    if not content:
-        return []
-    
-    logger.debug(f"Disambiguation content:\n{content}")
-    
-    # Build lookup: (msg_id, name_lower) -> (type, topic)
-    mention_lookup = {
-        (m[0], m[1].lower()): (m[2], m[3]) 
-        for m in mentions
-    }
-    
-    entries: List[ResolutionEntry] = []
-    for line in content.split("\n"):
-        line = line.strip()
-        if not line or "|" not in line:
-            continue
-        
-        parts = [p.strip() for p in line.split("|")]
-        verdict = parts[0].upper()
-        
-        if verdict == "EXISTING" and len(parts) >= 3:
-            canonical = parts[1]
-            mention_raw = parts[2]
-            mention, msg_id = _parse_mention_with_msg_id(mention_raw)
-            typ, topic = mention_lookup.get((msg_id, mention.lower()), ("unknown", "General"))
-            
-            entries.append(ResolutionEntry(
-                verdict="EXISTING",
-                canonical_name=canonical,
-                mentions=[mention],
-                entity_type=typ,
-                topic=topic,
-                msg_ids=[msg_id] if msg_id else []
-            ))
-        
-        elif verdict == "NEW_GROUP" and len(parts) >= 2:
-            mention_list = []
-            msg_ids = []
-            first_type, first_topic = None, None
-            
-            for raw in [m.strip() for m in parts[1].split(",")]:
-                mention, msg_id = _parse_mention_with_msg_id(raw)
-                mention_list.append(mention)
-                if msg_id:
-                    msg_ids.append(msg_id)
-                if first_type is None:
-                    first_type, first_topic = mention_lookup.get((msg_id, mention.lower()), ("unknown", "General"))
-            
-            entries.append(ResolutionEntry(
-                verdict="NEW_GROUP",
-                canonical_name=max(mention_list, key=lambda m: (len(m), m)),
-                mentions=mention_list,
-                entity_type=first_type or "unknown",
-                topic=first_topic or "General",
-                msg_ids=msg_ids
-            ))
-        
-        elif verdict == "NEW_SINGLE" and len(parts) >= 2:
-            mention_raw = parts[1]
-            mention, msg_id = _parse_mention_with_msg_id(mention_raw)
-            if msg_id is not None:
-                typ, topic = mention_lookup.get((msg_id, mention.lower()), (None, None))
-            else:
-                typ, topic = None, None
-            
-            if typ is None:
-                for (_, mname), (mtyp, mtopic) in mention_lookup.items():
-                    if mname == mention.lower():
-                        typ, topic = mtyp, mtopic
-                        break
-                else:
-                    typ, topic = "unknown", "General"
-            
-            entries.append(ResolutionEntry(
-                verdict="NEW_SINGLE",
-                canonical_name=mention,
-                mentions=[mention],
-                entity_type=typ,
-                topic=topic,
-                msg_ids=[msg_id] if msg_id else []
-            ))
-    
-    return entries
-
-def _parse_mention_with_msg_id(raw: str) -> Tuple[str, Optional[int]]:
-    """
-   Parse 'X (MSG_3)' -> ('X', 3)
-    Handles variations: MSG_3, MSG 3, MSG3, msg_3
-    """
-    if not raw:
-        return "", None
-    match = re.search(r"^(.+?)\s*\(MSG[_\s]*(\d+)\)$", raw.strip(), re.IGNORECASE)
-    if match:
-        return match.group(1).strip(), int(match.group(2))
-    
-    # Fallback: no msg_id in output
-    return raw.strip(), None
 
 def format_vp03_input(
     candidates: List[Dict],
@@ -534,7 +357,8 @@ def build_connection_response(parsed: List[dict]) -> List[MessageConnections]:
             EntityPair(
                 entity_a=item["entity_a"],
                 entity_b=item["entity_b"],
-                confidence=item["confidence"]
+                confidence=item["confidence"],
+                context=item.get("reason")
             )
         )
     

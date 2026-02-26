@@ -87,18 +87,19 @@ class MCPClientManager:
         try:
             conn.exit_stack = AsyncExitStack()
 
-            stdio_transport = await conn.exit_stack.enter_async_context(
-                stdio_client(server_params)
-            )
-            read, write = stdio_transport
+            async with asyncio.timeout(15):
+                stdio_transport = await conn.exit_stack.enter_async_context(
+                    stdio_client(server_params)
+                )
+                read, write = stdio_transport
 
-            conn.session = await conn.exit_stack.enter_async_context(
-                ClientSession(read, write)
-            )
+                conn.session = await conn.exit_stack.enter_async_context(
+                    ClientSession(read, write)
+                )
 
-            await conn.session.initialize()
+                await conn.session.initialize()
+                response = await conn.session.list_tools()
 
-            response = await conn.session.list_tools()
             allowed = conn.allowed_tools
             discovered = []
 
@@ -123,6 +124,18 @@ class MCPClientManager:
             tool_names = [t["name"] for t in discovered]
             logger.info(f"[MCP] Connected to '{conn.name}': {len(discovered)} tools — {tool_names}")
             return True
+        except TimeoutError:
+            conn.connected = False
+            conn.last_error = "Connection timed out after 15s"
+            logger.error(f"[MCP] Timed out connecting to '{conn.name}'")
+            if conn.exit_stack:
+                try:
+                    await conn.exit_stack.aclose()
+                except Exception:
+                    pass
+                conn.exit_stack = None
+                conn.session = None
+            return False
 
         except Exception as e:
             conn.connected = False
@@ -184,9 +197,14 @@ class MCPClientManager:
 
             return {"data": "\n".join(text_parts) if text_parts else "No content returned"}
 
+        except (ConnectionError, BrokenPipeError, EOFError, OSError) as e:
+            logger.error(f"[MCP] Connection lost to '{server_name}': {e}")
+            conn.connected = False
+            conn.last_error = str(e)
+            return {"error": f"MCP server '{server_name}' connection lost: {e}"}
+
         except Exception as e:
             logger.error(f"[MCP] Tool call failed — {server_name}.{tool_name}: {e}")
-            conn.connected = False
             conn.last_error = str(e)
             return {"error": f"MCP tool call failed: {e}"}
 

@@ -1,120 +1,15 @@
+
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import Dict, Any
+import copy
+from api.deps import get_app_state
 from api.state import AppState
-from shared.config import get_default_config, load_config, save_config, MCP_SERVER_PRESETS
-import httpx
-from datetime import datetime, timedelta
+from shared.config import load_config, save_config, get_default_config
+from shared.schema.settings import ConfigUpdate
+from shared.schema.tool_schema import TOOL_SCHEMAS
 
 router = APIRouter()
-
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
-
-
-class IngestionSettings(BaseModel):
-    batch_size: Optional[int] = Field(None, ge=1, le=100)
-    batch_timeout: Optional[float] = Field(None, ge=10.0)
-    checkpoint_interval: Optional[int] = Field(None, ge=1)
-    session_window: Optional[int] = Field(None, ge=1)
-
-class CleanerSettings(BaseModel):
-    interval_hours: Optional[int] = Field(None, ge=1)
-    orphan_age_hours: Optional[int] = Field(None, ge=1)
-    stale_junk_days: Optional[int] = Field(None, ge=1)
-
-class ProfileSettings(BaseModel):
-    msg_window: Optional[int] = Field(None, ge=5)
-    volume_threshold: Optional[int] = Field(None, ge=1)
-    idle_threshold: Optional[int] = Field(None, ge=10)
-    profile_batch_size: Optional[int] = Field(None, ge=1)
-    contradiction_sim_low: Optional[float] = Field(None, ge=0.0, le=1.0)
-    contradiction_sim_high: Optional[float] = Field(None, ge=0.0, le=1.0)
-    contradiction_batch_size: Optional[int] = Field(None, ge=1)
-
-class MergerSettings(BaseModel):
-    auto_threshold: Optional[float] = Field(None, ge=0.5, le=1.0)
-    hitl_threshold: Optional[float] = Field(None, ge=0.4, le=1.0)
-    cosine_threshold: Optional[float] = Field(None, ge=0.1, le=1.0)
-
-class DLQSettings(BaseModel):
-    interval_seconds: Optional[int] = Field(None, ge=10)
-    batch_size: Optional[int] = Field(None, ge=1)
-    max_attempts: Optional[int] = Field(None, ge=1)
-
-class ArchivalSettings(BaseModel):
-    retention_days: Optional[int] = Field(None, ge=1)
-
-class JobSettings(BaseModel):
-    cleaner: Optional[CleanerSettings] = None
-    profile: Optional[ProfileSettings] = None
-    merger: Optional[MergerSettings] = None
-    dlq: Optional[DLQSettings] = None
-    archival: Optional[ArchivalSettings] = None
-
-class AgentLimitSettings(BaseModel):
-    agent_history_turns: Optional[int] = Field(None, ge=1)
-    max_tool_calls: Optional[int] = Field(None, ge=1)
-    max_attempts: Optional[int] = Field(None, ge=1)
-    max_consecutive_errors: Optional[int] = Field(None, ge=1)
-    max_accumulated_messages: Optional[int] = Field(None, ge=1)
-    conversation_context_turns: Optional[int] = Field(None, ge=1)
-    tool_limits: Optional[Dict[str, int]] = None
-
-class NLPPipelineSettings(BaseModel):
-    gliner_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
-    vp01_min_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
-
-class SearchSettings(BaseModel):
-    vector_limit: Optional[int] = Field(None, ge=1)
-    fts_limit: Optional[int] = Field(None, ge=1)
-    rerank_candidates: Optional[int] = Field(None, ge=1)
-    default_message_limit: Optional[int] = Field(None, ge=1)
-    default_entity_limit: Optional[int] = Field(None, ge=1)
-    default_activity_hours: Optional[int] = Field(None, ge=1)
-
-class MemorySettings(BaseModel):
-    recall_strictness: Optional[float] = Field(None, ge=0.0, le=1.0)
-    fuzzy_match_threshold: Optional[int] = Field(None, ge=50, le=100)
-
-class EntityResolutionSettings(BaseModel):
-    fuzzy_substring_threshold: Optional[int] = Field(None, ge=50, le=100)
-    fuzzy_non_substring_threshold: Optional[int] = Field(None, ge=50, le=100)
-    generic_token_freq: Optional[int] = Field(None, ge=1)
-    candidate_fuzzy_threshold: Optional[int] = Field(None, ge=50, le=100)
-    candidate_vector_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
-
-class LLMSettings(BaseModel):
-    api_key: Optional[str] = None
-    reasoning_model: Optional[str] = None
-    agent_model: Optional[str] = None
-
-class DeveloperSettings(BaseModel):
-    ingestion: Optional[IngestionSettings] = None
-    jobs: Optional[JobSettings] = None
-    limits: Optional[AgentLimitSettings] = None
-    memory: Optional[MemorySettings] = None
-    entity_resolution: Optional[EntityResolutionSettings] = None
-    nlp_pipeline: Optional[NLPPipelineSettings] = None
-    search: Optional[SearchSettings] = None
-
-class ConfigUpdate(BaseModel):
-    user_name: Optional[str] = None
-    user_aliases: Optional[List[str]] = None
-    user_facts: Optional[List[str]] = None
-    llm: Optional[LLMSettings] = None
-    default_topics: Optional[dict] = None
-    developer_settings: Optional[DeveloperSettings] = None
-    curated_models: Optional[List[dict]] = None
-
-
-class MCPServerCreate(BaseModel):
-    name: str
-    command: str = "uvx"
-    args: list = []
-    env: dict = None
-    enabled: bool = True
-    allowed_tools: list = None
 
 
 def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -129,17 +24,27 @@ def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any
             source[key] = value
     return source
 
-@router.get("/models/curated")
-async def get_curated_models():
-    config = load_config()
-    return {"models": config.get("curated_models", [])}
+def _redact_config(config: dict) -> dict:
+    """Redact sensitive fields before returning to client."""
+    out = copy.deepcopy(config)
+    llm = out.get("llm", {})
+    if llm.get("api_key"):
+        llm["api_key"] = f"...{llm['api_key'][-4:]}"
+    
+    search = out.get("search", {})
+    if search.get("brave_api_key"):
+        search["brave_api_key"] = f"...{search['brave_api_key'][-4:]}"
+    if search.get("tavily_api_key"):
+        search["tavily_api_key"] = f"...{search['tavily_api_key'][-4:]}"
+    return out
 
 @router.get("/")
 async def get_config():
     config = load_config()
     if not config:
         return get_default_config()
-    return config
+    return _redact_config(config)
+
 
 @router.get("/status")
 async def get_config_status():
@@ -154,23 +59,39 @@ async def get_config_status():
         "has_user_name": has_user_name
     }
 
+
 @router.get("/tools")
 async def get_tools(request: Request):
     """
     Return a comprehensive list of available tools.
     Combines standard Knoggin tools with dynamic MCP tools.
     """
-    standard_tools = [
-        {"id": "search_entity", "name": "Search Entity", "source": "knoggin", "group": "Memory"},
-        {"id": "save_memory", "name": "Save Memory", "source": "knoggin", "group": "Memory"},
-        {"id": "forget_memory", "name": "Forget Memory", "source": "knoggin", "group": "Memory"},
-        {"id": "get_connections", "name": "Connections", "source": "knoggin", "group": "Graph"},
-        {"id": "find_path", "name": "Find Path", "source": "knoggin", "group": "Graph"},
-        {"id": "get_hierarchy", "name": "Hierarchy", "source": "knoggin", "group": "Graph"},
-        {"id": "search_messages", "name": "Search Messages", "source": "knoggin", "group": "History"},
-        {"id": "get_recent_activity", "name": "Recent Activity", "source": "knoggin", "group": "History"},
-        {"id": "search_files", "name": "Search Files", "source": "knoggin", "group": "RAG"},
-    ]
+    schema_map = {
+        s["function"]["name"]: s["function"]
+        for s in TOOL_SCHEMAS
+        if s["function"]["name"] != "request_clarification"
+    }
+
+    standard_tools = []
+    for tool_id in ["search_entity", "save_memory", "forget_memory", "get_connections", 
+                    "find_path", "get_hierarchy", "search_messages", "get_recent_activity", "search_files", "web_search", "news_search"]:
+        schema = schema_map.get(tool_id, {})
+        group_map = {
+            "search_entity": "Memory", "save_memory": "Memory", "forget_memory": "Memory",
+            "get_connections": "Graph", "find_path": "Graph", "get_hierarchy": "Graph",
+            "search_messages": "History", "get_recent_activity": "History",
+            "search_files": "RAG",
+            "web_search": "Search",
+            "news_search": "Search",
+        }
+        standard_tools.append({
+            "id": tool_id,
+            "name": schema.get("name", tool_id).replace("_", " ").title(),
+            "description": schema.get("description", ""),
+            "parameters": schema.get("parameters", {}),
+            "source": "knoggin",
+            "group": group_map.get(tool_id, "Other"),
+        })
     
     mcp_tools = []
     if request.app.state.app_state.resources.mcp_manager:
@@ -203,243 +124,53 @@ async def get_tools(request: Request):
         "tools": standard_tools + mcp_tools
     }
 
+def _strip_redacted_keys(d: dict):
+    """Remove redacted API key values (starting with '...') so they don't overwrite real keys."""
+    keys_to_remove = []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            _strip_redacted_keys(v)
+            if not v:  # Remove empty dicts after stripping
+                keys_to_remove.append(k)
+        elif isinstance(v, str) and v.startswith("..."):
+            keys_to_remove.append(k)
+    for k in keys_to_remove:
+        del d[k]
 
-
-
-@router.get("/mcp/presets")
-async def get_mcp_presets():
-    """Return curated list of MCP server presets."""
-    return {"presets": MCP_SERVER_PRESETS}
-
-
-@router.get("/mcp/servers")
-async def get_mcp_servers(request: Request):
-    """Return all configured MCP servers with live connection status."""
-    state: AppState = request.app.state.app_state
-    mcp = state.resources.mcp_manager
-    
-    if not mcp:
-        return {"servers": []}
-    
-    status = mcp.get_status()
-    config = load_config() or get_default_config()
-    server_configs = config.get("mcp", {}).get("servers", {})
-    
-    servers = []
-    for name, live in status.items():
-        cfg = server_configs.get(name, {})
-        servers.append({
-            "name": name,
-            "command": cfg.get("command", "uvx"),
-            "args": cfg.get("args", []),
-            "transport": cfg.get("transport", "stdio"),
-            "enabled": live["enabled"],
-            "connected": live["connected"],
-            "tool_count": live["tool_count"],
-            "tools": live["tools"],
-            "last_error": live["last_error"],
-        })
-    
-    return {"servers": servers}
-
-
-@router.post("/mcp/servers")
-async def add_mcp_server(body: MCPServerCreate, request: Request):
-    """Add a new MCP server, save to config, and optionally connect."""
-    state: AppState = request.app.state.app_state
-    mcp = state.resources.mcp_manager
-    
-    if not mcp:
-        raise HTTPException(status_code=500, detail="MCP manager not initialized")
-    
-    server_config = {
-        "command": body.command,
-        "args": body.args,
-        "enabled": body.enabled,
-        "transport": "stdio",
-    }
-    if body.env:
-        server_config["env"] = body.env
-    if body.allowed_tools:
-        server_config["allowed_tools"] = body.allowed_tools
-    
-    result = await mcp.add_server(body.name, server_config, connect=body.enabled)
-    
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    
-    config = load_config() or get_default_config()
-    if "mcp" not in config:
-        config["mcp"] = {"servers": {}}
-    config["mcp"]["servers"][body.name] = server_config
-    save_config(config)
-    
-    return result
-
-
-@router.delete("/mcp/servers/{name}")
-async def remove_mcp_server(name: str, request: Request):
-    """Disconnect and remove an MCP server."""
-    state: AppState = request.app.state.app_state
-    mcp = state.resources.mcp_manager
-    
-    if not mcp:
-        raise HTTPException(status_code=500, detail="MCP manager not initialized")
-    
-    success = await mcp.remove_server(name)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    
-    config = load_config() or get_default_config()
-    mcp_cfg = config.get("mcp", {})
-    servers = mcp_cfg.get("servers", {})
-    servers.pop(name, None)
-    save_config(config)
-    
-    return {"removed": name}
-
-
-@router.post("/mcp/servers/{name}/toggle")
-async def toggle_mcp_server(name: str, request: Request):
-    """Enable or disable an MCP server."""
-    state: AppState = request.app.state.app_state
-    mcp = state.resources.mcp_manager
-    
-    if not mcp:
-        raise HTTPException(status_code=500, detail="MCP manager not initialized")
-    
-    status = mcp.get_status()
-    if name not in status:
-        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
-    
-    currently_enabled = status[name]["enabled"]
-    
-    if currently_enabled:
-        success = await mcp.disable_server(name)
-    else:
-        success = await mcp.enable_server(name)
-    
-    if not success:
-        raise HTTPException(status_code=500, detail="Toggle failed")
-    
-    # Persist the change
-    config = load_config() or get_default_config()
-    mcp_cfg = config.get("mcp", {}).get("servers", {})
-    if name in mcp_cfg:
-        mcp_cfg[name]["enabled"] = not currently_enabled
-        save_config(config)
-    
-    new_status = mcp.get_status().get(name, {})
-    return {
-        "name": name,
-        "enabled": not currently_enabled,
-        "connected": new_status.get("connected", False),
-        "tool_count": new_status.get("tool_count", 0),
-        "tools": new_status.get("tools", []),
-    }
-
+_config_lock = asyncio.Lock()
 @router.patch("/")
 async def update_config(
     body: ConfigUpdate,
     state: AppState = Depends(get_app_state)
 ):
-    updates = body.model_dump(exclude_none=True)
-    if not updates:
-        raise HTTPException(status_code=400, detail="No fields to update")
+    async with _config_lock:
+        updates = body.model_dump(exclude_none=True)
+        if not updates:
+            raise HTTPException(status_code=400, detail="No fields to update")
 
+        # Strip redacted API keys — never overwrite real keys with "...xxxx"
+        _strip_redacted_keys(updates)
 
-    current_config = load_config() or get_default_config()
+        current_config = load_config() or get_default_config()
+        merged_config = deep_merge(copy.deepcopy(current_config), updates)
 
-    merged_config = deep_merge(current_config, updates)
-
-    success = save_config(merged_config)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to save config")
-    
-    if "user_name" in updates and updates["user_name"]:
-        state.user_name = merged_config["user_name"]
-    
-    llm_cfg = merged_config.get("llm", {})
-    if llm_cfg:
-        state.resources.llm_service.update_settings(
-            api_key=llm_cfg.get("api_key"),
-            reasoning_model=llm_cfg.get("reasoning_model"),
-            agent_model=llm_cfg.get("agent_model")
-        )
-    
-    active_count = 0
-    for _, context in state.active_sessions.items():
-        await context.update_runtime_settings(merged_config)
-        active_count += 1
-    
-    return merged_config
-
-@router.get("/models")
-async def get_available_models():
-    """
-    Fetch models from OpenRouter, filtered for Knoggin's use cases.
-    Returns separate lists for reasoning (with thinking) and agent (with tools) models.
-    Results are cached in-memory for 1 hour.
-    """
-
-    
-    # Simple in-memory cache
-    cache_key = "_models_cache"
-    cache_expiry_key = "_models_cache_expiry"
-    
-    # Check cache (stored on the module for simplicity)
-    cached = getattr(get_available_models, cache_key, None)
-    expiry = getattr(get_available_models, cache_expiry_key, None)
-    
-    if cached and expiry and datetime.now() < expiry:
-        return cached
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            reasoning_resp = await client.get(
-                "https://openrouter.ai/api/v1/models",
-                params={"supported_parameters": "reasoning"},
-                timeout=15.0
+        success = save_config(merged_config)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to save config")
+        
+        if "user_name" in updates and updates["user_name"]:
+            state.user_name = merged_config["user_name"]
+        
+        llm_cfg = updates.get("llm")
+        if llm_cfg:
+            state.resources.llm_service.update_settings(
+                api_key=llm_cfg.get("api_key"),
+                agent_model=llm_cfg.get("agent_model")
             )
-            
-            tools_resp = await client.get(
-                "https://openrouter.ai/api/v1/models",
-                params={"supported_parameters": "tools"},
-                timeout=15.0
-            )
-            
-            if reasoning_resp.status_code != 200 or tools_resp.status_code != 200:
-                raise HTTPException(status_code=502, detail="Failed to fetch models from OpenRouter")
-            
-            reasoning_data = reasoning_resp.json().get("data", [])
-            tools_data = tools_resp.json().get("data", [])
-            
-            def transform_model(m):
-                pricing = m.get("pricing", {})
-                prompt_price = float(pricing.get("prompt", 0)) * 1_000_000  # per 1M tokens
-                completion_price = float(pricing.get("completion", 0)) * 1_000_000
-                
-                return {
-                    "id": m.get("id"),
-                    "name": m.get("name"),
-                    "context_length": m.get("context_length"),
-                    "prompt_price": round(prompt_price, 2),
-                    "completion_price": round(completion_price, 2),
-                }
-            
-            result = {
-                "reasoning": [transform_model(m) for m in reasoning_data],
-                "agent": [transform_model(m) for m in tools_data],
-                "cached_at": datetime.now().isoformat()
-            }
-            
-            # Cache for 1 hour
-            setattr(get_available_models, cache_key, result)
-            setattr(get_available_models, cache_expiry_key, datetime.now() + timedelta(hours=1))
-            
-            return result
-            
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="OpenRouter request timed out")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        
+        active_count = 0
+        for _, context in state.active_sessions.items():
+            await context.update_runtime_settings(merged_config)
+            active_count += 1
+    
+    return _redact_config(merged_config)

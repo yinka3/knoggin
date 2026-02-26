@@ -226,6 +226,58 @@ TOOL_SCHEMAS = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the live internet for information. "
+                "Use this for: 1) Current events or news, 2) Technical documentation or facts outside the graph, "
+                "3) Verifying information with external sources. "
+                "This tool tracks sources and displays them to the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query."},
+                    "limit": {"type": "integer", "description": "Max results (default 5)"},
+                    "freshness": {
+                        "type": "string",
+                        "description": (
+                            "Filter results by recency. Options: 'pd' (past day), 'pw' (past week), "
+                            "'pm' (past month), 'py' (past year). Only set this when the user asks about recent events."
+                        )
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "news_search",
+            "description": (
+                "Search for recent news articles. Use this instead of web_search when the user specifically "
+                "asks about news, current events, or breaking stories. Returns curated results from news outlets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The news search query."},
+                    "limit": {"type": "integer", "description": "Max results (default 5)"},
+                    "freshness": {
+                        "type": "string",
+                        "description": (
+                            "Filter by time: 'pd' (past day), 'pw' (past week), 'pm' (past month). "
+                            "Defaults to 'pw' for news."
+                        )
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
 
@@ -239,6 +291,8 @@ ALL_TOOL_NAMES = [
     "save_memory",
     "forget_memory",
     "search_files",
+    "web_search",
+    "news_search",
 ]
 
 def get_filtered_schemas(enabled_tools: list[str] | None = None) -> list[dict]:

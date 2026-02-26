@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+import re
+import httpx
 from typing import List, Dict, Optional
 
 from loguru import logger
@@ -62,30 +65,15 @@ class Tools:
         return results
     
     def _normalize_output(self, entity_list: List[Dict]) -> List[Dict]:
-        """
-        Renames legacy types to the modern schema before showing the Agent.
-        Example: type="Library" -> type="Dependency"
-        """
-        if not entity_list or not self.topic_config:
+        if not entity_list:
             return entity_list
         
-        # build label alias map from config
-        alias_map = {}
-        for _, config in self.topic_config.raw.items():
-            label_aliases = config.get("label_aliases", {})
-            for legacy, canonical in label_aliases.items():
-                alias_map[legacy] = canonical
-        
         for entity in entity_list:
-            raw_type = entity.get("type")
-            if raw_type in alias_map:
-                entity["type"] = alias_map[raw_type]
-            
             if "top_connections" in entity:
                 self._normalize_output(entity["top_connections"])
         
         return entity_list
-    
+        
 
     async def _get_surrounding_context(self, msg_id: str, forward: int = 3, target_total: int = 10) -> List[Dict]:
         """Get surrounding turns for context."""
@@ -583,9 +571,14 @@ class Tools:
                 "error": f"Memory too long ({len(content)} chars). Max 200. Condense and retry."
             }
         
-        normalized_topic = self.topic_config.normalize_topic(topic) if topic else "General"
-        if normalized_topic not in self.active_topics and normalized_topic != "General":
-            return {"error": f"Topic '{topic}' is not active. Use an active topic or 'General'."}
+        normalized_topic = self.topic_config.normalize_topic(topic) if topic else None
+        if not normalized_topic:
+            # If no topic resolved (e.g. General disabled), try to use first active topic
+            normalized_topic = self.active_topics[0] if self.active_topics else None
+            if not normalized_topic:
+                return {"error": "No active topics available to save memory to."}
+        if normalized_topic not in self.active_topics:
+            return {"error": f"Topic '{topic}' is not active. Use an active topic."}
         
         memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, normalized_topic)
         
@@ -634,7 +627,8 @@ class Tools:
         if not memory_id:
             return {"error": "No memory_id provided"}
         
-        for topic in list(self.active_topics) + ["General"]:
+        all_topics = list(set(self.active_topics + list(self.topic_config.raw.keys())))
+        for topic in all_topics:
             memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, topic)
             removed = await self.redis.hdel(memory_key, memory_id)
             if removed:
@@ -695,9 +689,11 @@ class Tools:
         Fetch memory blocks for prompt injection.
         Always includes General. Adds hot topic blocks.
         """
-        topics_to_fetch = ["General"]
+        topics_to_fetch = []
+        if self.topic_config.is_active("General"):
+            topics_to_fetch.append("General")
         for t in hot_topics:
-            if t != "General" and t not in topics_to_fetch:
+            if t not in topics_to_fetch:
                 topics_to_fetch.append(t)
         
         blocks = {}
@@ -722,6 +718,214 @@ class Tools:
             blocks[topic] = entries
         
         return blocks
+    
+    async def web_search(self, query: str, limit: int = 5, freshness: str = None) -> List[Dict]:
+        """
+        Search the web using the best available provider.
+        Tier: configured provider > Brave > Tavily > DuckDuckGo (free default).
+        """
+        provider = self.search_cfg.get("provider", "auto")
+        brave_key = self.search_cfg.get("brave_api_key", "")
+        tavily_key = self.search_cfg.get("tavily_api_key", "")
+
+        # Explicit provider selection
+        if provider == "brave" and brave_key:
+            return await self._search_brave(query, limit, brave_key, freshness)
+        elif provider == "tavily" and tavily_key:
+            return await self._search_tavily(query, limit, tavily_key)
+        elif provider == "duckduckgo":
+            return await self._search_duckduckgo(query, limit, freshness)
+
+        # Auto mode: use best available
+        if brave_key:
+            return await self._search_brave(query, limit, brave_key, freshness)
+        if tavily_key:
+            return await self._search_tavily(query, limit, tavily_key)
+        return await self._search_duckduckgo(query, limit, freshness)
+
+    async def news_search(self, query: str, limit: int = 5, freshness: str = None) -> List[Dict]:
+        """
+        Search for news articles. Requires Brave Search API key.
+        """
+        brave_key = self.search_cfg.get("brave_api_key", "")
+        if not brave_key:
+            return [{"title": "Not Available", "url": "", "snippet": "News search requires a Brave Search API key. Configure one in Settings → Web Search."}]
+        return await self._news_brave(query, limit, brave_key, freshness or "pw")
+
+    async def _search_duckduckgo(self, query: str, limit: int, freshness: str = None) -> List[Dict]:
+        """Free web search via DuckDuckGo — no API key required."""
+        try:
+            from duckduckgo_search import DDGS
+            ddgs = DDGS()
+            timelimit = {"pd": "d", "pw": "w", "pm": "m", "py": "y"}.get(freshness)
+            raw = ddgs.text(query, max_results=min(limit, 10), timelimit=timelimit)
+
+            if not raw:
+                return [{"title": "No Results", "url": "", "snippet": f"No web results found for: {query}"}]
+
+            results = []
+            for r in raw:
+                results.append({
+                    "title": r.get("title", "Untitled"),
+                    "url": r.get("href", r.get("link", "")),
+                    "snippet": r.get("body", r.get("snippet", ""))
+                })
+            return results
+        except Exception as e:
+            logger.error(f"DuckDuckGo search failed: {e}")
+            return [{"title": "Search Error", "url": "", "snippet": f"DuckDuckGo search failed: {e}"}]
+
+
+    async def _search_tavily(self, query: str, limit: int, api_key: str) -> List[Dict]:
+        """Web search via Tavily API — optimized for AI agents."""
+        url = "https://api.tavily.com/search"
+        payload = {
+            "api_key": api_key,
+            "query": query,
+            "max_results": min(limit, 10),
+            "search_depth": "basic",
+            "include_answer": False,
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, json=payload, timeout=10.0)
+
+                if response.status_code == 401:
+                    logger.warning("Tavily API key invalid, falling back to DuckDuckGo")
+                    return await self._search_duckduckgo(query, limit)
+                if response.status_code == 429:
+                    logger.warning("Tavily rate limit hit, falling back to DuckDuckGo")
+                    return await self._search_duckduckgo(query, limit)
+
+                response.raise_for_status()
+                data = response.json()
+
+                results = []
+                for r in data.get("results", []):
+                    results.append({
+                        "title": r.get("title", "Untitled"),
+                        "url": r.get("url", ""),
+                        "snippet": r.get("content", "")
+                    })
+
+                if not results:
+                    return [{"title": "No Results", "url": "", "snippet": f"No web results found for: {query}"}]
+                return results
+        except httpx.TimeoutException:
+            logger.warning("Tavily timed out, falling back to DuckDuckGo")
+            return await self._search_duckduckgo(query, limit)
+        except Exception as e:
+            logger.error(f"Tavily search failed: {e}")
+            return await self._search_duckduckgo(query, limit)
+
+    async def _search_brave(self, query: str, limit: int, api_key: str, freshness: str = None) -> List[Dict]:
+        """Premium web search via Brave Search API."""
+        url = "https://api.search.brave.com/res/v1/web/search"
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": api_key
+        }
+        params = {
+            "q": query,
+            "count": min(limit, 10),
+            "extra_snippets": True,
+            "spellcheck": 1,
+        }
+        if freshness and freshness in ("pd", "pw", "pm", "py"):
+            params["freshness"] = freshness
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers=headers, params=params, timeout=10.0)
+
+                if response.status_code == 401:
+                    logger.warning("Brave API key invalid, falling back")
+                    return await self._search_tavily(query, limit, self.search_cfg.get("tavily_api_key", "")) \
+                        if self.search_cfg.get("tavily_api_key") else await self._search_duckduckgo(query, limit)
+                if response.status_code == 429:
+                    logger.warning("Brave rate limit hit, falling back")
+                    return await self._search_tavily(query, limit, self.search_cfg.get("tavily_api_key", "")) \
+                        if self.search_cfg.get("tavily_api_key") else await self._search_duckduckgo(query, limit)
+
+                response.raise_for_status()
+                data = response.json()
+
+                results = []
+                for result in data.get("web", {}).get("results", []):
+                    snippet = result.get("description", result.get("snippet", ""))
+                    snippet = re.sub(r"<[^>]+>", "", snippet)
+                    # Append extra snippets for richer context
+                    extra = result.get("extra_snippets", [])
+                    if extra:
+                        snippet += " ... " + " ... ".join(re.sub(r"<[^>]+>", "", s) for s in extra[:2])
+                    results.append({
+                        "title": result.get("title", "Untitled"),
+                        "url": result.get("url", ""),
+                        "snippet": snippet
+                    })
+
+                if not results:
+                    return [{"title": "No Results", "url": "", "snippet": f"No web results found for: {query}"}]
+                return results
+        except httpx.TimeoutException:
+            logger.warning("Brave timed out, falling back to DuckDuckGo")
+            return await self._search_duckduckgo(query, limit)
+        except Exception as e:
+            logger.error(f"Brave search failed: {e}")
+            return await self._search_duckduckgo(query, limit)
+
+    async def _news_brave(self, query: str, limit: int, api_key: str, freshness: str = "pw") -> List[Dict]:
+        """News search via Brave News API."""
+        url = "https://api.search.brave.com/res/v1/news/search"
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": api_key
+        }
+        params = {
+            "q": query,
+            "count": min(limit, 20),
+            "spellcheck": 1,
+            "freshness": freshness,
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers=headers, params=params, timeout=10.0)
+
+                if response.status_code in (401, 429):
+                    logger.warning(f"Brave news API returned {response.status_code}")
+                    return [{"title": "Error", "url": "", "snippet": f"Brave News API error ({response.status_code}). Check your API key in Settings."}]
+
+                response.raise_for_status()
+                data = response.json()
+
+                results = []
+                for article in data.get("results", []):
+                    snippet = article.get("description", "")
+                    snippet = re.sub(r"<[^>]+>", "", snippet)
+                    results.append({
+                        "title": article.get("title", "Untitled"),
+                        "url": article.get("url", ""),
+                        "snippet": snippet,
+                        "source": article.get("meta_url", {}).get("hostname", ""),
+                        "date": article.get("age", ""),
+                    })
+
+                if not results:
+                    return [{"title": "No Results", "url": "", "snippet": f"No news found for: {query}"}]
+                return results
+        except httpx.TimeoutException:
+            logger.warning("Brave news timed out")
+            return [{"title": "Timeout", "url": "", "snippet": "News search timed out. Try a simpler query."}]
+        except Exception as e:
+            logger.error(f"Brave news search failed: {e}")
+            return [{"title": "Search Error", "url": "", "snippet": f"News search failed: {e}"}]
+
+
+
 
     def get_file_manifest(self) -> List[Dict]:
         """Get list of uploaded files for prompt context."""

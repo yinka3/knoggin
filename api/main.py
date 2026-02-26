@@ -13,6 +13,8 @@ from api.routes.profiles import router as profiles_router
 from api.routes.health import router as health_router
 from api.routes.commands import router as commands_router
 from api.routes.config import router as config_router
+from api.routes.mcp import router as mcp_router
+from api.routes.models import router as models_router
 from api.routes.debug import router as debug_router
 from api.routes.agents import router as agents_router
 from api.routes.stats import router as stats_router
@@ -61,6 +63,8 @@ app.include_router(profiles_router, prefix="/profiles", tags=["profiles"])
 app.include_router(commands_router, prefix="/commands", tags=["commands"])
 app.include_router(agents_router, prefix="/agents", tags=["agents"])
 app.include_router(config_router, prefix="/config", tags=["config"])
+app.include_router(mcp_router, prefix="/config/mcp", tags=["mcp"])
+app.include_router(models_router, prefix="/config/models", tags=["models"])
 app.include_router(debug_router, prefix="/debug", tags=["debug"])
 app.include_router(stats_router, prefix="/stats", tags=["stats"])
 app.include_router(files_router, prefix="/files", tags=["files"])

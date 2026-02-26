@@ -39,27 +39,35 @@ export default function ToolToggles({ enabledTools, onToggle, disabled }) {
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-52 p-2">
-        <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-border">
-          <span className="text-xs font-medium text-foreground">Tools</span>
+      <PopoverContent align="start" className="w-[280px] p-3 rounded-xl shadow-lg border-border/50 bg-card/95 backdrop-blur-md">
+        <div className="flex items-center justify-between pb-3 mb-2 border-b border-border/40">
+          <span className="text-sm font-semibold text-foreground tracking-tight flex items-center gap-2">
+            <Wrench size={14} className="text-primary" />
+            Active Tools
+          </span>
           <button
             onClick={handleToggleAll}
-            className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+            className="text-[11px] font-medium text-muted-foreground hover:text-primary transition-colors px-2 py-1 rounded-md hover:bg-primary/10"
           >
             {allEnabled ? 'Disable All' : 'Enable All'}
           </button>
         </div>
-        <div className="space-y-0.5">
+        <div className="space-y-1">
           {tools.map(tool => (
             <div
               key={tool.id}
-              className="flex items-center justify-between gap-2 py-1 px-1 rounded hover:bg-muted/30 transition-colors"
+              className="flex items-center justify-between gap-3 p-2.5 rounded-lg hover:bg-muted/50 transition-colors group cursor-pointer"
+              onClick={() => handleToggle(tool.id)}
             >
-              <span className="text-xs text-foreground">{tool.name || tool.id}</span>
+              <div className="flex flex-col">
+                <span className="text-xs font-medium text-foreground group-hover:text-primary transition-colors">
+                  {tool.name || tool.id}
+                </span>
+              </div>
               <Switch
                 checked={enabledSet.has(tool.id)}
                 onCheckedChange={() => handleToggle(tool.id)}
-                className="scale-75"
+                className="data-[state=unchecked]:bg-muted-foreground/30 data-[state=checked]:bg-primary"
               />
             </div>
           ))}

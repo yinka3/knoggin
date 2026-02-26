@@ -1,10 +1,7 @@
 import os
 import json
-import secrets
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-import httpx
 from loguru import logger
 from dotenv import load_dotenv
 
@@ -12,10 +9,6 @@ load_dotenv()
 
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
 CONFIG_FILE = CONFIG_DIR / "knoggin.json"
-
-DEFAULT_REASONING_MODEL = "google/gemini-2.5-flash"
-DEFAULT_AGENT_MODEL = "google/gemini-3-flash-preview"
-DEFAULT_TOPICS = ["General"]
 
 MCP_SERVER_PRESETS = [
     {
@@ -30,6 +23,8 @@ MCP_SERVER_PRESETS = [
             {"key": "GOOGLE_REFRESH_TOKEN", "label": "Refresh Token", "placeholder": "1//0..."},
         ],
         "tags": ["gmail", "calendar", "drive", "docs", "google"],
+        "risk": "moderate",
+        "risk_note": "Can read emails, calendar events, and drive files. Write access depends on OAuth scopes granted.",
         "help_url": "https://console.cloud.google.com/apis/credentials",
         "help_label": "Google Cloud Console → Create OAuth credentials",
     },
@@ -43,6 +38,8 @@ MCP_SERVER_PRESETS = [
             {"key": "GOOGLE_MAPS_API_KEY", "label": "Maps API Key", "placeholder": "AIza..."},
         ],
         "tags": ["maps", "location", "directions", "google"],
+        "risk": "safe",
+        "risk_note": "Read-only location lookups and directions. No destructive operations.",
         "help_url": "https://console.cloud.google.com/apis/credentials",
         "help_label": "Google Cloud Console → Create API key with Maps enabled",
     },
@@ -56,22 +53,17 @@ MCP_SERVER_PRESETS = [
             {"key": "GITHUB_TOKEN", "label": "Personal Access Token", "placeholder": "ghp_..."},
         ],
         "tags": ["github", "git", "code", "repos"],
+        "risk": "moderate",
+        "risk_note": "Can read repos, issues, and PRs. Write access (creating issues, PRs) depends on token scopes.",
+        "allowed_tools": [
+            "search_repositories", "get_file_contents", "search_code",
+            "list_issues", "get_issue", "list_commits",
+            "get_pull_request", "list_pull_requests"
+        ],
         "help_url": "https://github.com/settings/tokens",
         "help_label": "GitHub → Settings → Developer settings → Personal access tokens",
     },
-    {
-        "id": "brave-search",
-        "name": "Brave Search",
-        "description": "Web & local search",
-        "command": "uvx",
-        "args": ["mcp-server-brave-search"],
-        "env_vars": [
-            {"key": "BRAVE_API_KEY", "label": "Brave API Key", "placeholder": "BSA..."},
-        ],
-        "tags": ["search", "web", "brave"],
-        "help_url": "https://brave.com/search/api/",
-        "help_label": "Brave Search API → Get API key",
-    },
+
     {
         "id": "filesystem",
         "name": "Filesystem",
@@ -80,6 +72,9 @@ MCP_SERVER_PRESETS = [
         "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home"],
         "env_vars": [],
         "tags": ["files", "filesystem", "local"],
+        "risk": "destructive",
+        "risk_note": "Can read, write, and delete files on your system. Restricted to read-only by default.",
+        "allowed_tools": ["read_file", "list_directory", "search_files", "get_file_info"],
     },
     {
         "id": "slack",
@@ -91,6 +86,12 @@ MCP_SERVER_PRESETS = [
             {"key": "SLACK_BOT_TOKEN", "label": "Bot Token", "placeholder": "xoxb-..."},
         ],
         "tags": ["slack", "messaging", "chat"],
+        "risk": "moderate",
+        "risk_note": "Can read channels and messages. Write access depends on bot token scopes.",
+        "allowed_tools": [
+            "slack_list_channels", "slack_get_channel_history",
+            "slack_get_users", "slack_get_thread_replies"
+        ],
         "help_url": "https://api.slack.com/apps",
         "help_label": "Slack API → Create app → Bot token",
     },
@@ -111,15 +112,13 @@ def get_default_config() -> dict:
                 "active": True, 
                 "labels": [],
                 "hierarchy": {}, 
-                "aliases": [],
-                "label_aliases": {},
+                "aliases": []
             },
             "Identity": {
                 "active": True,
                 "labels": ["person"],
                 "hierarchy": {},
-                "aliases": [],
-                "label_aliases": {}
+                "aliases": []
             }
         },
         "curated_models": [
@@ -186,8 +185,12 @@ def get_default_config() -> dict:
         ],
         "llm": {
             "api_key": "",
-            "reasoning_model": "google/gemini-2.5-flash",
             "agent_model": "google/gemini-3-flash-preview"
+        },
+        "search": {
+            "provider": "auto",
+            "brave_api_key": "",
+            "tavily_api_key": ""
         },
         "mcp": {
             "servers": {},
@@ -205,20 +208,22 @@ def get_default_config() -> dict:
             
             "jobs": {
                 "cleaner": {
+                    "enabled": True,
                     "interval_hours": 24,
                     "orphan_age_hours": 24,
                     "stale_junk_days": 30
                 },
                 "profile": {
                     "msg_window": 30,
-                    "volume_threshold": 30,
-                    "idle_threshold": 60,
+                    "volume_threshold": 15,
+                    "idle_threshold": 90,
                     "profile_batch_size": 8,
                     "contradiction_sim_low": 0.70,
                     "contradiction_sim_high": 0.95,
                     "contradiction_batch_size": 4
                 },
                 "merger": {
+                    "enabled": True,
                     "auto_threshold": 0.93,
                     "hitl_threshold": 0.65,
                     "cosine_threshold": 0.65
@@ -229,7 +234,14 @@ def get_default_config() -> dict:
                     "max_attempts": 2
                 },
                 "archival": {
-                    "retention_days": 14
+                    "enabled": True,
+                    "retention_days": 14,
+                    "fallback_interval_hours": 24
+                },
+                "topic_config": {
+                    "enabled": True,
+                    "interval_msgs": 40,
+                    "conversation_window": 50
                 }
             },
 
@@ -258,7 +270,9 @@ def get_default_config() -> dict:
                     "get_hierarchy": 5,
                     "save_memory": 2,
                     "forget_memory": 2,
-                    "search_files": 3
+                    "search_files": 3,
+                    "web_search": 2,
+                    "news_search": 2
                 }
             },
             
@@ -267,7 +281,8 @@ def get_default_config() -> dict:
                 "fuzzy_non_substring_threshold": 91,
                 "generic_token_freq": 10,
                 "candidate_fuzzy_threshold": 85,   
-                "candidate_vector_threshold": 0.85
+                "candidate_vector_threshold": 0.85,
+                "resolution_threshold": 0.85
             },
 
             "nlp_pipeline": {

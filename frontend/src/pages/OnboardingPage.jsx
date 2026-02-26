@@ -10,7 +10,6 @@ import {
   X,
   Zap,
   Layers,
-  ArrowRight,
   Loader2,
   Check,
   ExternalLink,
@@ -20,6 +19,7 @@ import { updateConfig, getConfigStatus } from '@/api/config'
 import { getQuestions, generateTopics, saveTopics, runExtraction } from '@/api/onboarding'
 import { cn } from '@/lib/utils'
 import TopicEditor from '@/components/TopicEditor'
+import HierarchyEditor from '@/components/HierarchyEditor'
 
 function StepDots({ current, total }) {
   return (
@@ -42,15 +42,13 @@ export default function OnboardingPage() {
   const [userName, setUserName] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const [saving, setSaving] = useState(false)
+  const [saving] = useState(false)
   const [error, setError] = useState(null)
-  const [seedPath, setSeedPath] = useState(null)
   const [questions, setQuestions] = useState([])
   const [currentQuestion, setCurrentQuestion] = useState(0)
   const [answers, setAnswers] = useState({})
-  const [direction, setDirection] = useState('forward')
 
-  const stepAnimation = `space-y-6 animate-in fade-in ${direction === 'forward' ? 'slide-in-from-right-4' : 'slide-in-from-left-4'} duration-300`
+  const stepAnimation = `space-y-6 animate-in fade-in zoom-in-95 duration-150`
   const [generatingTopics, setGeneratingTopics] = useState(false)
   const [topics, setTopics] = useState({})
 
@@ -75,19 +73,15 @@ export default function OnboardingPage() {
   }
 
   function handleNext() {
-    setDirection('forward')
     setStep(s => s + 1)
   }
 
   function handleBack() {
-    setDirection('back')
     setStep(s => s - 1)
     setError(null)
   }
 
   async function handleSelectPath(path) {
-    setDirection('forward')
-    setSeedPath(path)
     try {
       const data = await getQuestions(path)
       setQuestions(data.questions)
@@ -98,26 +92,8 @@ export default function OnboardingPage() {
     }
   }
 
-  async function handleSkipSeeding() {
-    setDirection('forward')
-    setSaving(true)
-    try {
-      await updateConfig({
-        user_name: userName.trim(),
-        llm: { api_key: apiKey.trim() },
-        configured_at: new Date().toISOString(),
-      })
-      setStep(6)
-      setExtracting(false)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setSaving(false)
-    }
-  }
 
-  function handleQuestionNext(skip = false) {
-    setDirection('forward')
+  function handleQuestionNext() {
     if (currentQuestion < questions.length - 1) {
       setCurrentQuestion(c => c + 1)
     } else {
@@ -126,7 +102,6 @@ export default function OnboardingPage() {
   }
 
   function handleQuestionBack() {
-    setDirection('back')
     if (currentQuestion > 0) {
       setCurrentQuestion(c => c - 1)
     } else {
@@ -352,25 +327,16 @@ export default function OnboardingPage() {
                   </div>
                 </button>
 
-                {/* Skip */}
-                <button
-                  onClick={handleSkipSeeding}
-                  className="w-full text-left p-4 rounded-xl border border-border/50 hover:border-border hover:bg-muted/20 hover:scale-[1.01] transition-all duration-200 group"
+              </div>
+              
+              <div className="mt-8 flex items-center">
+                <Button
+                  variant="ghost"
+                  onClick={handleBack}
+                  className="text-muted-foreground hover:text-foreground hover:bg-muted/50"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-muted group-hover:bg-muted/80 transition-colors">
-                      <ArrowRight size={20} className="text-muted-foreground" />
-                    </div>
-                    <div>
-                      <span className="text-sm font-medium text-muted-foreground group-hover:text-foreground transition-colors">
-                        Jump right in
-                      </span>
-                      <p className="text-[11px] text-muted-foreground mt-0.5">
-                        Start with a blank graph, build it through conversation
-                      </p>
-                    </div>
-                  </div>
-                </button>
+                  Back
+                </Button>
               </div>
             </div>
           )}
@@ -394,7 +360,7 @@ export default function OnboardingPage() {
               {/* Question content — keyed for remount animation */}
               <div
                 key={currentQuestion}
-                className={`space-y-4 animate-in fade-in ${direction === 'forward' ? 'slide-in-from-right-3' : 'slide-in-from-left-3'} duration-200`}
+                className="space-y-4 animate-in fade-in zoom-in-95 duration-150"
               >
                 <p className="text-base text-foreground leading-relaxed">
                   {questions[currentQuestion].question}
@@ -434,13 +400,6 @@ export default function OnboardingPage() {
                 </Button>
                 <div className="flex-1" />
                 <Button
-                  variant="ghost"
-                  onClick={() => handleQuestionNext(true)}
-                  className="text-muted-foreground"
-                >
-                  Skip
-                </Button>
-                <Button
                   onClick={() => handleQuestionNext()}
                   disabled={!answers[questions[currentQuestion].id]?.trim()}
                   className="rounded-xl px-6"
@@ -471,8 +430,11 @@ export default function OnboardingPage() {
                   <TopicEditor
                     topics={topics}
                     onChange={setTopics}
-                    protectedNames={['General', 'Identity']}
+                    protectedNames={['Identity']}
                     maxHeight="18rem"
+                    renderExtra={(name, config, updateField) => (
+                      <HierarchyEditor name={name} config={config} updateField={updateField} />
+                    )}
                   />
 
                   <div className="flex items-center gap-3">

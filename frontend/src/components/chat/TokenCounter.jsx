@@ -32,23 +32,28 @@ function Particle({ active, index, total }) {
 export default function TokenCounter({ value }) {
   const [showMilestone, setShowMilestone] = useState(false)
   const prevMilestone = useRef(0)
-  const springValue = useSpring(0, { stiffness: 50, damping: 20 })
+  const displayRef = useRef(null)
+  const springValue = useSpring(0, { stiffness: 350, damping: 25 })
   const display = useTransform(springValue, formatNumber)
-  const [displayText, setDisplayText] = useState('0')
 
   useEffect(() => {
     springValue.set(value)
   }, [value, springValue])
 
+  // Direct DOM update instead of setState per frame
   useEffect(() => {
-    return display.on('change', v => setDisplayText(v))
+    return display.on('change', v => {
+      if (displayRef.current) {
+        displayRef.current.textContent = v
+      }
+    })
   }, [display])
 
   // Milestone detection
   useEffect(() => {
     const currentMilestone = Math.floor(value / 50000)
     if (currentMilestone > prevMilestone.current && value > 0) {
-      setShowMilestone(true)
+      setTimeout(() => setShowMilestone(true), 0)
       setTimeout(() => setShowMilestone(false), 700)
     }
     prevMilestone.current = currentMilestone
@@ -63,7 +68,7 @@ export default function TokenCounter({ value }) {
         transition={{ duration: 0.4 }}
         className="relative"
       >
-        {displayText}
+        <span ref={displayRef}>0</span>
         {particles.map((_, i) => (
           <Particle key={i} active={showMilestone} index={i} total={8} />
         ))}

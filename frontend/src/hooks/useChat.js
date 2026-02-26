@@ -1,5 +1,39 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { sendMessage, getHistory } from '../api/chat'
+import { executeCommand } from '../api/commands'
+import { toast } from 'sonner'
+
+function formatCommandResult(command, result) {
+  if (!result) return `✅ \`${command}\` completed.`
+
+  switch (command) {
+    case '/pref':
+      return `✅ Saved preference: **"${result.content}"**`
+
+    case '/ick':
+      return `✅ Saved ick: **"${result.content}"**`
+
+    case '/merge list': {
+      if (!result.proposals?.length) return '📋 No pending merge proposals.'
+      const lines = result.proposals.map(
+        p => `${p.index}. **${p.primary_name}** ← ${p.secondary_name} (score: ${p.score})`
+      )
+      return `📋 **Pending merge proposals:**\n\n${lines.join('\n')}\n\nUse \`/merge approve <index>\` or \`/merge reject <index>\`.`
+    }
+
+    case '/merge approve':
+      return `✅ Merged **${result.secondary}** into **${result.primary}**.\n\n${result.undo_hint}`
+
+    case '/merge reject':
+      return `❌ Rejected merge of **${result.secondary}** into **${result.primary}**.`
+
+    case '/merge undo':
+      return `↩️ Undone! Restored **${result.restored_entity}** (${result.facts_restored} facts, ${result.relationships_restored} relationships recovered).`
+
+    default:
+      return `✅ \`${command}\` completed successfully.`
+  }
+}
 
 export function useChat(sessionId) {
   const [messages, setMessages] = useState([])
@@ -16,17 +50,23 @@ export function useChat(sessionId) {
   const abortControllerRef = useRef(null)
   const revealIndexRef = useRef(0)
   const revealIntervalRef = useRef(null)
+  const sessionIdRef = useRef(sessionId)
+
+  // Keep sessionIdRef always up-to-date
+  useEffect(() => {
+    sessionIdRef.current = sessionId
+  }, [sessionId])
 
   function startReveal() {
     if (revealIntervalRef.current) return
     revealIntervalRef.current = setInterval(() => {
       const target = streamingContentRef.current
       if (revealIndexRef.current < target.length) {
-        const step = Math.min(3, target.length - revealIndexRef.current)
+        const step = Math.min(5, target.length - revealIndexRef.current)
         revealIndexRef.current += step
         setStreamingContent(target.slice(0, revealIndexRef.current))
       }
-    }, 12)
+    }, 30)
   }
 
   function stopReveal() {
@@ -83,7 +123,62 @@ export function useChat(sessionId) {
 
   const send = useCallback(
     async content => {
-      if (!sessionId || !content.trim()) return
+      const trimmed = content.trim()
+      const currentSessionId = sessionIdRef.current
+      if (!currentSessionId || !trimmed) return
+
+      if (trimmed.startsWith('/')) {
+        const userMsg = {
+          role: 'user',
+          content: trimmed,
+          timestamp: new Date().toISOString(),
+        }
+        setMessages(prev => [...prev, userMsg])
+        
+        setLoading(true)
+        try {
+          const res = await executeCommand(currentSessionId, trimmed)
+          if (res.success) {
+            toast.success(`Command completed: ${res.command}`)
+
+            // Format a human-readable response based on command + result
+            const friendlyContent = formatCommandResult(res.command, res.result)
+
+            setMessages(prev => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: friendlyContent,
+                timestamp: new Date().toISOString(),
+              },
+            ])
+          } else {
+            toast.error(res.error || 'Command failed')
+            setMessages(prev => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: `Command failed: ${res.error || 'Unknown error'}`,
+                timestamp: new Date().toISOString(),
+              },
+            ])
+          }
+        } catch (err) {
+          console.error('Command execution failed:', err)
+          toast.error('Failed to execute command')
+          setMessages(prev => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: 'Error: Failed to execute command. Please try again.',
+              timestamp: new Date().toISOString(),
+            },
+          ])
+        } finally {
+          setLoading(false)
+        }
+        return
+      }
 
       if (abortControllerRef.current) {
         abortControllerRef.current.abort()
@@ -110,7 +205,7 @@ export function useChat(sessionId) {
 
       try {
         await sendMessage(
-          sessionId,
+          currentSessionId,
           content,
           [],
           (eventType, data) => {
@@ -164,6 +259,8 @@ export function useChat(sessionId) {
                     timestamp: new Date().toISOString(),
                     toolCalls: toolCallsRef.current.length > 0 ? [...toolCallsRef.current] : null,
                     usage: data.usage,
+                    msg_id: data.msg_id,
+                    sources: data.sources || null,
                   },
                 ])
                 setStreamingContent('')
@@ -185,6 +282,7 @@ export function useChat(sessionId) {
                     toolCalls: toolCallsRef.current.length > 0 ? [...toolCallsRef.current] : null,
                     usage: data.usage,
                     isClarification: true,
+                    msg_id: data.msg_id,
                   },
                 ])
                 setStreamingContent('')
@@ -193,6 +291,19 @@ export function useChat(sessionId) {
                   (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0)
                 setTotalTokens(prev => prev + tokens)
                 break
+              }
+
+              case 'msg_id': {
+                 setMessages(prev => {
+                   if (prev.length === 0) return prev
+                   const last = prev[prev.length - 1]
+                   if (last.role !== 'user') return prev
+                   return [
+                     ...prev.slice(0, -1),
+                     { ...last, msg_id: data.msg_id }
+                   ]
+                 })
+                 break
               }
 
               case 'error':
@@ -241,7 +352,7 @@ export function useChat(sessionId) {
         abortControllerRef.current = null
       }
     },
-    [sessionId]
+    []
   )
 
   return {

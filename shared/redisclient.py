@@ -10,8 +10,6 @@ REDIS_HOST = os.environ.get("REDIS_HOST")
 REDIS_PORT = os.environ.get("REDIS_PORT")
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")
 
-if not REDIS_PASSWORD:
-    raise ValueError("REDIS_PASSWORD not set in environment")
 
 
 class AsyncRedisClient:
@@ -34,7 +32,9 @@ class AsyncRedisClient:
                     pool = aioredis.ConnectionPool.from_url(
                         url=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}",
                         decode_responses=True,
-                        max_connections=10
+                        max_connections=10,
+                        retry_on_timeout=True,
+                        health_check_interval=30
                     )
                     cls._instance = aioredis.Redis(connection_pool=pool)
                     
@@ -144,6 +144,10 @@ class RedisKeys:
     def agent_memory(user: str, session: str, topic: str) -> str:
         return f"memory:{user}:{session}:{topic}"
     
+    @staticmethod
+    def heartbeat_counter(user: str, session: str) -> str:
+        return f"heartbeat_counter:{user}:{session}"
+    
     # ============ GLOBAL (no session) ============
     
     @staticmethod
@@ -169,4 +173,12 @@ class RedisKeys:
     @staticmethod
     def agents(user: str) -> str:
         return f"agents:{user}"
+
+    @staticmethod
+    def agent_working_memory(agent_id: str, category: str) -> str:
+        return f"agent_memory:{agent_id}:{category}"
+
+    @staticmethod
+    def global_stats() -> str:
+        return "global:stats"
     

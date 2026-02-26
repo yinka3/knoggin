@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@500;600;700&display=swap');
 @import 'tailwindcss';
 @import 'tw-animate-css';
 
@@ -27,7 +28,14 @@
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.6);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.7);
   font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    'Inter',
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
 }
 
 @theme inline {
@@ -69,40 +77,49 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Set Custom Fonts */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Outfit', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
 }
 
 .dark {
-  --background: oklch(0.1 0.002 155);
-  --foreground: oklch(0.9 0.005 155);
-  --card: oklch(0.13 0.004 155);
-  --card-foreground: oklch(0.9 0.005 155);
-  --popover: oklch(0.13 0.004 155);
-  --popover-foreground: oklch(0.9 0.005 155);
-  --primary: oklch(0.62 0.14 155);
-  --primary-foreground: oklch(0.1 0.002 155);
-  --secondary: oklch(0.15 0.004 155);
-  --secondary-foreground: oklch(0.9 0.005 155);
-  --muted: oklch(0.14 0.003 155);
-  --muted-foreground: oklch(0.55 0.008 155);
-  --accent: oklch(0.7 0.14 155);
-  --accent-foreground: oklch(0.1 0.002 155);
+  /* Deeper, cooler darks for premium feel */
+  --background: oklch(0.12 0.005 220);
+  --foreground: oklch(0.95 0.002 220);
+  --card: oklch(0.14 0.005 220);
+  --card-foreground: oklch(0.95 0.002 220);
+  --popover: oklch(0.14 0.005 220);
+  --popover-foreground: oklch(0.95 0.002 220);
+  /* Slightly more neon primary */
+  --primary: oklch(0.65 0.16 155);
+  --primary-foreground: oklch(0.12 0.005 220);
+  --secondary: oklch(0.16 0.006 220);
+  --secondary-foreground: oklch(0.95 0.002 220);
+  --muted: oklch(0.17 0.005 220);
+  --muted-foreground: oklch(0.65 0.01 220);
+  --accent: oklch(0.72 0.16 155);
+  --accent-foreground: oklch(0.12 0.005 220);
   --destructive: oklch(0.55 0.2 25);
-  --border: oklch(0.18 0.008 155);
-  --input: oklch(0.14 0.004 155);
-  --ring: oklch(0.62 0.14 155);
-  --chart-1: oklch(0.62 0.14 155);
-  --chart-2: oklch(0.58 0.12 165);
-  --chart-3: oklch(0.68 0.12 150);
-  --chart-4: oklch(0.52 0.1 160);
-  --chart-5: oklch(0.72 0.08 155);
-  --sidebar: oklch(0.11 0.003 155);
-  --sidebar-foreground: oklch(0.9 0.005 155);
-  --sidebar-primary: oklch(0.62 0.14 155);
-  --sidebar-primary-foreground: oklch(0.9 0.005 155);
-  --sidebar-accent: oklch(0.15 0.006 155);
-  --sidebar-accent-foreground: oklch(0.9 0.005 155);
-  --sidebar-border: oklch(0.18 0.008 155);
-  --sidebar-ring: oklch(0.62 0.14 155);
+  --border: oklch(0.2 0.008 220);
+  --input: oklch(0.16 0.005 220);
+  --ring: oklch(0.65 0.16 155);
+
+  --chart-1: oklch(0.65 0.16 155);
+  --chart-2: oklch(0.7 0.15 85);
+  --chart-3: oklch(0.9 0.01 260);
+  --chart-4: oklch(0.55 0.12 155);
+  --chart-5: oklch(0.62 0.13 85);
+
+  --sidebar: oklch(0.11 0.004 220);
+  --sidebar-foreground: oklch(0.95 0.002 220);
+  --sidebar-primary: oklch(0.65 0.16 155);
+  --sidebar-primary-foreground: oklch(0.95 0.002 220);
+  --sidebar-accent: oklch(0.16 0.006 220);
+  --sidebar-accent-foreground: oklch(0.95 0.002 220);
+  --sidebar-border: oklch(0.18 0.006 220);
+  --sidebar-ring: oklch(0.65 0.16 155);
 }
 
 @keyframes bounce-high {
@@ -155,27 +172,38 @@
   animation: card-in 0.3s ease-out forwards;
 }
 
-[data-radix-select-viewport] [data-highlighted] {
-  background-color: rgba(224, 122, 122, 0.15) !important;
-}
-
-/* Custom Scrollbar */
+/* Custom Scrollbar - Slim & Elegant */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 4px;
+  height: 4px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(46, 170, 110, 0.3);
+  background: var(--muted-foreground);
+  border-radius: 4px;
+  opacity: 0.3;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(46, 170, 110, 0.5);
+  background: var(--primary);
+  opacity: 0.8;
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(46, 170, 110, 0.3) transparent;
+  scrollbar-color: var(--muted-foreground) transparent;
+}
+
+/* Remove number input spin buttons */
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type='number'] {
+  appearance: textfield;
+  -moz-appearance: textfield; /* Firefox */
 }
 
 [data-radix-select-viewport] [data-highlighted] {
@@ -218,6 +246,11 @@
     200% 200%,
     100% 100%;
   animation: gradient-shift 30s ease-in-out infinite;
+  will-change: background-position;
+}
+
+.gradient-bg.streaming {
+  animation-play-state: paused;
 }
 
 @keyframes gradient-shift {
@@ -302,25 +335,154 @@
   animation-play-state: running;
 }
 
-@keyframes brain-float {
-  0%,
+@keyframes orb-breathe {
+  0% {
+    transform: scale(1);
+    box-shadow:
+      0 0 30px rgba(46, 170, 110, 0.4),
+      0 0 60px rgba(46, 170, 110, 0.2),
+      inset 0 0 20px rgba(255, 255, 255, 0.1);
+  }
+  15% {
+    transform: scale(1.06);
+    box-shadow:
+      0 0 38px rgba(46, 170, 110, 0.48),
+      0 0 70px rgba(46, 170, 110, 0.22),
+      inset 0 0 22px rgba(255, 255, 255, 0.13);
+  }
+  30% {
+    transform: scale(1.02);
+    box-shadow:
+      0 0 32px rgba(46, 170, 110, 0.42),
+      0 0 62px rgba(46, 170, 110, 0.2),
+      inset 0 0 20px rgba(255, 255, 255, 0.11);
+  }
+  45% {
+    transform: scale(1.04);
+    box-shadow:
+      0 0 35px rgba(46, 170, 110, 0.45),
+      0 0 66px rgba(46, 170, 110, 0.21),
+      inset 0 0 21px rgba(255, 255, 255, 0.12);
+  }
+  65% {
+    transform: scale(0.98);
+    box-shadow:
+      0 0 26px rgba(46, 170, 110, 0.35),
+      0 0 52px rgba(46, 170, 110, 0.16),
+      inset 0 0 18px rgba(255, 255, 255, 0.08);
+  }
+  80% {
+    transform: scale(1.03);
+    box-shadow:
+      0 0 34px rgba(46, 170, 110, 0.44),
+      0 0 64px rgba(46, 170, 110, 0.2),
+      inset 0 0 20px rgba(255, 255, 255, 0.11);
+  }
   100% {
-    transform: translateY(0px) rotate(0deg);
-    filter: drop-shadow(0 0 12px rgba(46, 170, 110, 0.5));
+    transform: scale(1);
+    box-shadow:
+      0 0 30px rgba(46, 170, 110, 0.4),
+      0 0 60px rgba(46, 170, 110, 0.2),
+      inset 0 0 20px rgba(255, 255, 255, 0.1);
+  }
+}
+
+.orb-breathe {
+  animation: orb-breathe 6s ease-in-out infinite;
+}
+
+@keyframes orb-glow-pulse {
+  0%, 100% {
+    opacity: 0.6;
+    transform: scale(1);
   }
   50% {
-    transform: translateY(-6px) rotate(2.5deg);
-    filter: drop-shadow(0 0 20px rgba(46, 170, 110, 0.7));
+    opacity: 1;
+    transform: scale(1.08);
   }
 }
 
-.brain-hover {
-  animation: brain-float 3s ease-in-out infinite;
-  animation-play-state: paused;
+.orb-glow-ring {
+  animation: orb-glow-pulse 4s ease-in-out infinite;
+  animation-delay: 0.5s;
 }
 
-.group:hover .brain-hover {
-  animation-play-state: running;
+.glass-card {
+  @apply relative bg-card/40 backdrop-blur-xl;
+  @apply border border-white/[0.08];
+  @apply shadow-lg shadow-black/5;
+  @apply shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)];
+}
+
+.glass-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.2), transparent);
+  opacity: 0.5;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+
+.glass-card:hover::before {
+  opacity: 1;
+}
+
+.glass-card:hover {
+  @apply border-white/[0.15];
+  @apply shadow-xl shadow-primary/10;
+}
+
+/* Glass container - for nested elements like icon boxes, badges */
+.glass-container {
+  @apply bg-white/[0.03] backdrop-blur-sm;
+  @apply border border-white/[0.05];
+}
+
+.glass-container:hover,
+.group:hover .glass-container {
+  @apply bg-primary/10 border-primary/20;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+.press-scale {
+  @apply transition-transform duration-100 active:scale-[0.97];
+}
+
+button:not(:disabled):active,
+[role='button']:not(:disabled):active {
+  transform: scale(0.97);
+  transition: transform 0.1s ease-out;
+}
+
+/* Prevent scale on elements that already have their own transforms */
+button.no-press-scale:active,
+[data-no-press-scale]:active {
+  transform: none;
+}
+
+/* Subtle bounce on click */
+@keyframes press-bounce {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.95);
+  }
+}
+
+.press-bounce:active {
+  animation: press-bounce 0.15s ease-out;
 }
 
 @layer base {

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { Brain, Sparkles, MessageSquare, Search, Zap, ArrowUp } from 'lucide-react'
+import { motion } from 'motion/react'
+import { ArrowUp, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import greetings from '@/data/greetings.json'
@@ -15,47 +16,200 @@ function getGreeting() {
 
 function getSubtext() {
   const hour = new Date().getHours()
-
   let key
   if (hour < 6) key = 'early_morning'
   else if (hour < 12) key = 'morning'
   else if (hour < 17) key = 'afternoon'
   else if (hour < 21) key = 'evening'
   else key = 'late_night'
-
   const pool = greetings[key]
   return pool[Math.floor(Math.random() * pool.length)]
 }
 
+// Scattered positions (px from center) → contracted positions
+const DOTS = [
+  { sx: -65, sy: -50 },
+  { sx: 45, sy: -70 },
+  { sx: 75, sy: -15 },
+  { sx: 55, sy: 55 },
+  { sx: -20, sy: 70 },
+  { sx: -70, sy: 25 },
+  { sx: 10, sy: -42 },
+  { sx: -42, sy: -25 },
+  { sx: 30, sy: 38 },
+  { sx: -50, sy: 50 },
+]
+
+// Which dots connect (index pairs)
+const EDGES = [
+  [0, 7],
+  [7, 5],
+  [5, 9],
+  [9, 4],
+  [4, 8],
+  [8, 3],
+  [3, 2],
+  [2, 1],
+  [1, 6],
+  [6, 0],
+  [7, 6],
+  [8, 2],
+  [5, 4],
+]
+
+function Dot({ x, y, phase, index, size = 5 }) {
+  return (
+    <motion.div
+      className="absolute rounded-full"
+      style={{
+        width: size,
+        height: size,
+        left: '50%',
+        top: '50%',
+        marginLeft: -size / 2,
+        marginTop: -size / 2,
+        background: 'radial-gradient(circle, rgba(46,170,110,0.95), rgba(46,170,110,0.4))',
+        boxShadow: '0 0 8px rgba(46,170,110,0.6), 0 0 16px rgba(46,170,110,0.2)',
+      }}
+      initial={{ x: 0, y: 0, scale: 0, opacity: 0 }}
+      animate={{
+        x: phase >= 3 ? 0 : x,
+        y: phase >= 3 ? 0 : y,
+        scale: phase >= 1 && phase < 4 ? 1 : 0,
+        opacity: phase >= 1 && phase < 4 ? (phase >= 3 ? 0.4 : 0.85) : 0,
+      }}
+      transition={{
+        x: { duration: 0.5, ease: [0.22, 1, 0.36, 1] },
+        y: { duration: 0.5, ease: [0.22, 1, 0.36, 1] },
+        scale: { duration: 0.2, delay: phase === 1 ? index * 0.04 : 0 },
+        opacity: { duration: phase >= 3 ? 0.4 : 0.2, delay: phase === 1 ? index * 0.04 : 0 },
+      }}
+    />
+  )
+}
+
+function ConstellationCanvas({ phase }) {
+  const canvasRef = useRef(null)
+  const animRef = useRef(null)
+  const progressRef = useRef(0)
+  const contractStartRef = useRef(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    const cx = canvas.width / 2
+    const cy = canvas.height / 2
+
+    // Phase 4+: clear and stop
+    if (phase >= 4) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      return
+    }
+
+    // Track when contraction starts
+    if (phase === 3 && !contractStartRef.current) {
+      contractStartRef.current = performance.now()
+    }
+
+    // Reset line draw progress at phase 2
+    if (phase === 2) progressRef.current = 0
+
+    function draw(timestamp) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+      if (phase >= 2) {
+        progressRef.current += (1 - progressRef.current) * 0.15 // Faster draw
+
+        // Contract toward center in phase 3
+        let contractT = 0
+        if (phase >= 3 && contractStartRef.current) {
+          contractT = Math.min(1, (timestamp - contractStartRef.current) / 400) // Faster contract
+        }
+        const eased = 1 - Math.pow(1 - contractT, 3)
+        const alpha = phase >= 3 ? Math.max(0, 0.35 * (1 - contractT * 1.5)) : 0.3
+
+        if (alpha > 0.01) {
+          EDGES.forEach(([fromIdx, toIdx], i) => {
+            const lineProgress = Math.max(
+              0,
+              Math.min(1, (progressRef.current * EDGES.length - i) / 1)
+            )
+            if (lineProgress <= 0) return
+
+            const from = DOTS[fromIdx]
+            const to = DOTS[toIdx]
+            const fx = cx + from.sx * (1 - eased)
+            const fy = cy + from.sy * (1 - eased)
+            const tx = cx + to.sx * (1 - eased)
+            const ty = cy + to.sy * (1 - eased)
+
+            ctx.beginPath()
+            ctx.moveTo(fx, fy)
+            ctx.lineTo(fx + (tx - fx) * lineProgress, fy + (ty - fy) * lineProgress)
+            ctx.strokeStyle = `rgba(46, 170, 110, ${alpha * lineProgress})`
+            ctx.lineWidth = 1
+            ctx.stroke()
+          })
+        }
+      }
+
+      animRef.current = requestAnimationFrame(draw)
+    }
+
+    animRef.current = requestAnimationFrame(draw)
+    return () => {
+      if (animRef.current) cancelAnimationFrame(animRef.current)
+    }
+  }, [phase])
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={200}
+      height={200}
+      className="absolute inset-0 pointer-events-none"
+      style={{ width: 200, height: 200 }}
+    />
+  )
+}
+
+function PulseRing({ active }) {
+  if (!active) return null
+  return (
+    <motion.div
+      className="absolute rounded-full border border-primary/30"
+      style={{ left: '50%', top: '50%', translateX: '-50%', translateY: '-50%' }}
+      initial={{ width: 20, height: 20, opacity: 0.6 }}
+      animate={{ width: 200, height: 200, opacity: 0 }}
+      transition={{ duration: 0.9, ease: 'easeOut' }}
+    />
+  )
+}
+
 export default function WelcomeState({ onFirstMessage, userName }) {
-  const [isReady, setIsReady] = useState(false)
+  // 0=empty, 1=dots appear, 2=lines draw, 3=contract+drop, 4=pulse+settle, 5=ready
+  const [phase, setPhase] = useState(0)
   const [inputValue, setInputValue] = useState('')
   const [isFocused, setIsFocused] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const textareaRef = useRef(null)
-  const brainRef = useRef(null)
-  const [tilt, setTilt] = useState({ x: 0, y: 0 })
   const [subtext] = useState(() => getSubtext())
 
   useEffect(() => {
-    const timer = setTimeout(() => setIsReady(true), 2500)
-    return () => clearTimeout(timer)
+    const timers = [
+      setTimeout(() => setPhase(1), 50), // dots fade in, staggered
+      setTimeout(() => setPhase(2), 300), // lines draw between dots
+      setTimeout(() => setPhase(3), 600), // network contracts + brain drops
+      setTimeout(() => setPhase(4), 1000), // pulse ring, constellation gone
+      setTimeout(() => setPhase(5), 1200), // fully ready
+    ]
+    return () => timers.forEach(clearTimeout)
   }, [])
 
-  function handleMouseMove(e) {
-    if (!brainRef.current) return
-    const rect = brainRef.current.getBoundingClientRect()
-    const centerX = rect.left + rect.width / 2
-    const centerY = rect.top + rect.height / 2
+  const isReady = phase >= 5
 
-    const x = (e.clientX - centerX) / (rect.width / 2)
-    const y = (e.clientY - centerY) / (rect.height / 2)
 
-    setTilt({ x: y * -15, y: x * 15 })
-  }
-
-  function handleMouseLeave() {
-    setTilt({ x: 0, y: 0 })
-  }
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -72,184 +226,167 @@ export default function WelcomeState({ onFirstMessage, userName }) {
   }
 
   const handleSubmit = () => {
-    if (!inputValue.trim()) return
-    onFirstMessage(inputValue)
+    if (!inputValue.trim() || submitting) return
+    setSubmitting(true)
+    const msg = inputValue.trim()
+    setInputValue('')
+    onFirstMessage(msg)
   }
-
-  const suggestions = [
-    {
-      label: 'Analyze my project idea',
-      icon: Zap,
-      prompt: 'I have a project idea I want to vet...',
-    },
-    {
-      label: 'Who are my key connections?',
-      icon: Search,
-      prompt: 'Search for my key professional connections...',
-    },
-    {
-      label: 'Catch me up on last week',
-      icon: MessageSquare,
-      prompt: 'What did I work on last week?',
-    },
-  ]
 
   return (
     <div className="h-full flex flex-col items-center justify-center p-8 relative overflow-hidden">
-      {/* THE BRAIN CONTAINER */}
-      <div
+      {/* === CONSTELLATION (centered) → ORB + GREETING (horizontal) === */}
+      <motion.div
         className={cn(
-          'relative group cursor-pointer mb-8 transition-all duration-1000',
-          isReady ? 'scale-100' : 'scale-95'
+          'flex items-center gap-6 mb-10',
+          isReady ? 'flex-row' : 'flex-col'
         )}
+        layout
+        transition={{ layout: { type: 'spring', stiffness: 200, damping: 25, mass: 1 } }}
       >
-        {/* 1. ORBITING GLOW — wider spread, viewport-scaled blur */}
-        <div
-          className={cn(
-            'absolute rounded-full transition-all duration-700',
-            'glow-orbit',
-            isReady ? 'opacity-30 group-hover:opacity-100 scale-100' : 'opacity-0 scale-50'
-          )}
-          style={{
-            inset: 'clamp(-48px, -3vw, -24px)',
-            filter: `blur(clamp(24px, 2.5vw, 48px))`,
-          }}
-        />
-
-        {/* Static ambient glow — wider spread, viewport-scaled blur */}
-        <div
-          className={cn(
-            'absolute bg-primary/20 rounded-full transition-all duration-1000',
-            'animate-pulse-slow',
-            isReady
-              ? 'opacity-50 group-hover:opacity-70 scale-100 group-hover:scale-110'
-              : 'opacity-0 scale-50'
-          )}
-          style={{
-            inset: 'clamp(-24px, -1.5vw, -8px)',
-            filter: `blur(clamp(40px, 3vw, 60px))`,
-          }}
-        />
-
-        {/* 2. BLUEPRINT GRID */}
-        {!isReady && (
-          <div className="absolute inset-0 bg-grid-slate-200/50 opacity-20 animate-pulse rounded-3xl" />
-        )}
-
-        {/* 3. THE ICON BOX */}
-        <div
-          ref={brainRef}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={handleMouseLeave}
-          className={cn(
-            'relative p-6 rounded-3xl border transition-all duration-700 ease-out bg-background/50 backdrop-blur-sm',
-            isReady
-              ? 'border-border/50 shadow-sm group-hover:shadow-xl group-hover:border-primary/30'
-              : 'border-primary/20 shadow-none'
-          )}
-          style={{
-            transform: `perspective(500px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)`,
-            transition:
-              tilt.x === 0 && tilt.y === 0 ? 'transform 0.5s ease-out' : 'transform 0.1s ease-out',
-          }}
+        {/* Constellation + Orb container */}
+        <motion.div
+          className="relative shrink-0 flex items-center justify-center"
+          style={{ width: isReady ? 80 : 200, height: isReady ? 80 : 200 }}
+          layout
+          transition={{ layout: { type: 'spring', stiffness: 200, damping: 25, mass: 1 } }}
         >
-          <Brain
-            size={48}
-            strokeWidth={1.5}
-            className={cn(
-              'transition-all duration-700',
-              !isReady && 'text-primary/60 animate-blueprint',
-              isReady &&
-                'text-primary/70 group-hover:text-primary brain-hover drop-shadow-[0_0_8px_rgba(46,170,110,0.3)]'
-            )}
-          />
+          {/* Constellation dots */}
+          {!isReady && DOTS.map((dot, i) => (
+            <Dot key={i} x={dot.sx} y={dot.sy} phase={phase} index={i} size={4 + (i % 3) * 1.5} />
+          ))}
 
-          {isReady && (
-            <>
-              <Sparkles
-                size={16}
-                className="absolute -top-1 -right-1 text-amber-400 opacity-0 group-hover:opacity-100 transition-all duration-500 delay-100 scale-0 group-hover:scale-100"
-              />
-              <Sparkles
-                size={12}
-                className="absolute bottom-2 -left-2 text-primary opacity-0 group-hover:opacity-100 transition-all duration-500 delay-200 scale-0 group-hover:scale-100"
-              />
-            </>
-          )}
-        </div>
-      </div>
+          {/* Constellation lines */}
+          {!isReady && <ConstellationCanvas phase={phase} />}
 
-      {/* TEXT CONTENT */}
-      <div className="animate-in fade-in slide-in-from-bottom-4 duration-1000 delay-500 fill-mode-backwards flex flex-col items-center w-full max-w-2xl z-10">
-        <h1 className="text-2xl font-semibold tracking-tight mb-2 text-foreground">
-          {getGreeting()}
-          {userName ? `, ${userName}` : ''}
-        </h1>
-        <p className="text-muted-foreground text-center max-w-[400px] mb-4 leading-relaxed">
-          {isReady ? subtext : 'Initializing neural pathways...'}
-        </p>
+          {/* Pulse ring */}
+          <PulseRing active={phase >= 4} />
 
-        {/* INPUT BAR */}
-        <div
-          className={cn(
-            'w-full relative flex items-end gap-2 p-2 rounded-2xl border transition-all duration-300 mb-8',
-            isReady ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4',
-            isFocused
-              ? 'bg-background border-primary/50 ring-2 ring-primary/10 shadow-md'
-              : 'bg-background border-input hover:border-accent'
-          )}
-        >
-          <textarea
-            ref={textareaRef}
-            value={inputValue}
-            onChange={e => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onFocus={() => setIsFocused(true)}
-            onBlur={() => setIsFocused(false)}
-            placeholder="Ask me anything..."
-            className="flex-1 w-full bg-transparent border-none focus:ring-0 resize-none max-h-[200px] min-h-[44px] py-3 px-4 text-sm text-foreground placeholder:text-muted-foreground/70 leading-relaxed"
-            rows={1}
-          />
-          <Button
-            size="icon"
-            onClick={handleSubmit}
-            disabled={!inputValue.trim()}
-            className={cn(
-              'rounded-xl h-10 w-10 shrink-0 transition-all duration-300 mb-1',
-              inputValue.trim()
-                ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm'
-                : 'bg-muted text-muted-foreground hover:bg-muted opacity-50'
-            )}
+          {/* Gradient orb */}
+          <motion.div
+            className="absolute rounded-full"
+            style={{
+              width: 80,
+              height: 80,
+            }}
+            initial={{ scale: 0, opacity: 0 }}
+            animate={
+              phase >= 3
+                ? { scale: 1, opacity: 1 }
+                : { scale: 0, opacity: 0 }
+            }
+            transition={{
+              scale: { duration: 0.6, ease: [0.22, 1, 0.36, 1], delay: phase === 3 ? 0.15 : 0 },
+              opacity: { duration: 0.4, delay: phase === 3 ? 0.1 : 0 },
+            }}
           >
-            <ArrowUp size={18} strokeWidth={2} />
-          </Button>
-        </div>
-      </div>
+            {/* Core orb */}
+            <div
+              className={cn(
+                'w-full h-full rounded-full relative orb-breathe',
+                isReady ? 'opacity-100' : 'opacity-80'
+              )}
+              style={{
+                background: `
+                  radial-gradient(circle at 35% 35%, rgba(52, 216, 130, 0.9), transparent 50%),
+                  radial-gradient(circle at 65% 65%, rgba(46, 170, 110, 0.8), transparent 50%),
+                  radial-gradient(circle at 50% 50%, rgba(46, 170, 110, 0.95), rgba(30, 120, 80, 0.6))
+                `,
+                boxShadow: `
+                  0 0 30px rgba(46, 170, 110, 0.4),
+                  0 0 60px rgba(46, 170, 110, 0.2),
+                  inset 0 0 20px rgba(255, 255, 255, 0.1)
+                `,
+              }}
+            >
+              {/* Inner highlight */}
+              <div
+                className="absolute rounded-full"
+                style={{
+                  width: '40%',
+                  height: '40%',
+                  top: '18%',
+                  left: '22%',
+                  background: 'radial-gradient(circle, rgba(255,255,255,0.25), transparent 70%)',
+                  filter: 'blur(4px)',
+                }}
+              />
+            </div>
 
-      {/* SUGGESTION CARDS */}
-      <div
-        className={cn(
-          'grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl transition-all duration-1000 delay-700',
-          isReady ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'
-        )}
-      >
-        {suggestions.map((s, i) => (
-          <Button
-            key={i}
-            variant="outline"
-            className="h-auto py-4 px-4 flex flex-col items-center gap-3 bg-card border-border hover:border-primary/50 hover:bg-accent/50 transition-all duration-300 group shadow-sm"
-            onClick={() => onFirstMessage(s.prompt)}
-          >
-            <s.icon
-              size={20}
-              className="text-muted-foreground group-hover:text-primary transition-colors duration-300"
+            {/* Outer glow */}
+            <div
+              className={cn(
+                'absolute rounded-full orb-glow-ring transition-opacity duration-1000',
+                isReady ? 'opacity-100' : 'opacity-0'
+              )}
+              style={{
+                inset: -12,
+                background: 'radial-gradient(circle, rgba(46, 170, 110, 0.15), transparent 70%)',
+                filter: 'blur(10px)',
+              }}
             />
-            <span className="text-xs font-medium text-muted-foreground group-hover:text-foreground transition-colors">
-              {s.label}
-            </span>
-          </Button>
-        ))}
-      </div>
+          </motion.div>
+        </motion.div>
+
+        {/* Greeting text — appears to the right of orb */}
+        <motion.div
+          className="flex flex-col z-10"
+          initial={{ opacity: 0, x: -20 }}
+          animate={isReady ? { opacity: 1, x: 0 } : { opacity: 0, x: -20 }}
+          transition={{ duration: 0.5, delay: 0.1, ease: 'easeOut' }}
+        >
+          <h1 className="text-2xl font-semibold tracking-tight mb-1 text-foreground">
+            {getGreeting()}
+            {userName ? `, ${userName}` : ''}
+          </h1>
+          <p className="text-muted-foreground max-w-[400px] leading-relaxed">
+            {subtext}
+          </p>
+        </motion.div>
+      </motion.div>
+
+      {/* === INPUT BAR === */}
+      <motion.div
+        className={cn(
+          'w-full max-w-2xl relative flex items-end gap-2 p-2 rounded-2xl border transition-all duration-300 mb-8',
+          isFocused
+            ? 'bg-background border-primary/50 ring-2 ring-primary/10 shadow-md'
+            : 'bg-background border-input hover:border-accent'
+        )}
+        initial={{ opacity: 0, y: 20 }}
+        animate={isReady ? { opacity: 1, y: 0 } : { opacity: 0, y: 20 }}
+        transition={{ duration: 0.5, delay: 0.15, ease: 'easeOut' }}
+      >
+        <textarea
+          ref={textareaRef}
+          value={inputValue}
+          onChange={e => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setIsFocused(false)}
+          placeholder="Ask me anything..."
+          disabled={submitting}
+          className="flex-1 w-full bg-transparent border-none focus:ring-0 focus:outline-none focus-visible:outline-none resize-none max-h-[200px] min-h-[44px] py-3 px-4 text-sm text-foreground placeholder:text-muted-foreground/70 leading-relaxed disabled:opacity-50"
+          rows={1}
+        />
+        <Button
+          size="icon"
+          onClick={handleSubmit}
+          disabled={!inputValue.trim() || submitting}
+          className={cn(
+            'rounded-xl h-10 w-10 shrink-0 transition-all duration-300 mb-1',
+            inputValue.trim() && !submitting
+              ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm'
+              : 'bg-muted text-muted-foreground hover:bg-muted opacity-50'
+          )}
+        >
+          {submitting ? (
+            <Loader2 size={18} strokeWidth={2} className="animate-spin" />
+          ) : (
+            <ArrowUp size={18} strokeWidth={2} />
+          )}
+        </Button>
+      </motion.div>
     </div>
   )
 }

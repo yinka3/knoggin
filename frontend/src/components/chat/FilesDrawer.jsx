@@ -1,12 +1,27 @@
-import { useState, useRef, useEffect } from 'react'
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
-import { Button } from '@/components/ui/button'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Badge } from '@/components/ui/badge'
-import { Paperclip, Upload, Trash2, File, FileCode, FileText, Loader2 } from 'lucide-react'
+import { Upload, Trash2, FileCode, FileText, File, Loader2 } from 'lucide-react'
 import { uploadFile, listFiles, deleteFile } from '@/api/files'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { formatDate, formatSize } from '@/lib/format'
+
+const CODE_EXT = new Set([
+  '.py',
+  '.js',
+  '.ts',
+  '.jsx',
+  '.tsx',
+  '.java',
+  '.go',
+  '.rs',
+  '.c',
+  '.cpp',
+  '.h',
+  '.css',
+  '.html',
+])
 
 const ALLOWED_EXT = [
   '.txt',
@@ -30,49 +45,78 @@ const ALLOWED_EXT = [
   '.json',
 ]
 
-const CODE_EXT = new Set([
-  '.py',
-  '.js',
-  '.ts',
-  '.jsx',
-  '.tsx',
-  '.java',
-  '.go',
-  '.rs',
-  '.c',
-  '.cpp',
-  '.h',
-  '.css',
-  '.html',
-])
-
 function getFileIcon(ext) {
   if (CODE_EXT.has(ext)) return FileCode
   return FileText
 }
 
+function FileRow({ file, onDelete, deleting }) {
+  const Icon = getFileIcon(file.extension)
+  const isDeleting = deleting === file.file_id
 
-export default function FilesDrawer({ sessionId }) {
-  const [open, setOpen] = useState(false)
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-3 px-3 py-2.5 rounded-lg group transition-all duration-150',
+        'border border-white/[0.04] bg-white/[0.01]',
+        'hover:border-white/[0.08]',
+        isDeleting && 'opacity-40'
+      )}
+    >
+      <div className="p-1.5 rounded-md bg-white/[0.03] shrink-0">
+        <Icon size={14} className="text-muted-foreground/60" />
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-foreground truncate">{file.original_name}</p>
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/40 mt-0.5">
+          <span>{formatSize(file.size_bytes)}</span>
+          <span>·</span>
+          <span>
+            {file.chunk_count} {file.chunk_count === 1 ? 'chunk' : 'chunks'}
+          </span>
+          <span>·</span>
+          <span>{formatDate(file.uploaded_at)}</span>
+        </div>
+      </div>
+
+      <button
+        onClick={() => onDelete(file.file_id, file.original_name)}
+        disabled={isDeleting}
+        className={cn(
+          'p-1.5 rounded-md shrink-0 transition-all duration-150',
+          'opacity-0 group-hover:opacity-100',
+          'text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10'
+        )}
+      >
+        {isDeleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+      </button>
+    </div>
+  )
+}
+
+export default function FilesDrawer({ sessionId, open, onOpenChange, onCountChange }) {
   const [files, setFiles] = useState([])
   const [uploading, setUploading] = useState(false)
   const [deleting, setDeleting] = useState(null)
   const fileInputRef = useRef(null)
 
+  const loadFiles = useCallback(async () => {
+    try {
+      const data = await listFiles(sessionId)
+      const fileList = data.files || []
+      setFiles(fileList)
+      onCountChange?.(fileList.length)
+    } catch (err) {
+      console.error('Failed to load files:', err)
+    }
+  }, [sessionId, onCountChange])
+
   useEffect(() => {
     if (open && sessionId) {
       loadFiles()
     }
-  }, [open, sessionId])
-
-  async function loadFiles() {
-    try {
-      const data = await listFiles(sessionId)
-      setFiles(data.files || [])
-    } catch (err) {
-      console.error('Failed to load files:', err)
-    }
-  }
+  }, [open, sessionId, loadFiles])
 
   async function handleFileSelect(e) {
     const selected = Array.from(e.target.files || [])
@@ -103,7 +147,11 @@ export default function FilesDrawer({ sessionId }) {
     setDeleting(fileId)
     try {
       await deleteFile(sessionId, fileId)
-      setFiles(prev => prev.filter(f => f.file_id !== fileId))
+      setFiles(prev => {
+        const next = prev.filter(f => f.file_id !== fileId)
+        onCountChange?.(next.length)
+        return next
+      })
       toast.success(`Removed ${fileName}`)
     } catch (err) {
       toast.error(err.message || 'Failed to delete')
@@ -115,37 +163,21 @@ export default function FilesDrawer({ sessionId }) {
   if (!sessionId) return null
 
   return (
-    <Sheet open={open} onOpenChange={setOpen}>
-      <SheetTrigger asChild>
-        <button
-          className={cn(
-            'relative flex items-center gap-1.5 px-2 py-1 rounded-md text-xs transition-colors duration-150',
-            'text-muted-foreground hover:text-foreground hover:bg-muted/50',
-            files.length > 0 && 'text-primary'
-          )}
-        >
-          <Paperclip size={14} />
-          <span className="hidden sm:inline">Files</span>
-          {files.length > 0 && (
-            <Badge variant="secondary" className="h-4 px-1 text-[10px] min-w-[16px] justify-center">
-              {files.length}
-            </Badge>
-          )}
-        </button>
-      </SheetTrigger>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="w-80 sm:w-96 p-0 flex flex-col">
+        <div className="px-5 pt-5 pb-3 border-b border-border/30">
+          <SheetHeader>
+            <SheetTitle className="flex items-center justify-between text-base">
+              <span>Files</span>
+              <Badge variant="outline" className="text-[10px] font-normal">
+                {files.length}/20
+              </Badge>
+            </SheetTitle>
+          </SheetHeader>
+        </div>
 
-      <SheetContent side="right" className="w-80 sm:w-96">
-        <SheetHeader>
-          <SheetTitle className="flex items-center justify-between">
-            <span>Session Files</span>
-            <Badge variant="outline" className="text-[10px]">
-              {files.length}/20
-            </Badge>
-          </SheetTitle>
-        </SheetHeader>
-
-        <div className="mt-6 space-y-4">
-          {/* Upload area */}
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {/* Upload */}
           <input
             ref={fileInputRef}
             type="file"
@@ -154,88 +186,50 @@ export default function FilesDrawer({ sessionId }) {
             multiple
             className="hidden"
           />
-          <Button
-            variant="outline"
-            className="w-full gap-2 border-dashed"
+          <button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading || files.length >= 20}
+            className={cn(
+              'w-full flex items-center justify-center gap-2 px-3 py-3 rounded-lg mb-4',
+              'border border-dashed border-white/[0.08] text-sm text-muted-foreground',
+              'hover:border-white/[0.15] hover:text-foreground hover:bg-white/[0.02]',
+              'transition-all duration-150',
+              (uploading || files.length >= 20) && 'opacity-40 pointer-events-none'
+            )}
           >
             {uploading ? (
               <>
                 <Loader2 size={14} className="animate-spin" />
-                Uploading...
+                <span className="text-xs">Uploading...</span>
               </>
             ) : (
               <>
                 <Upload size={14} />
-                Upload Files
+                <span className="text-xs">Upload files</span>
               </>
             )}
-          </Button>
+          </button>
 
           {/* File list */}
           {files.length === 0 ? (
-            <div className="text-center py-8">
-              <File size={24} className="mx-auto text-muted-foreground/40 mb-2" />
-              <p className="text-xs text-muted-foreground">No files uploaded yet</p>
-              <p className="text-[10px] text-muted-foreground/60 mt-1">
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <File size={20} className="text-muted-foreground/30 mb-2" />
+              <p className="text-xs text-muted-foreground/60">No files yet</p>
+              <p className="text-[10px] text-muted-foreground/30 mt-1">
                 Upload files for your agent to reference
               </p>
             </div>
           ) : (
-            <div className="space-y-1">
-              {files.map(f => {
-                const Icon = getFileIcon(f.extension)
-                const isDeleting = deleting === f.file_id
-
-                return (
-                  <div
-                    key={f.file_id}
-                    className={cn(
-                      'flex items-center gap-3 p-2.5 rounded-lg group transition-colors duration-150',
-                      'hover:bg-muted/50',
-                      isDeleting && 'opacity-50'
-                    )}
-                  >
-                    <div className="p-1.5 rounded-md bg-muted shrink-0">
-                      <Icon size={14} className="text-muted-foreground" />
-                    </div>
-
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm truncate">{f.original_name}</p>
-                      <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                        <span>{formatSize(f.size_bytes)}</span>
-                        <span>·</span>
-                        <span>{f.chunk_count} chunks</span>
-                        <span>·</span>
-                        <span>{formatDate(f.uploaded_at)}</span>
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={() => handleDelete(f.file_id, f.original_name)}
-                      disabled={isDeleting}
-                      className={cn(
-                        'p-1.5 rounded-md transition-all duration-150 shrink-0',
-                        'opacity-0 group-hover:opacity-100',
-                        'hover:bg-destructive/10 hover:text-destructive',
-                        'text-muted-foreground'
-                      )}
-                    >
-                      {isDeleting ? (
-                        <Loader2 size={12} className="animate-spin" />
-                      ) : (
-                        <Trash2 size={12} />
-                      )}
-                    </button>
-                  </div>
-                )
-              })}
+            <div className="space-y-1.5">
+              {files.map(f => (
+                <FileRow key={f.file_id} file={f} onDelete={handleDelete} deleting={deleting} />
+              ))}
             </div>
           )}
+        </div>
 
-          {/* Allowed types hint */}
-          <p className="text-[10px] text-muted-foreground/50 text-center">
+        <div className="px-5 py-2.5 border-t border-border/30">
+          <p className="text-[10px] text-muted-foreground/30 text-center">
             Supports code, text, PDF, DOCX, CSV, JSON — up to 50MB
           </p>
         </div>

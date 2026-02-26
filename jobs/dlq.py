@@ -109,7 +109,7 @@ class DLQReplayJob(BaseJob):
                 logger.warning("DLQ: No valid entities left after validation, skipping")
                 return True  # Consider it handled
             
-            success = await self.write_to_graph(result)
+            success, error_msg = await self.write_to_graph(result)
             
             if success:
                 logger.info(f"DLQ: Graph write retry succeeded for {len(result.entity_ids)} entities")
@@ -140,9 +140,9 @@ class DLQReplayJob(BaseJob):
                 return False
             
             if result.extraction_result:
-                success = await self.write_to_graph(result)
+                success, error_msg = await self.write_to_graph(result)
                 if not success:
-                    logger.warning("DLQ: Reprocessing succeeded but graph write failed")
+                    logger.warning(f"DLQ: Reprocessing succeeded but graph write failed: {error_msg}")
                     return False
             
             logger.info(f"DLQ: Full reprocess succeeded for {len(messages)} messages")

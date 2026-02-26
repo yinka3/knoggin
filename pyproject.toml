@@ -30,6 +30,7 @@ dependencies = [
     "langchain-text-splitters>=1.1.0",
     "pypdf>=6.6.2",
     "mcp>=1.2.0,<2.0",
+    "duckduckgo-search>=8.0.0",
 ]
 
 [tool.setuptools.package-data]

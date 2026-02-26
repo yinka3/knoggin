@@ -192,24 +192,49 @@ async def wait_for_batch_drain(context: Context, timeout: int = 120):
     logger.warning(f"Batch drain timeout after {timeout}s")
 
 
-async def wait_for_processing(context: Context, drain_timeout: int = 180):
-    """Wait for buffer drain, then run session jobs."""
-    user = context.user_name
-    
-    start = asyncio.get_event_loop().time()
-    while asyncio.get_event_loop().time() - start < drain_timeout:
-        buffer_len = await context.redis_client.llen(f"buffer:{user}")
-        if buffer_len == 0:
+async def wait_for_processing(context: Context, drain_timeout: int = 180, max_retries: int = 10):
+    for attempt in range(max_retries):
+        start = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start < drain_timeout:
+            buffer_len = await context.redis_client.llen(
+                RedisKeys.buffer(context.user_name, context.session_id)
+            )
+            if buffer_len == 0:
+                break
+            await asyncio.sleep(2)
+
+        buffer_len = await context.redis_client.llen(
+            RedisKeys.buffer(context.user_name, context.session_id)
+        )
+        dirty_len = await context.redis_client.scard(
+            RedisKeys.dirty_entities(context.user_name, context.session_id)
+        )
+        merge_len = await context.redis_client.scard(
+            RedisKeys.merge_queue(context.user_name, context.session_id)
+        )
+
+        if buffer_len == 0 and dirty_len == 0 and merge_len == 0:
+            logger.info("All queues processing completely finished.")
             break
-        logger.debug(f"Buffer draining: {buffer_len}")
+            
+        logger.info(f"Work still pending (buffer={buffer_len}, dirty={dirty_len}, merge={merge_len}), flushing...")
+        
+        await context.redis_client.set(
+            RedisKeys.checkpoint(context.user_name, context.session_id), 0
+        )
+        await context._run_session_jobs()
         await asyncio.sleep(2)
-    else:
-        logger.warning(f"Drain timeout after {drain_timeout}s, running jobs anyway")
-    
+        merge_len = await context.redis_client.scard(
+            RedisKeys.merge_queue(context.user_name, context.session_id)
+        )
+        
+        if dirty_len == 0 and merge_len == 0:
+            break
+        
+        logger.info(f"Queues not empty (dirty={dirty_len}, merge={merge_len}), running jobs again...")
+        await asyncio.sleep(2)
+
     await context.redis_client.set(f"checkpoint_count:{user}", 0)
-    
-    logger.info("Running session jobs...")
-    await context._run_session_jobs()
     logger.info("Session jobs complete ✓")
 
 

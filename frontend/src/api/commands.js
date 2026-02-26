@@ -5,5 +5,5 @@ export function executeCommand(sessionId, input) {
 }
 
 export function getAutocomplete(prefix) {
-  return apiGet(`/commands/autocomplete?prefix=${encodeURIComponent(prefix)}`)
+  return apiGet(`/commands/autocomplete?q=${encodeURIComponent(prefix)}`)
 }

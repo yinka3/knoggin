@@ -118,6 +118,9 @@ class MemGraphStore:
     def update_entity_embedding(self, entity_id: int, embedding: List[float]):
         return self._writer.update_entity_embedding(entity_id, embedding)
     
+    def update_entity_checkpoint(self, entity_id: int, last_msg_id: int):
+        return self._writer.update_entity_checkpoint(entity_id, last_msg_id)
+    
     def update_entity_aliases(self, alias_updates: Dict[int, List[str]]):
         return self._writer.update_entity_aliases(alias_updates)
 
@@ -144,6 +147,9 @@ class MemGraphStore:
     
     def delete_preference(self, pref_id: str) -> bool:
         return self._writer.delete_preference(pref_id)
+    
+    def delete_relationship(self, entity_a_id: int, entity_b_id: int) -> bool:
+        return self._writer.delete_relationship(entity_a_id, entity_b_id)
     
     # ===== READER DELEGATIONS =====
 
@@ -230,6 +236,9 @@ class MemGraphStore:
     
     def get_top_connected_entities(self, limit: int = 10) -> List[Dict]:
         return self._reader.get_top_connected_entities(limit)
+    
+    def get_entity_relationships(self, entity_id: int) -> List[Dict]:
+        return self._reader.get_entity_relationships(entity_id)
 
     # ===== TOOL QUERY DELEGATIONS =====
 

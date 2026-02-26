@@ -8,7 +8,11 @@ export async function apiFetch(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, options)
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || `Request failed: ${res.status}`)
+    let msg = err.detail || `Request failed: ${res.status}`
+    if (typeof msg === 'object') {
+      msg = JSON.stringify(msg)
+    }
+    throw new Error(msg)
   }
   return res.json()
 }

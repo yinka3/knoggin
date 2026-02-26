@@ -22,7 +22,6 @@ from agent.internals import (
 from agent.formatters import (
     format_entity_results,
     format_memory_context,
-    format_preferences_context, 
     format_retrieved_messages, 
     format_graph_results,
     format_path_results,
@@ -47,7 +46,10 @@ async def call_agent_streaming(
     model: str = None,
     tools: List[Dict] = None,
     memory_context: str = "",
-    preferences_context: str = ""
+    agent_rules: str = "",
+    agent_preferences: str = "",
+    agent_icks: str = "",
+    agent_temperature: float = 0.7
 ) -> AsyncGenerator[Union[Dict, AgentResponse], None]:
     """
     Streaming version of call_agent.
@@ -56,7 +58,9 @@ async def call_agent_streaming(
     system_prompt = get_agent_prompt(
         user_name, date, ctx.agent_persona, ctx.agent_name,
         memory_context=memory_context,
-        preferences_context=preferences_context
+        agent_rules=agent_rules,
+        agent_preferences=agent_preferences,
+        agent_icks=agent_icks
     )
     user_message = build_user_message(ctx, last_result)
 
@@ -80,7 +84,8 @@ async def call_agent_streaming(
         system=system_prompt,
         user=user_message,
         tools=tools if tools is not None else TOOL_SCHEMAS,
-        model=model
+        model=model,
+        temperature=agent_temperature
     ):
         chunk_type = chunk.get("type")
         
@@ -98,7 +103,11 @@ async def call_agent_streaming(
             usage = chunk.get("usage")
             
             if not tool_calls:
-                yield FinalResponse(content=chunk.get("content", ""), usage=usage)
+                yield FinalResponse(
+                    content=chunk.get("content", ""), 
+                    usage=usage,
+                    sources=ctx.evidence.sources if ctx.evidence.sources else None
+                )
                 return
             
             if content:
@@ -161,7 +170,8 @@ async def run_stream(
     enabled_tools: List[str] = None,
     file_rag = None,
     user_timezone: str = None,
-    mcp_manager=None
+    mcp_manager=None,
+    agent_temperature: float = 0.7
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
     
@@ -215,7 +225,8 @@ async def run_stream(
             "history_turns": len(conversation_history)
         })
 
-        search_cfg = dev_settings.get("search", {})
+        search_cfg = dev_settings.get("search", {}).copy()
+        search_cfg.update(get_config_value("search", {}))
         tools = Tools(
             user_name, store, ent_resolver, redis_client, session_id, 
             topic_config, search_config=search_cfg, file_rag=file_rag,
@@ -225,17 +236,20 @@ async def run_stream(
         if hot_topics:
             yield {"event": "status", "data": {"message": "Loading context..."}}
             ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=False)
-        
         memory_blocks = await tools.get_memory_blocks(valid_hot_topics)
         memory_context = format_memory_context(memory_blocks)
-
-        loop = asyncio.get_running_loop()
-        preferences = await loop.run_in_executor(
-            None,
-            store.list_preferences,
-            session_id
-        )
-        preferences_context = format_preferences_context(preferences)
+        
+        from shared.redisclient import RedisKeys
+        agent_memory_blocks = {"rules": "", "preferences": "", "icks": ""}
+        for category in agent_memory_blocks:
+            key = RedisKeys.agent_working_memory(agent_id, category)
+            raw = await redis_client.hgetall(key)
+            if raw:
+                entries = []
+                for val in raw.values():
+                    data = json.loads(val)
+                    entries.append(f"- {data['content']}")
+                agent_memory_blocks[category] = "\n".join(entries)
 
         last_result = None
         try:
@@ -260,10 +274,17 @@ async def run_stream(
             active_schemas = get_filtered_schemas(enabled_tools)
             if mcp_manager:
                 active_schemas = active_schemas + mcp_tools_to_schemas(mcp_manager.get_all_tools())
+            a_rules = str(agent_memory_blocks.get("rules", ""))
+            a_prefs = str(agent_memory_blocks.get("preferences", ""))
+            a_icks = str(agent_memory_blocks.get("icks", ""))
+            
             async for chunk in call_agent_streaming(
                 llm, ctx, user_name, last_result, current_time, model, active_schemas,
                 memory_context=memory_context,
-                preferences_context=preferences_context
+                agent_rules=a_rules,
+                agent_preferences=a_prefs,
+                agent_icks=a_icks,
+                agent_temperature=agent_temperature
             ):
                 
                 # Token - pass through to frontend
@@ -289,7 +310,8 @@ async def run_stream(
                     
                     yield {"event": "response", "data": {
                         "content": chunk.content,
-                        "usage": usage_accumulator
+                        "usage": usage_accumulator,
+                        "sources": ctx.evidence.sources if ctx.evidence.sources else None
                     }}
                     return
 
@@ -388,14 +410,22 @@ async def run_stream(
             if ctx.evidence.hierarchy:
                 evidence_ctx += f"Hierarchy:\n{format_hierarchy_results(ctx.evidence.hierarchy)}\n\n"
 
-            summary = await llm.call_llm(
-                system=get_fallback_summary_prompt(user_name, ctx.agent_name),
-                user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
-            )
+            try:
+                summary = await asyncio.wait_for(
+                    llm.call_llm(
+                        system=get_fallback_summary_prompt(user_name, ctx.agent_name),
+                        user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
+                    ),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Fallback summary timed out")
+                summary = None
 
             yield {"event": "response", "data": {
                 "content": summary or "I found information but couldn't summarize it.",
-                "usage": usage_accumulator
+                "usage": usage_accumulator,
+                "sources": ctx.evidence.sources if ctx.evidence.sources else None
             }}
         else:
             yield {"event": "clarification", "data": {

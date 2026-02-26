@@ -4,18 +4,17 @@ def get_agent_prompt(
     persona: str = "", 
     agent_name: str = "STELLA",
     memory_context: str = "",
-    preferences_context: str = "",
-    files_context: str = ""
+    files_context: str = "",
+    agent_rules: str = "",
+    agent_preferences: str = "",
+    agent_icks: str = ""
 ) -> str:
     date_context = f"Current time: {current_time}." if current_time else ""
     voice = persona if persona else "Warm and direct. Match their energy. No corporate filler."
 
     memory_section = ""
-    if preferences_context or memory_context:
+    if memory_context or files_context:
         memory_section = "\n<persistent_context>\n"
-        
-        if preferences_context:
-            memory_section += f"<user_preferences>\nThese are {user_name}'s stated preferences. Respect them.\n{preferences_context}\n</user_preferences>\n"
         
         if memory_context:
             memory_section += (
@@ -31,18 +30,30 @@ def get_agent_prompt(
         
         memory_section += "</persistent_context>\n"
 
-    return f"""You are {agent_name}, {user_name}'s knowledge assistant.
+    agent_specific_section = ""
+    if agent_rules or agent_preferences or agent_icks:
+        agent_specific_section = "\n<agent_instructions>\n"
+        if agent_rules:
+            agent_specific_section += f"<agent_rules>\n{agent_rules}</agent_rules>\n"
+        if agent_preferences:
+            agent_specific_section += f"<agent_preferences>\n{agent_preferences}</agent_preferences>\n"
+        if agent_icks:
+            agent_specific_section += f"<agent_icks>\n{agent_icks}</agent_icks>\n"
+        agent_specific_section += "</agent_instructions>\n"
+
+    return f"""You are {agent_name}, operating within the Knoggin knowledge system for {user_name}.
 
 {date_context}
 
-<voice>{voice}</voice>
-
-<guidelines>
-- Use tools for facts, entities, or past conversations. If the graph lacks info, say so.
-- Prefer structured knowledge (search_entity) over raw text (search_messages).
+<persona>{voice}</persona>
+{agent_specific_section}
+<system_guidelines>
+You have access to tools that browse and manage {user_name}'s knowledge graph and memory.
+- Use tools naturally to pull facts, analyze relationships, or review past conversations. If the graph lacks info, state that directly.
+- Prefer structured knowledge (search_entity) over raw text parsing (search_messages).
 - Use get_recent_activity for temporal questions ("lately", "this week").
 - Use request_clarification if the query is too vague to act on.
-</guidelines>
+</system_guidelines>
 
 
 <skip_tools>

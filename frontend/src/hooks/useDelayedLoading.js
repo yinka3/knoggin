@@ -8,7 +8,7 @@ export default function useDelayedLoading(loading, delay = 150) {
       const timer = setTimeout(() => setShowSkeleton(true), delay)
       return () => clearTimeout(timer)
     }
-    setShowSkeleton(false)
+    setTimeout(() => setShowSkeleton(false), 0)
   }, [loading, delay])
 
   return showSkeleton

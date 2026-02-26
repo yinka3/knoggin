@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
 import { useSession } from './SessionContext'
 import { WS_BASE } from '@/api/config-base'

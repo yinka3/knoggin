@@ -73,7 +73,7 @@ class GraphReader:
                 return [self._hydrate_fact(record) for record in result]
         except Exception as e:
             logger.error(f"Failed to get facts for entity {entity_id}: {e}")
-            return []
+            return None
 
     def get_facts_for_entities(self, entity_ids: List[int], active_only: bool = True) -> Dict[int, List[Fact]]:
         """Batch fetch facts for multiple entities. Returns {entity_id: [Fact, ...]}."""
@@ -109,7 +109,7 @@ class GraphReader:
                 
         except Exception as e:
             logger.error(f"Failed to batch fetch facts: {e}")
-            return {eid: [] for eid in entity_ids}
+            return None
 
     def get_facts_from_message(self, msg_id: int) -> List[Fact]:
         """Fetch all facts extracted from a message."""
@@ -496,15 +496,18 @@ class GraphReader:
         MATCH (e:Entity)
         {topic_match}
         {where_str}
-        WITH e, t
-        ORDER BY e.last_mentioned DESC
-        SKIP $offset LIMIT $limit
+        WITH e, t,
+            [(e)-[:HAS_FACT]->(f) | f.content][0..2] AS fact_snippets
         RETURN e.id AS id,
             e.session_id AS session_id,
             e.canonical_name AS canonical_name,
             e.type AS type,
             t.name AS topic,
-            e.last_mentioned / 1000 AS last_mentioned
+            e.last_mentioned / 1000 AS last_mentioned,
+            CASE WHEN size(fact_snippets) > 0
+                THEN reduce(s = '', x IN fact_snippets | s + CASE WHEN s = '' THEN '' ELSE '. ' END + x)
+                ELSE null
+            END AS summary
         """
         
         try:
@@ -535,7 +538,8 @@ class GraphReader:
             e.type AS type,
             t.name AS topic,
             e.last_mentioned / 1000 AS last_mentioned,
-            e.last_updated / 1000 AS last_updated
+            e.last_updated / 1000 AS last_updated,
+            e.last_profiled_msg_id AS last_profiled_msg_id
         """
         
         try:
@@ -630,4 +634,23 @@ class GraphReader:
                 return [dict(record) for record in result]
         except Exception as e:
             logger.error(f"Failed to get top connected entities: {e}")
+            return []
+    
+    def get_entity_relationships(self, entity_id: int) -> List[Dict]:
+        """Get all RELATED_TO edges for an entity with full metadata."""
+        query = """
+        MATCH (e:Entity {id: $entity_id})-[r:RELATED_TO]-(neighbor:Entity)
+        RETURN neighbor.id as neighbor_id,
+            neighbor.canonical_name as neighbor_name,
+            r.weight as weight,
+            r.message_ids as message_ids,
+            r.context as context,
+            r.confidence as confidence
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"entity_id": entity_id})
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get relationships for entity {entity_id}: {e}")
             return []

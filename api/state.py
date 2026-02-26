@@ -27,9 +27,9 @@ class AppState:
             return {sid: json.loads(data) for sid, data in raw.items()}
         except Exception as e:
             logger.warning(f"Failed to list sessions: {e}")
-            return {}
+            return {}  # type: ignore
 
-    async def create_session(self, topics_config: dict = None, model: str = None, agent_id: str = None) -> Context:
+    async def create_session(self, topics_config=None, model=None, agent_id=None, enabled_tools=None) -> Context:
         session_id = str(uuid.uuid4())
         
         if topics_config is None:
@@ -42,15 +42,13 @@ class AppState:
                         "active": True,
                         "labels": [],
                         "hierarchy": {},
-                        "aliases": [],
-                        "label_aliases": {}
+                        "aliases": []
                     },
                     "Identity": {
                         "active": True,
                         "labels": ["person"],
                         "hierarchy": {},
-                        "aliases": [],
-                        "label_aliases": {}
+                        "aliases": []
                     }
                 }
         
@@ -68,7 +66,8 @@ class AppState:
             "topics_config": topics_config,
             "last_active": datetime.now(timezone.utc).isoformat(),
             "model": model,
-            "agent_id": agent_id
+            "agent_id": agent_id,
+            "enabled_tools": enabled_tools
         }
         
         await self.resources.redis.hset(
@@ -155,7 +154,9 @@ class AppState:
         raw = await self.resources.redis.hget(RedisKeys.agents(self.user_name), agent_id)
         if not raw:
             return None
-        return AgentConfig.from_dict(json.loads(raw))
+            
+        data = json.loads(raw)
+        return AgentConfig.from_dict(data)
 
     async def get_agent_by_name(self, name: str) -> Optional[AgentConfig]:
         """Get agent by name (case-insensitive)."""
@@ -176,7 +177,7 @@ class AppState:
         
         return default_id
 
-    async def create_agent(self, name: str, persona: str, model: str = None) -> AgentConfig:
+    async def create_agent(self, name: str, persona: str, model: str = None, temperature: Optional[float] = 0.7, enabled_tools: Optional[List[str]] = None) -> AgentConfig:
         """Create a new agent."""
         agent_id = str(uuid.uuid4())
         config = AgentConfig(
@@ -184,6 +185,8 @@ class AppState:
             name=name,
             persona=persona,
             model=model,
+            temperature=temperature,
+            enabled_tools=enabled_tools,
             is_default=False
         )
         
@@ -196,7 +199,7 @@ class AppState:
         logger.info(f"Created agent: {name} ({agent_id})")
         return config
 
-    async def update_agent(self, agent_id: str, name: str = None, persona: str = None, model: str = None) -> Optional[AgentConfig]:
+    async def update_agent(self, agent_id: str, name: str = None, persona: str = None, model: str = None, temperature: Optional[float] = None, enabled_tools: Optional[List[str]] = None) -> Optional[AgentConfig]:
         """Update an existing agent. Returns None if not found."""
         config = await self.get_agent(agent_id)
         if not config:
@@ -208,6 +211,10 @@ class AppState:
             config.persona = persona
         if model is not None:
             config.model = model if model else None
+        if temperature is not None:
+            config.temperature = temperature
+        if enabled_tools is not None:
+            config.enabled_tools = enabled_tools
         
         await self.resources.redis.hset(
             RedisKeys.agents(self.user_name),
@@ -266,6 +273,8 @@ class AppState:
             name="STELLA",
             persona="Warm and direct. Match their energy. No corporate filler.",
             model=None,
+            temperature=0.7,
+            enabled_tools=None,
             is_default=True
         )
         
@@ -303,10 +312,11 @@ class AppState:
 
         memory_pattern = f"memory:{user}:{session_id}:*"
         cursor = 0
+        deleted = 0
         while True:
             cursor, keys = await redis.scan(cursor, match=memory_pattern, count=100)
             if keys:
-                deleted += await redis.delete(*keys)
+                deleted += int(await redis.delete(*keys))  # type: ignore
             if cursor == 0:
                 break
             
@@ -331,7 +341,7 @@ class AppState:
             direct_keys.append(RedisKeys.job_last_run(job, user, session_id))
             direct_keys.append(RedisKeys.job_pending(user, session_id, job))
         
-        deleted = 0
+        
         
         if direct_keys:
             deleted += await redis.delete(*direct_keys)

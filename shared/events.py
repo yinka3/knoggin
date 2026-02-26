@@ -1,10 +1,13 @@
 
 import asyncio
+from collections import deque
 from datetime import datetime, timezone
 import threading
 from typing import Dict, Set, Any
 from dataclasses import dataclass
 from loguru import logger
+
+HISTORY_SIZE = 5
 
 
 @dataclass
@@ -24,6 +27,7 @@ class DebugEventEmitter:
     
     def __init__(self):
         self._subscribers: Dict[str, Set[asyncio.Queue]] = {}
+        self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
         
     
@@ -38,6 +42,9 @@ class DebugEventEmitter:
             if session_id not in self._subscribers:
                 self._subscribers[session_id] = set()
             queue = asyncio.Queue(maxsize=1000)
+            # Replay recent events so the UI isn't empty on connect
+            for evt in self._history.get(session_id, []):
+                queue.put_nowait(evt)
             self._subscribers[session_id].add(queue)
             logger.debug(f"Debug subscriber added for session {session_id}")
             return queue
@@ -60,9 +67,6 @@ class DebugEventEmitter:
         data: Dict[str, Any] = None,
         verbose_only: bool = False
     ):
-        if not self.has_subscribers(session_id):
-            return
-        
         evt = DebugEvent(
             ts=datetime.now(timezone.utc).isoformat(),
             session_id=session_id,
@@ -71,6 +75,14 @@ class DebugEventEmitter:
             data=data or {},
             verbose_only=verbose_only
         )
+        
+        # Always record in history, even with no subscribers
+        if session_id not in self._history:
+            self._history[session_id] = deque(maxlen=HISTORY_SIZE)
+        self._history[session_id].append(evt)
+        
+        if not self.has_subscribers(session_id):
+            return
         
         async with self._lock:
             queues = self._subscribers.get(session_id, set()).copy()
@@ -85,6 +97,11 @@ class DebugEventEmitter:
                     logger.debug(f"Event queued up: {evt}")
                 except asyncio.QueueEmpty:
                     pass
+    
+    async def cleanup_session(self, session_id: str):
+        async with self._lock:
+            self._history.pop(session_id, None)
+            self._subscribers.pop(session_id, None)
 
 
 # Convenience wrappers

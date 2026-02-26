@@ -5,7 +5,6 @@ import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Plus,
-  MessageSquare,
   Brain,
   Settings,
   PanelLeftClose,
@@ -29,14 +28,12 @@ import {
 import { deleteSession } from '@/api/sessions'
 import { toast } from 'sonner'
 import { AnimatePresence, motion } from 'motion/react'
-import ToolsDrawer from '../tools/ToolsDrawer'
-import { Hammer } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 export default function Sidebar({ isOpen, onToggle }) {
   const { sessions, currentSessionId, createSession, selectSession, loadSessions, loading } =
     useSession()
   const [deleteTarget, setDeleteTarget] = useState(null)
-  const [toolsOpen, setToolsOpen] = useState(false)
   const location = useLocation()
 
   function handleDeleteClick(e, sessionId) {
@@ -69,14 +66,7 @@ export default function Sidebar({ isOpen, onToggle }) {
         className={`flex items-center ${isOpen ? 'justify-between' : 'justify-center'} p-3 border-b border-border h-14`}
       >
         {isOpen && (
-          <Link to="/" className="flex items-center gap-2 group">
-            <div className="relative">
-              <Brain
-                size={20}
-                className="text-primary transition-all duration-300 group-hover:scale-110"
-              />
-              <div className="absolute inset-0 bg-primary/30 blur-md rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-            </div>
+          <Link to="/chat" className="flex items-center gap-2 group">
             <span className="text-sm font-bold tracking-tight bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent group-hover:from-primary group-hover:to-primary/70 transition-all duration-300">
               Knoggin
             </span>
@@ -92,27 +82,7 @@ export default function Sidebar({ isOpen, onToggle }) {
 
       {/* Nav links */}
       <div className={`p-2 space-y-1 ${!isOpen && 'flex flex-col items-center'}`}>
-        {/* CHAT BUTTON */}
-        <Link to="/chat" className="w-full">
-          <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
-              location.pathname.startsWith('/chat')
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            {/* ANIMATION: Scales up and tilts left */}
-            <MessageSquare
-              size={18}
-              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:-rotate-6 group-hover:text-primary"
-            />
-            <span
-              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
-            >
-              Chat
-            </span>
-          </button>
-        </Link>
+        {/* DASHBOARD BUTTON */}
 
         <Link to="/dashboard" className="w-full">
           <button
@@ -146,7 +116,7 @@ export default function Sidebar({ isOpen, onToggle }) {
             {/* ANIMATION: Scales up and tilts right */}
             <Brain
               size={18}
-              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:rotate-6 group-hover:text-primary"
+              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
             />
             <span
               className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
@@ -176,49 +146,13 @@ export default function Sidebar({ isOpen, onToggle }) {
             </span>
           </button>
         </Link>
-
-        {/* TOOLS BUTTON */}
-        <button
-          onClick={() => setToolsOpen(true)}
-          className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative text-muted-foreground hover:text-foreground hover:bg-muted/50`}
-        >
-          <Hammer
-            size={18}
-            className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:rotate-12 group-hover:text-primary"
-          />
-          <span
-            className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
-          >
-            Tools
-          </span>
-        </button>
-
-        {/* DEBUG BUTTON */}
-        <Link to="/debug" className="w-full">
-          <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
-              location.pathname === '/debug'
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            <Terminal
-              size={18}
-              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
-            />
-            <span
-              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
-            >
-              Debug
-            </span>
-          </button>
-        </Link>
       </div>
+      <div className={`mx-3 border-t border-border/50 ${!isOpen && 'mx-2'}`} />
 
       {/* New chat button */}
       <div className={`p-2 ${!isOpen && 'flex justify-center'}`}>
         <Button
-          variant="outline"
+          variant="ghost"
           onClick={createSession}
           className={`${isOpen ? 'w-full justify-start' : 'w-10 justify-center px-0'} rounded-md border-primary/20 hover:border-primary/50 text-primary hover:bg-primary/5 transition-all shadow-none group`}
         >
@@ -252,22 +186,25 @@ export default function Sidebar({ isOpen, onToggle }) {
               ) : sessions.length === 0 ? (
                 <div className="px-2 text-sm text-muted-foreground italic">No sessions</div>
               ) : (
-                <AnimatePresence initial={false}>
+                <AnimatePresence initial={false} mode="popLayout">
                   {sessions.map(session => (
                     <motion.div
                       key={session.session_id}
                       layout
-                      exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                      transition={{ duration: 0.15, ease: 'easeOut' }}
-                      className="group relative"
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.95, filter: 'blur(4px)' }}
+                      transition={{ duration: 0.2, ease: 'easeOut' }}
+                      className="group relative mb-0.5"
                     >
                       <button
                         onClick={() => selectSession(session.session_id)}
-                        className={`w-full flex items-center gap-2 px-2 py-2 rounded-md text-sm truncate transition-all duration-200 ${
-                          currentSessionId === session.session_id
-                            ? 'bg-muted font-medium text-foreground'
-                            : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
-                        }`}
+                        className={cn(
+                          'w-full text-left px-3 py-2 rounded-lg text-sm truncate transition-all duration-200',
+                          session.session_id === currentSessionId
+                            ? 'bg-white/[0.05] border border-primary/20 text-primary'
+                            : 'text-muted-foreground hover:text-foreground hover:bg-white/[0.03]'
+                        )}
                       >
                         <span className="truncate flex-1">
                           {session.title || `Session ${session.session_id.slice(0, 4)}`}
@@ -332,6 +269,26 @@ export default function Sidebar({ isOpen, onToggle }) {
             </span>
           </button>
         </Link>
+
+        <Link to="/debug" className="w-full">
+          <button
+            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group ${
+              location.pathname === '/debug'
+                ? 'bg-primary/10 text-primary'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <Terminal
+              size={18}
+              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
+            />
+            <span
+              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+            >
+              Debug
+            </span>
+          </button>
+        </Link>
       </div>
 
       <AlertDialog open={!!deleteTarget} onOpenChange={open => !open && setDeleteTarget(null)}>
@@ -348,7 +305,6 @@ export default function Sidebar({ isOpen, onToggle }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <ToolsDrawer open={toolsOpen} onOpenChange={setToolsOpen} />
     </div>
   )
 }

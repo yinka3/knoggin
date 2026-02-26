@@ -1,87 +1,125 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Skeleton } from '@/components/ui/skeleton'
-import { MessageSquare, Bot, Users, FileText, GitBranch, Brain, RefreshCw } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import {
+  Brain,
+  FileText,
+  GitBranch,
+  MessageSquare,
+  RefreshCw,
+  Users,
+  Coins,
+  Hash,
+} from 'lucide-react'
 import { getStats, getStatsBreakdown } from '@/api/stats'
-import { PieChart, Pie, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { motion } from 'motion/react'
 import { useSocket } from '@/context/SocketContext'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 
-const COLORS = [
-  '#2eaa6e',
-  '#34d882',
-  '#25875a',
-  '#1d6847',
-  '#3ee898',
-  '#4af4a8',
-  '#19503a',
-  '#0f3d2b',
-]
-
-function StatCard({ icon: Icon, label, value, loading }) {
+function StatCard({ icon: Icon, label, value, loading, subtitle, delay = 0 }) {
   return (
-    <div className="bg-card border border-border rounded-xl p-4 flex items-center gap-4 hover:border-primary/30 transition-colors">
-      <div className="p-3 rounded-lg bg-primary/10 text-primary">
-        <Icon size={24} />
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95, y: 10 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      transition={{ duration: 0.4, delay, ease: [0.22, 1, 0.36, 1] }}
+      className={cn(
+        'rounded-xl p-4 border bg-card',
+        'border-white/[0.08] bg-gradient-to-br from-white/[0.03] via-transparent to-transparent',
+        'hover:border-white/[0.15] hover:shadow-lg hover:shadow-white/[0.03]',
+        'transition-all duration-300'
+      )}
+    >
+      <div className="p-2 rounded-lg bg-primary/10 text-primary w-fit mb-3">
+        <Icon size={16} />
       </div>
-      <div>
-        <p className="text-sm text-muted-foreground">{label}</p>
-        {loading ? (
-          <Skeleton className="h-7 w-16 mt-1" />
-        ) : (
-          <p className="text-2xl font-semibold text-foreground">{value?.toLocaleString() ?? '—'}</p>
-        )}
-      </div>
-    </div>
+
+      {loading ? (
+        <Skeleton className="h-7 w-14" />
+      ) : value === '0' || value === '$0.000000' ? (
+        <p className="text-2xl font-semibold text-muted-foreground/40">{value}</p>
+      ) : (
+        <p className="text-2xl font-semibold text-foreground">{value ?? '—'}</p>
+      )}
+      <p className="text-xs text-muted-foreground mt-1">{label}</p>
+      {subtitle && <p className="text-[10px] text-muted-foreground/60 mt-0.5">{subtitle}</p>}
+    </motion.div>
   )
 }
 
-function ChartCard({ title, children, loading }) {
+// Leaderboard card
+function LeaderboardCard({ title, items, loading, className, delay = 0 }) {
+  const maxValue = items?.[0]?.connections || items?.[0]?.count || 1
+
   return (
-    <div className="bg-card border border-border rounded-xl p-4">
-      <h3 className="text-sm font-medium text-foreground mb-4">{title}</h3>
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.5, delay, ease: [0.22, 1, 0.36, 1] }}
+      className={cn('rounded-xl p-5 border border-border bg-card', className)}
+    >
+      <div className="flex items-center gap-2 mb-4">
+        <Users size={16} className="text-muted-foreground" />
+        <h3 className="text-sm font-medium text-foreground">{title}</h3>
+      </div>
+
       {loading ? (
-        <div className="h-[200px] flex items-center justify-center">
-          <Skeleton className="h-32 w-32 rounded-full" />
+        <div className="space-y-3">
+          {[1, 2, 3, 4, 5].map(i => (
+            <Skeleton key={i} className="h-8 w-full" />
+          ))}
+        </div>
+      ) : items?.length > 0 ? (
+        <div className="space-y-3">
+          {items.slice(0, 5).map((item, idx) => (
+            <div key={item.name || idx} className="group">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'text-xs font-medium w-5 h-5 rounded-full flex items-center justify-center',
+                      idx === 0 ? 'bg-primary/20 text-primary' : 'bg-muted text-muted-foreground'
+                    )}
+                  >
+                    {idx + 1}
+                  </span>
+                  <span className="text-sm text-foreground truncate max-w-[120px]">
+                    {item.name}
+                  </span>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  {item.connections || item.count}
+                </span>
+              </div>
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <motion.div
+                  initial={{ width: 0 }}
+                  animate={{
+                    width: `${((item.connections || item.count) / maxValue) * 100}%`,
+                  }}
+                  transition={{ duration: 0.5, delay: idx * 0.1 }}
+                  className={cn('h-full rounded-full', idx === 0 ? 'bg-primary' : 'bg-zinc-400/60')}
+                />
+              </div>
+            </div>
+          ))}
         </div>
       ) : (
-        children
+        <p className="text-sm text-muted-foreground">No data yet</p>
       )}
-    </div>
+    </motion.div>
   )
 }
 
-function CustomTooltip({ active, payload }) {
-  if (!active || !payload?.length) return null
-  const data = payload[0].payload
-  return (
-    <div className="bg-popover border border-border rounded-lg px-3 py-2 shadow-lg">
-      <p className="text-sm font-medium text-foreground">{data.name || data.type || data.topic}</p>
-      <p className="text-xs text-muted-foreground">{data.count || data.connections} items</p>
-    </div>
-  )
+function formatTokens(num) {
+  if (!num) return '0'
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(2)}M`
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1)}K`
+  return num.toLocaleString()
 }
 
-function LeaderboardItem({ rank, name, type, value, maxValue }) {
-  const percentage = maxValue > 0 ? (value / maxValue) * 100 : 0
-  return (
-    <div className="flex items-center gap-3 py-2">
-      <span className="text-xs text-muted-foreground w-5">{rank}</span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-sm text-foreground truncate">{name}</span>
-          <span className="text-xs text-muted-foreground ml-2">{value}</span>
-        </div>
-        <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-          <div
-            className="h-full bg-primary rounded-full transition-all duration-500"
-            style={{ width: `${percentage}%` }}
-          />
-        </div>
-      </div>
-    </div>
-  )
+function formatCost(num) {
+  if (!num) return '$0.000000'
+  return `$${num.toFixed(6)}`
 }
 
 export default function DashboardPage() {
@@ -90,7 +128,6 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [breakdownLoading, setBreakdownLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [refreshing, setRefreshing] = useState(false)
 
   async function loadData() {
     try {
@@ -104,12 +141,6 @@ export default function DashboardPage() {
       setLoading(false)
       setBreakdownLoading(false)
     }
-  }
-
-  async function handleRefresh() {
-    setRefreshing(true)
-    await loadData()
-    setRefreshing(false)
   }
 
   useEffect(() => {
@@ -127,194 +158,101 @@ export default function DashboardPage() {
     debouncedLoad()
   })
 
-  useSocket('entities_merged', (data) => {
-    toast.success('Entities merged', { 
-      description: `${data.data.primary} ← ${data.data.secondary}` 
+  useSocket('entities_merged', data => {
+    toast.success('Entities merged', {
+      description: `${data.data.primary} ← ${data.data.secondary}`,
     })
     debouncedLoad()
   })
-  
-  useSocket('profiles_refined', (data) => {
-     toast.info('Profiles refined', {
-       description: `Updated ${data.data.count} entities`
-     })
-     debouncedLoad()
+
+  useSocket('profiles_refined', data => {
+    toast.info('Profiles refined', {
+      description: `Updated ${data.data.count} entities`,
+    })
+    debouncedLoad()
   })
 
-  const maxConnections = breakdown?.top_connected?.[0]?.connections || 1
-
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
       {/* Header */}
-      <div className="border-b border-border p-4">
+      <div className="border-b border-border/60 p-6 relative">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-medium text-foreground">Dashboard</h1>
-            <p className="text-sm text-muted-foreground">Your knowledge graph at a glance</p>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="gap-2"
+          <motion.div
+            initial={{ opacity: 0, x: -12 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
           >
-            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
-            Refresh
-          </Button>
+            <h1 className="text-lg font-semibold text-foreground tracking-tight">Dashboard</h1>
+            <p className="text-sm text-muted-foreground">Your knowledge graph at a glance</p>
+          </motion.div>
         </div>
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-4">
-        <div className="max-w-6xl mx-auto space-y-6">
+      <div className="flex-1 overflow-y-auto p-6 relative">
+        <div className="max-w-6xl mx-auto">
           {error && (
-            <div className="p-4 rounded-xl bg-destructive/10 text-destructive text-sm">{error}</div>
+            <div className="mb-4 p-4 rounded-xl bg-destructive/10 text-destructive text-sm border border-destructive/20">
+              {error}
+            </div>
           )}
 
-          {/* Stats Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-            {[
-              { icon: Users, label: 'Entities', value: stats?.entities },
-              { icon: FileText, label: 'Facts', value: stats?.facts },
-              { icon: GitBranch, label: 'Relationships', value: stats?.relationships },
-              { icon: MessageSquare, label: 'Sessions', value: stats?.sessions },
-              { icon: Bot, label: 'Agents', value: stats?.agents },
-              {
-                icon: Brain,
-                label: 'Graph Nodes',
-                value: stats ? stats.entities + stats.facts : null,
-              },
-            ].map((card, i) => (
-              <motion.div
-                key={card.label}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.2, delay: i * 0.06 }}
-              >
-                <StatCard
-                  icon={card.icon}
-                  label={card.label}
-                  value={card.value}
-                  loading={loading}
-                />
-              </motion.div>
-            ))}
+          {/* Stat Cards — 2 rows of 3 */}
+          <div className="grid grid-cols-3 gap-4 mb-4">
+            <StatCard
+              icon={Brain}
+              label="Total Entities"
+              value={stats?.entities?.toLocaleString()}
+              loading={loading}
+              subtitle="People, places, and things"
+              delay={0.1}
+            />
+            <StatCard
+              icon={FileText}
+              label="Facts"
+              value={stats?.facts?.toLocaleString()}
+              loading={loading}
+              delay={0.15}
+            />
+            <StatCard
+              icon={GitBranch}
+              label="Connections"
+              value={stats?.relationships?.toLocaleString()}
+              loading={loading}
+              delay={0.2}
+            />
+            <StatCard
+              icon={MessageSquare}
+              label="Sessions"
+              value={stats?.sessions?.toLocaleString()}
+              loading={loading}
+              delay={0.25}
+            />
+            <StatCard
+              icon={Hash}
+              label="Total Tokens"
+              value={formatTokens(stats?.total_tokens)}
+              loading={loading}
+              subtitle="All-time usage"
+              delay={0.3}
+            />
+            <StatCard
+              icon={Coins}
+              label="Total Cost"
+              value={formatCost(stats?.total_cost)}
+              loading={loading}
+              subtitle="OpenRouter spend"
+              delay={0.35}
+            />
           </div>
 
-          {/* Charts Row */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Entity Types - Donut Chart */}
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.2, delay: 0.36 }}
-            >
-              <ChartCard title="Entities by Type" loading={breakdownLoading}>
-                {breakdown?.by_type?.length > 0 ? (
-                  <ResponsiveContainer width="100%" height={200}>
-                    <PieChart>
-                      <Pie
-                        data={breakdown.by_type.map((entry, idx) => ({
-                          ...entry,
-                          fill: COLORS[idx % COLORS.length],
-                        }))}
-                        dataKey="count"
-                        nameKey="type"
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={50}
-                        outerRadius={80}
-                        paddingAngle={2}
-                      />
-                      <Tooltip content={<CustomTooltip />} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="h-[200px] flex items-center justify-center text-muted-foreground text-sm">
-                    No entity data yet
-                  </div>
-                )}
-                {/* Legend */}
-                {breakdown?.by_type?.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-2 justify-center">
-                    {breakdown.by_type.slice(0, 5).map((item, idx) => (
-                      <div key={item.type} className="flex items-center gap-1.5 text-xs">
-                        <div
-                          className="w-2 h-2 rounded-full"
-                          style={{ backgroundColor: COLORS[idx % COLORS.length] }}
-                        />
-                        <span className="text-muted-foreground">{item.type}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </ChartCard>
-            </motion.div>
-
-            {/* Topics - Bar Chart */}
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.2, delay: 0.44 }}
-            >
-              <ChartCard title="Entities by Topic" loading={breakdownLoading}>
-                {breakdown?.by_topic?.length > 0 ? (
-                  <ResponsiveContainer width="100%" height={200}>
-                    <BarChart
-                      data={breakdown.by_topic.slice(0, 6)}
-                      layout="vertical"
-                      margin={{ left: 0, right: 16 }}
-                    >
-                      <XAxis type="number" hide />
-                      <YAxis
-                        type="category"
-                        dataKey="topic"
-                        width={80}
-                        tick={{ fontSize: 12, fill: '#737373' }}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <Tooltip content={<CustomTooltip />} />
-                      <Bar dataKey="count" fill="#2eaa6e" radius={[0, 4, 4, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="h-[200px] flex items-center justify-center text-muted-foreground text-sm">
-                    No topic data yet
-                  </div>
-                )}
-              </ChartCard>
-            </motion.div>
-
-            {/* Top Connected - Leaderboard */}
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.2, delay: 0.52 }}
-            >
-              <ChartCard title="Most Connected Entities" loading={breakdownLoading}>
-                {breakdown?.top_connected?.length > 0 ? (
-                  <div className="space-y-1">
-                    {breakdown.top_connected.slice(0, 5).map((entity, idx) => (
-                      <LeaderboardItem
-                        key={entity.name}
-                        rank={idx + 1}
-                        name={entity.name}
-                        type={entity.type}
-                        value={entity.connections}
-                        maxValue={maxConnections}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <div className="h-[200px] flex items-center justify-center text-muted-foreground text-sm">
-                    No connection data yet
-                  </div>
-                )}
-              </ChartCard>
-            </motion.div>
-          </div>
+          {/* Most Connected — full width */}
+          <LeaderboardCard
+            title="Most Connected"
+            items={breakdown?.top_connected}
+            loading={breakdownLoading}
+            delay={0.4}
+          />
         </div>
       </div>
     </div>

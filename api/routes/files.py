@@ -5,14 +5,12 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from loguru import logger
 
+from api.deps import get_app_state
 from api.state import AppState
 from shared.file_rag import ALLOWED_EXTENSIONS, MAX_FILE_SIZE
 
 router = APIRouter()
 
-
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
 
 
 @router.post("/{session_id}/upload")

@@ -29,7 +29,8 @@ class GraphWriter:
                 "invalid_at": f.invalid_at.isoformat() if f.invalid_at else None,
                 "confidence": f.confidence,
                 "embedding": f.embedding,
-                "source_msg_id": f.source_msg_id
+                "source_msg_id": f.source_msg_id,
+                "source": f.source
             })
         
         def _execute_batch(tx: ManagedTransaction):
@@ -46,7 +47,8 @@ class GraphWriter:
                 invalid_at: item.invalid_at,
                 confidence: item.confidence,
                 created_at: timestamp(),
-                embedding: item.embedding
+                embedding: item.embedding,
+                source: item.source
             })
             CREATE (e)-[:HAS_FACT]->(f)
             
@@ -80,16 +82,14 @@ class GraphWriter:
         SET f.invalid_at = $invalid_at
         RETURN f.id as id
         """
-        try:
-            with self.driver.session() as session:
-                result = session.run(query, {
-                    "fact_id": fact_id,
-                    "invalid_at": invalid_at.isoformat()
-                }).single()
-                return result is not None
-        except Exception as e:
-            logger.error(f"Failed to invalidate fact {fact_id}: {e}")
-            return False
+
+        with self.driver.session() as session:
+            result = session.run(query, {
+                "fact_id": fact_id,
+                "invalid_at": invalid_at.isoformat()
+            }).single()
+            return result is not None
+
     
     def delete_old_invalidated_facts(self, cutoff: datetime) -> int:
         """Delete Fact nodes invalidated before cutoff date."""
@@ -128,13 +128,9 @@ class GraphWriter:
         """
         
         with self.driver.session() as session:
-            try:
-                session.run(query, {"batch": messages}).consume()
-                logger.info(f"Saved {len(messages)} message logs to Memgraph.")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to save message logs: {e}")
-                return False
+            session.run(query, {"batch": messages}).consume()
+            logger.info(f"Saved {len(messages)} message logs to Memgraph.")
+            return True
         
 
     def write_batch(self, entities: List[Dict], relationships: List[Dict]):
@@ -260,12 +256,19 @@ class GraphWriter:
         SET e.embedding = $embedding,
             e.last_updated = timestamp()
         """
-        try:
-            with self.driver.session() as session:
-                session.run(query, {"id": entity_id, "embedding": embedding}).consume()
-        except Exception as e:
-            logger.error(f"Failed to update embedding for entity {entity_id}: {e}")
-            return
+        with self.driver.session() as session:
+            session.run(query, {"id": entity_id, "embedding": embedding}).consume()
+
+    def update_entity_checkpoint(self, entity_id: int, last_msg_id: int):
+        """
+        Update ONLY the entity's profiled message checkpoint.
+        """
+        query = """
+        MATCH (e:Entity {id: $id})
+        SET e.last_profiled_msg_id = $last_msg_id
+        """
+        with self.driver.session() as session:
+            session.run(query, {"id": entity_id, "last_msg_id": last_msg_id}).consume()
 
     def cleanup_null_entities(self) -> int:
         """Remove entities with null type and their relationships."""
@@ -348,6 +351,9 @@ class GraphWriter:
         Merge secondary entity into primary (single transaction).
         Transfers RELATED_TO and HAS_FACT edges, then deletes secondary.
         """
+        if primary_id == secondary_id:
+            logger.warning(f"Self-merge rejected: {primary_id}")
+            return False
         
         def _execute_merge(tx):
             # Step 1: Validate both exist
@@ -536,4 +542,19 @@ class GraphWriter:
                 return result and result["deleted"] > 0
         except Exception as e:
             logger.error(f"Failed to delete preference: {e}")
+            return False
+    
+    def delete_relationship(self, entity_a_id: int, entity_b_id: int) -> bool:
+        """Delete RELATED_TO edge between two entities."""
+        query = """
+        MATCH (a:Entity {id: $a_id})-[r:RELATED_TO]-(b:Entity {id: $b_id})
+        DELETE r
+        RETURN count(r) as deleted
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"a_id": entity_a_id, "b_id": entity_b_id}).single()
+                return result and result["deleted"] > 0
+        except Exception as e:
+            logger.error(f"Failed to delete relationship ({entity_a_id}, {entity_b_id}): {e}")
             return False

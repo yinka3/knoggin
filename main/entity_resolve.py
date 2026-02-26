@@ -82,16 +82,16 @@ class EntityResolver:
                         candidate_vector_threshold: float = None):
         
         """Update resolution thresholds on the fly."""
-        if fuzzy_substring_threshold:
+        if fuzzy_substring_threshold is not None:
             self.fuzzy_substring_threshold = fuzzy_substring_threshold
-        if fuzzy_non_substring_threshold:
+        if fuzzy_non_substring_threshold is not None:
             self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
-        if generic_token_freq:
+        if generic_token_freq is not None:
             self.generic_token_freq = generic_token_freq
         
-        if candidate_fuzzy_threshold:
+        if candidate_fuzzy_threshold is not None:
             self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
-        if candidate_vector_threshold:
+        if candidate_vector_threshold is not None:
             self.candidate_vector_threshold = candidate_vector_threshold
             
         logger.info(f"EntityResolver settings updated: sub={self.fuzzy_substring_threshold}, non-sub={self.fuzzy_non_substring_threshold}, freq={self.generic_token_freq}")
@@ -127,9 +127,9 @@ class EntityResolver:
                     }
                         
             return eid
-            
         return None
     
+
     def get_profiles(self) -> Dict[int, Dict]:
         with self._lock:
             return dict(self.entity_profiles)
@@ -150,7 +150,7 @@ class EntityResolver:
             if profile and profile.get("embedding"):
                 return profile["embedding"]
         return self.store.get_entity_embedding(entity_id)
-    
+        
 
     def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -160,7 +160,7 @@ class EntityResolver:
             return []
             
         embeddings = self.embedding_service.encode(texts)
-        return embeddings.tolist()
+        return embeddings
         
     
     def validate_existing(self, canonical_name: str, mentions: List[str]) -> Tuple[Optional[int], bool, List[str]]:

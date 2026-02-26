@@ -3,6 +3,7 @@ import { Trash2, Pause, Play, Search, RefreshCw, Radio, Eye, EyeOff } from 'luci
 import { createDebugConnection } from '@/api/debug'
 import { listSessions } from '@/api/sessions'
 import { useSession } from '../context/SessionContext'
+import { cn } from '@/lib/utils'
 
 const COMPONENT_COLORS = {
   pipeline: 'text-blue-400',
@@ -33,12 +34,15 @@ function loadEvents(sessionId) {
     if (data.sessionId === sessionId && Date.now() - data.ts < 3600000) {
       return data.events || []
     }
-  } catch {}
+  } catch {
+    // Ignore error
+  }
   return []
 }
 
-function EventRow({ event }) {
+function EventRow({ event, index }) {
   const time = new Date(event.ts).toLocaleTimeString([], {
+    hour12: false,
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -46,15 +50,40 @@ function EventRow({ event }) {
   })
 
   const color = COMPONENT_COLORS[event.component] || 'text-muted-foreground'
-  const dataStr = JSON.stringify(event.data)
+
+  const eventColor =
+    event.event === 'completed' || event.event === 'drain_complete'
+      ? 'text-emerald-500/70'
+      : event.event === 'error' || event.event === 'failed'
+        ? 'text-red-400'
+        : 'text-neutral-400'
+
+  let dataStr = ''
+  if (event.data && typeof event.data === 'object') {
+    const entries = Object.entries(event.data)
+    if (entries.length === 0) {
+      dataStr = ''
+    } else {
+      dataStr = entries
+        .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
+        .join(', ')
+    }
+  } else {
+    dataStr = String(event.data || '')
+  }
 
   return (
-    <div className="flex items-start gap-0 py-px px-3 hover:bg-white/[0.02] font-mono text-[11px] leading-5 group">
-      <span className="text-neutral-600 shrink-0 w-[90px] select-none">{time}</span>
+    <div
+      className={cn(
+        'flex items-baseline gap-0 py-[3px] px-3 font-mono text-[11px] leading-5 group',
+        index % 2 === 0 ? 'bg-transparent' : 'bg-white/[0.01]'
+      )}
+    >
+      <span className="text-neutral-600 shrink-0 w-[100px] select-none">{time}</span>
       <span className={`shrink-0 w-[72px] ${color}`}>{event.component}</span>
-      <span className="text-neutral-400 shrink-0 w-[200px] truncate">{event.event}</span>
-      <span className="text-neutral-500 truncate flex-1 group-hover:text-neutral-300 transition-colors">
-        {dataStr === '{}' ? '' : dataStr}
+      <span className={`shrink-0 w-[140px] truncate ${eventColor}`}>{event.event}</span>
+      <span className="text-neutral-600 truncate flex-1 group-hover:text-neutral-400 transition-colors">
+        {dataStr}
       </span>
     </div>
   )
@@ -116,14 +145,16 @@ export default function DebugPage() {
   }, [])
 
   useEffect(() => {
-    loadSessions().then(loaded => {
-      if (currentSessionId && loaded.some(s => s.session_id === currentSessionId)) {
-        setSelectedSession(currentSessionId)
-      } else {
-        const active = loaded.find(s => s.is_active)
-        setSelectedSession(active?.session_id || loaded[0]?.session_id || null)
-      }
-    })
+    setTimeout(() => {
+      loadSessions().then(loaded => {
+        if (currentSessionId && loaded.some(s => s.session_id === currentSessionId)) {
+          setSelectedSession(currentSessionId)
+        } else {
+          const active = loaded.find(s => s.is_active)
+          setSelectedSession(active?.session_id || loaded[0]?.session_id || null)
+        }
+      })
+    }, 0)
   }, [loadSessions, currentSessionId])
 
   // Restore events from sessionStorage when session selected
@@ -131,8 +162,10 @@ export default function DebugPage() {
     if (selectedSession) {
       const restored = loadEvents(selectedSession)
       if (restored.length > 0) {
-        setEvents(restored)
-        setEventCount(restored.length)
+        setTimeout(() => {
+          setEvents(restored)
+          setEventCount(restored.length)
+        }, 0)
       }
     }
   }, [selectedSession])
@@ -242,8 +275,6 @@ export default function DebugPage() {
           JSON.stringify(e.data).toLowerCase().includes(filter.toLowerCase())
       )
     : events
-
-  const bufferedCount = eventsBufferRef.current.length
 
   return (
     <div className="flex flex-col h-full bg-[#0c0c0c]">
@@ -356,9 +387,9 @@ export default function DebugPage() {
 
       {/* Column headers */}
       <div className="flex items-center gap-0 px-3 py-1 bg-[#0e0e0e] border-b border-neutral-800/50 font-mono text-[10px] text-neutral-600 uppercase tracking-wider select-none">
-        <span className="w-[90px]">time</span>
+        <span className="w-[100px]">time</span>
         <span className="w-[72px]">source</span>
-        <span className="w-[200px]">event</span>
+        <span className="w-[140px]">event</span>
         <span className="flex-1">data</span>
       </div>
 
@@ -387,16 +418,20 @@ export default function DebugPage() {
             )}
           </div>
         ) : (
-          filteredEvents.map((event, idx) => <EventRow key={`${event.component}-${event.event}-${event.timestamp || idx}`} event={event} />)
+          filteredEvents.map((event, idx) => (
+            <EventRow
+              key={`${event.component}-${event.event}-${event.timestamp || idx}`}
+              event={event}
+              index={idx}
+            />
+          ))
         )}
       </div>
 
       {/* Paused bar */}
       {paused && (
         <div className="flex items-center justify-between px-4 py-1.5 bg-amber-500/5 border-t border-amber-500/20">
-          <span className="text-[11px] text-amber-500/70 font-mono">
-            paused — {bufferedCount} buffered
-          </span>
+          <span className="text-[11px] text-amber-500/70 font-mono">paused</span>
           <button
             onClick={handleResume}
             className="flex items-center gap-1 text-[11px] text-amber-400 font-mono hover:text-amber-300 transition-colors"

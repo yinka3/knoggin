@@ -17,7 +17,7 @@ Do NOT invent topic names. When uncertain, use "General".
 
 <speaker_context>
 Messages are labeled [USER] or [AGENT].
-[USER] messages are from {user_name}. First-person ("I", "me", "my") in [User] messages refers to them.
+[USER] messages are from {user_name}. First-person ("I", "me", "my") in [USER] messages refers to them.
 [AGENT] messages are from the AI assistant — extract entities mentioned in both.
 Never extract {user_name} as an entity—they are the implicit root node.
 </speaker_context>
@@ -45,6 +45,7 @@ nouns, lean toward extraction—duplicates are resolved later.
 <output_format>
 <entities>
 msg_id | name | label | topic | confidence
+Example: 1 | The Museum of Modern Art | museum | Culture | 0.9
 </entities>
 
 Rules:
@@ -250,44 +251,60 @@ FACT_B replaces the same quality/state as FACT_A:
 Respond ONLY with the results block. One judgment per line. No explanation.
 """
 
-def get_topic_generation_prompt() -> str:
-    return """You are a knowledge graph configuration assistant. Given a user's onboarding responses, generate a topic configuration that will guide entity extraction from their future conversations.
-
-<context>
-This configuration powers a personal knowledge graph. The user talks to an AI assistant, and entities (people, projects, concepts, etc.) are automatically extracted from conversation and organized into topics. Your job is to create the topic structure that makes this extraction accurate and well-organized.
-</context>
+def get_topic_seed_prompt() -> str:
+   return """You are a knowledge graph configuration assistant. Given the user's onboarding responses, generate a topic configuration.
 
 <schema>
-Each topic you generate must follow this structure:
+Each topic follows this structure:
 
 "TopicName": {
+    "active": true,
     "labels": [],
     "aliases": [],
-    "label_aliases": {}
+    "hierarchy": {}
 }
 
-Field definitions:
-
-- **labels**: List of lowercase, singular noun categories that a zero-shot NER model (GLiNER) uses to detect entities in text. These are the entity types that belong under this topic. For example, a "Fundraising" topic might have labels like ["investor", "fund", "round"]. The NER model scans conversation text and tries to match spans to these labels, so they should be concrete nouns that naturally appear as entity types.
-
-- **aliases**: Alternative names for the topic itself. Used for fuzzy topic matching when the user or system references a topic by a different name. For example, a "Work" topic might have aliases ["projects", "engineering", "building"].
-
-- **label_aliases**: A mapping of synonym → canonical label. When the NER model or LLM extracts an entity with a synonym label, it gets normalized to the canonical label. For example, {"VC": "fund", "cofounder": "person"} means if "VC" is detected as a label, it maps to the "fund" label.
+- **labels**: Lowercase singular nouns for zero-shot NER detection (e.g., ["investor", "fund", "round"])
+- **aliases**: Alternative names for the topic (e.g., "Work" might have ["projects", "engineering"])
+- **hierarchy**: Leave empty — detected automatically later
 </schema>
 
-<input>
-You will receive the user's responses to onboarding questions about their work, interests, people, goals, and tools. These are freeform text responses.
-</input>
-
 <rules>
-1. Generate between 1 and 6 topics based on what the user described.
-2. Do NOT generate "General" or "Identity" topics — those are system-managed.
-3. Only generate topics the user actually described or clearly implied. Do not invent topics they didn't mention.
-4. Labels should be specific enough to distinguish entity types but general enough to catch variations in conversation.
-5. Prefer fewer, well-defined topics over many sparse ones.
-6. Leave hierarchy empty — it is detected automatically later.
+1. Generate 1-6 topics based on what the user described.
+2. Do NOT generate "General" or "Identity" — system-managed.
+3. Only generate topics clearly described or implied by the user.
+4. Labels should be concrete nouns that appear naturally as entity types in conversation.
+5. Prefer fewer well-defined topics over many sparse ones.
 </rules>
 
-<output_format>
-Respond with ONLY valid JSON. No markdown backticks, no explanation, no preamble.
-</output_format>"""
+Respond with ONLY valid JSON. No markdown, no explanation."""
+
+def get_topic_evolution_prompt() -> str:
+   return """You are a knowledge graph configuration assistant. Review the conversation and update the topic configuration.
+
+<schema>
+Each topic follows this structure:
+
+"TopicName": {
+    "active": true/false,
+    "labels": [],
+    "aliases": [],
+    "hierarchy": {}
+}
+
+- **labels**: Lowercase singular nouns for zero-shot NER detection
+- **aliases**: Alternative names for the topic
+- **hierarchy**: Leave unchanged from current config
+</schema>
+
+<rules>
+1. Do NOT modify "General" or "Identity" — system-managed.
+2. Add new topics only if clearly evidenced in conversation.
+3. Set "active": false on existing topics with no conversation relevance. Do NOT remove them.
+4. Keep existing active topics unless clearly irrelevant to the user now.
+5. You may add or adjust labels on existing topics if conversation shows new entity types.
+6. Labels should be concrete singular nouns that appear naturally as entity types.
+7. Preserve hierarchy from current config — do not modify.
+</rules>
+
+Respond with ONLY valid JSON. No markdown, no explanation."""

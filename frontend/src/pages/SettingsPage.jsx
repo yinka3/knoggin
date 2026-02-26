@@ -3,10 +3,11 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Save, Plus, X, Lock } from 'lucide-react'
+import { Save, Plus, X, Lock, Play, Pause } from 'lucide-react'
 import { getConfig, getCuratedModels, updateConfig } from '@/api/config'
 import { toast } from 'sonner'
 import TopicEditor from '@/components/TopicEditor'
+import HierarchyEditor from '@/components/HierarchyEditor'
 import useDelayedLoading from '@/hooks/useDelayedLoading'
 import LLMSection from '@/components/settings/LLMSection'
 import MCPSection from '@/components/settings/MCPSection'
@@ -15,9 +16,7 @@ function SectionHeader({ children, description }) {
   return (
     <div className="mb-3">
       <h2 className="text-sm font-medium text-foreground">{children}</h2>
-      {description && (
-        <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
-      )}
+      {description && <p className="text-xs text-muted-foreground mt-0.5">{description}</p>}
     </div>
   )
 }
@@ -30,67 +29,95 @@ export default function SettingsPage() {
   const [userName, setUserName] = useState('')
   const [userAliases, setUserAliases] = useState('')
 
-  const [reasoningModel, setReasoningModel] = useState('')
   const [agentModel, setAgentModel] = useState('')
   const [defaultTopics, setDefaultTopics] = useState({})
 
-  const initialState = useRef(null)
+  const [devJobs, setDevJobs] = useState({
+    cleaner: true,
+    merger: true,
+    archival: true,
+    topic_config: true,
+  })
 
-  const [reasoningModels, setReasoningModels] = useState([])
-  const [agentModels, setAgentModels] = useState([])
-  const [modelsLoading, setModelsLoading] = useState(false)
+  const initialState = useRef(null)
 
   const [addingTopic, setAddingTopic] = useState(false)
   const [newTopicName, setNewTopicName] = useState('')
   const showSkeleton = useDelayedLoading(loading)
 
   const [openrouterKey, setOpenrouterKey] = useState('')
-
-  const [expandedTopic, setExpandedTopic] = useState(null)
+  const [searchConfig, setSearchConfig] = useState({ provider: 'auto', brave_api_key: '', tavily_api_key: '' })
 
   useEffect(() => {
     async function load() {
       try {
-        setModelsLoading(true)
-        const [config, models] = await Promise.all([
-          getConfig(),
-          getCuratedModels(),
-        ])
+
+        const [config, models] = await Promise.all([getConfig(), getCuratedModels()])
 
         setUserName(config.user_name || '')
         setUserAliases((config.user_aliases || []).join(', '))
         setDefaultTopics(config.default_topics || {})
         setOpenrouterKey(config.llm?.api_key || '')
-        setReasoningModel(config.llm?.reasoning_model || '')
+        setSearchConfig({
+          provider: config.search?.provider || 'auto',
+          brave_api_key: config.search?.brave_api_key || '',
+          tavily_api_key: config.search?.tavily_api_key || '',
+        })
         setAgentModel(config.llm?.agent_model || '')
+
+        const dSettings = config.developer_settings || {}
+        const jobs = dSettings.jobs || {}
+        setDevJobs({
+          cleaner: jobs.cleaner?.enabled !== false,
+          merger: jobs.merger?.enabled !== false,
+          archival: jobs.archival?.enabled !== false,
+          topic_config: jobs.topic_config?.enabled !== false,
+        })
 
         const aliases = (config.user_aliases || []).join(', ')
         initialState.current = JSON.stringify({
           userAliases: aliases,
           defaultTopics: config.default_topics || {},
           openrouterKey: config.llm?.api_key || '',
-          reasoningModel: config.llm?.reasoning_model || '',
+          searchConfig: {
+            provider: config.search?.provider || 'auto',
+            brave_api_key: config.search?.brave_api_key || '',
+            tavily_api_key: config.search?.tavily_api_key || '',
+          },
           agentModel: config.llm?.agent_model || '',
+          devJobs: {
+            cleaner: jobs.cleaner?.enabled !== false,
+            merger: jobs.merger?.enabled !== false,
+            archival: jobs.archival?.enabled !== false,
+            topic_config: jobs.topic_config?.enabled !== false,
+          },
         })
 
-        setReasoningModels(models.reasoning || [])
-        setAgentModels(models.agent || [])
       } catch (err) {
         setError(err.message)
       } finally {
         setLoading(false)
-        setModelsLoading(false)
       }
     }
     load()
   }, [])
 
-  const hasChanges = initialState.current !== null && JSON.stringify({
-    userAliases, defaultTopics, openrouterKey, reasoningModel, agentModel
-  }) !== initialState.current
+  const hasChanges =
+    initialState.current !== null &&
+    JSON.stringify({
+      userAliases,
+      defaultTopics,
+      openrouterKey,
+      searchConfig,
+      agentModel,
+      devJobs,
+    }) !== initialState.current
   useEffect(() => {
-    const handler = (e) => {
-      if (hasChanges) { e.preventDefault(); e.returnValue = '' }
+    const handler = e => {
+      if (hasChanges) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
     }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
@@ -100,6 +127,30 @@ export default function SettingsPage() {
     setSaving(true)
     setError(null)
     try {
+      const currentConfig = await getConfig()
+      const updatedDevSettings = {
+        ...(currentConfig.developer_settings || {}),
+        jobs: {
+          ...(currentConfig.developer_settings?.jobs || {}),
+          cleaner: {
+            ...(currentConfig.developer_settings?.jobs?.cleaner || {}),
+            enabled: devJobs.cleaner,
+          },
+          merger: {
+            ...(currentConfig.developer_settings?.jobs?.merger || {}),
+            enabled: devJobs.merger,
+          },
+          archival: {
+            ...(currentConfig.developer_settings?.jobs?.archival || {}),
+            enabled: devJobs.archival,
+          },
+          topic_config: {
+            ...(currentConfig.developer_settings?.jobs?.topic_config || {}),
+            enabled: devJobs.topic_config,
+          },
+        },
+      }
+
       await updateConfig({
         user_aliases: userAliases
           .split(',')
@@ -108,12 +159,18 @@ export default function SettingsPage() {
         default_topics: defaultTopics,
         llm: {
           api_key: openrouterKey,
-          reasoning_model: reasoningModel,
           agent_model: agentModel,
         },
+        search: searchConfig,
+        developer_settings: updatedDevSettings,
       })
       initialState.current = JSON.stringify({
-        userAliases, defaultTopics, openrouterKey, reasoningModel, agentModel
+        userAliases,
+        defaultTopics,
+        openrouterKey,
+        searchConfig,
+        agentModel,
+        devJobs,
       })
       toast.success('Settings saved')
     } catch (err) {
@@ -122,7 +179,7 @@ export default function SettingsPage() {
     } finally {
       setSaving(false)
     }
-  }, [userAliases, defaultTopics, openrouterKey, reasoningModel, agentModel])
+  }, [userAliases, defaultTopics, openrouterKey, searchConfig, agentModel, devJobs])
 
   function handleAddTopic() {
     const name = newTopicName.trim()
@@ -137,7 +194,6 @@ export default function SettingsPage() {
           label_aliases: {},
         },
       })
-      setExpandedTopic(name)
       setNewTopicName('')
       setAddingTopic(false)
     }
@@ -223,88 +279,107 @@ export default function SettingsPage() {
 
           {/* Models + API Keys */}
           <LLMSection
-            reasoningModel={reasoningModel}
-            setReasoningModel={setReasoningModel}
-            agentModel={agentModel}
-            setAgentModel={setAgentModel}
-            reasoningModels={reasoningModels}
-            agentModels={agentModels}
-            modelsLoading={modelsLoading}
             openrouterKey={openrouterKey}
             setOpenrouterKey={setOpenrouterKey}
+            searchConfig={searchConfig}
+            setSearchConfig={setSearchConfig}
           />
 
-          {/* Default Topics Section */}
+          {/* Topics Section */}
           <section>
-            <SectionHeader description="Topics applied to new sessions">
-              Default Topics
+            <SectionHeader description="Customize the categories and relationships for your notes.">
+              Topic Hierarchy
             </SectionHeader>
-             <TopicEditor
-               topics={defaultTopics}
-               onChange={setDefaultTopics}
-               protectedNames={['General']}
-               renderExtra={(name, config, updateField) => (
-                 <>
-                   <div>
-                     <Label className="text-[11px] text-muted-foreground">Label Aliases (JSON)</Label>
-                     <textarea
-                       value={Object.keys(config.label_aliases || {}).length > 0 ? JSON.stringify(config.label_aliases, null, 2) : ''}
-                       onChange={e => {
-                         try {
-                           const parsed = e.target.value.trim() ? JSON.parse(e.target.value) : {}
-                           updateField(name, 'label_aliases', parsed)
-                         } catch { /* invalid JSON */ }
-                       }}
-                       placeholder='{"org": "company"}'
-                       rows={2}
-                       className="mt-1 w-full bg-muted border border-border rounded-lg px-3 py-1.5 text-xs font-mono text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
-                     />
-                   </div>
-                   <div>
-                     <Label className="text-[11px] text-muted-foreground">Hierarchy (JSON)</Label>
-                     <textarea
-                       value={Object.keys(config.hierarchy || {}).length > 0 ? JSON.stringify(config.hierarchy, null, 2) : ''}
-                       onChange={e => {
-                         try {
-                           const parsed = e.target.value.trim() ? JSON.parse(e.target.value) : {}
-                           updateField(name, 'hierarchy', parsed)
-                         } catch { /* invalid JSON */ }
-                       }}
-                       placeholder='{"company": ["team"]}'
-                       rows={2}
-                       className="mt-1 w-full bg-muted border border-border rounded-lg px-3 py-1.5 text-xs font-mono text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
-                     />
-                   </div>
-                 </>
-               )}
-             />
-
-              {/* Add Topic */}
-              {addingTopic ? (
-                <div className="flex items-center gap-2 px-4 py-2">
-                  <Input
-                    value={newTopicName}
-                    onChange={e => setNewTopicName(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') handleAddTopic()
-                      if (e.key === 'Escape') { setAddingTopic(false); setNewTopicName('') }
-                    }}
-                    placeholder="Topic name..."
-                    autoFocus
-                    className="flex-1 bg-muted border-border rounded-lg text-sm h-8"
-                  />
-                  <Button size="sm" onClick={handleAddTopic} disabled={!newTopicName.trim() || defaultTopics[newTopicName.trim()]} className="rounded-lg h-8 text-xs">Add</Button>
-                  <button onClick={() => { setAddingTopic(false); setNewTopicName('') }} className="p-1.5 text-muted-foreground hover:text-foreground"><X size={14} /></button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => setAddingTopic(true)}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
-                >
-                  <Plus size={14} />
-                  Add Topic
-                </button>
+            <TopicEditor
+              topics={defaultTopics}
+              onChange={setDefaultTopics}
+              protectedNames={[]}
+              renderExtra={(name, config, updateField) => (
+                <HierarchyEditor name={name} config={config} updateField={updateField} />
               )}
+            />
+
+            {/* Add Topic */}
+            {addingTopic ? (
+              <div className="flex items-center gap-2 px-4 py-2">
+                <Input
+                  value={newTopicName}
+                  onChange={e => setNewTopicName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleAddTopic()
+                    if (e.key === 'Escape') {
+                      setAddingTopic(false)
+                      setNewTopicName('')
+                    }
+                  }}
+                  placeholder="Topic name..."
+                  autoFocus
+                  className="flex-1 bg-muted border-border rounded-lg text-sm h-8"
+                />
+                <Button
+                  size="sm"
+                  onClick={handleAddTopic}
+                  disabled={!newTopicName.trim() || defaultTopics[newTopicName.trim()]}
+                  className="rounded-lg h-8 text-xs"
+                >
+                  Add
+                </Button>
+                <button
+                  onClick={() => {
+                    setAddingTopic(false)
+                    setNewTopicName('')
+                  }}
+                  className="p-1.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setAddingTopic(true)}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
+              >
+                <Plus size={14} />
+                Add Topic
+              </button>
+            )}
+          </section>
+
+          {/* Background Jobs Section */}
+          <section>
+            <SectionHeader description="Toggle optional background tasks">
+              Background Jobs
+            </SectionHeader>
+            <div className="bg-card rounded-xl p-4 border border-border">
+              <JobCard
+                title="Merger / Dedup"
+                description="Periodically merges duplicate entities together."
+                enabled={devJobs.merger}
+                onToggle={v => setDevJobs(prev => ({ ...prev, merger: v }))}
+              />
+              <JobCard
+                title="Cleaner"
+                description="Removes unused orphaned entities."
+                enabled={devJobs.cleaner}
+                onToggle={v => setDevJobs(prev => ({ ...prev, cleaner: v }))}
+              />
+              <JobCard
+                title="Fact Archival"
+                description="Archives old facts out of working memory."
+                enabled={devJobs.archival}
+                onToggle={v => setDevJobs(prev => ({ ...prev, archival: v }))}
+              />
+              <JobCard
+                title="Topic Configs"
+                description="Automatically detects when to update your Topic Hierarchy."
+                enabled={devJobs.topic_config}
+                onToggle={v => setDevJobs(prev => ({ ...prev, topic_config: v }))}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-2 px-2">
+              Note: The <b>Profile Refinement</b> and <b>DLQ Replay</b> jobs cannot be disabled as
+              they are required for basic functionality.
+            </p>
           </section>
 
           {/* MCP Servers Section */}
@@ -316,6 +391,47 @@ export default function SettingsPage() {
           </section>
         </div>
       </div>
+    </div>
+  )
+}
+
+function JobCard({ title, description, enabled, onToggle }) {
+  return (
+    <div className="flex items-center justify-between py-3 border-b border-border/30 last:border-0">
+      <div className="space-y-0.5">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-foreground">{title}</span>
+          <span
+            className={`text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide ${
+              enabled ? 'bg-emerald-500/10 text-emerald-500' : 'bg-muted text-muted-foreground'
+            }`}
+          >
+            {enabled ? 'Running' : 'Paused'}
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+
+      <Button
+        variant={enabled ? 'outline' : 'default'}
+        size="sm"
+        onClick={() => onToggle(!enabled)}
+        className={`h-7 gap-1 px-2.5 rounded-lg text-xs ${
+          enabled
+            ? 'hover:bg-destructive/10 hover:text-destructive hover:border-destructive/30'
+            : ''
+        }`}
+      >
+        {enabled ? (
+          <>
+            <Pause size={12} /> Pause
+          </>
+        ) : (
+          <>
+            <Play size={12} /> Start
+          </>
+        )}
+      </Button>
     </div>
   )
 }

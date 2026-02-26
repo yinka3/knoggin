@@ -285,21 +285,6 @@ def format_memory_context(blocks: dict) -> str:
     return "\n".join(sections)
 
 
-def format_preferences_context(preferences: list) -> str:
-    """Format user-defined preferences for prompt injection."""
-    if not preferences:
-        return ""
-    
-    lines = []
-    for pref in preferences:
-        kind = pref.get("kind", "preference")
-        content = pref.get("content", "")
-        if kind == "ick":
-            lines.append(f"- AVOID: {content}")
-        else:
-            lines.append(f"- {content}")
-    
-    return "\n".join(lines)
 
 def format_files_context(files: list) -> str:
     """Format file manifest for prompt injection."""

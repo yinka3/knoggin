@@ -1,16 +1,15 @@
-import json
+import asyncio
 from typing import Optional, List, Dict
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
-from main.prompts import get_topic_generation_prompt
+
+from api.deps import get_app_state
 from api.state import AppState
 from shared.topics_config import TopicConfig
+from shared.topic_gen import generate_topics
 
 router = APIRouter()
-
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
 
 
 class CreateTopicRequest(BaseModel):
@@ -18,7 +17,6 @@ class CreateTopicRequest(BaseModel):
     labels: List[str] = []
     hierarchy: Dict = {}
     aliases: List[str] = []
-    label_aliases: Dict[str, str] = {}
     active: bool = True
 
 
@@ -26,7 +24,6 @@ class UpdateTopicRequest(BaseModel):
     labels: Optional[List[str]] = None
     hierarchy: Optional[Dict] = None
     aliases: Optional[List[str]] = None
-    label_aliases: Optional[Dict[str, str]] = None
     active: Optional[bool] = None
 
 class GenerateFromDescriptionRequest(BaseModel):
@@ -44,6 +41,46 @@ async def get_topic_config(session_id: str, state: AppState) -> TopicConfig:
         session_id
     )
     return topic_config
+
+@router.post("/generate")
+async def generate_topics_from_description(
+    body: GenerateFromDescriptionRequest,
+    state: AppState = Depends(get_app_state)
+):
+    logger.info(f"Topic generation started for user: {state.user_name}")
+    if not body.description.strip():
+        raise HTTPException(status_code=400, detail="Description is empty")
+
+    limit_key = f"topic_gen_count:{state.user_name}"
+    count = await state.resources.redis.get(limit_key)
+    count = int(count) if count else 0
+    logger.info(f"Topic generation count: {count}")
+
+    if count >= 3:
+        raise HTTPException(status_code=429, detail="Generation limit reached (3 attempts). Create the session or start a new configuration.")
+
+    logger.info("Calling LLM for topic generation...")
+
+    try:
+        merged = await asyncio.wait_for(
+            generate_topics(state.resources.llm_service, body.description.strip()),
+            timeout=30.0
+        )
+        logger.info("Topic generation complete.")
+    except asyncio.TimeoutError:
+        logger.error("Topic generation timed out after 30s")
+        raise HTTPException(status_code=504, detail="Topic generation timed out. Please try again.")
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Topic generation from description failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Topic generation failed: {str(e)}")
+
+    # Increment counter
+    await state.resources.redis.incr(limit_key)
+
+    return {"topics": merged, "attempts_remaining": 2 - count}
+
 
 @router.get("/{session_id}")
 async def list_topics(
@@ -73,7 +110,6 @@ async def create_topic(
         "labels": body.labels,
         "hierarchy": body.hierarchy,
         "aliases": body.aliases,
-        "label_aliases": body.label_aliases,
         "active": body.active
     })
     
@@ -127,8 +163,6 @@ async def update_topic(
         current["hierarchy"] = body.hierarchy
     if body.aliases is not None:
         current["aliases"] = body.aliases
-    if body.label_aliases is not None:
-        current["label_aliases"] = body.label_aliases
     if body.active is not None:
         topic_config.toggle_active(topic_name, body.active)
     
@@ -153,8 +187,12 @@ async def delete_topic(
     if topic_name not in topic_config.raw:
         raise HTTPException(status_code=404, detail="Topic not found")
     
-    if topic_name == "General":
-        raise HTTPException(status_code=400, detail="Cannot delete General topic")
+    if topic_name == "General" and not confirm:
+        return {
+            "warning": "Deleting General will remove the fallback topic. Entities currently tagged 'General' will keep their data but won't be categorized. Consider disabling instead.",
+            "recommendation": f"PATCH /topics/{session_id}/{topic_name} with {{'active': false}}",
+            "confirm": "Add ?confirm=true to proceed"
+        }
     
     if not confirm:
         return {
@@ -172,80 +210,3 @@ async def delete_topic(
         await state.active_sessions[session_id].update_topics_config(topic_config.raw)
     
     return {"success": True, "deleted": topic_name}
-
-@router.post("/generate")
-async def generate_topics_from_description(
-    body: GenerateFromDescriptionRequest,
-    state: AppState = Depends(get_app_state)
-):
-    if not body.description.strip():
-        raise HTTPException(status_code=400, detail="Description is empty")
-
-    limit_key = f"topic_gen_count:{state.user_name}"
-    count = await state.resources.redis.get(limit_key)
-    count = int(count) if count else 0
-
-    if count >= 3:
-        raise HTTPException(status_code=429, detail="Generation limit reached (3 attempts). Create the session or start a new configuration.")
-
-    system = get_topic_generation_prompt()
-
-    try:
-        raw = await state.resources.llm_service.call_llm(system, body.description.strip())
-    except Exception as e:
-        logger.error(f"Topic generation from description failed: {e}")
-        raise HTTPException(status_code=500, detail="Topic generation failed")
-
-    if not raw:
-        raise HTTPException(status_code=500, detail="LLM returned empty response")
-
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[-1]
-    if cleaned.endswith("```"):
-        cleaned = cleaned.rsplit("```", 1)[0]
-    cleaned = cleaned.strip()
-
-    try:
-        generated = json.loads(cleaned)
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse topic generation output: {cleaned[:500]}")
-        raise HTTPException(status_code=500, detail="Failed to parse generated topics")
-
-    generated.pop("General", None)
-    generated.pop("Identity", None)
-
-    if len(generated) > 6:
-        keys = list(generated.keys())[:6]
-        generated = {k: generated[k] for k in keys}
-
-    for name, config in generated.items():
-        config.setdefault("labels", [])
-        config.setdefault("aliases", [])
-        config.setdefault("label_aliases", {})
-        config.setdefault("hierarchy", {})
-        config.setdefault("active", True)
-
-    defaults = {
-        "General": {
-            "active": True,
-            "labels": [],
-            "hierarchy": {},
-            "aliases": [],
-            "label_aliases": {}
-        },
-        "Identity": {
-            "active": True,
-            "labels": ["person"],
-            "hierarchy": {},
-            "aliases": [],
-            "label_aliases": {}
-        }
-    }
-
-    merged = {**defaults, **generated}
-
-    # Increment counter
-    await state.resources.redis.incr(limit_key)
-
-    return {"topics": merged, "attempts_remaining": 2 - count}

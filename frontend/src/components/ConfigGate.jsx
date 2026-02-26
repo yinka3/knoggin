@@ -1,7 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { getConfigStatus } from '@/api/config'
-import { Brain } from 'lucide-react'
+import { Brain, RefreshCw } from 'lucide-react'
+
+const MAX_RETRIES = 3
+const RETRY_DELAY = 2000
 
 function LoadingScreen() {
   return (
@@ -16,40 +19,78 @@ function LoadingScreen() {
   )
 }
 
+function ConnectionError({ onRetry }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center gradient-bg">
+      <div className="flex flex-col items-center gap-4 text-center max-w-sm px-6">
+        <div className="p-4 rounded-2xl bg-destructive/10">
+          <Brain size={32} className="text-destructive" />
+        </div>
+        <div>
+          <h2 className="text-base font-semibold text-foreground mb-1">
+            Connection failed
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Could not reach the backend server. Make sure it's running and try again.
+          </p>
+        </div>
+        <button
+          onClick={onRetry}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+        >
+          <RefreshCw size={14} />
+          Retry
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function ConfigGate({ children }) {
   const [checked, setChecked] = useState(false)
   const [configured, setConfigured] = useState(false)
+  const [failed, setFailed] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
 
-  useEffect(() => {
-    console.log('ConfigGate: checking status for', location.pathname)
-    getConfigStatus()
-      .then(status => {
-        console.log('ConfigGate: status received', status)
+  const checkConfig = useCallback(async () => {
+    setTimeout(() => {
+      setFailed(false)
+      setChecked(false)
+    }, 0)
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        const status = await getConfigStatus()
         setConfigured(status.configured)
         setChecked(true)
-      })
-      .catch((err) => {
-        console.error('ConfigGate: connection failed', err)
-        setConfigured(false)
-        setChecked(true)
-      })
-  }, [location.pathname])
+        return
+      } catch {
+        if (attempt < MAX_RETRIES - 1) {
+          await new Promise(r => setTimeout(r, RETRY_DELAY))
+        }
+      }
+    }
+
+    setFailed(true)
+  }, [])
+
+  useEffect(() => {
+    setTimeout(() => checkConfig(), 0)
+  }, [checkConfig, location.pathname])
 
   useEffect(() => {
     if (!checked) return
-    console.log('ConfigGate: evaluating redirect', { checked, configured, path: location.pathname })
-    
+
     if (!configured && location.pathname !== '/onboarding') {
-      console.log('ConfigGate: redirecting to onboarding')
       navigate('/onboarding', { replace: true })
     }
     if (configured && location.pathname === '/onboarding') {
-      console.log('ConfigGate: redirecting to chat')
       navigate('/chat', { replace: true })
     }
   }, [checked, configured, location.pathname, navigate])
+
+  if (failed) return <ConnectionError onRetry={checkConfig} />
 
   if (!checked) return <LoadingScreen />
 
@@ -64,3 +105,4 @@ export default function ConfigGate({ children }) {
 
   return children
 }
+

@@ -47,6 +47,8 @@ class NLPPipeline:
         label_to_topics = {}
         
         for topic, config in self.topic_config.raw.items():
+            if config.get("active", True) is False:
+                continue
             for label in config.get("labels", []):
                 label_lower = label.lower()
                 if label_lower not in label_to_topics:
@@ -55,27 +57,6 @@ class NLPPipeline:
         
         logger.debug(f"Built label to topics map: {label_to_topics}")
         return label_to_topics
-    
-    def _normalize_label(self, label: str) -> Tuple[str, Optional[str], bool]:
-        """
-        Normalize extracted label via alias lookup.
-        
-        Returns: (canonical_label, topic_or_none, is_ambiguous)
-        """
-        if not label:
-            return label, None, False
-        
-        label_lower = label.lower()
-        mappings = self.topic_config.label_alias_lookup.get(label_lower, [])
-        
-        if not mappings:
-            return label, None, False
-        
-        if len(mappings) == 1:
-            canonical, topic = mappings[0]
-            return canonical, topic, False
-        
-        return label, None, True
 
     def _build_phrase_matcher(self) -> Tuple[PhraseMatcher, Dict[str, int]]:
         """Build PhraseMatcher from current known aliases."""
@@ -129,7 +110,9 @@ class NLPPipeline:
         Returns: (topic or None, is_ambiguous)
         """
         if not label:
-            return "General", False
+            if self.topic_config.is_active("General"):
+                return "General", False
+            return None, False
         
         label_lower = label.lower()
         topics = self._label_to_topics.get(label_lower, [])
@@ -139,7 +122,9 @@ class NLPPipeline:
         elif len(topics) > 1:
             return None, True
         else:
-            return "General", False
+            if self.topic_config.is_active("General"):
+                return "General", False
+            return None, False
         
     
     
@@ -201,7 +186,7 @@ class NLPPipeline:
                         ))
         
         gliner_filtered = set()
-        # process GLiNER entities second
+
         for msg_id, span_text, label in gliner_ents:
             if is_covered(span_text, covered_texts[msg_id]):
                 continue
@@ -213,21 +198,13 @@ class NLPPipeline:
             
             covered_texts[msg_id].add(span_text.lower())
 
-            canonical_label, resolved_topic, is_alias_ambiguous = self._normalize_label(label)
-            
-            if resolved_topic:
-                resolved.append((msg_id, span_text, canonical_label, resolved_topic))
-            elif is_alias_ambiguous:
-                topics = [t for _, t in self.topic_config.label_alias_lookup.get(label.lower(), [])]
-                ambiguous.append((msg_id, span_text, canonical_label, topics))
+            topic, is_ambiguous = self._assign_topic(label)
+
+            if is_ambiguous:
+                topics = self._label_to_topics.get(label.lower(), [])
+                ambiguous.append((msg_id, span_text, label, topics))
             else:
-                topic, is_ambiguous = self._assign_topic(canonical_label)
-                
-                if is_ambiguous:
-                    topics = self._label_to_topics.get(canonical_label.lower(), [])
-                    ambiguous.append((msg_id, span_text, canonical_label, topics))
-                else:
-                    resolved.append((msg_id, span_text, canonical_label, topic))
+                resolved.append((msg_id, span_text, label, topic))
         
         await emit(session_id, "pipeline", "gliner_complete", {
             "raw_count": len(gliner_ents),
@@ -247,7 +224,7 @@ class NLPPipeline:
         
         vp01_count = 0
         if reasoning and "<entities>" in reasoning:
-            response = parse_entities(reasoning, min_confidence=self.vp01_min_confidence)
+            response = parse_entities(reasoning, min_confidence=self.vp01_min_confidence, topic_config=self.topic_config)
             if response:
                 for entity in response:
                     if validate_entity(entity.name, entity.topic, self.topic_config):

@@ -5,7 +5,7 @@ export function getProfiles(params = {}) {
   const qs = new URLSearchParams()
   
   if (topic) qs.set('topic', topic)
-  if (search) qs.set('search', search)
+  if (search) qs.set('q', search)
   if (limit) qs.set('limit', limit)
   if (offset) qs.set('offset', offset)
   

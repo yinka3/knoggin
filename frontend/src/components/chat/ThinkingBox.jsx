@@ -79,35 +79,45 @@ function ToolCallItem({ tc, isLast, streaming }) {
   )
 }
 
-export default function ThinkingBox({ toolCalls, streaming, currentThinking, defaultOpen = true }) {
+export default function ThinkingBox({ toolCalls, streaming, currentThinking, defaultOpen = true, totalDuration: totalDurationProp }) {
   const [isOpen, setIsOpen] = useState(defaultOpen)
-  const [elapsed, setElapsed] = useState(0)
+  const timerRef = useRef(null)
   const startTimeRef = useRef(null)
+  const timerDisplayRef = useRef(null)
 
   useEffect(() => {
     if (streaming && (toolCalls.length > 0 || currentThinking)) {
-      setIsOpen(true)
+      setTimeout(() => setIsOpen(true), 0)
     }
   }, [streaming, toolCalls.length, currentThinking])
 
+  // Close accordion if streaming ended
   useEffect(() => {
     if (streaming && !defaultOpen && isOpen && toolCalls.length > 0) {
       const timer = setTimeout(() => setIsOpen(false), 400)
       return () => clearTimeout(timer)
     }
-  }, [defaultOpen, streaming])
+  }, [defaultOpen, streaming, isOpen, toolCalls.length])
 
+  // Timer using direct DOM updates instead of setState
   useEffect(() => {
     if (streaming && toolCalls.length > 0) {
       if (!startTimeRef.current) {
         startTimeRef.current = Date.now()
       }
-      const interval = setInterval(() => {
-        setElapsed(Date.now() - startTimeRef.current)
+      timerRef.current = setInterval(() => {
+        if (timerDisplayRef.current) {
+          const elapsed = Date.now() - startTimeRef.current
+          timerDisplayRef.current.textContent = `${(elapsed / 1000).toFixed(1)}s`
+        }
       }, 100)
-      return () => clearInterval(interval)
+      return () => clearInterval(timerRef.current)
     } else if (!streaming && startTimeRef.current) {
-      setElapsed(Date.now() - startTimeRef.current)
+      // Final update on stop
+      if (timerDisplayRef.current) {
+        const elapsed = Date.now() - startTimeRef.current
+        timerDisplayRef.current.textContent = `${(elapsed / 1000).toFixed(1)}s`
+      }
       startTimeRef.current = null
     }
   }, [streaming, toolCalls.length])
@@ -116,12 +126,13 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
 
   const hasRunningTool = toolCalls.some(tc => tc.status === 'running')
 
+  // Use total_duration from backend metadata (wall-clock), fall back to sum of per-tool durations
+  const storedDuration = !streaming
+    ? (totalDurationProp || toolCalls.reduce((sum, tc) => sum + (tc.duration || 0), 0))
+    : 0
+
   return (
-    <Collapsible
-      open={isOpen}
-      onOpenChange={setIsOpen}
-      className="border border-border/50 rounded-lg bg-muted/40 my-3 overflow-hidden transition-all duration-200"
-    >
+    <Collapsible open={isOpen} onOpenChange={setIsOpen} className="glass-card rounded-xl my-3">
       <CollapsibleTrigger className="flex items-center gap-2 w-full px-4 py-2 text-xs text-muted-foreground hover:bg-muted/60 transition-colors">
         {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <span className="font-medium">Reasoning Process</span>
@@ -139,9 +150,14 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
         )}
 
         {/* Timer — stays visible after completion */}
-        {(streaming || elapsed > 0) && toolCalls.length > 0 && (
-          <span className="ml-auto text-[10px] text-muted-foreground/70 font-mono tabular-nums">
-            {(elapsed / 1000).toFixed(1)}s
+        {toolCalls.length > 0 && (
+          <span
+            ref={timerDisplayRef}
+            className="ml-auto text-[10px] text-muted-foreground/70 font-mono tabular-nums"
+          >
+            {!streaming && storedDuration > 0
+              ? `${(storedDuration / 1000).toFixed(1)}s`
+              : '0.0s'}
           </span>
         )}
       </CollapsibleTrigger>

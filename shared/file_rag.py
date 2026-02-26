@@ -192,7 +192,7 @@ class FileRAGService:
             end = min(i + batch_size, len(chunks))
             collection.add(
                 ids=chunk_ids[i:end],
-                embeddings=embeddings[i:end].tolist(),
+                embeddings=embeddings[i:end],
                 documents=chunks[i:end],
                 metadatas=metadatas[i:end],
             )

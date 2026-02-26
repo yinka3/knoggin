@@ -3,13 +3,11 @@ from functools import partial
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 
+from api.deps import get_app_state
 from api.state import AppState
 from db.store import MemGraphStore
 
 router = APIRouter()
-
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
 
 @router.get("/")
 async def list_profiles(

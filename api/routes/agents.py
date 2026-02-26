@@ -1,28 +1,36 @@
 import json
-from typing import Optional
+import uuid
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from api.deps import get_app_state
 from api.state import AppState
 from shared.redisclient import RedisKeys
+from datetime import datetime, timezone
 
 router = APIRouter()
 
-
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
 
 
 class CreateAgentRequest(BaseModel):
     name: str
     persona: str
     model: Optional[str] = None
+    temperature: Optional[float] = 0.7
+    enabled_tools: Optional[list[str]] = None
 
 
 class UpdateAgentRequest(BaseModel):
     name: Optional[str] = None
     persona: Optional[str] = None
     model: Optional[str] = None
+    temperature: Optional[float] = None
+    enabled_tools: Optional[list[str]] = None
+
+
+class AgentMemoryEntry(BaseModel):
+    content: str
 
 
 @router.get("/")
@@ -45,7 +53,9 @@ async def create_agent(
     agent = await state.create_agent(
         name=body.name,
         persona=body.persona,
-        model=body.model
+        model=body.model,
+        temperature=body.temperature,
+        enabled_tools=body.enabled_tools
     )
     
     return agent.to_dict()
@@ -88,7 +98,9 @@ async def update_agent(
         agent_id=agent_id,
         name=body.name,
         persona=body.persona,
-        model=body.model
+        model=body.model,
+        temperature=body.temperature,
+        enabled_tools=body.enabled_tools
     )
     
     if not agent:
@@ -153,3 +165,84 @@ async def get_session_memory(
     
     total = sum(len(v) for v in blocks.values())
     return {"blocks": blocks, "total": total}
+
+@router.get("/{agent_id}/memory")
+async def get_agent_memory(
+    agent_id: str,
+    state: AppState = Depends(get_app_state)
+):
+    agent = await state.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+        
+    categories = ["rules", "preferences", "icks"]
+    blocks = {}
+    
+    for category in categories:
+        key = RedisKeys.agent_working_memory(agent_id, category)
+        raw = await state.resources.redis.hgetall(key)
+        
+        entries = []
+        if raw:
+            for mem_id, payload in raw.items():
+                data = json.loads(payload)
+                data["id"] = mem_id
+                entries.append(data)
+            
+            entries.sort(key=lambda x: x.get("created_at", ""))
+            
+        blocks[category] = entries
+        
+    return blocks
+
+@router.post("/{agent_id}/memory/{category}")
+async def add_agent_memory(
+    agent_id: str,
+    category: str,
+    body: AgentMemoryEntry,
+    state: AppState = Depends(get_app_state)
+):
+    agent = await state.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+        
+    if category not in ["rules", "preferences", "icks"]:
+        raise HTTPException(status_code=400, detail="Invalid memory category")
+        
+    key = RedisKeys.agent_working_memory(agent_id, category)
+    
+    mem_id = f"mem_{str(uuid.uuid4().hex)[:8]}"
+    payload = json.dumps({
+        "content": body.content,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    await state.resources.redis.hset(key, mem_id, payload)
+    
+    return {
+        "id": mem_id,
+        "content": body.content,
+        "category": category
+    }
+
+@router.delete("/{agent_id}/memory/{category}/{memory_id}")
+async def delete_agent_memory(
+    agent_id: str,
+    category: str,
+    memory_id: str,
+    state: AppState = Depends(get_app_state)
+):
+    agent = await state.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+        
+    if category not in ["rules", "preferences", "icks"]:
+        raise HTTPException(status_code=400, detail="Invalid memory category")
+        
+    key = RedisKeys.agent_working_memory(agent_id, category)
+    
+    deleted = await state.resources.redis.hdel(key, memory_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Memory entry not found")
+        
+    return {"success": True}

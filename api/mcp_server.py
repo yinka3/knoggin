@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, List
 from loguru import logger
+from shared.schema.dtypes import Fact
 from mcp.server.fastmcp import FastMCP
 from shared.redisclient import RedisKeys
 
@@ -42,8 +43,41 @@ def create_mcp_app(get_resources) -> FastMCP:
     async def _resolve_or_create_entity(store, embedding, name, entity_type, topic, loop) -> Optional[int]:
         """
         Find existing entity by name or create a new one.
-        Uses FTS first, vector fallback, then creates if nothing matches.
+        Uses active resolver if a session is running, falls back to direct graph ops.
         """
+        resources = get_resources()
+        resolver = resources.active_resolver
+
+        if resolver:
+            entity_id = resolver.get_id(name)
+            if entity_id:
+                return entity_id
+
+            new_id = await resources.redis.incr(RedisKeys.global_next_ent_id())
+            await loop.run_in_executor(
+                _executor(),
+                lambda: resolver.register_entity(
+                    new_id, name, [name], entity_type, topic, "mcp"
+                )
+            )
+
+            entity_data = {
+                "id": new_id,
+                "canonical_name": name,
+                "type": entity_type,
+                "confidence": 0.8,
+                "topic": topic,
+                "embedding": resolver.get_embedding_for_id(new_id),
+                "aliases": [name],
+                "session_id": "mcp"
+            }
+            await loop.run_in_executor(
+                _executor(),
+                lambda: store.write_batch([entity_data], [])
+            )
+
+            logger.info(f"[MCP] Created entity '{name}' (id={new_id}) via resolver")
+            return new_id
 
         fts_results = await loop.run_in_executor(
             _executor(),
@@ -54,7 +88,6 @@ def create_mcp_app(get_resources) -> FastMCP:
             for r in fts_results:
                 if r.get("canonical_name", "").lower() == name.lower():
                     return r["id"]
-
             for r in fts_results:
                 aliases = [a.lower() for a in (r.get("aliases") or [])]
                 if name.lower() in aliases:
@@ -95,7 +128,7 @@ def create_mcp_app(get_resources) -> FastMCP:
             lambda: store.write_batch([entity_data], [])
         )
 
-        logger.info(f"[MCP] Created new entity '{name}' (id={new_id}, type={entity_type})")
+        logger.info(f"[MCP] Created entity '{name}' (id={new_id}) via direct graph")
         return new_id
 
 
@@ -355,7 +388,7 @@ def create_mcp_app(get_resources) -> FastMCP:
 
             fact_embedding = await loop.run_in_executor(_executor(), embedding.encode_single, fact)
 
-            from shared.schema.dtypes import Fact
+            
 
             new_fact = Fact(
                 id=str(uuid.uuid4()),
@@ -381,6 +414,10 @@ def create_mcp_app(get_resources) -> FastMCP:
                 _executor(),
                 lambda: store.update_entity_embedding(entity_id, new_embedding)
             )
+
+            resolver = get_resources().active_resolver
+            if resolver:
+                resolver.compute_embedding(entity_id, resolution_text)
 
             logger.info(f"[MCP] Saved fact for '{entity_name}' (id={entity_id}): {fact[:80]}")
             return json.dumps({

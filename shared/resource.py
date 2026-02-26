@@ -30,6 +30,7 @@ class ResourceManager:
         self.spacy: spacy.Language = None
         self.chroma: chromadb.ClientAPI = None
         self.mcp_manager: MCPClientManager = None
+        self.active_resolver = None
 
     @classmethod
     async def initialize(cls) -> "ResourceManager":
@@ -53,9 +54,9 @@ class ResourceManager:
                 llm_config = get_config_value("llm", {})
                 instance.llm_service = LLMService(
                     api_key=llm_config.get("api_key"),
-                    reasoning_model=llm_config.get("reasoning_model", "google/gemini-2.5-flash"),
                     agent_model=llm_config.get("agent_model", "google/gemini-3-flash-preview"),
-                    trace_logger=get_trace_logger()
+                    trace_logger=get_trace_logger(),
+                    redis_client=instance.redis
                 )
                 
                 instance.embedding = EmbeddingService(device=device)
@@ -144,6 +145,8 @@ class ResourceManager:
             await self.mcp_manager.shutdown()
         
         self.chroma = None
+        if self.llm_service:
+            await self.llm_service.close()
         logger.info("ResourceManager shutdown complete")
         
         self.__class__._instance = None

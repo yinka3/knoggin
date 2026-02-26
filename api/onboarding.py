@@ -1,21 +1,20 @@
+import asyncio
 from datetime import datetime, timezone
-import json
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import List
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from loguru import logger
 
+from api.deps import get_app_state
 from api.state import AppState
 from main.setup import run_setup
-from main.prompts import get_topic_generation_prompt
 from shared.config import load_config, save_config, get_default_config
 from shared.topics_config import TopicConfig
 from shared.setup_questions import ONBOARDING_QUESTIONS
+from shared.topic_gen import generate_topics as generate_topics_from_text
 
 router = APIRouter()
 
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
 
 class QAPair(BaseModel):
     question: str
@@ -48,58 +47,15 @@ async def generate_topics(
     if not text_block:
         raise HTTPException(status_code=400, detail="All answers are empty")
 
-    system = get_topic_generation_prompt()
-
     try:
-        raw = await state.resources.llm_service.call_llm(system, text_block)
-    except Exception as e:
-        logger.error(f"Topic generation LLM call failed: {e}")
-        raise HTTPException(status_code=500, detail="Topic generation failed")
-
-    if not raw:
-        raise HTTPException(status_code=500, detail="LLM returned empty response")
-
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[-1]
-    if cleaned.endswith("```"):
-        cleaned = cleaned.rsplit("```", 1)[0]
-    cleaned = cleaned.strip()
-
-    try:
-        generated = json.loads(cleaned)
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse topic generation output: {cleaned[:500]}")
-        raise HTTPException(status_code=500, detail="Failed to parse generated topics")
-
-    generated.pop("General", None)
-    generated.pop("Identity", None)
-
-    for name, config in generated.items():
-        config.setdefault("labels", [])
-        config.setdefault("aliases", [])
-        config.setdefault("label_aliases", {})
-        config.setdefault("hierarchy", {})
-        config.setdefault("active", True)
-
-    defaults = {
-        "General": {
-            "active": True,
-            "labels": [],
-            "hierarchy": {},
-            "aliases": [],
-            "label_aliases": {}
-        },
-        "Identity": {
-            "active": True,
-            "labels": ["person"],
-            "hierarchy": {},
-            "aliases": [],
-            "label_aliases": {}
-        }
-    }
-
-    merged = {**defaults, **generated}
+        merged = await asyncio.wait_for(
+            generate_topics_from_text(state.resources.llm_service, text_block),
+            timeout=30.0
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Topic generation timed out. Please try again.")
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {"topics": merged}
 
@@ -111,9 +67,6 @@ async def save_topics(
 ):
     if not body.topics:
         raise HTTPException(status_code=400, detail="No topics provided")
-
-    if "General" not in body.topics:
-        raise HTTPException(status_code=400, detail="General topic is required")
 
     config = load_config() or get_default_config()
     config["default_topics"] = body.topics
@@ -136,6 +89,9 @@ async def extract(
         raise HTTPException(status_code=400, detail="No responses provided")
 
     config = load_config() or get_default_config()
+    if config.get("configured_at"):
+        raise HTTPException(status_code=400, detail="Onboarding already completed.")
+    
     topics_raw = config.get("default_topics")
     if not topics_raw:
         raise HTTPException(

@@ -18,6 +18,7 @@ from jobs.jobs_utils import enrich_facts_with_sources, extract_fact_with_source,
 from shared.schema.dtypes import Fact, FactMergeResult
 from shared.events import emit
 from shared.redisclient import RedisKeys
+from shared.config import get_config_value
 
 class ProfileRefinementJob(BaseJob):
     """
@@ -31,7 +32,7 @@ class ProfileRefinementJob(BaseJob):
 
     def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, 
                 executor: ThreadPoolExecutor, embedding_service: EmbeddingService,
-                msg_window: int = 30, volume_threshold: int = 30, idle_threshold: int = 60,
+                msg_window: int = 30, volume_threshold: int = 15, idle_threshold: int = 90,
                 contradiction_sim_low: float = 0.70, contradiction_sim_high: float = 0.95,
                 contradiction_batch_size: int = 4, profile_batch_size: int = 8):
         
@@ -214,7 +215,8 @@ class ProfileRefinementJob(BaseJob):
                 return JobResult(success=False, summary="No context found")
             
             try:
-                updates = await self._run_updates(ctx, entity_ids, conversation)
+
+                updates, clear_ids = await self._run_updates(ctx, entity_ids, conversation)
                 
                 if updates:
                     await self._write_updates(updates)
@@ -225,7 +227,10 @@ class ProfileRefinementJob(BaseJob):
                     merge_queue = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
                     updated_ids = [str(u["id"]) for u in updates]
                     
-                    if updated_ids:
+                    dev_settings = get_config_value("developer_settings", {})
+                    merger_enabled = dev_settings.get("jobs", {}).get("merger", {}).get("enabled", True)
+
+                    if updated_ids and merger_enabled:
                         await ctx.redis.sadd(merge_queue, *updated_ids)
                         logger.info(f"Passed {len(updated_ids)} updated entities to Merge Queue")
 
@@ -239,9 +244,15 @@ class ProfileRefinementJob(BaseJob):
         
         user_refined = await self._maybe_refine_user(ctx, current_msg_id)
         
-        processed_ids = [str(u["id"]) for u in updates]
+        # Clear IDs from dirty queue to prevent infinite loop
+        # We clear both successfully updated entities AND entities that had no new context/facts
+        processed_ids = []
+        if 'clear_ids' in locals() and clear_ids:
+            processed_ids.extend([str(eid) for eid in clear_ids])
+            
         if processed_ids:
             await ctx.redis.srem(dirty_key, *processed_ids)
+            logger.debug(f"Cleared {len(processed_ids)} entities from dirty queue")
         
         parts = []
         if updates:
@@ -332,7 +343,7 @@ class ProfileRefinementJob(BaseJob):
         
         merge_result = process_extracted_facts(existing_facts, new_facts)
         
-        valid_msg_ids = {turn['user_msg_id'] for turn in conversation if turn.get('user_msg_id') is not None}
+        valid_msg_ids = {int(turn['user_msg_id']) for turn in conversation if turn.get('user_msg_id') is not None}
 
         await self._apply_fact_changes(user_id, merge_result, existing_facts, valid_msg_ids, ctx.session_id)
         
@@ -362,7 +373,6 @@ class ProfileRefinementJob(BaseJob):
         self, 
         ctx: JobContext,
         batch: List[Dict],
-        conversation_text: str,
         ents_to_facts: Dict[int, List[Fact]],
         current_msg_id: int,
         valid_msg_ids: set
@@ -378,9 +388,11 @@ class ProfileRefinementJob(BaseJob):
                     "existing_facts": enriched_facts,
                     "known_aliases": e["known_aliases"]
                 })
-            
+
+            combined_conversation = "\n---\n".join([e["conversation_text"] for e in batch])
+
             system_reasoning = get_profile_extraction_prompt(ctx.user_name)
-            user_content = format_vp04_input(llm_input, conversation_text)
+            user_content = format_vp04_input(llm_input, combined_conversation)
 
             await emit(ctx.session_id, "job", "llm_call", {
                 "stage": "profile_extraction",
@@ -429,15 +441,24 @@ class ProfileRefinementJob(BaseJob):
                     "last_msg_id": current_msg_id
                 })
 
+            loop = asyncio.get_running_loop()
+            updated_ids = {u["id"] for u in updates}
+            no_update_ents = [orig for orig in batch if orig["ent_id"] not in updated_ids]
+            
+            for orig in no_update_ents:
+                await loop.run_in_executor(
+                    None,
+                    self.store.update_entity_checkpoint,
+                    orig["ent_id"],
+                    current_msg_id
+                )
+
             return updates
     
 
-    async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]):
-        """Process entities in batches instead of individually."""
-        
+    async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]) -> Tuple[List[Dict], List[int]]:
         current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
-        conversation_text = "\n".join([turn["formatted"] for turn in conversation])
 
         loop = asyncio.get_running_loop()
 
@@ -448,8 +469,9 @@ class ProfileRefinementJob(BaseJob):
                 valid_entities.append((ent_id, profile))
 
         if not valid_entities:
-            return []
-        
+            return [], entity_ids # if invalid, we should clear them from dirty queue too
+
+
         ents_to_facts = await loop.run_in_executor(
             None,
             self.store.get_facts_for_entities,
@@ -457,35 +479,69 @@ class ProfileRefinementJob(BaseJob):
             True
         )
 
+        if ents_to_facts is None:
+            logger.error("Failed to fetch facts for entities, skipping profile refinement")
+            return [], []
+
+
+        # Fetch last_profiled_msg_id for each entity
+        profiled_checkpoints = {}
+        for ent_id, _ in valid_entities:
+            entity_data = await loop.run_in_executor(
+                None, self.store.get_entity_by_id, ent_id
+            )
+            if entity_data and entity_data.get("last_profiled_msg_id"):
+                profiled_checkpoints[ent_id] = entity_data["last_profiled_msg_id"]
+
         entity_inputs = []
         for ent_id, profile in valid_entities:
             existing_facts = ents_to_facts.get(ent_id, [])
             
+            # Filter conversation to only new turns since last profiling
+            checkpoint = profiled_checkpoints.get(ent_id, 0)
+            entity_conversation = [
+                turn for turn in conversation
+                if (turn.get("user_msg_id") or 0) > checkpoint
+            ]
+            
+            if not entity_conversation:
+                logger.debug(f"No new conversation for entity {ent_id} since msg_{checkpoint}")
+                continue
+
+
             entity_inputs.append({
                 "ent_id": ent_id,
                 "entity_name": profile.get("canonical_name", "Unknown"),
                 "entity_type": profile.get("type", "unknown"),
                 "existing_facts": existing_facts,
-                "known_aliases": self.resolver.get_mentions_for_id(ent_id)
+                "known_aliases": self.resolver.get_mentions_for_id(ent_id),
+                "conversation_text": "\n".join([t["formatted"] for t in entity_conversation])
             })
-        
+
         if not entity_inputs:
-            return []
-        
+            return [], entity_ids # all evaluated and had no new context, clear them
+
+
         batches = [
             entity_inputs[i:i + self.profile_batch_size]
             for i in range(0, len(entity_inputs), self.profile_batch_size)
         ]
-        
-        valid_msg_ids = {turn['user_msg_id'] for turn in conversation if turn.get('user_msg_id') is not None}
+
+        valid_msg_ids = {int(turn['user_msg_id']) for turn in conversation if turn.get('user_msg_id') is not None}
 
         tasks = [
-            self._process_single_batch(ctx, batch, conversation_text, ents_to_facts, current_msg_id, valid_msg_ids)
+            self._process_single_batch(ctx, batch, ents_to_facts, current_msg_id, valid_msg_ids)
             for batch in batches
         ]
-        
+
         results = await asyncio.gather(*tasks)
-        return [update for batch_updates in results for update in batch_updates]
+        
+        # Return the generated updates, along with the ENTIRE list of entity_ids we evaluated,
+        # so they can all be removed from the dirty queue and stop the infinite loop.
+        # - If an entity had no new conversation turns, it was skipped, so it should be removed.
+        # - If an entity was evaluated but got no new facts, it should be removed.
+        # - If an entity was updated, it should also be removed.
+        return [update for batch_updates in results for update in batch_updates], entity_ids
     
 
     async def _apply_fact_changes(
@@ -509,7 +565,7 @@ class ProfileRefinementJob(BaseJob):
             content, msg_id = extract_fact_with_source(raw_content)
             
             if msg_id and valid_msg_ids and msg_id not in valid_msg_ids:
-                logger.warning(f"Invalid msg_id {msg_id} not in conversation window, setting to None")
+                logger.warning(f"Invalid msg_id {msg_id} (type {type(msg_id)}) not in conversation window {valid_msg_ids} (type {type(list(valid_msg_ids)[0]) if valid_msg_ids else 'empty'}), setting to None")
                 msg_id = None
             
             embedding = await loop.run_in_executor(
@@ -547,13 +603,24 @@ class ProfileRefinementJob(BaseJob):
                 )
                 logger.debug(f"Created {count} facts for entity {entity_id}")
                 
+                failed_invalidations = []
                 for fact_id in to_invalidate:
-                    await loop.run_in_executor(
-                        self.executor,
-                        self.store.invalidate_fact,
-                        fact_id,
-                        now
-                    )
+                    try:
+                        await loop.run_in_executor(
+                            self.executor,
+                            self.store.invalidate_fact,
+                            fact_id,
+                            now
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
+                        failed_invalidations.append(fact_id)
+
+                if failed_invalidations:
+                    await emit(session_id, "job", "invalidation_failures", {
+                        "entity_id": entity_id,
+                        "failed_fact_ids": failed_invalidations
+                    })
                 
                 await emit(session_id, "job", "facts_changed", {
                     "entity_id": entity_id,
@@ -569,13 +636,24 @@ class ProfileRefinementJob(BaseJob):
                     "error": str(e)
                 })
         elif to_invalidate:
+            failed_invalidations = []
             for fact_id in to_invalidate:
-                await loop.run_in_executor(
-                    self.executor,
-                    self.store.invalidate_fact,
-                    fact_id,
-                    now
-                )
+                try:
+                    await loop.run_in_executor(
+                        self.executor,
+                        self.store.invalidate_fact,
+                        fact_id,
+                        now
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
+                    failed_invalidations.append(fact_id)
+
+            if failed_invalidations:
+                await emit(session_id, "job", "invalidation_failures", {
+                    "entity_id": entity_id,
+                    "failed_fact_ids": failed_invalidations
+                })
             
             await emit(session_id, "job", "facts_changed", {
                 "entity_id": entity_id,

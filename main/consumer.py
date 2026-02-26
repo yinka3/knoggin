@@ -103,7 +103,12 @@ class BatchConsumer:
                 timed_out = True
             
             self._wake_event.clear()
-            await self._drain_buffer(flush_partial=timed_out)
+            try:
+                await self._drain_buffer(flush_partial=timed_out)
+            except Exception as e:
+                logger.error(f"BatchConsumer: Unexpected error during _drain_buffer: {e}")
+                # Brief backoff to prevent tight loop on persistent transient errors
+                await asyncio.sleep(5)
 
         logger.info("BatchConsumer shutting down, final drain...")
         await self._drain_buffer(flush_partial=True)
@@ -150,7 +155,7 @@ class BatchConsumer:
                     await emit(self.session_id, "pipeline", "dlq_write_failed", {
                         "msg_count": len(messages)
                     })
-                    return
+                    break
                 dlq_count += len(messages)
             else:
                 loop = asyncio.get_running_loop()
@@ -164,7 +169,10 @@ class BatchConsumer:
                     }
                     for msg in messages
                 ]
-                await loop.run_in_executor(None, self.store.save_message_logs, batch)
+                try:
+                    await loop.run_in_executor(None, self.store.save_message_logs, batch)
+                except Exception as e:
+                    logger.error(f"Failed to save message logs: {e}")
                 
                 graph_success = True
                 if result.extraction_result:
@@ -193,11 +201,11 @@ class BatchConsumer:
                         batch_result=result
                     )
                     if not dlq_success:
-                        logger.critical(f"DLQ write failed after graph failure.")
+                        logger.critical(f"DLQ write failed after graph failure. Leaving {len(messages)} messages in buffer for retry.")
                         await emit(self.session_id, "pipeline", "dlq_write_failed", {
                             "msg_count": len(messages)
                         })
-                        return
+                        break
                     dlq_count += len(messages)
                 else:
                     count = await self.redis.incrby(self._checkpoint_key, len(messages))

@@ -4,13 +4,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from api.deps import get_app_state
 from api.state import AppState
 from shared.redisclient import RedisKeys
 from shared.schema.tool_schema import ALL_TOOL_NAMES
 router = APIRouter()
 
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
 
 
 class CreateSessionRequest(BaseModel):
@@ -73,7 +72,8 @@ async def create_session(
     context = await state.create_session(
         body.topics_config if body else None,
         model=body.model if body else None,
-        agent_id=agent_id
+        agent_id=agent_id,
+        enabled_tools=body.enabled_tools if body else None
     )
 
     await state.resources.redis.delete(f"topic_gen_count:{state.user_name}")
@@ -93,9 +93,9 @@ async def create_session(
     
     return {
         "session_id": context.session_id,
-        "created_at": metadata["created_at"],
-        "model": metadata.get("model"),
-        "agent_id": metadata.get("agent_id")
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "model": body.model if body else None,
+        "agent_id": agent_id
     }
 
 @router.get("/{session_id}")
