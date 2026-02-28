@@ -149,5 +149,164 @@ TOOL_SCHEMAS = [
                 "required": ["question"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": (
+                "Save a piece of information to your persistent memory for this session. "
+                "Use sparingly — only for facts that will be valuable in future conversations. "
+                "Good: user preferences, key project decisions, important names/roles, stated goals. "
+                "Bad: transient details, things already in the knowledge graph, conversation-specific context. "
+                "Write memories as standalone facts, not references to 'this conversation'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The fact or note to remember. Keep concise — one clear statement."
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Topic this memory belongs to. Use 'General' for cross-cutting notes. Must be an active topic in the session."
+                    }
+                },
+                "required": ["content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_memory",
+            "description": (
+                "Remove a memory that is no longer accurate or relevant. "
+                "Use when the user corrects something you remembered, or when a fact becomes outdated."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The ID of the memory to remove. Visible in your memory context block."
+                    }
+                },
+                "required": ["memory_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": (
+                "Search through files the user has uploaded to this session. "
+                "Use when the user asks about content in their uploaded documents, code files, or PDFs. "
+                "Returns the most relevant chunks with file name and location. "
+                "Only works if files have been uploaded — check the file context in your prompt first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for in the uploaded files."
+                    },
+                    "file_name": {
+                        "type": "string",
+                        "description": "Optional: restrict search to a specific file by name."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max chunks to return (default 5)."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the live internet for information. "
+                "Use this for: 1) Current events or news, 2) Technical documentation or facts outside the graph, "
+                "3) Verifying information with external sources. "
+                "This tool tracks sources and displays them to the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query."},
+                    "limit": {"type": "integer", "description": "Max results (default 5)"},
+                    "freshness": {
+                        "type": "string",
+                        "description": (
+                            "Filter results by recency. Options: 'pd' (past day), 'pw' (past week), "
+                            "'pm' (past month), 'py' (past year). Only set this when the user asks about recent events."
+                        )
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "news_search",
+            "description": (
+                "Search for recent news articles. Use this instead of web_search when the user specifically "
+                "asks about news, current events, or breaking stories. Returns curated results from news outlets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The news search query."},
+                    "limit": {"type": "integer", "description": "Max results (default 5)"},
+                    "freshness": {
+                        "type": "string",
+                        "description": (
+                            "Filter by time: 'pd' (past day), 'pw' (past week), 'pm' (past month). "
+                            "Defaults to 'pw' for news."
+                        )
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
+
+ALL_TOOL_NAMES = [
+    "search_entity",
+    "get_connections",
+    "find_path",
+    "get_hierarchy",
+    "search_messages",
+    "get_recent_activity",
+    "save_memory",
+    "forget_memory",
+    "search_files",
+    "web_search",
+    "news_search",
+]
+
+def get_filtered_schemas(enabled_tools: list[str] | None = None) -> list[dict]:
+    """
+    Return tool schemas filtered to only enabled tools.
+    Always includes request_clarification (not user-toggleable).
+    If enabled_tools is None, returns all tools.
+    """
+    if enabled_tools is None:
+        return TOOL_SCHEMAS
+    
+    enabled_set = set(enabled_tools)
+    return [
+        schema for schema in TOOL_SCHEMAS
+        if schema["function"]["name"] in enabled_set
+        or schema["function"]["name"] == "request_clarification"
+    ]

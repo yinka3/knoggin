@@ -1,23 +1,31 @@
-const API_BASE = 'http://localhost:8000'
+import { apiGet, apiPost, apiPatch, apiDelete } from './fetch'
 
-export async function listSessions() {
-  const res = await fetch(`${API_BASE}/sessions/`)
-  if (!res.ok) throw new Error('Failed to list sessions')
-  return res.json()
+export function listSessions() {
+  return apiGet('/sessions/')
 }
 
-export async function createSession(topicsConfig = null) {
-  const res = await fetch(`${API_BASE}/sessions/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topics_config: topicsConfig }),
+export function createSession(topicsConfig = null, agentId = null, enabledTools = null) {
+  return apiPost('/sessions/', {
+    topics_config: topicsConfig,
+    agent_id: agentId,
+    enabled_tools: enabledTools,
   })
-  if (!res.ok) throw new Error('Failed to create session')
-  return res.json()
 }
 
-export async function getSession(sessionId) {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}`)
-  if (!res.ok) throw new Error('Session not found')
-  return res.json()
+export function getSession(sessionId) {
+  return apiGet(`/sessions/${sessionId}`)
+}
+
+export function updateSession(sessionId, { model, agentId, enabledTools }) {
+  const body = {}
+  if (model !== undefined) body.model = model
+  if (agentId !== undefined) body.agent_id = agentId
+  if (enabledTools !== undefined) body.enabled_tools = enabledTools
+
+  return apiPatch(`/sessions/${sessionId}`, body)
+}
+
+export function deleteSession(sessionId, force = false) {
+  const query = force ? '?force=true' : ''
+  return apiDelete(`/sessions/${sessionId}${query}`)
 }

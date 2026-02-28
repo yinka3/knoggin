@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -33,9 +34,9 @@ export function SessionProvider({ children }) {
     setConfigModalOpen(true)
   }
 
-  async function createSessionWithConfig(topicsConfig) {
+  async function createSessionWithConfig(topicsConfig, agentId = null) {
     try {
-      const data = await apiCreateSession(topicsConfig)
+      const data = await apiCreateSession(topicsConfig, agentId)
       await loadSessions()
       setCurrentSessionId(data.session_id)
       navigate(`/chat/${data.session_id}`)

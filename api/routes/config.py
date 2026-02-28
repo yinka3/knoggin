@@ -1,125 +1,22 @@
+
+import asyncio
+import copy
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from api.deps import get_app_state
 from api.state import AppState
-from shared.config import get_default_config, load_config, save_config
+from shared.config import load_config, save_config, get_default_config, deep_merge, redact_config
+from shared.schema.settings import ConfigUpdate
+from shared.schema.tool_schema import TOOL_SCHEMAS
 
 router = APIRouter()
-
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
-
-
-class IngestionSettings(BaseModel):
-    batch_size: Optional[int] = Field(None, ge=1, le=100)
-    batch_timeout: Optional[float] = Field(None, ge=10.0)
-    checkpoint_interval: Optional[int] = Field(None, ge=1)
-    session_window: Optional[int] = Field(None, ge=1)
-
-class CleanerSettings(BaseModel):
-    interval_hours: Optional[int] = Field(None, ge=1)
-    orphan_age_hours: Optional[int] = Field(None, ge=1)
-    stale_junk_days: Optional[int] = Field(None, ge=1)
-
-class ProfileSettings(BaseModel):
-    msg_window: Optional[int] = Field(None, ge=5)
-    volume_threshold: Optional[int] = Field(None, ge=1)
-    idle_threshold: Optional[int] = Field(None, ge=10)
-    profile_batch_size: Optional[int] = Field(None, ge=1)
-    contradiction_sim_low: Optional[float] = Field(None, ge=0.0, le=1.0)
-    contradiction_sim_high: Optional[float] = Field(None, ge=0.0, le=1.0)
-    contradiction_batch_size: Optional[int] = Field(None, ge=1)
-
-class MergerSettings(BaseModel):
-    auto_threshold: Optional[float] = Field(None, ge=0.5, le=1.0)
-    hitl_threshold: Optional[float] = Field(None, ge=0.4, le=1.0)
-    cosine_threshold: Optional[float] = Field(None, ge=0.1, le=1.0)
-
-class DLQSettings(BaseModel):
-    interval_seconds: Optional[int] = Field(None, ge=10)
-    batch_size: Optional[int] = Field(None, ge=1)
-    max_attempts: Optional[int] = Field(None, ge=1)
-
-class ArchivalSettings(BaseModel):
-    retention_days: Optional[int] = Field(None, ge=1)
-
-class JobSettings(BaseModel):
-    cleaner: Optional[CleanerSettings] = None
-    profile: Optional[ProfileSettings] = None
-    merger: Optional[MergerSettings] = None
-    dlq: Optional[DLQSettings] = None
-    archival: Optional[ArchivalSettings] = None
-
-class AgentLimitSettings(BaseModel):
-    agent_history_turns: Optional[int] = Field(None, ge=1)
-    max_tool_calls: Optional[int] = Field(None, ge=1)
-    max_attempts: Optional[int] = Field(None, ge=1)
-    max_consecutive_errors: Optional[int] = Field(None, ge=1)
-    max_accumulated_messages: Optional[int] = Field(None, ge=1)
-    conversation_context_turns: Optional[int] = Field(None, ge=1)
-    tool_limits: Optional[Dict[str, int]] = None
-
-class NLPPipelineSettings(BaseModel):
-    gliner_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
-    vp01_min_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
-
-class SearchSettings(BaseModel):
-    vector_limit: Optional[int] = Field(None, ge=1)
-    fts_limit: Optional[int] = Field(None, ge=1)
-    rerank_candidates: Optional[int] = Field(None, ge=1)
-    default_message_limit: Optional[int] = Field(None, ge=1)
-    default_entity_limit: Optional[int] = Field(None, ge=1)
-    default_activity_hours: Optional[int] = Field(None, ge=1)
-
-class MemorySettings(BaseModel):
-    recall_strictness: Optional[float] = Field(None, ge=0.0, le=1.0)
-    fuzzy_match_threshold: Optional[int] = Field(None, ge=50, le=100)
-
-class EntityResolutionSettings(BaseModel):
-    fuzzy_substring_threshold: Optional[int] = Field(None, ge=50, le=100)
-    fuzzy_non_substring_threshold: Optional[int] = Field(None, ge=50, le=100)
-    generic_token_freq: Optional[int] = Field(None, ge=1)
-    candidate_fuzzy_threshold: Optional[int] = Field(None, ge=50, le=100)
-    candidate_vector_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
-
-class DeveloperSettings(BaseModel):
-    ingestion: Optional[IngestionSettings] = None
-    jobs: Optional[JobSettings] = None
-    limits: Optional[AgentLimitSettings] = None
-    memory: Optional[MemorySettings] = None
-    entity_resolution: Optional[EntityResolutionSettings] = None
-    nlp_pipeline: Optional[NLPPipelineSettings] = None
-    search: Optional[SearchSettings] = None
-
-class ConfigUpdate(BaseModel):
-    user_name: Optional[str] = None
-    user_summary: Optional[str] = None
-    reasoning_model: Optional[str] = None
-    agent_model: Optional[str] = None
-    default_topics: Optional[dict] = None
-    developer_settings: Optional[DeveloperSettings] = None
-
-
-
-def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Recursively merge update dict into source dict.
-    This ensures we don't wipe out 'jobs' when updating 'ingestion'.
-    """
-    for key, value in updates.items():
-        if isinstance(value, dict) and key in source and isinstance(source[key], dict):
-            deep_merge(source[key], value)
-        else:
-            source[key] = value
-    return source
-
 
 @router.get("/")
 async def get_config():
     config = load_config()
     if not config:
         return get_default_config()
-    return config
+    return redact_config(config)
+
 
 @router.get("/status")
 async def get_config_status():
@@ -134,27 +31,118 @@ async def get_config_status():
         "has_user_name": has_user_name
     }
 
+
+@router.get("/tools")
+async def get_tools(request: Request):
+    """
+    Return a comprehensive list of available tools.
+    Combines standard Knoggin tools with dynamic MCP tools.
+    """
+    schema_map = {
+        s["function"]["name"]: s["function"]
+        for s in TOOL_SCHEMAS
+        if s["function"]["name"] != "request_clarification"
+    }
+
+    standard_tools = []
+    for tool_id in ["search_entity", "save_memory", "forget_memory", "get_connections", 
+                    "find_path", "get_hierarchy", "search_messages", "get_recent_activity", "search_files", "web_search", "news_search"]:
+        schema = schema_map.get(tool_id, {})
+        group_map = {
+            "search_entity": "Memory", "save_memory": "Memory", "forget_memory": "Memory",
+            "get_connections": "Graph", "find_path": "Graph", "get_hierarchy": "Graph",
+            "search_messages": "History", "get_recent_activity": "History",
+            "search_files": "RAG",
+            "web_search": "Search",
+            "news_search": "Search",
+        }
+        standard_tools.append({
+            "id": tool_id,
+            "name": schema.get("name", tool_id).replace("_", " ").title(),
+            "description": schema.get("description", ""),
+            "parameters": schema.get("parameters", {}),
+            "source": "knoggin",
+            "group": group_map.get(tool_id, "Other"),
+        })
+    
+    mcp_tools = []
+    if request.app.state.app_state.resources.mcp_manager:
+        raw_mcp = request.app.state.app_state.resources.mcp_manager.get_all_tools()
+        for tool in raw_mcp:
+            name = tool.get("namespaced")
+            if not name: continue
+            
+            # Parse namespaces: mcp__server__tool_name
+            parts = name.split("__", 2)
+            if len(parts) == 3:
+                server = parts[1]
+                display_name = parts[2].replace("_", " ").title()
+                group = f"MCP: {server.title()}"
+            else:
+                server = "external"
+                display_name = name
+                group = "MCP: External"
+            
+            mcp_tools.append({
+                "id": name,
+                "name": display_name,
+                "source": "mcp",
+                "server": server,
+                "group": group,
+                "description": tool.get("description", "")
+            })
+            
+    return {
+        "tools": standard_tools + mcp_tools
+    }
+
+def _strip_redacted_keys(d: dict):
+    """Remove redacted API key values (starting with '...') so they don't overwrite real keys."""
+    keys_to_remove = []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            _strip_redacted_keys(v)
+            if not v:  # Remove empty dicts after stripping
+                keys_to_remove.append(k)
+        elif isinstance(v, str) and v.startswith("..."):
+            keys_to_remove.append(k)
+    for k in keys_to_remove:
+        del d[k]
+
+_config_lock = asyncio.Lock()
 @router.patch("/")
 async def update_config(
     body: ConfigUpdate,
     state: AppState = Depends(get_app_state)
 ):
-    updates = body.model_dump(exclude_none=True)
-    if not updates:
-        raise HTTPException(status_code=400, detail="No fields to update")
+    async with _config_lock:
+        updates = body.model_dump(exclude_none=True)
+        if not updates:
+            raise HTTPException(status_code=400, detail="No fields to update")
 
+        # Strip redacted API keys — never overwrite real keys with "...xxxx"
+        _strip_redacted_keys(updates)
 
-    current_config = load_config() or get_default_config()
+        current_config = load_config() or get_default_config()
+        merged_config = deep_merge(copy.deepcopy(current_config), updates)
 
-    merged_config = deep_merge(current_config, updates)
-
-    success = save_config(merged_config)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to save config")
+        success = save_config(merged_config)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to save config")
+        
+        if "user_name" in updates and updates["user_name"]:
+            state.user_name = merged_config["user_name"]
+        
+        llm_cfg = updates.get("llm")
+        if llm_cfg:
+            state.resources.llm_service.update_settings(
+                api_key=llm_cfg.get("api_key"),
+                agent_model=llm_cfg.get("agent_model")
+            )
+        
+        active_count = 0
+        for _, context in state.active_sessions.items():
+            await context.update_runtime_settings(merged_config)
+            active_count += 1
     
-    active_count = 0
-    for _, context in state.active_sessions.items():
-        await context.update_runtime_settings(merged_config)
-        active_count += 1
-    
-    return merged_config
+    return redact_config(merged_config)

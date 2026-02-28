@@ -9,7 +9,7 @@ from rapidfuzz import fuzz
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 
 from db.store import MemGraphStore
-from schema.dtypes import Fact, FactMergeResult, ProfileUpdate
+from shared.schema.dtypes import Fact, FactMergeResult, ProfileUpdate
 
 
 
@@ -208,6 +208,7 @@ def parse_new_facts(reasoning: str) -> Optional[List[ProfileUpdate]]:
 def parse_merge_score(reasoning: str) -> Optional[float]:
     """
     Parses <score>0.XX</score> from text. 
+    Falls back to bare float if no tags found.
     Lenient on closing tag. Strict on numeric bounds.
     """
     if not reasoning:
@@ -216,6 +217,13 @@ def parse_merge_score(reasoning: str) -> Optional[float]:
     match = re.search(r"(?i)<score>\s*(.*?)(?:</score>|$)", reasoning, re.DOTALL)
     
     if not match:
+        # Fallback: look for a bare float on its own line (e.g. "0.85")
+        bare = re.search(r"(?:^|\n)\s*(0\.\d{1,2}|1\.00?)\s*(?:\n|$)", reasoning)
+        if bare:
+            try:
+                return float(bare.group(1))
+            except ValueError:
+                pass
         return None
         
     score_str = match.group(1).strip()

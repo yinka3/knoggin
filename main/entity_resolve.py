@@ -6,9 +6,9 @@ from rapidfuzz import fuzz, process
 from db.store import MemGraphStore
 from shared.embedding import EmbeddingService
 from main.utils import is_substring_match
-from schema.dtypes import Fact
+from shared.schema.dtypes import Fact
 from shared.events import emit_sync
-
+from jobs.jobs_utils import cosine_similarity
 
 class EntityResolver:
     
@@ -82,16 +82,16 @@ class EntityResolver:
                         candidate_vector_threshold: float = None):
         
         """Update resolution thresholds on the fly."""
-        if fuzzy_substring_threshold:
+        if fuzzy_substring_threshold is not None:
             self.fuzzy_substring_threshold = fuzzy_substring_threshold
-        if fuzzy_non_substring_threshold:
+        if fuzzy_non_substring_threshold is not None:
             self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
-        if generic_token_freq:
+        if generic_token_freq is not None:
             self.generic_token_freq = generic_token_freq
         
-        if candidate_fuzzy_threshold:
+        if candidate_fuzzy_threshold is not None:
             self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
-        if candidate_vector_threshold:
+        if candidate_vector_threshold is not None:
             self.candidate_vector_threshold = candidate_vector_threshold
             
         logger.info(f"EntityResolver settings updated: sub={self.fuzzy_substring_threshold}, non-sub={self.fuzzy_non_substring_threshold}, freq={self.generic_token_freq}")
@@ -99,9 +99,37 @@ class EntityResolver:
     def get_id(self, name: str) -> Optional[int]:
         if not name:
             return None
+            
+        lower_name = name.lower()
+        
         with self._lock:
-            return self._name_to_id.get(name.lower())
+            stored_id = self._name_to_id.get(lower_name)
+            if stored_id:
+                return stored_id
+
+        found = self.store.get_entities_by_names([name])
+        if found:
+            entity = found[0]
+            eid = entity["id"]
+            
+            with self._lock:
+                self._name_to_id[lower_name] = eid
+                if entity.get("aliases"):
+                    for a in entity["aliases"]:
+                        self._name_to_id[a.lower()] = eid
+                
+                if eid not in self.entity_profiles:
+                    self.entity_profiles[eid] = {
+                        "canonical_name": entity.get("canonical_name", name),
+                        "type": entity.get("type"),
+                        "topic": "General",
+                        "session_id": None
+                    }
+                        
+            return eid
+        return None
     
+
     def get_profiles(self) -> Dict[int, Dict]:
         with self._lock:
             return dict(self.entity_profiles)
@@ -122,7 +150,7 @@ class EntityResolver:
             if profile and profile.get("embedding"):
                 return profile["embedding"]
         return self.store.get_entity_embedding(entity_id)
-    
+        
 
     def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -132,7 +160,7 @@ class EntityResolver:
             return []
             
         embeddings = self.embedding_service.encode(texts)
-        return embeddings.tolist()
+        return embeddings
         
     
     def validate_existing(self, canonical_name: str, mentions: List[str]) -> Tuple[Optional[int], bool, List[str]]:
@@ -449,6 +477,18 @@ class EntityResolver:
                 )
 
                 if not passes_threshold:
+                    emb_a = self.get_embedding_for_id(primary_id)
+                    emb_b = self.get_embedding_for_id(neighbor_id)
+                    if emb_a and emb_b:
+                        
+                        cos_sim = cosine_similarity(emb_a, emb_b)
+                        if cos_sim >= 0.90:
+                            logger.info(
+                                f"Cosine-first candidate: ({primary_id}, {neighbor_id}) "
+                                f"names='{primary_name}'/'{neighbor_name}' cos={cos_sim:.3f}"
+                            )
+                            seen_pairs[pair_key] = (0, False)
+                            continue
                     continue
 
                 tokens_i = set(primary_name.lower().split()) - generic_tokens

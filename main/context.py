@@ -1,7 +1,12 @@
 import asyncio
+import re
+import uuid
+
 from datetime import datetime, timezone
+import os
 import redis.asyncio as aioredis
 from concurrent.futures import ThreadPoolExecutor
+from jobs.topics import TopicConfigJob
 from loguru import logger
 import json
 from jobs.archive import FactArchivalJob
@@ -11,8 +16,8 @@ from jobs.profile import ProfileRefinementJob
 from jobs.scheduler import Scheduler
 from jobs.merger import MergeDetectionJob
 from jobs.cleaner import EntityCleanupJob
-from main.utils import handle_background_task_result
-from shared.config import get_config_value
+from main.utils import handle_background_task_result, extract_xml_content
+
 from main.consumer import BatchConsumer
 from shared.embedding import EmbeddingService
 from main.processor import BatchProcessor, BatchResult
@@ -23,10 +28,10 @@ from shared.topics_config import TopicConfig
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
-import uuid
+from shared.file_rag import FileRAGService
+from shared.schema.dtypes import MessageConnections, MessageData, Fact
 
-from schema.dtypes import Fact, MessageConnections, MessageData
-from shared.events import emit
+from shared.events import DebugEventEmitter, emit
 from shared.redisclient import RedisKeys
 from shared.resource import ResourceManager
 
@@ -35,10 +40,13 @@ class Context:
     def __init__(self, user_name: str, topics: List[str], redis_client):
         self.user_name: str = user_name
         self.active_topics: List[str] = topics
+        self.resources: ResourceManager = None
         self.scheduler: Scheduler = None
         self.redis_client: aioredis.Redis = redis_client
         self.model: Optional[str] = None
         self.llm: LLMService = None
+        self.file_rag: FileRAGService = None
+        self.mcp_manager = None
         
         self.store: MemGraphStore = None
         self.nlp_pipe: NLPPipeline = None
@@ -52,6 +60,8 @@ class Context:
         self.consumer: BatchConsumer = None
         self.profile_job: BaseJob = None
         self.merge_job: BaseJob = None
+        self._background_tasks: set = set()
+
 
     @classmethod
     async def create(
@@ -80,6 +90,7 @@ class Context:
         instance.model = model
         instance.redis_client = resources.redis
         instance.embedding_service = resources.embedding
+        instance.mcp_manager = resources.mcp_manager
         
         await resources.redis.hset(
             RedisKeys.session_config(user_name),
@@ -108,8 +119,9 @@ class Context:
             candidate_fuzzy_threshold=er_cfg.get("candidate_fuzzy_threshold", 85),
             candidate_vector_threshold=er_cfg.get("candidate_vector_threshold", 0.85)
         )
+        resources.active_resolver = instance.ent_resolver
         
-        await instance._get_or_create_user_entity(user_name)
+        await instance._verify_user_entity(user_name)
         nlp_cfg = dev_settings.get("nlp_pipeline", {})
         instance.nlp_pipe = await loop.run_in_executor(
             instance.executor,
@@ -136,7 +148,8 @@ class Context:
             cpu_executor=instance.executor,
             user_name=user_name,
             topic_config=instance.topic_config,
-            get_next_ent_id=instance.get_next_ent_id
+            get_next_ent_id=instance.get_next_ent_id,
+            resolution_threshold=er_cfg.get("resolution_threshold", 0.85)
         )
         
         ingest_cfg = dev_settings.get("ingestion", {})
@@ -145,6 +158,9 @@ class Context:
         checkpoint_interval = ingest_cfg.get("checkpoint_interval") or (batch_size * 4)
         session_window = ingest_cfg.get("session_window") or (batch_size * 3)
         batch_timeout = ingest_cfg.get("batch_timeout", 300.0)
+        
+
+
         
         instance.consumer = BatchConsumer(
             user_name=user_name,
@@ -161,6 +177,14 @@ class Context:
             session_window=session_window
         )
         instance.consumer.start()
+
+        upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
+        instance.file_rag = FileRAGService(
+            session_id=instance.session_id,
+            chroma_client=resources.chroma,
+            embedding_service=resources.embedding,
+            upload_dir=upload_dir,
+        )
         
         jobs_cfg = dev_settings.get("jobs", {})
         
@@ -172,8 +196,8 @@ class Context:
             executor=instance.executor,
             embedding_service=instance.embedding_service,
             msg_window=prof_cfg.get("msg_window", 30),
-            volume_threshold=prof_cfg.get("volume_threshold", 30),
-            idle_threshold=prof_cfg.get("idle_threshold", 60),
+            volume_threshold=prof_cfg.get("volume_threshold", 15),
+            idle_threshold=prof_cfg.get("idle_threshold", 90),
             profile_batch_size=prof_cfg.get("profile_batch_size", 8),
             contradiction_sim_low=prof_cfg.get("contradiction_sim_low", 0.70),
             contradiction_sim_high=prof_cfg.get("contradiction_sim_high", 0.95),
@@ -202,7 +226,7 @@ class Context:
             write_to_graph=instance._write_to_graph_callback,
             interval=dlq_cfg.get("interval_seconds", 60),
             batch_size=dlq_cfg.get("batch_size", 50),
-            max_attempts=dlq_cfg.get("max_attempts", 3)
+            max_attempts=dlq_cfg.get("max_attempts", 2)
         ))
         
         clean_cfg = jobs_cfg.get("cleaner", {})
@@ -219,7 +243,17 @@ class Context:
         instance.scheduler.register(FactArchivalJob(
             user_name=user_name, 
             store=instance.store,
-            retention_days=arch_cfg.get("retention_days", 14)
+            retention_days=arch_cfg.get("retention_days", 14),
+            fallback_interval_hours=arch_cfg.get("fallback_interval_hours", 24)
+        ))
+
+        topic_cfg = jobs_cfg.get("topic_config", {})
+        instance.scheduler.register(TopicConfigJob(
+            llm=instance.llm,
+            topic_config=instance.topic_config,
+            update_callback=instance.update_topics_config,
+            interval_msgs=topic_cfg.get("interval_msgs", 40),
+            conversation_window=topic_cfg.get("conversation_window", 50)
         ))
 
         await instance.scheduler.start()
@@ -251,68 +285,41 @@ class Context:
             "topics": list(new_config.keys())
         })
     
-    async def _get_or_create_user_entity(self, user_name: str):
+    async def _verify_user_entity(self, user_name: str):
         loop = asyncio.get_running_loop()
-        entity_id = self.ent_resolver.get_id(user_name)
-
-        if entity_id and entity_id == 1:
-            logger.info(f"User {user_name} recognized.")
-            await emit(self.session_id, "system", "user_entity_recognized", {
+        
+        entity = await loop.run_in_executor(
+            self.executor, self.store.get_entity_by_id, 1
+        )
+        
+        if not entity or entity["canonical_name"] != user_name:
+            logger.critical(
+                f"User entity not found for '{user_name}'. "
+                f"Expected entity id=1. Onboarding may not have completed."
+            )
+            return
+        
+        profile = self.ent_resolver.entity_profiles.get(1)
+        if profile and profile["canonical_name"] == user_name:
+            logger.info(f"User entity verified: {user_name} (id=1)")
+            await emit(self.session_id, "system", "user_entity_verified", {
                 "user_name": user_name,
-                "entity_id": entity_id
+                "entity_id": 1
             })
-            return entity_id
+            return
         
-        logger.info(f"Creating new USER entity for {user_name}")
-        
-        new_id = await self.get_next_ent_id()
-        
-        initial_fact_content = get_config_value("user_summary") or f"The primary user named {user_name}"
-
-        embedding = await loop.run_in_executor(
-            self.executor,
-            partial(self.ent_resolver.register_entity, new_id, user_name, [user_name], "person", "Identity")
-        )
-
-        # Create initial fact as Fact node
-        fact_embedding = self.embedding_service.encode_single(initial_fact_content)
-        
-        facts: List[Fact] = []
-
-        facts.append(Fact(
-            id=str(uuid.uuid4()),
-            content=initial_fact_content,
-            valid_at=datetime.now(timezone.utc),
-            embedding=fact_embedding,
-            source_entity_id=new_id
-        ))
-        
+        logger.warning(f"User entity exists in graph but missing from resolver, backfilling")
+        all_aliases = entity.get("aliases") or [user_name]
         await loop.run_in_executor(
             self.executor,
-            partial(self.store.create_facts_batch, new_id, facts)
+            partial(
+                self.ent_resolver.register_entity,
+                1, user_name, all_aliases, "person", "Identity"
+            )
         )
-
-        user_entity = {
-            "id": new_id,
-            "canonical_name": user_name,
-            "type": "person",
-            "confidence": 1.0,
-            "topic": "Identity",
-            "embedding": embedding,
-            "aliases": [user_name]
-        }
-
-        await loop.run_in_executor(
-            self.executor,
-            partial(self.store.write_batch, [user_entity], [])
-        )
-        
-        logger.info(f"User entity {user_name} (ID: {new_id}) written to graph")
-        await emit(self.session_id, "system", "user_entity_created", {
-            "user_name": user_name,
-            "entity_id": new_id
+        await emit(self.session_id, "system", "user_entity_recovered", {
+            "user_name": user_name
         })
-        return new_id
     
     async def _run_session_jobs(self):
         await emit(self.session_id, "job", "session_jobs_started", {})
@@ -326,10 +333,12 @@ class Context:
         if await self.profile_job.should_run(ctx):
             await self.profile_job.execute(ctx)
         
-        logger.info("Profile refinement done, waiting then moving on to merge detection...")
-        await asyncio.sleep(0.5)
+        merge_key = RedisKeys.merge_queue(self.user_name, self.session_id)
+        merge_count = await self.redis_client.scard(merge_key)
+        profile_flag = await self.redis_client.get(RedisKeys.profile_complete(self.user_name, self.session_id))
+        logger.info(f"Merge check: queue_size={merge_count}, profile_complete={profile_flag}")
 
-        if await self.merge_job.should_run(ctx):
+        if getattr(self.merge_job, "enabled", True) and await self.merge_job.should_run(ctx):
             await self.merge_job.execute(ctx)
         
         await emit(self.session_id, "job", "session_jobs_complete", {})
@@ -339,11 +348,16 @@ class Context:
         msg.id = await self.get_next_msg_id()
         await self.add_to_redis(msg)
 
+        await self.redis_client.incr(
+            RedisKeys.heartbeat_counter(self.user_name, self.session_id)
+        )
+
         buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
         await self.redis_client.rpush(buffer_key, json.dumps({
             "id": msg.id,
             "message": msg.message.strip(),
-            "timestamp": msg.timestamp.isoformat()
+            "timestamp": msg.timestamp.isoformat(),
+            "role": "user"
         }))
 
         await self.scheduler.record_activity()
@@ -351,8 +365,7 @@ class Context:
 
         return msg
 
-    async def add_to_conversation_log(self, role: str, content: str, timestamp: datetime, user_msg_id: int = None):
-        """Add a turn to the unified conversation log."""
+    async def add_to_conversation_log(self, role: str, content: str, timestamp: datetime, user_msg_id: int = None, metadata: dict = None):
         turn_id = await self.get_next_turn_id()
         turn_key = f"turn_{turn_id}"
         
@@ -363,6 +376,8 @@ class Context:
         }
         if user_msg_id is not None:
             payload["user_msg_id"] = user_msg_id
+        if metadata:
+            payload["metadata"] = metadata
         
         conv_key = RedisKeys.conversation(self.user_name, self.session_id)
         sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
@@ -394,19 +409,150 @@ class Context:
             f"turn_{turn_id}"
         )
     
-    async def add_assistant_turn(self, content: str, timestamp: datetime):
+    async def add_assistant_turn(self, content: str, timestamp: datetime, metadata: dict = None, user_msg_id: int = None):
         """Add assistant turn to conversation log."""
+        if metadata is None:
+            metadata = {}
+
         turn_id = await self.add_to_conversation_log(
             role="assistant",
             content=content,
-            timestamp=timestamp
+            timestamp=timestamp,
+            metadata=metadata,
+            user_msg_id=user_msg_id
         )
         
         task = asyncio.create_task(
             self._persist_assistant_embedding(turn_id, content, timestamp)
         )
-        task.add_done_callback(handle_background_task_result)
+        self._background_tasks.add(task)
+        task.add_done_callback(
+            lambda t: (self._background_tasks.discard(t), handle_background_task_result(t))
+        )
 
+
+
+    async def _maybe_extract_assistant(self, content: str, user_msg_id: int) -> bool:
+        """
+        Classify assistant response and extract facts if worthy.
+        If subject entity exists -> link to entity.
+        If subject entity missing -> link to User (id=1) as fallback.
+        
+        Returns: True if facts were found, False otherwise.
+        """
+        if not content or len(content.strip()) < 50:
+            return False
+
+        # 1. Expand classification prompt to also extract
+        prompt = (
+            f"Review this assistant response in a conversation about various topics:\n\n"
+            f"---\n{content}\n---\n\n"
+            f"Does this response contain specific facts, definitions, or clear statements worth remembering long-term?\n"
+            f"If YES, extract them as concise claims in a <facts> XML block, where each fact has a 'subject' attribute "
+            f"(the specific entity name the fact is about).\n"
+            f"Format:\n<facts>\n"
+            f'  <fact subject="Entity Name">Content of the fact...</fact>\n'
+            f"</facts>\n\n"
+            f"If NO (it's just chit-chat, advice, or general commentary), respond with only NO."
+        )
+
+        try:
+            # 2. Call LLM (single pass)
+            response = await self.llm.call_llm(
+                user=prompt,
+                system="You are a knowledge extractor. Be precise and concise.",
+                temperature=0.0
+            )
+            
+            if not response or response.strip().upper().startswith("NO"):
+                return False
+            
+            # 3. Parse facts
+            xml_content = extract_xml_content(response, "facts")
+            if not xml_content:
+                return False
+
+            # Regex to capture subject="..." and content
+            # Matches: <fact subject="Subject">Content</fact>
+            fact_pattern = re.compile(r'<fact\s+subject="([^"]+)">([^<]+)</fact>', re.IGNORECASE | re.DOTALL)
+            matches = fact_pattern.findall(xml_content)
+            
+            if not matches:
+                return False
+
+
+
+            facts_by_entity: Dict[int, List[Fact]] = {}
+            loop = asyncio.get_running_loop()
+            
+            # 4. Process each fact
+            for subject, fact_content in matches:
+                subject = subject.strip()
+                fact_content = fact_content.strip()
+                if not subject or not fact_content:
+                    continue
+                
+                # Compute subject embedding (async wrap)
+                emb_list = await loop.run_in_executor(
+                    self.executor,
+                    partial(self.embedding_service.encode, [subject])
+                )
+                subject_emb = emb_list[0]
+                
+                # Check candidates
+                candidates = self.ent_resolver.get_candidate_ids(subject, precomputed_embedding=subject_emb)
+                
+                # Default to User (1) if no candidate found
+                if candidates:
+                    target_id = candidates[0] # Best match
+                    clean_content = fact_content
+                else:
+                    target_id = 1
+                    clean_content = f"[{subject}] {fact_content}" # Add context since attached to user
+                
+                # Create Fact object
+                fact_id = f"fact_{uuid.uuid4().hex[:16]}"
+                
+                # Compute content embedding (async wrap)
+                content_emb_list = await loop.run_in_executor(
+                    self.executor,
+                    partial(self.embedding_service.encode, [clean_content])
+                )
+                content_emb = content_emb_list[0]
+
+                new_fact = Fact(
+                    id=fact_id,
+                    source_entity_id=target_id,
+                    content=clean_content,
+                    valid_at=datetime.now(timezone.utc),
+                    source_msg_id=user_msg_id, 
+                    confidence=0.9,
+                    embedding=content_emb,
+                    source="llm"
+                )
+                
+                if target_id not in facts_by_entity:
+                    facts_by_entity[target_id] = []
+                facts_by_entity[target_id].append(new_fact)
+
+            # 5. Write to graph
+            if facts_by_entity:
+                count = 0
+                for eid, facts in facts_by_entity.items():
+                    try:
+                        c = self.store.create_facts_batch(eid, facts)
+                        count += c
+                    except Exception as e:
+                        logger.error(f"Failed to persist assistant facts for entity {eid}: {e}")
+                
+                if count > 0:
+                    logger.info(f"Extracted {count} facts from assistant response (source='llm')")
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"Error in assistant fact extraction: {e}")
+            return False
 
     async def _persist_assistant_embedding(self, turn_id: int, content: str, timestamp: datetime):
         """Background task: compute embedding and write to graph with retry."""
@@ -487,7 +633,7 @@ class Context:
         for turn_id, data in zip(turn_ids, turn_data):
             if data:
                 parsed = json.loads(data)
-                role_label = "User" if parsed["role"] == "user" else "AGENT"
+                role_label = "USER" if parsed["role"] == "user" else "AGENT"
                 ts = datetime.fromisoformat(parsed['timestamp'])
                 date_str = ts.strftime("%Y-%m-%d %H:%M")
                 results.append({
@@ -497,7 +643,8 @@ class Context:
                     "content": parsed["content"],
                     "timestamp": parsed["timestamp"],
                     "relative": f"[{date_str}]",
-                    "user_msg_id": parsed.get("user_msg_id")
+                    "user_msg_id": parsed.get("user_msg_id"),
+                    "metadata": parsed.get("metadata")
                 })
         
         return results
@@ -512,11 +659,11 @@ class Context:
         alias_updates: Dict[int, List[str]] = None
     ):
 
-        existing_candidates = list(set(entity_ids) - new_entity_ids)
-        
         loop = asyncio.get_running_loop()
         
-        validation_result = set()
+        valid_existing_ids = set()
+        existing_candidates = list(set(entity_ids) - new_entity_ids)
+
         if existing_candidates:
             validation_result = await loop.run_in_executor(
                 self.executor,
@@ -611,7 +758,8 @@ class Context:
                         "entity_a": ent_a["canonical_name"],
                         "entity_b": ent_b["canonical_name"],
                         "message_id": f"msg_{msg_id}",
-                        "confidence": pair.confidence
+                        "confidence": pair.confidence,
+                        "context": pair.context
                     })
                 else:
                     logger.warning(f"Skipping pair: {pair.entity_a} - {pair.entity_b} (Entity missing or Zombie)")
@@ -670,7 +818,6 @@ class Context:
 
         if "default_topics" in new_config:
             await self.update_topics_config(new_config["default_topics"])
-            self.nlp_pipe.refresh_topic_mappings()
             logger.info(f"Topics updated: {list(new_config['default_topics'].keys())}")
 
         ingest_cfg = dev_settings.get("ingestion", {})
@@ -687,6 +834,9 @@ class Context:
                     checkpoint_interval=current_chk,
                     session_window=current_win
                 )
+            
+
+
 
 
         jobs_cfg = dev_settings.get("jobs", {})
@@ -703,6 +853,7 @@ class Context:
             )
 
         if "merger" in jobs_cfg and self.merge_job:
+            self.merge_job.enabled = jobs_cfg["merger"].get("enabled", True)
             self.merge_job.update_settings(
                 auto_threshold=jobs_cfg["merger"].get("auto_threshold"),
                 hitl_threshold=jobs_cfg["merger"].get("hitl_threshold"),
@@ -713,6 +864,7 @@ class Context:
             if "cleaner" in jobs_cfg:
                 cleaner = self.scheduler._jobs.get("entity_cleanup")
                 if cleaner:
+                    cleaner.enabled = jobs_cfg["cleaner"].get("enabled", True)
                     cleaner.update_settings(
                         interval_hours=jobs_cfg["cleaner"].get("interval_hours"),
                         orphan_age_hours=jobs_cfg["cleaner"].get("orphan_age_hours"),
@@ -731,9 +883,18 @@ class Context:
             if "archival" in jobs_cfg:
                 archiver = self.scheduler._jobs.get("fact_archival")
                 if archiver:
+                    archiver.enabled = jobs_cfg["archival"].get("enabled", True)
                     archiver.update_settings(
-                        retention_days=jobs_cfg["archival"].get("retention_days")
+                        retention_days=jobs_cfg["archival"].get("retention_days"),
+                        fallback_interval_hours=jobs_cfg["archival"].get("fallback_interval_hours")
                     )
+            
+            if "topic_config" in jobs_cfg:
+                tconfig = self.scheduler._jobs.get("topic_config")
+                if tconfig:
+                    tconfig.enabled = jobs_cfg["topic_config"].get("enabled", True)
+                    # We might need to add `update_settings` to `topic_config` job later if it supports hot reload 
+                    # For now just setting the feature flag is enough
         
         er_cfg = dev_settings.get("entity_resolution", {})
         if er_cfg and self.ent_resolver:
@@ -751,14 +912,6 @@ class Context:
                 gliner_threshold=nlp_cfg.get("gliner_threshold"),
                 vp01_min_confidence=nlp_cfg.get("vp01_min_confidence")
             )
-
-        llm_cfg = new_config.get("llm", {})
-        if llm_cfg and self.llm:
-            self.llm.update_settings(
-                api_key=llm_cfg.get("api_key"),
-                reasoning_model=llm_cfg.get("reasoning_model"),
-                agent_model=llm_cfg.get("agent_model")
-            )
             
         await emit(self.session_id, "system", "config_updated", {
             "keys": list(new_config.keys())
@@ -770,4 +923,12 @@ class Context:
     async def shutdown(self):
         await self.consumer.stop()
         await self.scheduler.stop()
+        if self.resources:
+            self.resources.active_resolver = None
+        
+        if self._background_tasks:
+            logger.info(f"Awaiting {len(self._background_tasks)} background tasks...")
+            await asyncio.wait(self._background_tasks, timeout=10.0)
         await emit(self.session_id, "system", "session_shutdown", {})
+        await DebugEventEmitter.get().cleanup_session(self.session_id)
+        

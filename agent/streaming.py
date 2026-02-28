@@ -1,16 +1,16 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 from typing import AsyncGenerator, Dict, List, Optional, Union
 import uuid
-
+from zoneinfo import ZoneInfo
 from loguru import logger
 import redis.asyncio as aioredis
 
 from agent.tools import Tools
 from agent.system_prompt import get_agent_prompt, get_fallback_summary_prompt
 from agent.internals import (
-    AgentConfig,
+    AgentRunConfig,
     AgentState,
     RetrievedEvidence,
     AgentContext,
@@ -20,16 +20,19 @@ from agent.internals import (
     execute_tool
 )
 from agent.formatters import (
-    format_entity_results, 
+    format_entity_results,
+    format_memory_context,
     format_retrieved_messages, 
     format_graph_results,
     format_path_results,
     format_hierarchy_results
 )
+from shared.file_rag import FileRAGService
+from shared.mcp_bridge import mcp_tools_to_schemas
 from shared.service import LLMService
 from shared.topics_config import TopicConfig
-from schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
-from schema.tool_schema import TOOL_SCHEMAS
+from shared.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
+from shared.schema.tool_schema import get_filtered_schemas, TOOL_SCHEMAS
 from shared.config import get_config_value
 from shared.events import emit
 
@@ -39,15 +42,28 @@ async def call_agent_streaming(
     ctx: AgentContext,
     user_name: str,
     last_result: Optional[Dict] = None,
-    persona: str = "",
     date: str = "",
-    model: str = None
+    model: str = None,
+    tools: List[Dict] = None,
+    memory_context: str = "",
+    agent_rules: str = "",
+    agent_preferences: str = "",
+    agent_ticks: str = "",
+    agent_temperature: float = 0.7,
+    agent_base_prompt: str = None
 ) -> AsyncGenerator[Union[Dict, AgentResponse], None]:
     """
     Streaming version of call_agent.
     Yields token dicts for text, then final ToolCall/ClarificationRequest/FinalResponse.
     """
-    system_prompt = get_agent_prompt(user_name, date, persona)
+    system_prompt = get_agent_prompt(
+        user_name, date, ctx.agent_persona, ctx.agent_name,
+        memory_context=memory_context,
+        agent_rules=agent_rules,
+        agent_preferences=agent_preferences,
+        agent_icks=agent_icks,
+        custom_base_prompt=agent_base_prompt
+    )
     user_message = build_user_message(ctx, last_result)
 
     content = ""
@@ -69,8 +85,9 @@ async def call_agent_streaming(
     async for chunk in llm.call_llm_with_tools_streaming(
         system=system_prompt,
         user=user_message,
-        tools=TOOL_SCHEMAS,
-        model=model
+        tools=tools if tools is not None else TOOL_SCHEMAS,
+        model=model,
+        temperature=agent_temperature
     ):
         chunk_type = chunk.get("type")
         
@@ -88,7 +105,11 @@ async def call_agent_streaming(
             usage = chunk.get("usage")
             
             if not tool_calls:
-                yield FinalResponse(content=chunk.get("content", ""), usage=usage)
+                yield FinalResponse(
+                    content=chunk.get("content", ""), 
+                    usage=usage,
+                    sources=ctx.evidence.sources if ctx.evidence.sources else None
+                )
                 return
             
             if content:
@@ -138,6 +159,7 @@ async def run_stream(
     user_name: str,
     session_id: str,
     agent_id: str,
+    agent_name: str,
     agent_persona: str,
     conversation_history: List[Dict],
     hot_topics: List[str],
@@ -146,7 +168,13 @@ async def run_stream(
     store,
     ent_resolver,
     redis_client: aioredis.Redis,
-    model: str = None
+    model: str = None,
+    enabled_tools: List[str] = None,
+    file_rag = None,
+    user_timezone: str = None,
+    mcp_manager=None,
+    agent_temperature: float = 0.7,
+    agent_base_prompt: str = None
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
     
@@ -157,13 +185,13 @@ async def run_stream(
         tool_limits_raw = limits.get("tool_limits", {})
 
         if tool_limits_raw:
-            defaults = dict(AgentConfig.tool_limits)
+            defaults = dict(AgentRunConfig.tool_limits)
             defaults.update(tool_limits_raw)
             tool_limits_tuple = tuple(defaults.items())
         else:
-            tool_limits_tuple = AgentConfig.tool_limits
+            tool_limits_tuple = AgentRunConfig.tool_limits
 
-        config = AgentConfig(
+        config = AgentRunConfig(
             max_calls=limits.get("max_tool_calls", 6),
             max_attempts=limits.get("max_attempts", 8),
             max_history_turns=limits.get("agent_history_turns", 7),
@@ -185,6 +213,8 @@ async def run_stream(
             session_id=session_id,
             run_id=run_id,
             agent_id=agent_id,
+            agent_name=agent_name,
+            agent_persona=agent_persona,
             hot_topics=valid_hot_topics,
             active_topics=topic_config.active_topics,
             history=conversation_history
@@ -198,15 +228,38 @@ async def run_stream(
             "history_turns": len(conversation_history)
         })
 
-        search_cfg = dev_settings.get("search", {})
-        tools = Tools(user_name, store, ent_resolver, redis_client, session_id, topic_config, search_config=search_cfg)
+        search_cfg = dev_settings.get("search", {}).copy()
+        search_cfg.update(get_config_value("search", {}))
+        tools = Tools(
+            user_name, store, ent_resolver, redis_client, session_id, 
+            topic_config, search_config=search_cfg, file_rag=file_rag,
+            mcp_manager=mcp_manager
+        )
 
         if hot_topics:
             yield {"event": "status", "data": {"message": "Loading context..."}}
             ctx.hot_topic_context = await tools.get_hot_topic_context(hot_topics, slim=False)
+        memory_blocks = await tools.get_memory_blocks(valid_hot_topics)
+        memory_context = format_memory_context(memory_blocks)
+        
+        from shared.redisclient import RedisKeys
+        agent_memory_blocks = {"rules": "", "preferences": "", "icks": ""}
+        for category in agent_memory_blocks:
+            key = RedisKeys.agent_working_memory(agent_id, category)
+            raw = await redis_client.hgetall(key)
+            if raw:
+                entries = []
+                for val in raw.values():
+                    data = json.loads(val)
+                    entries.append(f"- {data['content']}")
+                agent_memory_blocks[category] = "\n".join(entries)
 
         last_result = None
-        current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        try:
+            tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
+        except Exception:
+            tz = ZoneInfo("UTC")
+        current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
         usage_accumulator = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         
         while ctx.state.attempt_count < ctx.config.max_attempts:
@@ -221,8 +274,22 @@ async def run_stream(
 
             # Collect tool calls while streaming tokens
             pending_tool_calls = []
+            active_schemas = get_filtered_schemas(enabled_tools)
+            if mcp_manager:
+                active_schemas = active_schemas + mcp_tools_to_schemas(mcp_manager.get_all_tools())
+            a_rules = str(agent_memory_blocks.get("rules", ""))
+            a_prefs = str(agent_memory_blocks.get("preferences", ""))
+            a_icks = str(agent_memory_blocks.get("icks", ""))
             
-            async for chunk in call_agent_streaming(llm, ctx, user_name, last_result, agent_persona, current_time, model):
+            async for chunk in call_agent_streaming(
+                llm, ctx, user_name, last_result, current_time, model, active_schemas,
+                memory_context=memory_context,
+                agent_rules=a_rules,
+                agent_preferences=a_prefs,
+                agent_icks=a_icks,
+                agent_temperature=agent_temperature,
+                agent_base_prompt=agent_base_prompt
+            ):
                 
                 # Token - pass through to frontend
                 if isinstance(chunk, dict) and chunk.get("type") == "token":
@@ -247,7 +314,8 @@ async def run_stream(
                     
                     yield {"event": "response", "data": {
                         "content": chunk.content,
-                        "usage": usage_accumulator
+                        "usage": usage_accumulator,
+                        "sources": ctx.evidence.sources if ctx.evidence.sources else None
                     }}
                     return
 
@@ -346,14 +414,22 @@ async def run_stream(
             if ctx.evidence.hierarchy:
                 evidence_ctx += f"Hierarchy:\n{format_hierarchy_results(ctx.evidence.hierarchy)}\n\n"
 
-            summary = await llm.call_llm(
-                system=get_fallback_summary_prompt(user_name),
-                user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
-            )
+            try:
+                summary = await asyncio.wait_for(
+                    llm.call_llm(
+                        system=get_fallback_summary_prompt(user_name, ctx.agent_name),
+                        user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
+                    ),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Fallback summary timed out")
+                summary = None
 
             yield {"event": "response", "data": {
                 "content": summary or "I found information but couldn't summarize it.",
-                "usage": usage_accumulator
+                "usage": usage_accumulator,
+                "sources": ctx.evidence.sources if ctx.evidence.sources else None
             }}
         else:
             yield {"event": "clarification", "data": {

@@ -3,13 +3,11 @@ from functools import partial
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 
+from api.deps import get_app_state
 from api.state import AppState
 from db.store import MemGraphStore
 
 router = APIRouter()
-
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
 
 @router.get("/")
 async def list_profiles(
@@ -71,8 +69,8 @@ async def get_profile(
     )
     
     entity["hierarchy"] = {
-        "parent": parents[0]["canonical_name"] if parents else None,
-        "children": [c["canonical_name"] for c in children]
+        "parent": {"id": parents[0]["id"], "name": parents[0]["canonical_name"]} if parents else None,
+        "children": [{"id": c["id"], "name": c["canonical_name"]} for c in children]
     }
     
     return entity

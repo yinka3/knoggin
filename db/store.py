@@ -9,7 +9,7 @@ import os
 from db.query_tools import GraphToolQueries
 from db.reader import GraphReader
 from db.writer import GraphWriter
-from schema.dtypes import Fact
+from shared.schema.dtypes import Fact
 load_dotenv()
 
 MEMGRAPH_USER=os.environ.get("MEMGRAPH_USER")
@@ -118,6 +118,9 @@ class MemGraphStore:
     def update_entity_embedding(self, entity_id: int, embedding: List[float]):
         return self._writer.update_entity_embedding(entity_id, embedding)
     
+    def update_entity_checkpoint(self, entity_id: int, last_msg_id: int):
+        return self._writer.update_entity_checkpoint(entity_id, last_msg_id)
+    
     def update_entity_aliases(self, alias_updates: Dict[int, List[str]]):
         return self._writer.update_entity_aliases(alias_updates)
 
@@ -144,6 +147,9 @@ class MemGraphStore:
     
     def delete_preference(self, pref_id: str) -> bool:
         return self._writer.delete_preference(pref_id)
+    
+    def delete_relationship(self, entity_a_id: int, entity_b_id: int) -> bool:
+        return self._writer.delete_relationship(entity_a_id, entity_b_id)
     
     # ===== READER DELEGATIONS =====
 
@@ -186,7 +192,7 @@ class MemGraphStore:
     def get_parent_entities(self, entity_id: int) -> List[Dict]:
         return self._reader.get_parent_entities(entity_id)
 
-    def get_neighbor_entities(self, entity_id: int, limit: int = 5) -> List[str]:
+    def get_neighbor_entities(self, entity_id: int, limit: int = 5) -> List[Dict]:
         return self._reader.get_neighbor_entities(entity_id, limit)
 
     def get_child_entities(self, entity_id: int) -> List[Dict]:
@@ -221,6 +227,27 @@ class MemGraphStore:
     
     def get_graph_stats(self) -> Dict[str, int]:
         return self._reader.get_graph_stats()
+    
+    def get_entity_count_by_type(self) -> List[Dict]:
+        return self._reader.get_entity_count_by_type()
+    
+    def get_entity_count_by_topic(self) -> List[Dict]:
+        return self._reader.get_entity_count_by_topic()
+    
+    def get_top_connected_entities(self, limit: int = 10) -> List[Dict]:
+        return self._reader.get_top_connected_entities(limit)
+    
+    def get_entity_relationships(self, entity_id: int) -> List[Dict]:
+        return self._reader.get_entity_relationships(entity_id)
+
+    def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
+        return self._reader.get_recent_facts(days, limit)
+
+    def get_recently_active_entities(self, days: int = 7, limit: int = 10) -> List[Dict]:
+        return self._reader.get_recently_active_entities(days, limit)
+
+    def get_notable_entities(self, limit: int = 10) -> List[Dict]:
+        return self._reader.get_notable_entities(limit)
 
     # ===== TOOL QUERY DELEGATIONS =====
 

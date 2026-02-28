@@ -1,12 +1,21 @@
-const API_BASE = 'http://localhost:8000'
+import { apiGet } from './fetch'
+import { API_BASE } from './config-base'
 
-export async function getHistory(sessionId, limit = 40) {
-  const res = await fetch(`${API_BASE}/chat/${sessionId}/history?limit=${limit}`)
-  if (!res.ok) throw new Error('Failed to load history')
+export function getHistory(sessionId, limit = 40) {
+  return apiGet(`/chat/${sessionId}/history?limit=${limit}`)
+}
+
+export async function extractMessageFacts(sessionId, content, userMsgId) {
+  const res = await fetch(`${API_BASE}/chat/${sessionId}/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, user_msg_id: userMsgId }),
+  })
+  if (!res.ok) throw new Error('Failed to extract facts')
   return res.json()
 }
 
-export async function sendMessage(sessionId, message, hotTopics = [], onEvent) {
+export async function sendMessage(sessionId, message, hotTopics = [], onEvent, signal = null) {
   const res = await fetch(`${API_BASE}/chat/${sessionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -15,6 +24,7 @@ export async function sendMessage(sessionId, message, hotTopics = [], onEvent) {
       hot_topics: hotTopics,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     }),
+    signal,
   })
 
   if (!res.ok) {

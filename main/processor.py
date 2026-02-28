@@ -4,6 +4,7 @@ import time
 import asyncio
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
+import numpy as np
 import redis.asyncio as aioredis
 from loguru import logger
 from typing import Dict, List, Set, Tuple, Optional
@@ -12,24 +13,30 @@ from shared.service import LLMService
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from main.prompts import (
-    get_disambiguation_reasoning_prompt,
     get_connection_reasoning_prompt
 )
 from shared.topics_config import TopicConfig
-from main.utils import (
-    dedupe_entries, 
-    format_vp02_input, 
+from main.utils import ( 
     format_vp03_input, 
-    parse_connection_response, 
-    parse_disambiguation
+    parse_connection_response
 )
-from schema.dtypes import (
+from shared.schema.dtypes import (
     BatchResult,
-    MessageConnections,
-    ResolutionEntry,
+    MessageConnections
 )
 from shared.events import emit
 from shared.redisclient import RedisKeys
+
+
+def _safe_json(obj):
+    """Fallback serializer for numpy types in DLQ payloads."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 class BatchProcessor:
@@ -45,7 +52,8 @@ class BatchProcessor:
             cpu_executor: ThreadPoolExecutor,
             user_name: str,
             topic_config: TopicConfig,
-            get_next_ent_id):
+            get_next_ent_id,
+            resolution_threshold: float = 0.85):
 
         self.session_id = session_id
         self.redis = redis_client
@@ -57,6 +65,7 @@ class BatchProcessor:
         self.user_name = user_name
         self.topic_config = topic_config
         self._get_next_ent_id = get_next_ent_id
+        self.resolution_threshold = resolution_threshold
     
         
     async def run(self, messages: List[Dict], session_text: str) -> BatchResult:
@@ -111,29 +120,18 @@ class BatchProcessor:
                 logger.info("No mentions found in batch, skipping LLM calls")
                 return result
             
-            known_entities = await self._build_known_entities(mentions)
-            
-            disambiguation = await self._disambiguate(mentions, messages, known_entities, session_text)
-            if disambiguation is None:
-                logger.error("Disambiguation failed - no results returned")
-                result.success = False
-                result.error = "VEGAPUNK-02 returned empty disambiguation"
-                await emit(self.session_id, "pipeline", "disambiguation_failed", {
-                    "mention_count": len(mentions),
-                    "known_entity_count": len(known_entities)
-                })
-                return result
-            
-            await emit(self.session_id, "pipeline", "disambiguation_complete", {
-                "new": len([e for e in disambiguation if e.verdict != "EXISTING"]),
-                "existing": len([e for e in disambiguation if e.verdict == "EXISTING"])
+            entity_ids, new_ids, alias_ids, entity_msg_map, alias_updates = await self._resolve_mentions(mentions, messages)
+
+            await emit(self.session_id, "pipeline", "resolution_complete", {
+                "new": len(new_ids),
+                "existing": len(entity_ids) - len(new_ids),
+                "aliases_added": len(alias_ids)
             })
-            
-            entity_ids, new_ids, alias_ids, entity_msg_map = await self._resolve(disambiguation, messages)
+
             result.entity_ids = entity_ids
             result.new_entity_ids = new_ids
             result.alias_updated_ids = alias_ids
-            
+            result.alias_updates = alias_updates
             user_id = self.ent_resolver.get_id(self.user_name)
             if user_id and user_id not in entity_ids:
                 entity_ids.append(user_id)
@@ -142,7 +140,7 @@ class BatchProcessor:
             if connections is None:
                 logger.error("Connection extraction failed")
                 result.success = False
-                result.error = "Connection extraction failed (VP-04)"
+                result.error = "Connection extraction failed (VP-03)"
                 await emit(self.session_id, "pipeline", "connections_failed", {
                     "entity_count": len(entity_ids)
                 })
@@ -174,7 +172,7 @@ class BatchProcessor:
             result.success = False
             result.error = str(e)
             return result
-
+    
     
     async def _extract_mentions(self, messages: List[Dict], session_id: str) -> List[Tuple[int, str, str, str]]:
         """Run NER across all messages."""
@@ -189,15 +187,29 @@ class BatchProcessor:
         logger.debug(f"Extracted {normalized_mentions} mentions")
         return normalized_mentions
 
-    async def _build_known_entities(
-        self, 
+    async def _resolve_mentions(
+        self,
         mentions: List[Tuple[int, str, str, str]],
-        max_amount: int = 50
-    ) -> List[Dict]:
-        
-        unique_names = list({name for _, name, _, _ in mentions if name})
+        messages: List[Dict]
+    ) -> Tuple[List[int], Set[int], Set[int], Dict[int, List[int]], Dict[int, List[str]]]:
+        """
+        Deterministic entity resolution using 4 scoring signals.
+        Replaces VP-02 LLM disambiguation.
+        """
         loop = asyncio.get_running_loop()
-        
+        msg_text_map = {m["id"]: m["message"] for m in messages}
+
+        entity_ids = []
+        new_ids = set()
+        alias_ids = set()
+        entity_msg_map: Dict[int, List[int]] = {}
+        created_in_batch: Dict[str, int] = {}
+        alias_updates: Dict[int, List[str]] = {}
+        batch_matched_ids: Set[int] = set()
+
+        # Precompute embeddings for unique mention names
+        unique_names = list({name for _, name, _, _ in mentions if name})
+        embedding_map = {}
         if unique_names:
             embeddings_array = await loop.run_in_executor(
                 self.executor,
@@ -205,278 +217,216 @@ class BatchProcessor:
                 unique_names
             )
             embedding_map = {
-                name: emb.tolist() 
+                name: emb
                 for name, emb in zip(unique_names, embeddings_array)
             }
-        else:
-            embedding_map = {}
-                
-        candidate_scores: Dict[int, float] = {}
 
-        for msg_id, name, _, _ in mentions:
-            if not name:
-                continue
-            candidates = self.ent_resolver.get_candidate_ids(
-                name, 
-                precomputed_embedding=embedding_map.get(name)
-            )
-            
-            for rank, (eid, _) in enumerate(candidates):
-                score = 1.0 / (rank + 1) # higher ranks gets boosted score
-                if eid not in candidate_scores or score > candidate_scores[eid]:
-                    candidate_scores[eid] = score
-                logger.debug(f"Mention '{name}' (MSG {msg_id}) candidate entity ID {eid} = score {score:.3f}")
-        
-
-        sorted_ids = sorted(candidate_scores.keys(), key=lambda x: candidate_scores[x], reverse=True)
-
-        if not sorted_ids:
-            await emit(self.session_id, "pipeline", "no_known_candidates", {
-                "mention_count": len(mentions)
-            }, verbose_only=True)
-            return []
-        
-        loop = asyncio.get_running_loop()
-        facts_map = await loop.run_in_executor(
-            self.executor,
-            partial(self.store.get_facts_for_entities, sorted_ids, active_only=True)
-        )
-        
-        known = []
-        for eid in sorted_ids[:max_amount]:
-            profile = self.ent_resolver.entity_profiles.get(eid)
-            if profile:
-                connections = self.store.get_neighbor_entities(eid, limit=5)
-                entity_facts = [f.content for f in facts_map.get(eid, [])]
-
-                known.append({
-                    "canonical_name": profile["canonical_name"],
-                    "facts": entity_facts,
-                    "connected_to": connections
-                })
-                logger.debug(f"Known entity added: {known[-1]["canonical_name"]} with {len(connections)} connections.")
-        
-        return known
-    
-    async def _try_fast_path(
-        self, 
-        mentions: List[Tuple[int, str, str, str]], 
-        known_entities: List[Dict]   
-    ) -> Optional[List[ResolutionEntry]]:
-        
-        if not known_entities:
-            return [
-                ResolutionEntry(
-                    verdict="NEW_SINGLE",
-                    canonical_name=name,
-                    mentions=[name],
-                    entity_type=typ,
-                    topic=topic,
-                    msg_ids=[msg_id]
-                )
-                for msg_id, name, typ, topic in mentions
-            ]
-        
-        entries: List[ResolutionEntry] = []
-        existing_ids: List[int] = []
-
+        # First pass: collect base candidates for all mentions
+        mention_candidates = []
         for msg_id, name, typ, topic in mentions:
-            exact_id = self.ent_resolver.get_id(name)
-            
-            if exact_id is not None:
-                profile = self.ent_resolver.entity_profiles.get(exact_id)
-                entries.append(ResolutionEntry(
-                    verdict="EXISTING",
-                    canonical_name=profile["canonical_name"],
-                    mentions=[name],
-                    entity_type=typ,
-                    topic=topic,
-                    msg_ids=[msg_id]
-                ))
-                existing_ids.append(exact_id)
+            if not name:
+                mention_candidates.append(None)
                 continue
-            
-            fuzzy_candidates = self.ent_resolver.get_candidate_ids(name)
-            
-            if len(fuzzy_candidates) == 0:
-                entries.append(ResolutionEntry(
-                    verdict="NEW_SINGLE",
-                    canonical_name=name,
-                    mentions=[name],
-                    entity_type=typ,
-                    topic=topic,
-                    msg_ids=[msg_id]
-                ))
-            else:
-                return None
-        
-        if existing_ids:
-            loop = asyncio.get_running_loop()
-            valid_ids = await loop.run_in_executor(
-                self.executor,
-                self.store.validate_existing_ids,
-                existing_ids
-            )
-            
-            zombies = set(existing_ids) - valid_ids
-            if zombies:
-                logger.warning(f"Fast path found {len(zombies)} zombie entities, falling back to LLM")
-                self.ent_resolver.remove_entities(list(zombies))
-                return None
-        
-        return entries
 
-    async def _disambiguate(
-        self,
-        mentions: List[Tuple[int, str, str, str]],
-        messages: List[Dict],
-        known_entities: List[Dict],
-        session_text: str
-    ) -> Optional[List[ResolutionEntry]]:
-
-        fast_result = await self._try_fast_path(mentions, known_entities)
-        if fast_result is not None:
-            await emit(self.session_id, "pipeline", "fast_path_used", {
-                "mention_count": len(mentions),
-                "all_new": len(known_entities) == 0,
-                "all_existing": all(e.verdict == "EXISTING" for e in fast_result)
-            })
-            return fast_result
-
-        system_02 = get_disambiguation_reasoning_prompt(self.user_name)
-        user_02 = format_vp02_input(
-            known_entities,
-            mentions,
-            [{"id": m["id"], "text": m["message"]} for m in messages],
-            session_text
-        )
-
-        await emit(self.session_id, "pipeline", "llm_call", {
-            "stage": "disambiguation",
-            "prompt": user_02
-        }, verbose_only=True)
-        
-        reasoning = await self.llm.call_llm(system_02, user_02)
-        if not reasoning:
-            logger.error("VEGAPUNK-02 failed")
-            return None
-        
-        if "<resolution>" not in reasoning:
-            logger.warning("No <resolution> block in VEGAPUNK-02 output")
-        
-        result = parse_disambiguation(reasoning, mentions)
-        return result if result else None
-
-
-    async def _resolve(
-        self,
-        disambiguation: List[ResolutionEntry],
-        messages: List[Dict]
-    ) -> Tuple[List[int], Set[int], Set[int], Dict[int, List[int]], Dict[int, List[str]]]:
-        
-        loop = asyncio.get_running_loop()
-        
-        msg_text_map = {m["id"]: m["message"] for m in messages}
-        entity_ids = []
-        new_ids = set()
-        alias_ids = set()
-        entity_msg_map: Dict[int, List[int]] = {}
-        created_in_batch: Dict[str, int] = {}
-        alias_updates: Dict[int, List[str]] = {}
-
-        entries = dedupe_entries(disambiguation)
-        for entry in entries:
-            if not entry.canonical_name:
-                continue
-                
-            canonical_clean = entry.canonical_name.strip()
-            canonical_lower = canonical_clean.lower()
+            canonical_lower = name.strip().lower()
 
             if canonical_lower in created_in_batch:
-                ent_id = created_in_batch[canonical_lower]
-                entity_ids.append(ent_id)
-                if entry.msg_ids:
-                    if ent_id not in entity_msg_map:
-                        entity_msg_map[ent_id] = []
-                    entity_msg_map[ent_id].extend(entry.msg_ids)
-                logger.debug(f"Reusing entity ID {ent_id} for '{canonical_clean}' created earlier in batch")
+                mention_candidates.append(("batch_dedup", created_in_batch[canonical_lower]))
                 continue
 
-            if entry.verdict == "EXISTING":
-                try:
-                    ent_id, aliases_added, new_aliases = self.ent_resolver.validate_existing(
-                        entry.canonical_name, entry.mentions
-                    )
-                    
-                    if ent_id is not None:
-                        valid_ids = await loop.run_in_executor(
-                            self.executor,
-                            self.store.validate_existing_ids, 
-                            [ent_id]
-                        )
-                        
-                        if valid_ids is None:
-                            logger.warning(f"Could not validate entity {ent_id}, assuming valid")
-                        elif not valid_ids:
-                            logger.warning(f"Zombie Entity Detected: Resolver has ID {ent_id} for '{entry.canonical_name}', but DB does not. Treating as NEW.")
-                            self.ent_resolver.remove_entities([ent_id])
-                            ent_id = None
+            precomputed = embedding_map.get(name)
+            candidates = self.ent_resolver.get_candidate_ids(
+                name, precomputed_embedding=precomputed
+            )
 
-                    if ent_id is None:
-                        logger.info(f"Creating replacement entity for '{entry.canonical_name}'")
-                        canonical = entry.canonical_name if entry.canonical_name else entry.mentions[0]
-                        
+            if candidates:
+                top_id, top_score = candidates[0]
+                if top_score >= self.resolution_threshold:
+                    mention_candidates.append(("candidate", top_id, top_score))
+                else:
+                    mention_candidates.append(("new", None))
+            else:
+                mention_candidates.append(("new", None))
+
+        # Second pass: batch-boost all candidates with graph signals
+        pairs_to_boost = []
+        boost_indices = []
+
+        for i, entry in enumerate(mention_candidates):
+            if entry and entry[0] == "candidate":
+                _, top_id, top_score = entry
+                msg_id = mentions[i][0]
+                pairs_to_boost.append((top_id, top_score, msg_id))
+                boost_indices.append(i)
+
+        boosted_scores = {}
+        if pairs_to_boost:
+            boosted_scores = await self._boost_candidates(
+                pairs_to_boost, msg_text_map, batch_matched_ids
+            )
+
+        for i, (msg_id, name, typ, topic) in enumerate(mentions):
+            if not name:
+                continue
+
+            entry = mention_candidates[i]
+            if entry is None:
+                continue
+
+            canonical_lower = name.strip().lower()
+            ent_id = None
+
+            # Batch dedup
+            if entry[0] == "batch_dedup":
+                ent_id = entry[1]
+                entity_ids.append(ent_id)
+                if ent_id not in entity_msg_map:
+                    entity_msg_map[ent_id] = []
+                entity_msg_map[ent_id].append(msg_id)
+                continue
+
+            # Candidate match
+            if entry[0] == "candidate":
+                top_id = entry[1]
+                boosted = boosted_scores.get(top_id, entry[2])
+
+                if boosted >= self.resolution_threshold:
+                    ent_id = top_id
+                    batch_matched_ids.add(ent_id)
+
+                    existing_id, aliases_added, new_aliases = self.ent_resolver.validate_existing(
+                        name.strip(), [name.strip()]
+                    )
+                    if existing_id and aliases_added:
+                        self.ent_resolver.commit_new_aliases(existing_id, new_aliases)
+                        alias_ids.add(existing_id)
+                        alias_updates[existing_id] = new_aliases
+                else:
+                    verified = self.store.validate_existing_ids([top_id])
+                    if not verified:
+                        logger.warning(f"Zombie candidate {top_id} for '{name}', evicting")
+                        self.ent_resolver.remove_entities([top_id])
+
+            # New entity — re-check batch dedup before creating
+            if ent_id is None:
+                if canonical_lower in created_in_batch:
+                    ent_id = created_in_batch[canonical_lower]
+                else:
+                    try:
                         ent_id = await self._get_next_ent_id()
+                        source_context = msg_text_map.get(msg_id)
+
                         await loop.run_in_executor(
                             self.executor,
                             partial(
                                 self.ent_resolver.register_entity,
-                                ent_id, canonical, entry.mentions, entry.entity_type, entry.topic
+                                ent_id, name.strip(), [name.strip()],
+                                typ, topic, self.session_id,
+                                source_context
                             )
                         )
                         new_ids.add(ent_id)
                         created_in_batch[canonical_lower] = ent_id
-                    elif aliases_added:
-                        self.ent_resolver.commit_new_aliases(ent_id, new_aliases)
-                        alias_ids.add(ent_id)
-                        alias_updates[ent_id] = new_aliases
-                except Exception as e:
-                    logger.error(f"Failed to register entity '{canonical_clean}': {e}")
-                    ent_id = None
-            
-            else:
-                try:
-                    ent_id = await self._get_next_ent_id()
-                    source_context = None
-                    if entry.msg_ids:
-                        first_msg_id = entry.msg_ids[0]
-                        source_context = msg_text_map.get(first_msg_id)
+                        batch_matched_ids.add(ent_id)
+                    except Exception as e:
+                        logger.error(f"Failed to register entity '{name}': {e}")
+                        ent_id = None
 
-                    await loop.run_in_executor(
-                        self.executor,
-                        partial(
-                            self.ent_resolver.register_entity,
-                            ent_id, 
-                            canonical_clean, 
-                            entry.mentions, 
-                            entry.entity_type, 
-                            entry.topic, 
-                            self.session_id,
-                            source_context
-                        )
-                    )
-                    new_ids.add(ent_id)
-                    created_in_batch[canonical_lower] = ent_id
-                except Exception as e:
-                    logger.error(f"Failed to register entity '{canonical_clean}': {e}")
-                    ent_id = None
-            
             if ent_id is not None:
                 entity_ids.append(ent_id)
-                if entry.msg_ids:
-                    entity_msg_map[ent_id] = entry.msg_ids
-        
+                if ent_id not in entity_msg_map:
+                    entity_msg_map[ent_id] = []
+                entity_msg_map[ent_id].append(msg_id)
+
         return entity_ids, new_ids, alias_ids, entity_msg_map, alias_updates
+    
+    async def _boost_candidates(
+        self,
+        candidate_pairs: List[Tuple[int, float, int]],
+        msg_text_map: Dict[int, str],
+        batch_matched_ids: Set[int]
+    ) -> Dict[int, float]:
+        """
+        Enhance base scores with graph signals.
+        Signal 3: LLM fact relevance (batched, single call)
+        Signal 4: Connection co-occurrence
+        """
+        results = {}
+        loop = asyncio.get_running_loop()
+
+        # --- Signal 3: Fact relevance via LLM ---
+        llm_pairs = []
+        pair_keys = []
+
+        for candidate_id, base_score, msg_id in candidate_pairs:
+            msg_text = msg_text_map.get(msg_id, "")
+            if not msg_text:
+                results[candidate_id] = base_score
+                continue
+
+            facts = await loop.run_in_executor(
+                self.executor,
+                self.store.get_facts_for_entity, candidate_id, True
+            )
+
+            if not facts:
+                results[candidate_id] = base_score
+                continue
+
+            fact_strs = [f.content for f in facts[:5]]
+            llm_pairs.append((msg_text, fact_strs))
+            pair_keys.append((candidate_id, base_score))
+
+        if llm_pairs:
+            lines = []
+            for i, (msg, facts) in enumerate(llm_pairs, 1):
+                lines.append(f"{i}. Message: \"{msg}\" | Facts: {', '.join(facts)}")
+
+            prompt = (
+                "For each pair, does the message relate to the entity's facts? "
+                "Answer YES or NO per line, nothing else.\n\n"
+                + "\n".join(lines)
+            )
+
+            try:
+                response = await self.llm.call_llm(
+                    system="You are a relevance judge. Answer only YES or NO per line.",
+                    user=prompt
+                )
+
+                if response:
+                    judgments = response.strip().split("\n")
+                    for i, (candidate_id, base_score) in enumerate(pair_keys):
+                        if i < len(judgments) and "YES" in judgments[i].upper():
+                            results[candidate_id] = base_score + 0.05
+                        else:
+                            results[candidate_id] = base_score
+                else:
+                    for candidate_id, base_score in pair_keys:
+                        results[candidate_id] = base_score
+
+            except Exception as e:
+                logger.warning(f"Fact relevance LLM failed, using base scores: {e}")
+                for candidate_id, base_score in pair_keys:
+                    results[candidate_id] = base_score
+
+        # --- Signal 4: Connection co-occurrence ---
+        for candidate_id, base_score, msg_id in candidate_pairs:
+            score = results.get(candidate_id, base_score)
+
+            if batch_matched_ids:
+                neighbors = await loop.run_in_executor(
+                    self.executor,
+                    self.store.get_neighbor_ids, candidate_id
+                )
+                overlap = batch_matched_ids & neighbors
+                if overlap:
+                    score += min(len(overlap) * 0.03, 0.05)
+
+            results[candidate_id] = score
+
+        return results
+    
 
     async def _extract_connections(
         self,
@@ -488,7 +438,7 @@ class BatchProcessor:
         """Extract connections between entities."""
 
         if not entity_ids:
-            return None
+            return []
         
         candidates = []
         for ent_id in entity_ids:
@@ -546,7 +496,7 @@ class BatchProcessor:
             entry["batch_result"] = batch_result.to_dict()
         
         try:
-            await self.redis.rpush(dlq_key, json.dumps(entry))
+            await self.redis.rpush(dlq_key, json.dumps(entry, default=_safe_json))
             logger.warning(f"DLQ [{stage}]: {len(messages)} messages stored")
 
             await emit(self.session_id, "pipeline", "dlq_enqueued", {

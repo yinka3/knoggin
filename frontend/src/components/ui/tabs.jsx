@@ -1,5 +1,6 @@
 "use client"
 
+/* eslint-disable react-refresh/only-export-components */
 import * as React from "react"
 import * as TabsPrimitive from "@radix-ui/react-tabs"
 import { cva } from "class-variance-authority";

@@ -112,7 +112,11 @@ def format_entity_results(entities: List[Dict], evidence_limit: int = 5) -> str:
                 weight = conn.get("weight", 0)
                 
                 alias_str = f" (aka {', '.join(conn_aliases)})" if conn_aliases else ""
-                block += f"  -> {conn_name}{alias_str} | weight: {weight}\n"
+                conn_context = conn.get("context")
+                if conn_context:
+                    block += f"  -> {conn_name}{alias_str} | Context: {conn_context} | weight: {weight}\n"
+                else:
+                    block += f"  -> {conn_name}{alias_str} | weight: {weight}\n"
                 
                 for ev in conn.get("evidence", [])[:evidence_limit]:
                     msg = ev.get("message", "")
@@ -138,6 +142,9 @@ def format_graph_results(results: List[Dict]) -> str:
             last_seen = _format_timestamp(r.get("last_seen"))
             
             block = f"--- {source} -> {target} ---\n"
+            context = r.get("context")
+            if context:
+                block += f"Description: {context}\n"
             target_facts = r.get("target_facts", [])
             if target_facts:
                 block += f"Facts: {' | '.join(target_facts[:3])}\n"
@@ -256,3 +263,37 @@ def format_hierarchy_results(results: List[Dict]) -> str:
         blocks.append(block)
     
     return "\n".join(blocks)
+
+def format_memory_context(blocks: dict) -> str:
+    """Format memory blocks for prompt injection."""
+    if not blocks:
+        return ""
+    
+    sections = []
+    for topic, entries in blocks.items():
+        if not entries:
+            continue
+        
+        lines = [f"[{topic}]"]
+        for entry in entries:
+            lines.append(f"  - ({entry['id']}) {entry['content']}")
+        sections.append("\n".join(lines))
+    
+    if not sections:
+        return ""
+    
+    return "\n".join(sections)
+
+
+
+def format_files_context(files: list) -> str:
+    """Format file manifest for prompt injection."""
+    if not files:
+        return ""
+    
+    lines = []
+    for f in files:
+        size_kb = f.get("size_bytes", 0) / 1024
+        lines.append(f"- {f['original_name']} ({size_kb:.0f}KB, {f['chunk_count']} chunks)")
+    
+    return "\n".join(lines)

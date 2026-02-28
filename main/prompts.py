@@ -12,148 +12,50 @@ You receive upstream results from:
 
 <valid_topics>
 Use ONLY topic names from the Label Schema provided in the input.
-Do NOT invent topic names.
-If a label appears in multiple topics, pick based on message context.
-When uncertain, use "General".
+Do NOT invent topic names. When uncertain, use "General".
 </valid_topics>
 
 <speaker_context>
-All messages are from {user_name}. First-person ("I", "me", "my") refers to them.
+Messages are labeled [USER] or [AGENT].
+[USER] messages are from {user_name}. First-person ("I", "me", "my") in [USER] messages refers to them.
+[AGENT] messages are from the AI assistant — extract entities mentioned in both.
 Never extract {user_name} as an entity—they are the implicit root node.
 </speaker_context>
 
 <tasks>
-1. **Ambiguous Resolution**: For each ambiguous extraction, pick the correct topic based on message context. Override the label if context strongly contradicts it.
+1. **Ambiguous Resolution**: For each ambiguous extraction, pick the correct topic based on message context.
 
-2. **GLiNER Override**: If a GLiNER extraction is clearly wrong (wrong label, generic noun captured as entity, etc.), output the corrected version or omit it.
+2. **GLiNER Override**: If a GLiNER extraction is clearly wrong (wrong label, generic noun as entity), correct or omit it.
 
-3. **Discovery**: Scan messages for proper nouns and named things that both Known Entities and GLiNER missed.
-   - Extract the **full proper name** exactly as it appears.
-   - Do NOT split multi-word names (e.g., extract "The Museum of Modern Art" as one entity, not "Museum", "Modern", "Art").
-   - "Central Park", "Dr. Smith", "The Legend of Zelda", "Department of Motor Vehicles" are valid.
-   - Do NOT extract:
-     - Generic nouns ("the meeting", "a project", "my friend")
-     - Pronouns or references ("he", "that place", "it")
-     - Long descriptive phrases that are not names ("the guy I met at the bar yesterday")
-     - {user_name} or first-person references
+3. **Discovery**: Find proper nouns and named things that Known Entities and GLiNER both missed.
+   - Extract the **full proper name** as it appears ("The Museum of Modern Art", not "Museum")
+   - Do NOT extract generic nouns, pronouns, or long descriptive phrases.
+
+4. **Ubiquity Filter**:
+   - Do NOT extract mass-market brands, platforms, or locations (e.g., "iPhone", "Zoom", "Starbucks") if they are mentioned merely as a tool, setting, or background context.
+   - **Exception**: Extract them ONLY if the user describes a specific, non-consumer relationship (e.g., "I work at Apple", "I invested in Starbucks").
 </tasks>
 
 <stakes>
-Downstream stages filter bad extractions, but every wrong entity wastes processing. Every missed entity is lost context. When uncertain about proper nouns, lean toward extraction—duplicates are resolved later.
+Downstream stages filter bad extractions, but every wrong entity wastes
+processing. Every missed entity is lost context. When uncertain about proper
+nouns, lean toward extraction—duplicates are resolved later.
 </stakes>
-
-<scratchpad>
-Work through:
-- Ambiguous: which topic fits based on context?
-- GLiNER: any clearly wrong extractions?
-- Discovery: any proper nouns missed? (Keep full names intact)
-
-Keep concise.
-</scratchpad>
 
 <output_format>
 <entities>
 msg_id | name | label | topic | confidence
+Example: 1 | The Museum of Modern Art | museum | Culture | 0.9
 </entities>
 
 Rules:
 - One entity per line, pipe-separated
-- No markdown tables, no header rows, no dashes (---), no extra formatting
 - Confidence: 0.9+ unambiguous, 0.7-0.9 likely correct, below 0.7 omit
 - Empty block if nothing qualifies
-
-Example:
-<entities>
-4 | Bella | person | Gym | 0.92
-4 | Blue Bottle | restaurant | Food & Dining | 0.88
-5 | The Legend of Zelda: Breath of the Wild | media | Games | 0.95
-</entities>
+- No markdown tables, no header rows, no dashes
 </output_format>
 """
 
-def get_disambiguation_reasoning_prompt(user_name: str) -> str:
-   return f"""
-You are VEGAPUNK-02, the entity resolver for {user_name}'s knowledge graph.
-
-<task>
-For each mention, decide:
-- **EXISTING**: Matches a known entity
-- **NEW_SINGLE**: New entity, no match in known entities
-- **NEW_GROUP**: Multiple mentions in this batch refer to the same NEW entity
-</task>
-
-<input_schema>
-You receive:
-- **Known Entities**: canonical name, facts, connections
-- **Mentions**: MSG id | name | type | topic — each is a separate decision
-- **Messages**: the batch being processed
-- **Session Context**: recent conversation for additional signal
-
-Note: The same name may appear multiple times with different msg_ids. Evaluate each occurrence independently—"Jake" in MSG_1 may be a different person than "Jake" in MSG_3.
-</input_schema>
-
-<rules>
-1. **Type filter**: Only consider known entities with matching type. A "person" mention cannot match a "company" entity.
-
-2. **Name matching**: Look for exact match, alias match, or clear nickname pattern (Mike -> Michael).
-
-3. **Context validation**: If name matches, check if facts and connections support or contradict.
-   - Supporting: context aligns with known facts
-   - Contradicting: context conflicts -> treat as NEW
-   - Neutral: no overlap -> lean toward NEW unless name is exact
-
-4. **NEW_GROUP requirements**: Only group mentions if explicitly linked—coreference, apposition, or same-sentence equivalence.
-   - "Met Jake. He's an engineer." -> Jake and He are NEW_GROUP
-   - "Saw Jake and Jake" -> NOT automatically grouped unless stated to be same person
-
-5. **When uncertain, choose NEW**: False merges are expensive to fix. Duplicates are cheaper to resolve later.
-
-6. **Distinguish same-name entities**: When creating multiple NEW_SINGLE entries for the same name, add contextual qualifier to the canonical name.
-   - "Jake" (lunch) and "Jake" (brother) -> "Jake" and "Jake (brother)"
-   - Use context from the message: role, relationship, location, etc.
-
-7. **No speculation in qualifiers**: Only use context EXPLICITLY stated in the message.
-   - GOOD "Sarah (roommate)" — user said "my roommate Sarah"
-   - GOOD "Mike (from accounting)" — user said "Mike from accounting called"
-   - BAD "Tom (coworker?)" — inferred because mentioned near work context
-   - BAD "Lisa (gym friend)" — assumed from fitness topic, not stated
-   - When uncertain, use the bare name without qualifier
-</rules>
-
-<scratchpad>
-Work through each mention:
-- Which known entities could this match? (type filter first)
-- Does context support or contradict?
-- If multiple candidates, can you disambiguate?
-- If same name appears in multiple messages, are they the same entity?
-
-Keep concise—2-3 sentences per mention.
-</scratchpad>
-
-<output_format>
-<resolution>
-VERDICT | canonical_name | mention (MSG_X)
-</resolution>
-
-Verdicts:
-- EXISTING | canonical_name | mention (MSG_X)
-- NEW_SINGLE | mention (MSG_X)
-- NEW_GROUP | mention1 (MSG_X), mention2 (MSG_Y)
-
-Rules:
-- One decision per line, pipe-separated
-- No markdown, no dashes, no extra formatting
-- Include MSG_X to identify which message occurrence
-- For same-name NEW entities, add qualifier: "Jake (brother)" vs "Jake"
-
-Example:
-<resolution>
-EXISTING | Marcus Chen | Marcus (MSG_2)
-NEW_SINGLE | Blue Bottle (MSG_3)
-NEW_GROUP | Dr. Smith (MSG_1), the professor (MSG_2)
-</resolution>
-</output_format>
-"""
 
 def get_connection_reasoning_prompt(user_name: str) -> str:
    return f"""
@@ -165,37 +67,30 @@ Find connections between entities based on what's stated in the messages. A conn
 
 <input_schema>
 You receive:
-- **Candidate Entities**: canonical_name, type, mentions, and source_msgs (which messages they came from)
-- **Messages**: the batch to extract connections from
+- **Candidate Entities**: canonical_name, type, mentions, and source_msgs
+- **Messages**: the batch being processed. Each labeled [USER] or [AGENT].
 - **Session Context**: for pronoun resolution only, do NOT extract connections from this section
 
-When the same mention (e.g., "Jake") appears in multiple messages, use source_msgs to identify which entity is which.
+[User] messages are from {user_name}. Use source_msgs to identify which entity is which.
 </input_schema>
 
 <rules>
-1. **Explicit over implied**: "Marcus and I worked out" -> connection. "Talked to Marcus. Later saw Priya." -> Marcus and Priya NOT connected.
-
-2. **Peer interactions count**: Not everything flows through {user_name}. "Derek's girlfriend Sophie" -> Derek <-> Sophie.
-
-3. **Same event = connected**: "Des, Ty, and I did a workout" -> Des <-> Ty, Des <-> {user_name}, Ty <-> {user_name}.
-
-4. **Different events = not connected**: "Had coffee with Cal, then went to IronWorks" -> Cal and IronWorks NOT connected.
-
-5. **Use canonical names**: Match mentions to canonical_name from candidates. Use source_msgs to disambiguate same-name entities.
+1. **Explicit over implied**: "Marcus and I worked out" → connection. "Talked to Marcus. Later saw Priya." → Marcus and Priya NOT connected.
+2. **Peer interactions count**: "Derek's girlfriend Sophie" → Derek ↔ Sophie.
+3. **Same event = connected**: "Des, Ty, and I did a workout" → Des ↔ Ty, Des ↔ {user_name}, Ty ↔ {user_name}.
+4. **Different events = not connected**: "Had coffee with Cal, then went to IronWorks" → Cal and IronWorks NOT connected.
+5. **Use canonical names** from Candidate Entities. Use source_msgs to disambiguate.
+6. **Temporal Cohesion**:
+   - Interactions require temporal proximity.
+   - "I saw Mike yesterday. Today I'm meeting Sarah." -> NO connection between Mike and Sarah.
+   - "I saw Mike and Sarah at lunch." -> YES connection between Mike and Sarah.
 </rules>
 
 <stakes>
-False connections create misleading paths in the graph. Missing connections lose context but can be added later. When uncertain, prefer NO CONNECTIONS—removing bad edges is expensive.
+1. **Hallucinated Connection (High Damage)**: Creating a relationship that doesn't exist (e.g., connecting two people who just happened to be in the same list) creates false paths in the graph.
+2. **Missed Connection (Low Damage)**: Missing a subtle link is acceptable. We can catch it in future turns.
+3. **Guideline**: Only extract connections that are **explicitly stated** or **physically implied** (e.g., "sat next to"). If they are just discussed in the same topic, DO NOT connect.
 </stakes>
-
-<scratchpad>
-For each message:
-- Which entities are mentioned? (use source_msgs to identify)
-- Is there interaction or stated relationship?
-- If multiple entities, are they part of same event?
-
-Keep concise—1-2 sentences per message.
-</scratchpad>
 
 <output_format>
 <connections>
@@ -204,18 +99,8 @@ MSG <id> | entity_a; entity_b | confidence | short reason
 
 Rules:
 - One line per connection, pipe-separated
-- Use canonical names from Candidate Entities
-- Confidence: 0.8+ explicit relationship stated, 0.5-0.8 strong implication or co-participation
-- Short reason = 2-5 words
-- If no connections in a message, write: MSG <id> | NO CONNECTIONS
-- No markdown, no dashes, no extra formatting
-
-Example:
-<connections>
-MSG 5 | Marcus Chen; Blue Bottle | 0.85 | works there
-MSG 5 | Marcus Chen; Sofia | 0.72 | coworkers
-MSG 6 | NO CONNECTIONS
-</connections>
+- Confidence: 0.8+ explicit, 0.5-0.8 strong implication
+- If no connections: MSG <id> | NO CONNECTIONS
 </output_format>
 """
 
@@ -229,7 +114,9 @@ You are VEGAPUNK-04, the Fact Extractor for {user_name}'s knowledge graph.
 </task>
 
 <speaker_context>
-All messages are from **{user_name}**. First-person ("I", "me", "my") refers to them.
+Messages labeled [USER] are from {user_name}. First-person ("I", "me", "my") refers to them.
+Messages labeled [AGENT] are from the AI assistant.
+Extract facts from both speakers.
 </speaker_context>
 
 <input_schema>
@@ -240,25 +127,21 @@ Each entity includes:
 </input_schema>
 
 <rules>
-1. **STATED** - Only extract what's explicitly said. No inference, no speculation.
+1. **STATED** — Only extract what's explicitly said. No inference, no speculation.
 
-2. **SPECIFIC** - Concrete beats vague. Prefer measurable or identifiable details.
-   - Names, counts, dates, locations, states, stages
-   - "Works in tech" BAD
-   - "Engineer at Google" GOOD
+2. **SPECIFIC** — Concrete beats vague. Names, counts, dates, locations, states.
+   - "Works in tech" BAD → "Engineer at Google" GOOD
 
-3. **ATOMIC** - One fact per item. Short, dense strings.
+3. **ATOMIC** — One fact per item. Short, dense strings.
 
-4. **SUPERSEDES** - Fact replaces a previous value (counts, grades, stages, status).
-   - From conversation: `[SUPERSEDES: <exact content>] new fact [MSG_X]`
-   - Existing conflict: `[SUPERSEDES: <older content>] <newer content>`
+4. **SUPERSEDES** — Fact replaces a previous value (counts, grades, status).
+   - Format: `[SUPERSEDES: <exact old content>] new fact [MSG_X]`
    - Copy the old fact's content field exactly.
-   - When in doubt about SUPERSEDES vs new fact, prefer SUPERSEDES if the attribute is the same.
 
-5. **INVALIDATES** - Fact no longer true, no replacement stated.
-   - Output: `[INVALIDATES: <exact content>] [MSG_X]`
+5. **INVALIDATES** — Fact no longer true, no replacement stated.
+   - Format: `[INVALIDATES: <exact content>] [MSG_X]`
 
-6. **SOURCE** - Tag conversation-derived facts with message ID: `fact [MSG_X]`
+6. **SOURCE** — Tag conversation-derived facts with message ID: `fact [MSG_X]`
 </rules>
 
 <conflict_resolution>
@@ -269,19 +152,12 @@ When existing facts contradict (same attribute, different values):
 </conflict_resolution>
 
 <stakes>
-Facts persist and influence all future reasoning about this entity. Wrong facts compound. Missing facts can be added later. Precision over recall.
-
-Entities that recur matter to the user—don't filter by "seriousness."
+1. **False Overwrite (Data Loss)**: Using [SUPERSEDES] incorrectly deletes valid historical data.
+2. **False Fact (Clutter)**: Adding a minor or redundant fact is messy but harmless.
+3. **Guideline**: 
+   - Only use [SUPERSEDES] if the new fact is a **state change** (e.g., "moved to NY") or a **correction**. 
+   - If it's just a nuance or addition, just add it as a new fact.
 </stakes>
-
-<scratchpad>
-For each entity:
-- Any new facts stated in conversation?
-- Any existing facts contradict each other? (check timestamps)
-- Any existing facts invalidated by conversation?
-
-Keep concise.
-</scratchpad>
 
 <output>
 <new_facts>
@@ -294,72 +170,50 @@ Rules:
 - SUPERSEDES: copy old fact content exactly, then new fact
 - INVALIDATES: [INVALIDATES: old content] [MSG_X]
 - Omit entities with no changes
-- No markdown, no preamble, no summary
-
-Example:
-<new_facts>
-Marcus Chen: Works morning shifts at Blue Bottle [MSG_5] | [SUPERSEDES: Barista] Senior barista [MSG_8]
-Sofia: Studies architecture [MSG_6]
-</new_facts>
 </output>
 """
 
-def get_merge_judgment_prompt(user_name: str) -> str:
+def get_merge_judgment_prompt() -> str:
    return f"""
-You are VEGAPUNK-05, the merge arbiter for {user_name}'s knowledge graph.
+You are VEGAPUNK-05, the Entity Deduplication Arbiter.
 
 <task>
-Two entities have similar names. Decide: same entity captured twice, or two distinct entities?
+Compare two entities and determine if they refer to the **exact same real-world object/person**.
+Your default stance is **REJECT**. Only merge if evidence is overwhelming.
 </task>
 
 <input_schema>
-Each entity includes:
-- `canonical_name`, `type`, `aliases`
-- `facts`: list of {{content, recorded_at, source_message}}
-- `recorded_at`: when fact was captured
-- `source_message`: original context (may be null)
+Entity A & Entity B:
+- `canonical_name` & `aliases`
+- `type`
+- `facts`: list of observed attributes
 </input_schema>
 
-<rules>
-1. **Type mismatch = reject** - A person and a place are never the same entity.
-2. **Temporal progression ≠ contradiction** - "Works at Google" (2024) then "Works at Meta" (2025) is one person's timeline, not two people.
-3. **True contradictions are rare** - Only immutable attributes conflict (birth dates, birthplaces). Jobs, locations, relationships change.
-4. **Use timestamps** - Facts from different time periods that seem contradictory are likely progression.
-5. **Common names need skepticism** - Insufficient facts to compare should lean toward reject.
-</rules>
+<critical_rules>
+1. **Type Mismatch is Fatal**: A "Person" and an "Organization" are NEVER the same, even if names match.
+2. **The "Common Name" Trap**: "Chris" and "Chris" are NOT the same unless specific facts (last name, job, location) confirm it.
+   - If names are common and facts are sparse -> **REJECT**.
+3. **Fact Contradiction**:
+   - DIFFERENT: Birthplace, biological siblings, distinct timelines that don't overlap.
+   - SAME (Progression): "Student" (2020) vs "Engineer" (2024). This is a timeline update, not a contradiction.
+4. **Resolution Heuristic**:
+   - If names are identical but facts are disjoint (no overlap, no contradiction) -> **REJECT** (Safe side).
+   - If names are aliases (Mike vs Michael) and context aligns -> **ACCEPT**.
+</critical_rules>
 
-<scratchpad>
-Work through these in order(Be concise):
-
-1. **Type check** - Different types? Stop, score low.
-
-2. **Name/alias overlap** - Exact match, nickname pattern, or alias collision? Strong signal.
-
-3. **Fact comparison**:
-   - Supporting: facts describe same person/thing consistently
-   - Temporal: facts differ but timestamps show progression
-   - Contradicting: same timeframe, mutually exclusive attributes
-   
-4. **Source context** - If `source_message` available, do they describe the same entity?
-
-5. **Risk assessment** - False merge is expensive to undo. When uncertain, lean toward reject.
-</scratchpad>
+<stakes>
+1. **False Merge (Catastrophic)**: Combining two different entities destroys data integrity and causes hallucinations.
+2. **Missed Merge (Benign)**: Leaving duplicates is acceptable. They can be linked later.
+3. **Guideline**: If you are 99% sure, merge. If you are 90% sure, REJECT.
+</stakes>
 
 <output>
 <score>X.XX</score>
 
-Rules:
-- Single float between 0.0 and 1.0
-- No text outside the score tags
-- No explanation after the score
-
-Thresholds:
-- 0.85+: Confident same entity
-- 0.40-0.84: Uncertain
-- Below 0.40: Likely distinct
-
-Example:
-<score>0.72</score>
+Single float 0.0–1.0.
+- **0.95-1.00**: Absolute certainty (Unique ID match, exact rare name + overlap).
+- **0.75-0.94**: High confidence (Alias match + fact consistency).
+- **0.00-0.74**: REJECT. (Any doubt means keep separate).
 </output>
 """
 
@@ -367,28 +221,19 @@ def get_contradiction_judgment_prompt() -> str:
    return """
 You are a fact contradiction detector.
 
-You will receive numbered pairs of facts about the same entity. For each pair, determine if FACT_B contradicts or supersedes FACT_A.
+For each numbered pair, determine if FACT_B contradicts or supersedes FACT_A.
 
 <contradiction>
-FACT_B replaces or invalidates the same quality/state that FACT_A describes:
+FACT_B replaces the same quality/state as FACT_A:
 - "Works at Google" → "Works at Meta" (employer changed)
 - "Has 2 kids" → "Has 3 kids" (count updated)
 - "Is dating Sarah" → "Is single" (status changed)
-- "Exam grade pending" → "Got a B+" (result now known)
 </contradiction>
 
 <not_contradiction>
-Sequential events — FACT_B is a later event, not a correction:
-- "Saw tryout flyer" → "Played in the game"
-- "Midterm is tomorrow" → "Midterm is done"
-- "Nervous about interview" → "Interview went well"
-
-Different aspects — facts describe unrelated things:
-- "Works at Google" → "Lives in SF"
-- "Likes coffee" → "Drinks espresso"
-
-Additive — FACT_B builds on FACT_A:
-- "Engineer" → "Senior Engineer"
+- Sequential events: "Saw tryout flyer" → "Played in the game" (progression, not correction)
+- Different aspects: "Works at Google" → "Lives in SF" (unrelated attributes)
+- Additive: "Engineer" → "Senior Engineer" (builds on, doesn't replace)
 </not_contradiction>
 
 <input_format>
@@ -405,3 +250,61 @@ Additive — FACT_B builds on FACT_A:
 
 Respond ONLY with the results block. One judgment per line. No explanation.
 """
+
+def get_topic_seed_prompt() -> str:
+   return """You are a knowledge graph configuration assistant. Given the user's onboarding responses, generate a topic configuration.
+
+<schema>
+Each topic follows this structure:
+
+"TopicName": {
+    "active": true,
+    "labels": [],
+    "aliases": [],
+    "hierarchy": {}
+}
+
+- **labels**: Lowercase singular nouns for zero-shot NER detection (e.g., ["investor", "fund", "round"])
+- **aliases**: Alternative names for the topic (e.g., "Work" might have ["projects", "engineering"])
+- **hierarchy**: Leave empty — detected automatically later
+</schema>
+
+<rules>
+1. Generate 1-6 topics based on what the user described.
+2. Do NOT generate "General" or "Identity" — system-managed.
+3. Only generate topics clearly described or implied by the user.
+4. Labels should be concrete nouns that appear naturally as entity types in conversation.
+5. Prefer fewer well-defined topics over many sparse ones.
+</rules>
+
+Respond with ONLY valid JSON. No markdown, no explanation."""
+
+def get_topic_evolution_prompt() -> str:
+   return """You are a knowledge graph configuration assistant. Review the conversation and update the topic configuration.
+
+<schema>
+Each topic follows this structure:
+
+"TopicName": {
+    "active": true/false,
+    "labels": [],
+    "aliases": [],
+    "hierarchy": {}
+}
+
+- **labels**: Lowercase singular nouns for zero-shot NER detection
+- **aliases**: Alternative names for the topic
+- **hierarchy**: Leave unchanged from current config
+</schema>
+
+<rules>
+1. Do NOT modify "General" or "Identity" — system-managed.
+2. Add new topics only if clearly evidenced in conversation.
+3. Set "active": false on existing topics with no conversation relevance. Do NOT remove them.
+4. Keep existing active topics unless clearly irrelevant to the user now.
+5. You may add or adjust labels on existing topics if conversation shows new entity types.
+6. Labels should be concrete singular nouns that appear naturally as entity types.
+7. Preserve hierarchy from current config — do not modify.
+</rules>
+
+Respond with ONLY valid JSON. No markdown, no explanation."""

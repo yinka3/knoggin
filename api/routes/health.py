@@ -1,11 +1,10 @@
 import asyncio
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
+
+from api.deps import get_app_state
 from api.state import AppState
 
 router = APIRouter()
-
-def get_app_state(request: Request) -> AppState:
-    return request.app.state.app_state
 
 @router.get("/health")
 async def health_check(state: AppState = Depends(get_app_state)):

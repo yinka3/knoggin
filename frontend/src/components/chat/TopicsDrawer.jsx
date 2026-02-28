@@ -1,12 +1,5 @@
-import { useState, useEffect } from 'react'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-  SheetTrigger,
-} from '@/components/ui/sheet'
+import { useState, useEffect, useCallback } from 'react'
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import {
   Dialog,
   DialogContent,
@@ -28,59 +21,82 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
 import { toast } from 'sonner'
-import { Settings, Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, Pencil, ArrowRight, X } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { createTopic, getTopics, updateTopic, deleteTopic } from '../../api/topics'
+import HierarchyEditor from '@/components/HierarchyEditor'
 
-export default function TopicsDrawer({ sessionId }) {
-  const [open, setOpen] = useState(false)
+export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
   const [topics, setTopics] = useState({})
-  const [activeTopics, setActiveTopics] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  // Edit dialog state
   const [editOpen, setEditOpen] = useState(false)
-  const [editTopic, setEditTopic] = useState({ name: '', labels: '', aliases: '', active: true })
+  const [editTopic, setEditTopic] = useState({ name: '', labels: '', aliases: '', active: true, hierarchy: {} })
   const [isNew, setIsNew] = useState(false)
   const [saving, setSaving] = useState(false)
 
-  // Delete dialog state
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState(null)
 
-  async function loadTopics() {
+  // Quick-add state
+  const [addingNew, setAddingNew] = useState(false)
+  const [newTopicName, setNewTopicName] = useState('')
+
+  const loadTopics = useCallback(async () => {
     if (!sessionId) return
     setLoading(true)
     setError(null)
     try {
       const data = await getTopics(sessionId)
       setTopics(data.topics || {})
-      setActiveTopics(data.active_topics || [])
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }
+  }, [sessionId])
 
   useEffect(() => {
     if (open && sessionId) {
       loadTopics()
     }
-  }, [open, sessionId])
+  }, [open, sessionId, loadTopics])
 
-  function openNewTopic() {
-    setEditTopic({
-      name: '',
-      labels: '',
-      aliases: '',
-      hierarchy: '',
-      labelAliases: '',
-      active: true,
-    })
-    setIsNew(true)
-    setEditOpen(true)
+  // Toggle a topic's active state inline
+  async function toggleTopic(name) {
+    const current = topics[name]
+    const newActive = current.active === false ? true : false
+    try {
+      await updateTopic(sessionId, name, { active: newActive })
+      setTopics(prev => ({
+        ...prev,
+        [name]: { ...prev[name], active: newActive }
+      }))
+    } catch (err) {
+      toast.error(err.message)
+    }
+  }
+
+  // Quick-add a new topic
+  async function handleQuickAdd() {
+    const trimmed = newTopicName.trim()
+    if (!trimmed) return
+    if (topics[trimmed]) {
+      toast.error('Topic already exists')
+      return
+    }
+    try {
+      await createTopic(sessionId, { name: trimmed, labels: [], aliases: [], hierarchy: {}, active: true })
+      setNewTopicName('')
+      setAddingNew(false)
+      await loadTopics()
+      toast.success('Topic created')
+    } catch (err) {
+      toast.error(err.message)
+    }
   }
 
   function openEditTopic(name) {
@@ -89,14 +105,7 @@ export default function TopicsDrawer({ sessionId }) {
       name,
       labels: config.labels?.join(', ') || '',
       aliases: config.aliases?.join(', ') || '',
-      hierarchy:
-        Object.keys(config.hierarchy || {}).length > 0
-          ? JSON.stringify(config.hierarchy, null, 2)
-          : '',
-      labelAliases:
-        Object.keys(config.label_aliases || {}).length > 0
-          ? JSON.stringify(config.label_aliases, null, 2)
-          : '',
+      hierarchy: config.hierarchy || {},
       active: config.active !== false,
     })
     setIsNew(false)
@@ -106,71 +115,29 @@ export default function TopicsDrawer({ sessionId }) {
   async function handleSave() {
     setSaving(true)
     try {
-      let hierarchyObj = {}
-      let labelAliasesObj = {}
-
-      try {
-        if (editTopic.hierarchy.trim()) {
-          hierarchyObj = JSON.parse(editTopic.hierarchy)
-        }
-      } catch {
-        setError('Invalid hierarchy JSON')
-        setSaving(false)
-        return
+      const payload = {
+        labels: editTopic.labels
+          ? editTopic.labels
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean)
+          : [],
+        aliases: editTopic.aliases
+          ? editTopic.aliases
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean)
+          : [],
+        hierarchy: editTopic.hierarchy,
+        active: editTopic.active,
       }
 
-      try {
-        if (editTopic.labelAliases.trim()) {
-          labelAliasesObj = JSON.parse(editTopic.labelAliases)
-        }
-      } catch {
-        setError('Invalid label aliases JSON')
-        setSaving(false)
-        return
-      }
+      await updateTopic(sessionId, editTopic.name, payload)
 
-      if (isNew) {
-        await createTopic(sessionId, {
-          name: editTopic.name.trim(),
-          labels: editTopic.labels
-            ? editTopic.labels
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean)
-            : [],
-          aliases: editTopic.aliases
-            ? editTopic.aliases
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean)
-            : [],
-          hierarchy: hierarchyObj,
-          label_aliases: labelAliasesObj,
-          active: editTopic.active,
-        })
-      } else {
-        await updateTopic(sessionId, editTopic.name, {
-          labels: editTopic.labels
-            ? editTopic.labels
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean)
-            : [],
-          aliases: editTopic.aliases
-            ? editTopic.aliases
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean)
-            : [],
-          hierarchy: hierarchyObj,
-          label_aliases: labelAliasesObj,
-          active: editTopic.active,
-        })
-      }
       setEditOpen(false)
       setError(null)
       await loadTopics()
-      toast.success(isNew ? 'Topic created' : 'Topic updated')
+      toast.success('Topic updated')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -198,192 +165,196 @@ export default function TopicsDrawer({ sessionId }) {
   }
 
   const topicNames = Object.keys(topics)
+  const activeCount = topicNames.filter(n => topics[n].active !== false).length
 
   return (
     <>
-      <Sheet open={open} onOpenChange={setOpen} modal={false}>
-        <SheetTrigger asChild>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all duration-300 group"
-          >
-            <Settings
-              size={18}
-              className="transition-transform duration-500 ease-out group-hover:rotate-90"
-            />
-          </Button>
-        </SheetTrigger>
+      <Sheet open={open} onOpenChange={onOpenChange}>
         <SheetContent className="bg-background border-border w-72">
           <SheetHeader>
-            <SheetTitle className="text-foreground">Topics</SheetTitle>
-            <SheetDescription className="text-xs text-muted-foreground font-mono">
-              {sessionId?.slice(0, 8)}...
-            </SheetDescription>
+            <SheetTitle className="flex items-center gap-2">
+              <span>Topics</span>
+              <Badge variant="outline" className="text-[10px] font-normal">
+                {activeCount}/{topicNames.length}
+              </Badge>
+            </SheetTitle>
           </SheetHeader>
 
           {loading && (
-            <div className="mt-6 space-y-1">
+            <div className="mt-6 space-y-2">
               {[1, 2, 3].map(i => (
-                <div key={i} className="flex items-center gap-3 px-3 py-2">
-                  <div className="w-2 h-2 rounded-full bg-muted-foreground/20 animate-pulse" />
-                  <div
-                    className="h-4 bg-muted-foreground/20 rounded animate-pulse"
-                    style={{ width: `${50 + i * 15}%` }}
-                  />
-                </div>
+                <div
+                  key={i}
+                  className="h-8 bg-muted-foreground/10 rounded-full animate-pulse"
+                  style={{ width: `${50 + i * 12}%` }}
+                />
               ))}
             </div>
           )}
+
           {error && <p className="text-destructive text-sm mt-4">{error}</p>}
 
           {!loading && (
-            <div className="mt-6 space-y-1">
-              {topicNames.map(name => {
-                const config = topics[name]
-                const isActive = config.active !== false
+            <div className="mt-8">
+              {/* Topic Chips */}
+              <div className="flex flex-wrap gap-x-3 gap-y-4">
+                {topicNames.map(name => {
+                  const isActive = topics[name].active !== false
+                  const labelCount = topics[name].labels?.length || 0
 
-                return (
-                  <button
-                    key={name}
-                    onClick={() => openEditTopic(name)}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left text-sm transition-colors hover:bg-muted ${
-                      isActive ? 'text-foreground' : 'text-muted-foreground'
-                    }`}
+                  return (
+                    <div key={name} className="group relative">
+                      <button
+                        onClick={() => toggleTopic(name)}
+                        className={cn(
+                          'inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300 border shadow-sm',
+                          isActive
+                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20 hover:border-emerald-500/40 hover:scale-[1.02] active:scale-[0.98]'
+                            : 'bg-muted/10 text-muted-foreground/40 border-border/20 hover:bg-muted/20 hover:text-muted-foreground/60 hover:border-border/40 hover:scale-[1.02] active:scale-[0.98]'
+                        )}
+                      >
+                        <span className="tracking-tight">{name}</span>
+                        {labelCount > 0 && (
+                          <span className={cn(
+                            "flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-md text-[10px] font-bold transition-colors",
+                            isActive 
+                              ? "bg-emerald-500/20 text-emerald-400/80" 
+                              : "bg-muted-foreground/10 text-muted-foreground/40"
+                          )}>
+                            {labelCount}
+                          </span>
+                        )}
+                      </button>
+                      
+                      {/* Edit icon - more subtle and positioned better */}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openEditTopic(name) }}
+                        className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-lg bg-background/80 backdrop-blur-sm border border-border/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-200 hover:bg-primary/10 hover:border-primary/30 hover:scale-110 shadow-lg"
+                      >
+                        <Pencil size={10} className="text-muted-foreground/70" />
+                      </button>
+                    </div>
+                  )
+                })}
+
+                {/* Quick-add chip */}
+                {addingNew ? (
+                  <form
+                    onSubmit={e => { e.preventDefault(); handleQuickAdd() }}
+                    className="inline-flex items-center"
                   >
-                    <span
-                      className={`w-2 h-2 rounded-full ${isActive ? 'bg-accent' : 'bg-muted-foreground/30'}`}
+                    <Input
+                      autoFocus
+                      value={newTopicName}
+                      onChange={e => setNewTopicName(e.target.value)}
+                      onBlur={() => { if (!newTopicName.trim()) setAddingNew(false) }}
+                      placeholder="Topic name"
+                      className="h-9 w-32 text-sm rounded-xl px-4 bg-muted/20 border-border/30 focus:ring-1 focus:ring-primary/20 transition-all"
                     />
-                    <span>{name}</span>
+                  </form>
+                ) : (
+                  <button
+                    onClick={() => setAddingNew(true)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium text-muted-foreground/30 border border-dashed border-muted-foreground/10 hover:border-muted-foreground/30 hover:text-muted-foreground/50 hover:bg-muted/20 transition-all duration-300 hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    <Plus size={14} className="opacity-70" />
+                    <span>Add</span>
                   </button>
-                )
-              })}
+                )}
+              </div>
 
-              <button
-                onClick={openNewTopic}
-                className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left text-sm text-muted-foreground hover:text-accent hover:bg-muted transition-colors mt-4"
-              >
-                <Plus size={14} />
-                <span>Add Topic</span>
-              </button>
+              {/* Hint */}
+              <div className="flex items-center gap-2 mt-6 px-1">
+                <div className="h-px flex-1 bg-gradient-to-r from-border/5 to-transparent" />
+                <p className="text-[10px] font-medium tracking-wider uppercase text-muted-foreground/30">
+                  Tap to toggle · hover to edit
+                </p>
+              </div>
             </div>
           )}
         </SheetContent>
       </Sheet>
 
-      {/* Edit/Create Dialog */}
+      {/* Edit Dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="bg-background border-border sm:max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-foreground">
-              {isNew ? 'New Topic' : editTopic.name}
-            </DialogTitle>
-            <DialogDescription className="text-muted-foreground text-sm">
-              {isNew ? 'Create a new topic' : 'Edit topic configuration'}
+            <DialogTitle>{editTopic.name}</DialogTitle>
+            <DialogDescription className="text-xs">
+              Edit topic configuration
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-4">
-            {isNew && (
-              <div className="space-y-2">
-                <Label htmlFor="name" className="text-muted-foreground">
-                  Name
-                </Label>
-                <Input
-                  id="name"
-                  value={editTopic.name}
-                  onChange={e => setEditTopic({ ...editTopic, name: e.target.value })}
-                  placeholder="Work"
-                  className="bg-muted border-border"
-                />
-              </div>
-            )}
-
             <div className="space-y-2">
-              <Label htmlFor="labels" className="text-muted-foreground">
-                Labels <span className="text-xs">(comma-separated)</span>
+              <Label htmlFor="labels" className="text-sm flex items-center gap-2">
+                Labels
+                <span className="text-[10px] text-muted-foreground font-normal bg-muted px-1.5 py-0.5 rounded">
+                  comma-separated
+                </span>
               </Label>
               <Input
                 id="labels"
                 value={editTopic.labels}
                 onChange={e => setEditTopic({ ...editTopic, labels: e.target.value })}
                 placeholder="Company, Project, Person"
-                className="bg-muted border-border"
+                className="bg-muted/50 border-border/50 h-9 rounded-lg"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="aliases" className="text-muted-foreground">
-                Aliases <span className="text-xs">(comma-separated)</span>
+              <Label htmlFor="aliases" className="text-sm flex items-center gap-2">
+                Aliases
+                <span className="text-[10px] text-muted-foreground font-normal bg-muted px-1.5 py-0.5 rounded">
+                  comma-separated
+                </span>
               </Label>
               <Input
                 id="aliases"
                 value={editTopic.aliases}
                 onChange={e => setEditTopic({ ...editTopic, aliases: e.target.value })}
                 placeholder="job, office"
-                className="bg-muted border-border"
+                className="bg-muted/50 border-border/50 h-9 rounded-lg"
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="hierarchy" className="text-muted-foreground">
-                Hierarchy <span className="text-xs">(JSON)</span>
-              </Label>
-              <textarea
-                id="hierarchy"
-                value={editTopic.hierarchy}
-                onChange={e => setEditTopic({ ...editTopic, hierarchy: e.target.value })}
-                placeholder='{"parent": "child"}'
-                rows={2}
-                className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-accent font-mono"
-              />
-            </div>
+            {/* Visual Hierarchy Editor */}
+            <HierarchyEditor
+              name={editTopic.name}
+              config={editTopic}
+              updateField={(name, field, val) => setEditTopic(prev => ({ ...prev, [field]: val }))}
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="labelAliases" className="text-muted-foreground">
-                Label Aliases <span className="text-xs">(JSON)</span>
-              </Label>
-              <textarea
-                id="labelAliases"
-                value={editTopic.labelAliases}
-                onChange={e => setEditTopic({ ...editTopic, labelAliases: e.target.value })}
-                placeholder='{"OldLabel": "NewLabel"}'
-                rows={2}
-                className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-accent font-mono"
-              />
-            </div>
-
-            <div className="flex items-center justify-between py-2">
-              <Label htmlFor="active" className="text-muted-foreground">
-                Active
-              </Label>
+            <div className="flex items-center justify-between p-3 rounded-lg border border-border/30 bg-white/[0.01]">
+              <div>
+                <Label htmlFor="active" className="text-sm">
+                  Active
+                </Label>
+                <p className="text-[10px] text-muted-foreground">Enable or disable this topic</p>
+              </div>
               <Switch
                 id="active"
                 checked={editTopic.active}
                 onCheckedChange={checked => setEditTopic({ ...editTopic, active: checked })}
-                disabled={editTopic.name === 'General'}
-                className="data-[state=unchecked]:bg-muted-foreground/30"
               />
             </div>
           </div>
 
-          <div className="flex items-center justify-between">
-            {!isNew && editTopic.name !== 'General' && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => confirmDelete(editTopic.name)}
-                className="text-muted-foreground hover:text-destructive"
-              >
-                <Trash2 size={14} className="mr-1" />
-                Delete
-              </Button>
-            )}
+          <div className="flex items-center justify-between pt-2 border-t border-border/30">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => confirmDelete(editTopic.name)}
+              className="text-muted-foreground hover:text-destructive"
+            >
+              <Trash2 size={14} className="mr-1" />
+              Delete
+            </Button>
             <div className="flex-1" />
             <Button
               onClick={handleSave}
-              disabled={saving || (isNew && !editTopic.name.trim())}
-              className="bg-primary text-primary-foreground hover:bg-accent"
+              disabled={saving}
+              size="sm"
             >
               {saving ? 'Saving...' : 'Save'}
             </Button>
@@ -393,23 +364,18 @@ export default function TopicsDrawer({ sessionId }) {
 
       {/* Delete Confirmation */}
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <AlertDialogContent className="bg-background border-border">
+        <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-foreground">
-              Delete "{deleteTarget}"?
-            </AlertDialogTitle>
-            <AlertDialogDescription className="text-muted-foreground">
-              This will remove the topic configuration. Entities tagged with this topic will become
-              uncategorized.
+            <AlertDialogTitle>Delete "{deleteTarget}"?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete the topic. Consider disabling it instead.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="border-border text-muted-foreground">
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDelete}
-              className="bg-destructive hover:bg-destructive/90 text-white"
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete
             </AlertDialogAction>

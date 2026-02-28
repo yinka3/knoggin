@@ -17,6 +17,7 @@ class EntityPair:
     entity_a: str
     entity_b: str
     confidence: float
+    context: str = None
 
 @dataclass
 class MessageConnections:
@@ -38,15 +39,6 @@ class ProfileUpdate:
     canonical_name: str
     facts: List[str]
 
-@dataclass
-class ResolutionEntry:
-    verdict: Literal["EXISTING", "NEW_GROUP", "NEW_SINGLE"]
-    mentions: List[str]
-    entity_type: str
-    canonical_name: Optional[str] = None
-    topic: str = "General"
-    msg_ids: List[int] = field(default_factory=list)
-
 
 @dataclass
 class Fact:
@@ -58,6 +50,7 @@ class Fact:
     source_msg_id: Optional[int] = None 
     confidence: float = 1.0
     embedding: List[float] = field(default_factory=list)
+    source: str = "user"
 
     @classmethod
     def from_record(cls, record: dict) -> "Fact":
@@ -69,7 +62,8 @@ class Fact:
             invalid_at=cls._parse_dt(record["invalid_at"]) if record.get("invalid_at") else None,
             confidence=record.get("confidence", 1.0),
             embedding=record.get("embedding") or [],
-            source_msg_id=record.get("source_msg_id")
+            source_msg_id=record.get("source_msg_id"),
+            source=record.get("source", "user")
         )
 
     @staticmethod
@@ -102,13 +96,18 @@ class BatchResult:
             "entity_ids": self.entity_ids,
             "new_entity_ids": list(self.new_entity_ids),
             "alias_updated_ids": list(self.alias_updated_ids),
+            "alias_updates": {str(k): v for k, v in self.alias_updates.items()},
             "extraction_result": [
                 {"message_id": mc.message_id, "entity_pairs": [
-                    {"entity_a": p.entity_a, "entity_b": p.entity_b, "confidence": p.confidence}
+                    {"entity_a": p.entity_a, "entity_b": p.entity_b, 
+                    "confidence": p.confidence, "context": p.context}
                     for p in mc.entity_pairs
                 ]} for mc in (self.extraction_result or [])
             ],
-            "message_embeddings": self.message_embeddings,
+            "message_embeddings": {
+                k: (v.tolist() if hasattr(v, 'tolist') else v)
+                for k, v in self.message_embeddings.items()
+            },
             "success": self.success,
             "error": self.error
         }
@@ -122,7 +121,12 @@ class BatchResult:
                 MessageConnections(
                     message_id=mc["message_id"],
                     entity_pairs=[
-                        EntityPair(entity_a=p["entity_a"], entity_b=p["entity_b"], confidence=p["confidence"])
+                        EntityPair(
+                            entity_a=p["entity_a"], 
+                            entity_b=p["entity_b"], 
+                            confidence=p["confidence"],
+                            context=p.get("context")
+                        )
                         for p in mc["entity_pairs"]
                     ]
                 ) for mc in data["extraction_result"]
@@ -132,6 +136,7 @@ class BatchResult:
             entity_ids=data.get("entity_ids", []),
             new_entity_ids=set(data.get("new_entity_ids", [])),
             alias_updated_ids=set(data.get("alias_updated_ids", [])),
+            alias_updates={int(k): v for k, v in data.get("alias_updates", {}).items()},
             extraction_result=extraction_result,
             message_embeddings=data.get("message_embeddings", {}),
             success=data.get("success", True),
@@ -170,8 +175,13 @@ class AgentConfig:
     id: str
     name: str
     persona: str
+    base_prompt: Optional[str] = None
     model: Optional[str] = None
+    temperature: float = 0.7
+    enabled_tools: Optional[List[str]] = None
     is_default: bool = False
+    is_spawned: bool = False
+    spawned_by: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict:
@@ -179,8 +189,13 @@ class AgentConfig:
             "id": self.id,
             "name": self.name,
             "persona": self.persona,
+            "base_prompt": self.base_prompt,
             "model": self.model,
+            "temperature": self.temperature,
+            "enabled_tools": self.enabled_tools,
             "is_default": self.is_default,
+            "is_spawned": self.is_spawned,
+            "spawned_by": self.spawned_by,
             "created_at": self.created_at.isoformat()
         }
 
@@ -193,8 +208,13 @@ class AgentConfig:
             id=data["id"],
             name=data["name"],
             persona=data["persona"],
+            base_prompt=data.get("base_prompt"),
             model=data.get("model"),
+            temperature=data.get("temperature", 0.7),
+            enabled_tools=data.get("enabled_tools"),
             is_default=data.get("is_default", False),
+            is_spawned=data.get("is_spawned", False),
+            spawned_by=data.get("spawned_by"),
             created_at=created or datetime.now(timezone.utc)
         )
 
@@ -231,6 +251,7 @@ class ToolCall:
 class FinalResponse:
     content: str
     usage: Optional[Dict] = None
+    sources: Optional[List[Dict]] = None
 
 
 @dataclass
@@ -240,27 +261,3 @@ class ClarificationRequest:
 
 
 AgentResponse = Union[ToolCall, List[ToolCall], FinalResponse, ClarificationRequest]
-
-
-# ===============
-# Used during benchmarking  NOTE (dataclass is stale will need to update it)
-# ===============
-# @dataclass
-# class TraceEntry:
-#     step: int
-#     state: str
-#     tool: str
-#     args: Dict
-#     resolved_args: Dict
-#     result_summary: str
-#     result_count: int
-#     duration_ms: float
-#     error: Optional[str] = None
-
-# @dataclass
-# class QueryTrace:
-#     trace_id: str
-#     user_query: str
-#     started_at: datetime
-#     entries: List[TraceEntry] = field(default_factory=list)
-

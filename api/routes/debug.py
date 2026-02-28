@@ -8,7 +8,7 @@ router = APIRouter()
 
 
 @router.websocket("/{session_id}/ws")
-async def debug_stream(websocket: WebSocket, session_id: str, verbose: bool = False):
+async def debug_stream(websocket: WebSocket, session_id: str):
     """
     Stream debug events for a session.
     

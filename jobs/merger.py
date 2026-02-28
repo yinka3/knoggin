@@ -8,7 +8,7 @@ from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from jobs.jobs_utils import cosine_similarity, enrich_facts_with_sources, find_duplicate_facts, format_vp05_input, has_sufficient_facts, parse_merge_score
 from main.prompts import get_merge_judgment_prompt
-from shared.service import LLMService
+from shared.service import MERGE_MODEL, LLMService
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
 from shared.topics_config import TopicConfig
@@ -40,7 +40,9 @@ class MergeDetectionJob(BaseJob):
         return "merge_detection"
     
     async def should_run(self, ctx: JobContext) -> bool:
-        return await ctx.redis.get(RedisKeys.profile_complete(ctx.user_name, ctx.session_id)) is not None
+        merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
+        queue_size = await ctx.redis.scard(merge_key)
+        return queue_size > 0
     
     def _same_topic(self, topic_a: str, topic_b: str) -> bool:
         """Check if topics are the same after alias normalization."""
@@ -86,7 +88,7 @@ class MergeDetectionJob(BaseJob):
     
     
     async def _get_merge_judgment(self, candidate: dict, session_id: str = None) -> Optional[float]:
-        system = get_merge_judgment_prompt(self.user_name)
+        system = get_merge_judgment_prompt()
         
         enriched_facts_a = await enrich_facts_with_sources(candidate.get("facts_a", []), self.store)
         enriched_facts_b = await enrich_facts_with_sources(candidate.get("facts_b", []), self.store)
@@ -112,7 +114,7 @@ class MergeDetectionJob(BaseJob):
             "prompt": user_content
         }, verbose_only=True)
         
-        result = await self.llm.call_llm(system, user_content, reasoning="medium")
+        result = await self.llm.call_llm(system, user_content, model=MERGE_MODEL, reasoning="medium")
         
         if not result:
             return None
@@ -120,7 +122,7 @@ class MergeDetectionJob(BaseJob):
         score = parse_merge_score(result)
         
         if score is None:
-            logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']})")
+            logger.warning(f"Unparseable judgment for ({candidate['primary_id']}, {candidate['secondary_id']}): {result[:200]}")
             
         return score
     
@@ -147,12 +149,15 @@ class MergeDetectionJob(BaseJob):
                 if success:
                     now = datetime.now(timezone.utc)
                     for fact_id in duplicate_fact_ids:
-                        await loop.run_in_executor(
-                            None,
-                            self.store.invalidate_fact,
-                            fact_id,
-                            now
-                        )
+                        try:
+                            await loop.run_in_executor(
+                                None,
+                                self.store.invalidate_fact,
+                                fact_id,
+                                now
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to invalidate duplicate fact {fact_id} during merge: {e}")
                     return True
                 else:
                     logger.warning(f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): store returned False")
@@ -385,12 +390,20 @@ class MergeDetectionJob(BaseJob):
             else:
                 failed += 1
             
-            if dirty_ids:
-                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-                await ctx.redis.sadd(dirty_key, *[str(eid) for eid in dirty_ids])
-                logger.info(f"Queued {len(dirty_ids)} merged entities for immediate profile refinement")
-            
-            proposals_stored = await self._store_hitl_proposals(ctx, hitl, seen_ids)
+        if dirty_ids:
+            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
+            await ctx.redis.sadd(dirty_key, *[str(eid) for eid in dirty_ids])
+            logger.info(f"Queued {len(dirty_ids)} merged entities for immediate profile refinement")
+        
+        filtered_hitl = [
+            c for c in hitl
+            if c["primary_id"] not in seen_ids and c["secondary_id"] not in seen_ids
+        ]
+
+        if len(filtered_hitl) < len(hitl):
+            logger.info(f"Filtered {len(hitl) - len(filtered_hitl)} HITL proposals that overlap with auto-merges")
+
+        proposals_stored = await self._store_hitl_proposals(ctx, filtered_hitl, seen_ids)
 
         return f"{successful} merged, {failed} failed, {proposals_stored} HITL"
     

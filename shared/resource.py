@@ -1,17 +1,21 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import os
 from gliner import GLiNER
 from loguru import logger
 import redis.asyncio as aioredis
 import spacy
 import torch
+from db.community_store import CommunityStore
 from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
 from shared.config import get_config_value
 from shared.embedding import EmbeddingService
+from shared.mcp_client import MCPClientManager
 from shared.redisclient import AsyncRedisClient
 from shared.service import LLMService
+import chromadb
 
 class ResourceManager:
     _instance = None
@@ -25,6 +29,10 @@ class ResourceManager:
         self.executor: ThreadPoolExecutor = None
         self.gliner: GLiNER = None
         self.spacy: spacy.Language = None
+        self.chroma: chromadb.ClientAPI = None
+        self.mcp_manager: MCPClientManager = None
+        self.active_resolver = None
+        self.community_store: CommunityStore = None
 
     @classmethod
     async def initialize(cls) -> "ResourceManager":
@@ -48,12 +56,16 @@ class ResourceManager:
                 llm_config = get_config_value("llm", {})
                 instance.llm_service = LLMService(
                     api_key=llm_config.get("api_key"),
-                    reasoning_model=llm_config.get("reasoning_model", "google/gemini-2.5-flash"),
                     agent_model=llm_config.get("agent_model", "google/gemini-3-flash-preview"),
-                    trace_logger=get_trace_logger()
+                    trace_logger=get_trace_logger(),
+                    redis_client=instance.redis
                 )
                 
                 instance.embedding = EmbeddingService(device=device)
+
+                chroma_path = os.path.join(os.getenv("CONFIG_DIR", "./config"), "chroma_db")
+                instance.chroma = chromadb.PersistentClient(path=chroma_path)
+                logger.info(f"ChromaDB initialized at {chroma_path}")
 
                 exclude = ["ner", "lemmatizer", "attribute_ruler"]
                 nlp = spacy.load("en_core_web_md", exclude=exclude)
@@ -65,6 +77,11 @@ class ResourceManager:
                 model.to(device)
                 logger.info("Loaded GLiNER large-v2.1")
                 instance.gliner = model
+
+                mcp_config = get_config_value("mcp") or {"servers": {}}
+                instance.mcp_manager = await MCPClientManager.create(mcp_config)
+                logger.info("MCP manager initialized")
+                instance.community_store = CommunityStore(instance.store.driver)
 
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
@@ -101,6 +118,14 @@ class ResourceManager:
                 pass
             self.embedding = None
         
+        if self.mcp_manager:
+            try:
+                await self.mcp_manager.shutdown()
+            except Exception:
+                pass
+            self.mcp_manager = None
+        
+        self.chroma = None
         self.gliner = None
         self.spacy = None
         
@@ -118,6 +143,13 @@ class ResourceManager:
         
         if self.embedding:
             self.embedding.cleanup()
+        
+        if self.mcp_manager:
+            await self.mcp_manager.shutdown()
+        
+        self.chroma = None
+        if self.llm_service:
+            await self.llm_service.close()
         
         logger.info("ResourceManager shutdown complete")
         

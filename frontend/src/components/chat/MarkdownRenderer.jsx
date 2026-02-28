@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -39,28 +39,27 @@ function CodeBlock({ language, children }) {
   )
 }
 
-export default function MarkdownRenderer({ content }) {
+const markdownComponents = {
+  code({ inline, className, children, ...props }) {
+    const match = /language-(\w+)/.exec(className || '')
+    const codeString = String(children).replace(/\n$/, '')
+
+    if (!inline && match) {
+      return <CodeBlock language={match[1]}>{codeString}</CodeBlock>
+    }
+
+    return (
+      <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
+        {children}
+      </code>
+    )
+  },
+}
+
+export default memo(function MarkdownRenderer({ content }) {
   return (
-    <ReactMarkdown
-      components={{
-        code({ inline, className, children, ...props }) {
-          const match = /language-(\w+)/.exec(className || '')
-          const codeString = String(children).replace(/\n$/, '')
-
-          if (!inline && match) {
-            return <CodeBlock language={match[1]}>{codeString}</CodeBlock>
-          }
-
-          // Inline code
-          return (
-            <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
-              {children}
-            </code>
-          )
-        },
-      }}
-    >
+    <ReactMarkdown components={markdownComponents}>
       {content}
     </ReactMarkdown>
   )
-}
+})

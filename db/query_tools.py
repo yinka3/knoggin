@@ -117,6 +117,7 @@ class GraphToolQueries:
             conn.aliases AS conn_aliases,
             r.weight AS conn_weight,
             r.message_ids AS evidence_ids,
+            r.context AS conn_context,
             [(conn)-[:HAS_FACT]->(cf) WHERE cf.invalid_at IS NULL | cf.content] AS conn_facts,
             parent.canonical_name AS parent_name,
             children_count
@@ -161,6 +162,7 @@ class GraphToolQueries:
                             "aliases": row["conn_aliases"] or [],
                             "facts": row["conn_facts"] or [],
                             "weight": row["conn_weight"],
+                            "context": row["conn_context"],
                             "evidence_ids": (row["evidence_ids"] or [])[:evidence_limit]
                         })
                 return list(entities.values())
@@ -192,7 +194,8 @@ class GraphToolQueries:
             r.weight as connection_strength,
             r.message_ids as evidence_ids,
             r.confidence as confidence,
-            r.last_seen as last_seen
+            r.last_seen as last_seen,
+            r.context as context
         ORDER BY r.weight DESC, r.last_seen DESC
         LIMIT $limit
         """

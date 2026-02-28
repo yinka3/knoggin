@@ -103,7 +103,12 @@ class BatchConsumer:
                 timed_out = True
             
             self._wake_event.clear()
-            await self._drain_buffer(flush_partial=timed_out)
+            try:
+                await self._drain_buffer(flush_partial=timed_out)
+            except Exception as e:
+                logger.error(f"BatchConsumer: Unexpected error during _drain_buffer: {e}")
+                # Brief backoff to prevent tight loop on persistent transient errors
+                await asyncio.sleep(5)
 
         logger.info("BatchConsumer shutting down, final drain...")
         await self._drain_buffer(flush_partial=True)
@@ -150,7 +155,7 @@ class BatchConsumer:
                     await emit(self.session_id, "pipeline", "dlq_write_failed", {
                         "msg_count": len(messages)
                     })
-                    return
+                    break
                 dlq_count += len(messages)
             else:
                 loop = asyncio.get_running_loop()
@@ -164,7 +169,10 @@ class BatchConsumer:
                     }
                     for msg in messages
                 ]
-                await loop.run_in_executor(None, self.store.save_message_logs, batch)
+                try:
+                    await loop.run_in_executor(None, self.store.save_message_logs, batch)
+                except Exception as e:
+                    logger.error(f"Failed to save message logs: {e}")
                 
                 graph_success = True
                 if result.extraction_result:
@@ -193,11 +201,11 @@ class BatchConsumer:
                         batch_result=result
                     )
                     if not dlq_success:
-                        logger.critical(f"DLQ write failed after graph failure.")
+                        logger.critical(f"DLQ write failed after graph failure. Leaving {len(messages)} messages in buffer for retry.")
                         await emit(self.session_id, "pipeline", "dlq_write_failed", {
                             "msg_count": len(messages)
                         })
-                        return
+                        break
                     dlq_count += len(messages)
                 else:
                     count = await self.redis.incrby(self._checkpoint_key, len(messages))
@@ -231,21 +239,18 @@ class BatchConsumer:
         lines = []
         for turn in conversation:
             content = turn["content"]
-            if turn["role"] == "assistant" and len(content) > 200:
-                content = content[:200] + "..."
             lines.append(f"[{turn['role_label']}]: {content}")
         return "\n".join(lines)
     
     def update_ingestion_settings(self, batch_size: int = None, batch_timeout: float = None, 
-                                  checkpoint_interval: int = None, session_window: int = None):
-        """Update ingestion parameters on the fly."""
-        if batch_size:
+                              checkpoint_interval: int = None, session_window: int = None):
+        if batch_size is not None:
             self.batch_size = batch_size
-        if batch_timeout:
+        if batch_timeout is not None:
             self.batch_timeout = batch_timeout
-        if checkpoint_interval:
+        if checkpoint_interval is not None:
             self.checkpoint_interval = checkpoint_interval
-        if session_window:
+        if session_window is not None:
             self.session_window = session_window
         
         logger.info(f"Consumer ingestion settings updated: batch={self.batch_size}, timeout={self.batch_timeout}")

@@ -1,51 +1,22 @@
-// src/pages/SettingsPage.jsx
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Lock, Save, ChevronDown, ChevronRight, Plus, X, Trash2, Eye, EyeOff } from 'lucide-react'
-import { getConfig, updateConfig } from '@/api/config'
+import { Save, Plus, X, Lock, Play, Pause } from 'lucide-react'
+import { getConfig, getCuratedModels, updateConfig } from '@/api/config'
 import { toast } from 'sonner'
-
-const REASONING_MODELS = [
-  { value: 'google/gemini-2.5-flash', label: 'gemini-2.5-flash', tier: 'default' },
-  { value: 'google/gemini-2.5-flash-lite', label: 'gemini-2.5-flash-lite', tier: 'budget' },
-]
-
-const AGENT_MODELS = [
-  { value: 'google/gemini-3-flash-preview', label: 'gemini-3-flash-preview', tier: 'default' },
-  { value: 'deepseek/deepseek-v3.2', label: 'deepseek-v3.2', tier: 'budget' },
-  { value: 'x-ai/grok-4.1-fast', label: 'grok-4.1-fast', tier: 'budget' },
-  { value: 'anthropic/claude-sonnet-4.5', label: 'claude-sonnet-4.5', tier: 'premium' },
-]
-
-function TierBadge({ tier }) {
-  const styles = {
-    default: 'bg-muted text-muted-foreground',
-    budget: 'bg-primary/20 text-primary',
-    premium: 'bg-amber-500/20 text-amber-400',
-  }
-  return (
-    <Badge variant="secondary" className={`text-[10px] ml-auto rounded-full ${styles[tier]}`}>
-      {tier}
-    </Badge>
-  )
-}
+import TopicEditor from '@/components/TopicEditor'
+import HierarchyEditor from '@/components/HierarchyEditor'
+import useDelayedLoading from '@/hooks/useDelayedLoading'
+import LLMSection from '@/components/settings/LLMSection'
+import MCPSection from '@/components/settings/MCPSection'
 
 function SectionHeader({ children, description }) {
   return (
-    <div className="mb-4">
-      <h2 className="text-base font-medium text-foreground">{children}</h2>
-      {description && <p className="text-sm text-muted-foreground mt-0.5">{description}</p>}
+    <div className="mb-3">
+      <h2 className="text-sm font-medium text-foreground">{children}</h2>
+      {description && <p className="text-xs text-muted-foreground mt-0.5">{description}</p>}
     </div>
   )
 }
@@ -56,44 +27,72 @@ export default function SettingsPage() {
   const [error, setError] = useState(null)
 
   const [userName, setUserName] = useState('')
-  const [userSummary, setUserSummary] = useState('')
-  const [reasoningModel, setReasoningModel] = useState('')
+  const [userAliases, setUserAliases] = useState('')
+
   const [agentModel, setAgentModel] = useState('')
   const [defaultTopics, setDefaultTopics] = useState({})
-  const [expandedTopic, setExpandedTopic] = useState(null)
+
+  const [devJobs, setDevJobs] = useState({
+    cleaner: true,
+    merger: true,
+    archival: true,
+    topic_config: true,
+  })
+
+  const initialState = useRef(null)
 
   const [addingTopic, setAddingTopic] = useState(false)
   const [newTopicName, setNewTopicName] = useState('')
-  const [showSkeleton, setShowSkeleton] = useState(false)
-  const [agentName, setAgentName] = useState('')
-  const [systemPrompt, setSystemPrompt] = useState('')
-  const [openrouterKey, setOpenrouterKey] = useState('')
-  const [directProvider, setDirectProvider] = useState('')
-  const [directApiKey, setDirectApiKey] = useState('')
-  const [showKeys, setShowKeys] = useState(false)
+  const showSkeleton = useDelayedLoading(loading)
 
-  useEffect(() => {
-    if (loading) {
-      const timer = setTimeout(() => setShowSkeleton(true), 150)
-      return () => clearTimeout(timer)
-    }
-    setShowSkeleton(false)
-  }, [loading])
+  const [openrouterKey, setOpenrouterKey] = useState('')
+  const [searchConfig, setSearchConfig] = useState({ provider: 'auto', brave_api_key: '', tavily_api_key: '' })
 
   useEffect(() => {
     async function load() {
       try {
-        const config = await getConfig()
+
+        const [config, models] = await Promise.all([getConfig(), getCuratedModels()])
+
         setUserName(config.user_name || '')
-        setUserSummary(config.user_summary || '')
-        setReasoningModel(config.reasoning_model || '')
-        setAgentModel(config.agent_model || '')
+        setUserAliases((config.user_aliases || []).join(', '))
         setDefaultTopics(config.default_topics || {})
-        setAgentName(config.agent_name || '')
-        setSystemPrompt(config.system_prompt || '')
-        setOpenrouterKey(config.openrouter_api_key || '')
-        setDirectProvider(config.direct_provider || '')
-        setDirectApiKey(config.direct_api_key || '')
+        setOpenrouterKey(config.llm?.api_key || '')
+        setSearchConfig({
+          provider: config.search?.provider || 'auto',
+          brave_api_key: config.search?.brave_api_key || '',
+          tavily_api_key: config.search?.tavily_api_key || '',
+        })
+        setAgentModel(config.llm?.agent_model || '')
+
+        const dSettings = config.developer_settings || {}
+        const jobs = dSettings.jobs || {}
+        setDevJobs({
+          cleaner: jobs.cleaner?.enabled !== false,
+          merger: jobs.merger?.enabled !== false,
+          archival: jobs.archival?.enabled !== false,
+          topic_config: jobs.topic_config?.enabled !== false,
+        })
+
+        const aliases = (config.user_aliases || []).join(', ')
+        initialState.current = JSON.stringify({
+          userAliases: aliases,
+          defaultTopics: config.default_topics || {},
+          openrouterKey: config.llm?.api_key || '',
+          searchConfig: {
+            provider: config.search?.provider || 'auto',
+            brave_api_key: config.search?.brave_api_key || '',
+            tavily_api_key: config.search?.tavily_api_key || '',
+          },
+          agentModel: config.llm?.agent_model || '',
+          devJobs: {
+            cleaner: jobs.cleaner?.enabled !== false,
+            merger: jobs.merger?.enabled !== false,
+            archival: jobs.archival?.enabled !== false,
+            topic_config: jobs.topic_config?.enabled !== false,
+          },
+        })
+
       } catch (err) {
         setError(err.message)
       } finally {
@@ -103,32 +102,84 @@ export default function SettingsPage() {
     load()
   }, [])
 
-  async function handleSave() {
-    setSaving(true)
+  const hasChanges =
+    initialState.current !== null &&
+    JSON.stringify({
+      userAliases,
+      defaultTopics,
+      openrouterKey,
+      searchConfig,
+      agentModel,
+      devJobs,
+    }) !== initialState.current
+  useEffect(() => {
+    const handler = e => {
+      if (hasChanges) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [hasChanges])
 
+  const handleSave = useCallback(async () => {
+    setSaving(true)
+    setError(null)
     try {
+      const currentConfig = await getConfig()
+      const updatedDevSettings = {
+        ...(currentConfig.developer_settings || {}),
+        jobs: {
+          ...(currentConfig.developer_settings?.jobs || {}),
+          cleaner: {
+            ...(currentConfig.developer_settings?.jobs?.cleaner || {}),
+            enabled: devJobs.cleaner,
+          },
+          merger: {
+            ...(currentConfig.developer_settings?.jobs?.merger || {}),
+            enabled: devJobs.merger,
+          },
+          archival: {
+            ...(currentConfig.developer_settings?.jobs?.archival || {}),
+            enabled: devJobs.archival,
+          },
+          topic_config: {
+            ...(currentConfig.developer_settings?.jobs?.topic_config || {}),
+            enabled: devJobs.topic_config,
+          },
+        },
+      }
+
       await updateConfig({
-        user_summary: userSummary || null,
-        reasoning_model: reasoningModel,
-        agent_model: agentModel,
+        user_aliases: userAliases
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean),
         default_topics: defaultTopics,
-        agent_name: agentName || null,
-        system_prompt: systemPrompt || null,
-        openrouter_api_key: openrouterKey || null,
-        direct_provider: directProvider || null,
-        direct_api_key: directApiKey || null,
+        llm: {
+          api_key: openrouterKey,
+          agent_model: agentModel,
+        },
+        search: searchConfig,
+        developer_settings: updatedDevSettings,
       })
-      toast.success('Settings saved', {
-        description: 'Model changes applied to active sessions',
+      initialState.current = JSON.stringify({
+        userAliases,
+        defaultTopics,
+        openrouterKey,
+        searchConfig,
+        agentModel,
+        devJobs,
       })
+      toast.success('Settings saved')
     } catch (err) {
-      toast.error('Failed to save settings', {
-        description: err.message,
-      })
+      setError(err.message)
+      toast.error('Failed to save settings')
     } finally {
       setSaving(false)
     }
-  }
+  }, [userAliases, defaultTopics, openrouterKey, searchConfig, agentModel, devJobs])
 
   function handleAddTopic() {
     const name = newTopicName.trim()
@@ -143,7 +194,6 @@ export default function SettingsPage() {
           label_aliases: {},
         },
       })
-      setExpandedTopic(name)
       setNewTopicName('')
       setAddingTopic(false)
     }
@@ -168,10 +218,17 @@ export default function SettingsPage() {
             <h1 className="text-lg font-medium text-foreground">Settings</h1>
             <p className="text-sm text-muted-foreground">Manage your preferences</p>
           </div>
-          <Button onClick={handleSave} disabled={saving} className="rounded-xl">
-            <Save size={16} className="mr-2" />
-            {saving ? 'Saving...' : 'Save'}
-          </Button>
+          <div className="flex items-center gap-3">
+            {hasChanges && (
+              <span className="text-xs text-amber-500 bg-amber-500/10 px-2.5 py-1 rounded-full">
+                Unsaved changes
+              </span>
+            )}
+            <Button onClick={handleSave} disabled={saving} className="rounded-xl">
+              <Save size={16} className="mr-2" />
+              {saving ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -185,8 +242,9 @@ export default function SettingsPage() {
 
           {/* Profile Section */}
           <section>
-            <SectionHeader description="Your identity for STELLA">Profile</SectionHeader>
+            <SectionHeader description="Your identity for Knoggin">Profile</SectionHeader>
             <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
+              {/* Name - Locked */}
               <div className="space-y-2">
                 <Label htmlFor="name" className="text-muted-foreground flex items-center gap-2">
                   Name
@@ -200,389 +258,180 @@ export default function SettingsPage() {
                 />
               </div>
 
+              {/* Aliases */}
               <div className="space-y-2">
-                <Label htmlFor="summary" className="text-muted-foreground">
-                  Summary
-                </Label>
-                <textarea
-                  id="summary"
-                  value={userSummary}
-                  onChange={e => setUserSummary(e.target.value)}
-                  placeholder="A brief description about yourself for the agent..."
-                  rows={3}
-                  className="w-full bg-muted border border-border rounded-xl px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
-                />
-              </div>
-            </div>
-          </section>
-
-          {/* Models Section */}
-          <section>
-            <SectionHeader description="Choose which models power STELLA">Models</SectionHeader>
-            <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">Reasoning Model</Label>
-                <Select value={reasoningModel} onValueChange={setReasoningModel}>
-                  <SelectTrigger className="bg-muted border-border rounded-xl">
-                    <SelectValue placeholder="Select model" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-popover border-border rounded-xl">
-                    {REASONING_MODELS.map(model => (
-                      <SelectItem key={model.value} value={model.value} className="rounded-lg">
-                        <span className="flex items-center gap-2 w-full">
-                          {model.label}
-                          <TierBadge tier={model.tier} />
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">Agent Model</Label>
-                <Select value={agentModel} onValueChange={setAgentModel}>
-                  <SelectTrigger className="bg-muted border-border rounded-xl">
-                    <SelectValue placeholder="Select model" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-popover border-border rounded-xl">
-                    {AGENT_MODELS.map(model => (
-                      <SelectItem key={model.value} value={model.value} className="rounded-lg">
-                        <span className="flex items-center gap-2 w-full">
-                          {model.label}
-                          <TierBadge tier={model.tier} />
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-          </section>
-
-          {/* Agent Section */}
-          <section>
-            <SectionHeader description="Customize your AI assistant">Agent</SectionHeader>
-            <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
-              <div className="space-y-2">
-                <Label htmlFor="agentName" className="text-muted-foreground">
-                  Agent Name
+                <Label htmlFor="aliases" className="text-muted-foreground">
+                  Aliases
                 </Label>
                 <Input
-                  id="agentName"
-                  value={agentName}
-                  onChange={e => setAgentName(e.target.value)}
-                  placeholder="STELLA"
+                  id="aliases"
+                  value={userAliases}
+                  onChange={e => setUserAliases(e.target.value)}
+                  placeholder="Nicknames, handles (comma-separated)"
                   className="bg-muted border-border rounded-xl"
                 />
                 <p className="text-[11px] text-muted-foreground">
-                  Use {'{agent_name}'} in the system prompt to reference this
+                  Comma-separated names your agent should recognize as you
                 </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="systemPrompt" className="text-muted-foreground">
-                  System Prompt
-                </Label>
-                <textarea
-                  id="systemPrompt"
-                  value={systemPrompt}
-                  onChange={e => setSystemPrompt(e.target.value)}
-                  placeholder="You are {agent_name}, a personal knowledge management assistant..."
-                  rows={8}
-                  className="w-full bg-muted border border-border rounded-xl px-3 py-2 text-sm text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
-                />
               </div>
             </div>
           </section>
 
-          {/* API Keys Section */}
+          {/* Models + API Keys */}
+          <LLMSection
+            openrouterKey={openrouterKey}
+            setOpenrouterKey={setOpenrouterKey}
+            searchConfig={searchConfig}
+            setSearchConfig={setSearchConfig}
+          />
+
+          {/* Topics Section */}
           <section>
-            <SectionHeader description="Configure LLM provider access">API Keys</SectionHeader>
-            <div className="space-y-4 bg-card rounded-xl p-4 border border-border">
-              <div className="flex items-center justify-between">
-                <Label className="text-muted-foreground">Show Keys</Label>
-                <button
-                  type="button"
-                  onClick={() => setShowKeys(!showKeys)}
-                  className="text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showKeys ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="openrouterKey" className="text-muted-foreground">
-                  OpenRouter API Key
-                </Label>
-                <Input
-                  id="openrouterKey"
-                  type={showKeys ? 'text' : 'password'}
-                  value={openrouterKey}
-                  onChange={e => setOpenrouterKey(e.target.value)}
-                  placeholder="sk-or-..."
-                  className="bg-muted border-border rounded-xl font-mono text-sm"
-                />
-              </div>
-
-              <div className="border-t border-border pt-4 space-y-4">
-                <p className="text-xs text-muted-foreground">
-                  Optional: Use a direct provider instead of OpenRouter
-                </p>
-
-                <div className="space-y-2">
-                  <Label className="text-muted-foreground">Provider</Label>
-                  <Select value={directProvider} onValueChange={setDirectProvider}>
-                    <SelectTrigger className="bg-muted border-border rounded-xl">
-                      <SelectValue placeholder="None" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-popover border-border rounded-xl">
-                      <SelectItem value="none" className="rounded-lg">
-                        None
-                      </SelectItem>
-                      <SelectItem value="openai" className="rounded-lg">
-                        OpenAI
-                      </SelectItem>
-                      <SelectItem value="anthropic" className="rounded-lg">
-                        Anthropic
-                      </SelectItem>
-                      <SelectItem value="google" className="rounded-lg">
-                        Google
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {directProvider && (
-                  <div className="space-y-2">
-                    <Label htmlFor="directApiKey" className="text-muted-foreground">
-                      {directProvider.charAt(0).toUpperCase() + directProvider.slice(1)} API Key
-                    </Label>
-                    <Input
-                      id="directApiKey"
-                      type={showKeys ? 'text' : 'password'}
-                      value={directApiKey}
-                      onChange={e => setDirectApiKey(e.target.value)}
-                      placeholder={
-                        directProvider === 'openai'
-                          ? 'sk-...'
-                          : directProvider === 'anthropic'
-                            ? 'sk-ant-...'
-                            : '...'
-                      }
-                      className="bg-muted border-border rounded-xl font-mono text-sm"
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
-
-          {/* Default Topics Section */}
-          <section>
-            <SectionHeader description="Topics applied to new sessions">
-              Default Topics
+            <SectionHeader description="Customize the categories and relationships for your notes.">
+              Topic Hierarchy
             </SectionHeader>
-            <div className="space-y-2">
-              {Object.entries(defaultTopics).map(([name, config]) => (
-                <div key={name} className="rounded-xl overflow-hidden bg-card border border-border">
-                  <button
-                    onClick={() => setExpandedTopic(expandedTopic === name ? null : name)}
-                    className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/50 transition-colors"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span
-                        className={`w-2 h-2 rounded-full ${config.active !== false ? 'bg-primary' : 'bg-muted-foreground/30'}`}
-                      />
-                      <div className="text-left">
-                        <span className="text-foreground font-medium">{name}</span>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {config.labels?.length > 0 ? config.labels.join(', ') : 'No labels'}
-                        </p>
-                      </div>
-                    </div>
-                    {expandedTopic === name ? (
-                      <ChevronDown size={16} className="text-muted-foreground" />
-                    ) : (
-                      <ChevronRight size={16} className="text-muted-foreground" />
-                    )}
-                  </button>
+            <TopicEditor
+              topics={defaultTopics}
+              onChange={setDefaultTopics}
+              protectedNames={[]}
+              renderExtra={(name, config, updateField) => (
+                <HierarchyEditor name={name} config={config} updateField={updateField} />
+              )}
+            />
 
-                  {expandedTopic === name && (
-                    <div className="px-4 pb-4 pt-2 border-t border-border space-y-4">
-                      {/* Topic Aliases */}
-                      <div>
-                        <Label className="text-xs text-muted-foreground">Topic Aliases</Label>
-                        <Input
-                          value={config.aliases?.join(', ') || ''}
-                          onChange={e => {
-                            const newAliases = e.target.value
-                              .split(',')
-                              .map(s => s.trim())
-                              .filter(Boolean)
-                            setDefaultTopics({
-                              ...defaultTopics,
-                              [name]: { ...config, aliases: newAliases },
-                            })
-                          }}
-                          placeholder="work, job, office"
-                          className="mt-1 bg-muted border-border rounded-lg text-sm"
-                        />
-                        <p className="text-[11px] text-muted-foreground mt-1">
-                          Comma-separated alternate names for this topic
-                        </p>
-                      </div>
-
-                      {/* Labels */}
-                      <div>
-                        <Label className="text-xs text-muted-foreground">Labels</Label>
-                        <Input
-                          value={config.labels?.join(', ') || ''}
-                          onChange={e => {
-                            const newLabels = e.target.value
-                              .split(',')
-                              .map(s => s.trim())
-                              .filter(Boolean)
-                            setDefaultTopics({
-                              ...defaultTopics,
-                              [name]: { ...config, labels: newLabels },
-                            })
-                          }}
-                          placeholder="person, company, project"
-                          className="mt-1 bg-muted border-border rounded-lg text-sm"
-                        />
-                        <p className="text-[11px] text-muted-foreground mt-1">
-                          Entity types to extract for this topic
-                        </p>
-                      </div>
-
-                      {/* Label Aliases */}
-                      <div>
-                        <Label className="text-xs text-muted-foreground">Label Aliases</Label>
-                        <textarea
-                          value={
-                            Object.keys(config.label_aliases || {}).length > 0
-                              ? JSON.stringify(config.label_aliases, null, 2)
-                              : ''
-                          }
-                          onChange={e => {
-                            try {
-                              const parsed = e.target.value.trim() ? JSON.parse(e.target.value) : {}
-                              setDefaultTopics({
-                                ...defaultTopics,
-                                [name]: { ...config, label_aliases: parsed },
-                              })
-                            } catch {
-                              // Invalid JSON, don't update
-                            }
-                          }}
-                          placeholder='{"org": "company", "firm": "company"}'
-                          rows={3}
-                          className="mt-1 w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
-                        />
-                        <p className="text-[11px] text-muted-foreground mt-1">
-                          JSON mapping alternate label names to canonical labels
-                        </p>
-                      </div>
-
-                      {/* Hierarchy */}
-                      <div>
-                        <Label className="text-xs text-muted-foreground">Hierarchy</Label>
-                        <textarea
-                          value={
-                            Object.keys(config.hierarchy || {}).length > 0
-                              ? JSON.stringify(config.hierarchy, null, 2)
-                              : ''
-                          }
-                          onChange={e => {
-                            try {
-                              const parsed = e.target.value.trim() ? JSON.parse(e.target.value) : {}
-                              setDefaultTopics({
-                                ...defaultTopics,
-                                [name]: { ...config, hierarchy: parsed },
-                              })
-                            } catch {
-                              // Invalid JSON, don't update
-                            }
-                          }}
-                          placeholder='{"company": ["team", "project"]}'
-                          rows={3}
-                          className="mt-1 w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors"
-                        />
-                        <p className="text-[11px] text-muted-foreground mt-1">
-                          JSON defining parent-child relationships between labels
-                        </p>
-                      </div>
-
-                      {name !== 'General' && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            const updated = { ...defaultTopics }
-                            delete updated[name]
-                            setDefaultTopics(updated)
-                            setExpandedTopic(null)
-                          }}
-                          className="text-muted-foreground hover:text-destructive"
-                        >
-                          <Trash2 size={14} className="mr-1" />
-                          Remove Topic
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-
-              {/* Add Topic - Inline */}
-              {addingTopic ? (
-                <div className="flex items-center gap-2 p-2 rounded-xl border border-primary/50 bg-card">
-                  <Input
-                    value={newTopicName}
-                    onChange={e => setNewTopicName(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') handleAddTopic()
-                      if (e.key === 'Escape') {
-                        setAddingTopic(false)
-                        setNewTopicName('')
-                      }
-                    }}
-                    placeholder="Topic name..."
-                    autoFocus
-                    className="flex-1 bg-muted border-border rounded-lg text-sm"
-                  />
-                  <Button
-                    size="sm"
-                    onClick={handleAddTopic}
-                    disabled={!newTopicName.trim() || defaultTopics[newTopicName.trim()]}
-                    className="rounded-lg"
-                  >
-                    Add
-                  </Button>
-                  <button
-                    onClick={() => {
+            {/* Add Topic */}
+            {addingTopic ? (
+              <div className="flex items-center gap-2 px-4 py-2">
+                <Input
+                  value={newTopicName}
+                  onChange={e => setNewTopicName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleAddTopic()
+                    if (e.key === 'Escape') {
                       setAddingTopic(false)
                       setNewTopicName('')
-                    }}
-                    className="p-2 text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => setAddingTopic(true)}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-dashed border-border text-sm text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors"
+                    }
+                  }}
+                  placeholder="Topic name..."
+                  autoFocus
+                  className="flex-1 bg-muted border-border rounded-lg text-sm h-8"
+                />
+                <Button
+                  size="sm"
+                  onClick={handleAddTopic}
+                  disabled={!newTopicName.trim() || defaultTopics[newTopicName.trim()]}
+                  className="rounded-lg h-8 text-xs"
                 >
-                  <Plus size={16} />
-                  Add Topic
+                  Add
+                </Button>
+                <button
+                  onClick={() => {
+                    setAddingTopic(false)
+                    setNewTopicName('')
+                  }}
+                  className="p-1.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X size={14} />
                 </button>
-              )}
+              </div>
+            ) : (
+              <button
+                onClick={() => setAddingTopic(true)}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
+              >
+                <Plus size={14} />
+                Add Topic
+              </button>
+            )}
+          </section>
+
+          {/* Background Jobs Section */}
+          <section>
+            <SectionHeader description="Toggle optional background tasks">
+              Background Jobs
+            </SectionHeader>
+            <div className="bg-card rounded-xl p-4 border border-border">
+              <JobCard
+                title="Merger / Dedup"
+                description="Periodically merges duplicate entities together."
+                enabled={devJobs.merger}
+                onToggle={v => setDevJobs(prev => ({ ...prev, merger: v }))}
+              />
+              <JobCard
+                title="Cleaner"
+                description="Removes unused orphaned entities."
+                enabled={devJobs.cleaner}
+                onToggle={v => setDevJobs(prev => ({ ...prev, cleaner: v }))}
+              />
+              <JobCard
+                title="Fact Archival"
+                description="Archives old facts out of working memory."
+                enabled={devJobs.archival}
+                onToggle={v => setDevJobs(prev => ({ ...prev, archival: v }))}
+              />
+              <JobCard
+                title="Topic Configs"
+                description="Automatically detects when to update your Topic Hierarchy."
+                enabled={devJobs.topic_config}
+                onToggle={v => setDevJobs(prev => ({ ...prev, topic_config: v }))}
+              />
             </div>
+            <p className="text-[11px] text-muted-foreground mt-2 px-2">
+              Note: The <b>Profile Refinement</b> and <b>DLQ Replay</b> jobs cannot be disabled as
+              they are required for basic functionality.
+            </p>
+          </section>
+
+          {/* MCP Servers Section */}
+          <section>
+            <SectionHeader description="Connect external tool servers via MCP">
+              MCP Servers
+            </SectionHeader>
+            <MCPSection />
           </section>
         </div>
       </div>
+    </div>
+  )
+}
+
+function JobCard({ title, description, enabled, onToggle }) {
+  return (
+    <div className="flex items-center justify-between py-3 border-b border-border/30 last:border-0">
+      <div className="space-y-0.5">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-foreground">{title}</span>
+          <span
+            className={`text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide ${
+              enabled ? 'bg-emerald-500/10 text-emerald-500' : 'bg-muted text-muted-foreground'
+            }`}
+          >
+            {enabled ? 'Running' : 'Paused'}
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+
+      <Button
+        variant={enabled ? 'outline' : 'default'}
+        size="sm"
+        onClick={() => onToggle(!enabled)}
+        className={`h-7 gap-1 px-2.5 rounded-lg text-xs ${
+          enabled
+            ? 'hover:bg-destructive/10 hover:text-destructive hover:border-destructive/30'
+            : ''
+        }`}
+      >
+        {enabled ? (
+          <>
+            <Pause size={12} /> Pause
+          </>
+        ) : (
+          <>
+            <Play size={12} /> Start
+          </>
+        )}
+      </Button>
     </div>
   )
 }

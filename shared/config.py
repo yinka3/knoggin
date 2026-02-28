@@ -1,10 +1,8 @@
 import os
 import json
-import secrets
-from datetime import datetime, timezone
+import copy
 from pathlib import Path
-from typing import Optional
-import httpx
+from typing import Any, Dict, Optional
 from loguru import logger
 from dotenv import load_dotenv
 
@@ -13,9 +11,92 @@ load_dotenv()
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
 CONFIG_FILE = CONFIG_DIR / "knoggin.json"
 
-DEFAULT_REASONING_MODEL = "google/gemini-2.5-flash"
-DEFAULT_AGENT_MODEL = "google/gemini-3-flash-preview"
-DEFAULT_TOPICS = ["General"]
+MCP_SERVER_PRESETS = [
+    {
+        "id": "google-workspace",
+        "name": "Google Workspace",
+        "description": "Gmail, Calendar, Drive & Docs",
+        "command": "uvx",
+        "args": ["google-workspace-mcp"],
+        "env_vars": [
+            {"key": "GOOGLE_CLIENT_ID", "label": "Client ID", "placeholder": "your-client-id.apps.googleusercontent.com"},
+            {"key": "GOOGLE_CLIENT_SECRET", "label": "Client Secret", "placeholder": "GOCSPX-..."},
+            {"key": "GOOGLE_REFRESH_TOKEN", "label": "Refresh Token", "placeholder": "1//0..."},
+        ],
+        "tags": ["gmail", "calendar", "drive", "docs", "google"],
+        "risk": "moderate",
+        "risk_note": "Can read emails, calendar events, and drive files. Write access depends on OAuth scopes granted.",
+        "help_url": "https://console.cloud.google.com/apis/credentials",
+        "help_label": "Google Cloud Console → Create OAuth credentials",
+    },
+    {
+        "id": "google-maps",
+        "name": "Google Maps",
+        "description": "Location search, directions & geocoding",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-google-maps"],
+        "env_vars": [
+            {"key": "GOOGLE_MAPS_API_KEY", "label": "Maps API Key", "placeholder": "AIza..."},
+        ],
+        "tags": ["maps", "location", "directions", "google"],
+        "risk": "safe",
+        "risk_note": "Read-only location lookups and directions. No destructive operations.",
+        "help_url": "https://console.cloud.google.com/apis/credentials",
+        "help_label": "Google Cloud Console → Create API key with Maps enabled",
+    },
+    {
+        "id": "github",
+        "name": "GitHub",
+        "description": "Repos, issues, PRs & code search",
+        "command": "uvx",
+        "args": ["mcp-server-github"],
+        "env_vars": [
+            {"key": "GITHUB_TOKEN", "label": "Personal Access Token", "placeholder": "ghp_..."},
+        ],
+        "tags": ["github", "git", "code", "repos"],
+        "risk": "moderate",
+        "risk_note": "Can read repos, issues, and PRs. Write access (creating issues, PRs) depends on token scopes.",
+        "allowed_tools": [
+            "search_repositories", "get_file_contents", "search_code",
+            "list_issues", "get_issue", "list_commits",
+            "get_pull_request", "list_pull_requests"
+        ],
+        "help_url": "https://github.com/settings/tokens",
+        "help_label": "GitHub → Settings → Developer settings → Personal access tokens",
+    },
+
+    {
+        "id": "filesystem",
+        "name": "Filesystem",
+        "description": "Read, write & search local files",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home"],
+        "env_vars": [],
+        "tags": ["files", "filesystem", "local"],
+        "risk": "destructive",
+        "risk_note": "Can read, write, and delete files on your system. Restricted to read-only by default.",
+        "allowed_tools": ["read_file", "list_directory", "search_files", "get_file_info"],
+    },
+    {
+        "id": "slack",
+        "name": "Slack",
+        "description": "Channels, messages & users",
+        "command": "uvx",
+        "args": ["mcp-server-slack"],
+        "env_vars": [
+            {"key": "SLACK_BOT_TOKEN", "label": "Bot Token", "placeholder": "xoxb-..."},
+        ],
+        "tags": ["slack", "messaging", "chat"],
+        "risk": "moderate",
+        "risk_note": "Can read channels and messages. Write access depends on bot token scopes.",
+        "allowed_tools": [
+            "slack_list_channels", "slack_get_channel_history",
+            "slack_get_users", "slack_get_thread_replies"
+        ],
+        "help_url": "https://api.slack.com/apps",
+        "help_label": "Slack API → Create app → Bot token",
+    },
+]
 
 _config_cache: Optional[dict] = None
 _config_mtime: Optional[float] = None
@@ -24,54 +105,124 @@ def get_default_config() -> dict:
     return {
         "_warning": "This file is auto-generated. Use the UI to modify settings. Manual edits may be overwritten.",
         "user_name": "",
-        "user_summary": None,
+        "user_aliases": [],
+        "user_facts": [],
         "configured_at": None,
         "default_topics": {
             "General": {
                 "active": True, 
                 "labels": [],
                 "hierarchy": {}, 
-                "aliases": [],
-                "label_aliases": {},
+                "aliases": []
             },
             "Identity": {
                 "active": True,
                 "labels": ["person"],
                 "hierarchy": {},
-                "aliases": [],
-                "label_aliases": {}
+                "aliases": []
             }
         },
+        "curated_models": [
+            {
+                "id": "anthropic/claude-sonnet-4.5",
+                "name": "Claude Sonnet 4.5",
+                "input_price": 3.00,
+                "output_price": 15.00
+            },
+            {
+                "id": "anthropic/claude-opus-4.5",
+                "name": "Claude Opus 4.5",
+                "input_price": 5.00,
+                "output_price": 25.00
+            },
+            {
+                "id": "x-ai/grok-4.1-fast",
+                "name": "Grok 4.1 Fast",
+                "input_price": 0.20,
+                "output_price": 0.50
+            },
+            {
+                "id": "openai/gpt-5.1",
+                "name": "GPT-5.1",
+                "input_price": 1.25,
+                "output_price": 10.00
+            },
+            {
+                "id": "google/gemini-3-pro-preview",
+                "name": "Gemini 3 Pro",
+                "input_price": 2.00,
+                "output_price": 12.00
+            },
+            {
+                "id": "anthropic/claude-haiku-4.5",
+                "name": "Claude Haiku 4.5",
+                "input_price": 1.00,
+                "output_price": 5.00
+            },
+            {
+                "id": "google/gemini-2.5-flash-lite-preview-09-2025",
+                "name": "Gemini 2.5 Flash Lite",
+                "input_price": 0.10,
+                "output_price": 0.40
+            },
+            {
+                "id": "google/gemini-2.5-flash",
+                "name": "Gemini 2.5 Flash",
+                "input_price": 0.30,
+                "output_price": 2.50
+            },
+            {
+                "id": "deepseek/deepseek-v3.1",
+                "name": "DeepSeek V3.1",
+                "input_price": 0.60,
+                "output_price": 1.70
+            },
+            {
+                "id": "openai/gpt-oss-120b:free",
+                "name": "GPT-OSS-120B",
+                "input_price": 0,
+                "output_price": 0
+            }
+        ],
         "llm": {
             "api_key": "",
-            "reasoning_model": "google/gemini-2.5-flash",
             "agent_model": "google/gemini-3-flash-preview"
+        },
+        "search": {
+            "provider": "auto",
+            "brave_api_key": "",
+            "tavily_api_key": ""
+        },
+        "mcp": {
+            "servers": {},
+            "tool_timeout": 15.0,
+            "max_mcp_calls_per_run": 3
         },
         "developer_settings": {
             
             "ingestion": {
                 "batch_size": 8,
-                "batch_timeout": 300.0,
-                # "checkpoint_interval": 32,  # Optional override (default: 4x batch)
-                # "session_window": 24        # Optional override (default: 3x batch)
+                "batch_timeout": 300.0
             },
             
             "jobs": {
                 "cleaner": {
+                    "enabled": True,
                     "interval_hours": 24,
                     "orphan_age_hours": 24,
                     "stale_junk_days": 30
                 },
                 "profile": {
                     "msg_window": 30,
-                    "volume_threshold": 30,
-                    "idle_threshold": 60,
+                    "volume_threshold": 15,
+                    "idle_threshold": 90,
                     "profile_batch_size": 8,
                     "contradiction_sim_low": 0.70,
                     "contradiction_sim_high": 0.95,
                     "contradiction_batch_size": 4
                 },
                 "merger": {
+                    "enabled": True,
                     "auto_threshold": 0.93,
                     "hitl_threshold": 0.65,
                     "cosine_threshold": 0.65
@@ -82,7 +233,14 @@ def get_default_config() -> dict:
                     "max_attempts": 2
                 },
                 "archival": {
-                    "retention_days": 14
+                    "enabled": True,
+                    "retention_days": 14,
+                    "fallback_interval_hours": 24
+                },
+                "topic_config": {
+                    "enabled": True,
+                    "interval_msgs": 40,
+                    "conversation_window": 50
                 }
             },
 
@@ -94,21 +252,26 @@ def get_default_config() -> dict:
                 "default_entity_limit": 5,
                 "default_activity_hours": 24
             },
-            
+
             "limits": {
                 "agent_history_turns": 7,
-                "max_tool_calls": 6,
-                "max_attempts": 8,
+                "max_tool_calls": 12,
+                "max_attempts": 15,
                 "max_consecutive_errors": 3,
                 "max_accumulated_messages": 30,
                 "conversation_context_turns": 10,
                 "tool_limits": {
-                    "search_messages": 2,
-                    "get_connections": 4,
-                    "search_entity": 4,
-                    "get_activity": 5,
-                    "find_path": 5,
-                    "get_hierarchy": 5
+                    "search_messages": 6,
+                    "get_connections": 8,
+                    "search_entity": 8,
+                    "get_activity": 8,
+                    "find_path": 8,
+                    "get_hierarchy": 8,
+                    "save_memory": 4,
+                    "forget_memory": 4,
+                    "search_files": 3,
+                    "web_search": 4,
+                    "news_search": 4
                 }
             },
             
@@ -117,14 +280,21 @@ def get_default_config() -> dict:
                 "fuzzy_non_substring_threshold": 91,
                 "generic_token_freq": 10,
                 "candidate_fuzzy_threshold": 85,   
-                "candidate_vector_threshold": 0.85
+                "candidate_vector_threshold": 0.85,
+                "resolution_threshold": 0.85
             },
 
             "nlp_pipeline": {
                 "gliner_threshold": 0.85,
                 "vp01_min_confidence": 0.8
-            }
-
+            },
+            "community": {
+                "enabled": False,
+                "interval_minutes": 30,
+                "max_turns": 10,
+                "seeding_agent_id": None,
+                "agent_pool_ids": []
+            },
         }
     }
 
@@ -169,6 +339,8 @@ def save_config(data: dict) -> bool:
         with open(CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=2)
         
+        CONFIG_FILE.chmod(0o600)
+        
         _config_cache = data
         _config_mtime = _get_file_mtime()
         return True
@@ -195,3 +367,46 @@ def get_config_value(key: str, default=None):
     if not config:
         return default
     return config.get(key, default)
+
+def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge updates into source dict."""
+    for key, value in updates.items():
+        if isinstance(value, dict) and key in source and isinstance(source[key], dict):
+            deep_merge(source[key], value)
+        else:
+            source[key] = value
+    return source
+
+
+def update_config_value(key: str, updates: dict) -> bool:
+    """
+    Update a top-level config key with deep merge.
+    Preserves existing nested values not included in updates.
+    """
+    import copy
+    config = load_config() or get_default_config()
+    
+    if key not in config:
+        config[key] = {}
+    
+    current = config[key]
+    if isinstance(current, dict) and isinstance(updates, dict):
+        deep_merge(current, updates)
+    else:
+        config[key] = updates
+    
+    return save_config(config)
+
+def redact_config(config: dict) -> dict:
+    """Redact sensitive fields before returning to client."""
+    out = copy.deepcopy(config)
+    llm = out.get("llm", {})
+    if llm.get("api_key"):
+        llm["api_key"] = f"...{llm['api_key'][-4:]}"
+    
+    search = out.get("search", {})
+    if search.get("brave_api_key"):
+        search["brave_api_key"] = f"...{search['brave_api_key'][-4:]}"
+    if search.get("tavily_api_key"):
+        search["tavily_api_key"] = f"...{search['tavily_api_key'][-4:]}"
+    return out
