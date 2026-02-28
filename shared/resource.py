@@ -7,6 +7,7 @@ from loguru import logger
 import redis.asyncio as aioredis
 import spacy
 import torch
+from db.community_store import CommunityStore
 from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
 from shared.config import get_config_value
@@ -31,6 +32,7 @@ class ResourceManager:
         self.chroma: chromadb.ClientAPI = None
         self.mcp_manager: MCPClientManager = None
         self.active_resolver = None
+        self.community_store: CommunityStore = None
 
     @classmethod
     async def initialize(cls) -> "ResourceManager":
@@ -79,6 +81,7 @@ class ResourceManager:
                 mcp_config = get_config_value("mcp") or {"servers": {}}
                 instance.mcp_manager = await MCPClientManager.create(mcp_config)
                 logger.info("MCP manager initialized")
+                instance.community_store = CommunityStore(instance.store.driver)
 
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
@@ -147,6 +150,7 @@ class ResourceManager:
         self.chroma = None
         if self.llm_service:
             await self.llm_service.close()
+        
         logger.info("ResourceManager shutdown complete")
         
         self.__class__._instance = None

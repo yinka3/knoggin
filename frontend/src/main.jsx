@@ -19,6 +19,7 @@ const AgentsPage = lazy(() => import('./pages/AgentsPage'))
 const DebugPage = lazy(() => import('./pages/DebugPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const DeveloperSettingsPage = lazy(() => import('./pages/DeveloperSettingsPage'))
+const CommunityPage = lazy(() => import('./pages/CommunityPage'))
 
 function LoadingFallback() {
   return (
@@ -28,7 +29,8 @@ function LoadingFallback() {
         style={{
           width: 32,
           height: 32,
-          background: 'radial-gradient(circle at 40% 40%, rgba(52, 216, 130, 0.9), rgba(46, 170, 110, 0.6))',
+          background:
+            'radial-gradient(circle at 40% 40%, rgba(52, 216, 130, 0.9), rgba(46, 170, 110, 0.6))',
           boxShadow: '0 0 20px rgba(46, 170, 110, 0.4)',
         }}
       />
@@ -50,6 +52,7 @@ function AppRoutes() {
                 <Route path="/dashboard" element={<DashboardPage />} />
                 <Route path="/memory" element={<MemoryPage />} />
                 <Route path="/agents" element={<AgentsPage />} />
+                <Route path="/community" element={<CommunityPage />} />
                 <Route path="/debug" element={<DebugPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
                 <Route path="/settings/developer" element={<DeveloperSettingsPage />} />

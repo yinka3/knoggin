@@ -240,6 +240,15 @@ class MemGraphStore:
     def get_entity_relationships(self, entity_id: int) -> List[Dict]:
         return self._reader.get_entity_relationships(entity_id)
 
+    def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
+        return self._reader.get_recent_facts(days, limit)
+
+    def get_recently_active_entities(self, days: int = 7, limit: int = 10) -> List[Dict]:
+        return self._reader.get_recently_active_entities(days, limit)
+
+    def get_notable_entities(self, limit: int = 10) -> List[Dict]:
+        return self._reader.get_notable_entities(limit)
+
     # ===== TOOL QUERY DELEGATIONS =====
 
     def get_hot_topic_context_with_messages(self, hot_topic_names: List[str], msg_limit: int = 5, slim: bool = False) -> Dict:

@@ -5,6 +5,8 @@ from typing import Optional
 from loguru import logger
 import redis.asyncio as aioredis
 
+from shared.resource import ResourceManager
+
 
 
 @dataclass
@@ -15,6 +17,7 @@ class JobContext:
     redis: aioredis.Redis
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None
+    resources: Optional[ResourceManager] = None
 
 
 @dataclass 

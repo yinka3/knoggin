@@ -10,7 +10,7 @@ import redis.asyncio as aioredis
 from agent.tools import Tools
 from agent.system_prompt import get_agent_prompt, get_fallback_summary_prompt
 from agent.internals import (
-    AgentConfig,
+    AgentRunConfig,
     AgentState,
     RetrievedEvidence,
     AgentContext,
@@ -48,8 +48,9 @@ async def call_agent_streaming(
     memory_context: str = "",
     agent_rules: str = "",
     agent_preferences: str = "",
-    agent_icks: str = "",
-    agent_temperature: float = 0.7
+    agent_ticks: str = "",
+    agent_temperature: float = 0.7,
+    agent_base_prompt: str = None
 ) -> AsyncGenerator[Union[Dict, AgentResponse], None]:
     """
     Streaming version of call_agent.
@@ -60,7 +61,8 @@ async def call_agent_streaming(
         memory_context=memory_context,
         agent_rules=agent_rules,
         agent_preferences=agent_preferences,
-        agent_icks=agent_icks
+        agent_icks=agent_icks,
+        custom_base_prompt=agent_base_prompt
     )
     user_message = build_user_message(ctx, last_result)
 
@@ -171,7 +173,8 @@ async def run_stream(
     file_rag = None,
     user_timezone: str = None,
     mcp_manager=None,
-    agent_temperature: float = 0.7
+    agent_temperature: float = 0.7,
+    agent_base_prompt: str = None
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
     
@@ -182,13 +185,13 @@ async def run_stream(
         tool_limits_raw = limits.get("tool_limits", {})
 
         if tool_limits_raw:
-            defaults = dict(AgentConfig.tool_limits)
+            defaults = dict(AgentRunConfig.tool_limits)
             defaults.update(tool_limits_raw)
             tool_limits_tuple = tuple(defaults.items())
         else:
-            tool_limits_tuple = AgentConfig.tool_limits
+            tool_limits_tuple = AgentRunConfig.tool_limits
 
-        config = AgentConfig(
+        config = AgentRunConfig(
             max_calls=limits.get("max_tool_calls", 6),
             max_attempts=limits.get("max_attempts", 8),
             max_history_turns=limits.get("agent_history_turns", 7),
@@ -284,7 +287,8 @@ async def run_stream(
                 agent_rules=a_rules,
                 agent_preferences=a_prefs,
                 agent_icks=a_icks,
-                agent_temperature=agent_temperature
+                agent_temperature=agent_temperature,
+                agent_base_prompt=agent_base_prompt
             ):
                 
                 # Token - pass through to frontend

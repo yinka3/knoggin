@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from loguru import logger
 from fastapi.middleware.cors import CORSMiddleware
 from shared.resource import ResourceManager
@@ -21,6 +21,7 @@ from api.routes.stats import router as stats_router
 from api.routes.files import router as files_router
 from api.mcp_server import create_mcp_app
 from api.onboarding import router as onboarding_router
+from api.routes.community import router as community_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,10 +33,19 @@ async def lifespan(app: FastAPI):
     
     app.state.app_state = AppState(resources, {}, user_name)
     
+    from jobs.scheduler import Scheduler
+    from jobs.aac_job import AACJob
+    global_scheduler = Scheduler(user_name, "global", resources.redis, resources)
+    global_scheduler.register(AACJob())
+    await global_scheduler.start()
+    app.state.global_scheduler = global_scheduler
+
     logger.info(f"Knoggin ready for user: {user_name}")
     yield
     
     logger.info("Shutting down Knoggin...")
+    if hasattr(app.state, "global_scheduler"):
+        await app.state.global_scheduler.stop()
     await app.state.app_state.shutdown()
 
 
@@ -68,3 +78,4 @@ app.include_router(models_router, prefix="/config/models", tags=["models"])
 app.include_router(debug_router, prefix="/debug", tags=["debug"])
 app.include_router(stats_router, prefix="/stats", tags=["stats"])
 app.include_router(files_router, prefix="/files", tags=["files"])
+app.include_router(community_router, prefix="/community", tags=["community"])

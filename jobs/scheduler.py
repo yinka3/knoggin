@@ -18,10 +18,11 @@ class Scheduler:
     CHECK_INTERVAL = 30
     JOB_EXECUTION_TIMEOUT = 300
     
-    def __init__(self, user_name: str, session_id: str, redis: aioredis.Redis):
+    def __init__(self, user_name: str, session_id: str, redis: aioredis.Redis, resources=None):
         self.user_name = user_name
         self.session_id = session_id
         self.redis = redis
+        self.resources = resources
         self._jobs: Dict[str, BaseJob] = {}
         self._last_runs: Dict[str, datetime] = {}
         self._running_tasks: Dict[str, asyncio.Task] = {}
@@ -33,6 +34,16 @@ class Scheduler:
         self._jobs[job.name] = job
         logger.info(f"Registered job: {job.name}")
         return self
+    
+    async def _build_context(self) -> JobContext:
+        idle_seconds = await self._get_idle_seconds()
+        return JobContext(
+            user_name=self.user_name,
+            session_id=self.session_id,
+            redis=self.redis,
+            idle_seconds=idle_seconds,
+            resources=self.resources
+        )
     
     async def start(self):
         """Start the scheduler loop."""
@@ -92,7 +103,8 @@ class Scheduler:
             user_name=self.user_name,
             session_id=self.session_id,
             redis=self.redis,
-            idle_seconds=idle_seconds
+            idle_seconds=idle_seconds,
+            resources=self.resources
         )
     
     async def _get_idle_seconds(self) -> float:

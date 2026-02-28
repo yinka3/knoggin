@@ -60,8 +60,6 @@ class Context:
         self.consumer: BatchConsumer = None
         self.profile_job: BaseJob = None
         self.merge_job: BaseJob = None
-
-        self.file_rag = None
         self._background_tasks: set = set()
 
 

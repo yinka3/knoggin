@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 
 
 class IngestionSettings(BaseModel):
@@ -39,6 +39,13 @@ class ArchivalSettings(BaseModel):
 class TopicConfigSettings(BaseModel):
     interval_msgs: Optional[int] = Field(None, ge=5)
     conversation_window: Optional[int] = Field(None, ge=5)
+
+class CommunitySettings(BaseModel):
+    enabled: bool = Field(False)
+    interval_minutes: int = Field(30, ge=1)
+    max_turns: int = Field(10, ge=1)
+    seeding_agent_id: Optional[str] = None
+    agent_pool_ids: List[str] = Field(default_factory=list)
 
 class JobSettings(BaseModel):
     cleaner: Optional[CleanerSettings] = None
@@ -93,6 +100,7 @@ class DeveloperSettings(BaseModel):
     entity_resolution: Optional[EntityResolutionSettings] = None
     nlp_pipeline: Optional[NLPPipelineSettings] = None
     search: Optional[SearchSettings] = None
+    community: Optional[CommunitySettings] = None
 
 class ConfigUpdate(BaseModel):
     user_name: Optional[str] = None
@@ -102,6 +110,7 @@ class ConfigUpdate(BaseModel):
     search: Optional[SearchAPIKeySettings] = None
     default_topics: Optional[dict] = None
     developer_settings: Optional[DeveloperSettings] = None
+    community: Optional[CommunitySettings] = None
     curated_models: Optional[List[dict]] = None
 
     @field_validator("user_name")

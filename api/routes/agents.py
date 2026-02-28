@@ -33,6 +33,27 @@ class AgentMemoryEntry(BaseModel):
     content: str
 
 
+@router.get("/defaults")
+async def get_agent_defaults(state: AppState = Depends(get_app_state)):
+    return {
+        "default_persona": "Warm and direct. Match their energy. No corporate filler.",
+        "default_base_prompt": (
+            "You are {agent_name}, operating within the Knoggin knowledge system for {user_name}.\n\n"
+            "{date_context}\n\n"
+            "<persona>{voice}</persona>\n"
+            "{agent_specific_section}\n"
+            "<system_guidelines>\n"
+            "You have access to tools that browse and manage {user_name}'s knowledge graph and memory.\n"
+            "- Use tools naturally to pull facts, analyze relationships, or review past conversations. If the graph lacks info, state that directly.\n"
+            "- Prefer structured knowledge (search_entity) over raw text parsing (search_messages).\n"
+            "- Use get_recent_activity for temporal questions (\"lately\", \"this week\").\n"
+            "- Use request_clarification if the query is too vague to act on.\n"
+            "</system_guidelines>\n\n"
+            "{memory_section}"
+        )
+    }
+
+
 @router.get("/")
 async def list_agents(state: AppState = Depends(get_app_state)):
     agents = await state.list_agents()

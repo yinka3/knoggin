@@ -2,7 +2,19 @@ import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
-import { Code2, Save, RotateCcw, Sparkles, Zap, Search, Fingerprint, Workflow, Database, PlaySquare } from 'lucide-react'
+import {
+  Code2,
+  Save,
+  RotateCcw,
+  Sparkles,
+  Zap,
+  Search,
+  Fingerprint,
+  Workflow,
+  Database,
+  PlaySquare,
+  Users,
+} from 'lucide-react'
 import { getConfig, updateConfig } from '@/api/config'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -12,6 +24,7 @@ import EntityResolutionSection from '@/components/settings/developer/EntityResol
 import PipelineSection from '@/components/settings/developer/PipelineSection'
 import IngestionSection from '@/components/settings/developer/IngestionSection'
 import BackgroundJobsSection from '@/components/settings/developer/BackgroundJobsSection'
+import CommunitySection from '@/components/settings/developer/CommunitySection'
 import { motion, AnimatePresence } from 'motion/react'
 
 const TABS = [
@@ -21,6 +34,7 @@ const TABS = [
   { id: 'pipeline', label: 'Pipeline', icon: Workflow },
   { id: 'ingestion', label: 'Ingestion', icon: Database },
   { id: 'jobs', label: 'Background Jobs', icon: PlaySquare },
+  { id: 'community', label: 'Community', icon: Users },
 ]
 
 export default function DeveloperSettingsPage() {
@@ -105,8 +119,12 @@ export default function DeveloperSettingsPage() {
               <Code2 size={24} />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-foreground tracking-tight">Developer Settings</h1>
-              <p className="text-sm text-muted-foreground mt-0.5">Advanced configuration and system tuning</p>
+              <h1 className="text-xl font-semibold text-foreground tracking-tight">
+                Developer Settings
+              </h1>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                Advanced configuration and system tuning
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -156,7 +174,6 @@ export default function DeveloperSettingsPage() {
       {/* Main Layout */}
       <div className="flex-1 overflow-hidden">
         <div className="max-w-5xl mx-auto h-full flex flex-col md:flex-row gap-8 p-6">
-          
           {/* Sidebar Navigation */}
           <nav className="w-full md:w-64 shrink-0 space-y-1 relative">
             {TABS.map(tab => {
@@ -180,7 +197,13 @@ export default function DeveloperSettingsPage() {
                       transition={{ type: 'spring', stiffness: 400, damping: 30 }}
                     />
                   )}
-                  <Icon size={18} className={cn('shrink-0', isActive ? 'text-primary animate-pulse-slow' : 'opacity-70')} />
+                  <Icon
+                    size={18}
+                    className={cn(
+                      'shrink-0',
+                      isActive ? 'text-primary animate-pulse-slow' : 'opacity-70'
+                    )}
+                  />
                   {tab.label}
                 </button>
               )
@@ -198,16 +221,28 @@ export default function DeveloperSettingsPage() {
                 transition={{ duration: 0.25, ease: 'easeOut' }}
                 className="w-full h-full overflow-y-auto"
               >
-                {activeTab === 'limits' && <AgentLimitsSection settings={settings} update={update} />}
+                {activeTab === 'limits' && (
+                  <AgentLimitsSection settings={settings} update={update} />
+                )}
                 {activeTab === 'search' && <SearchSection settings={settings} update={update} />}
-                {activeTab === 'entity' && <EntityResolutionSection settings={settings} update={update} />}
-                {activeTab === 'pipeline' && <PipelineSection settings={settings} update={update} />}
-                {activeTab === 'ingestion' && <IngestionSection settings={settings} update={update} />}
-                {activeTab === 'jobs' && <BackgroundJobsSection settings={settings} update={update} />}
+                {activeTab === 'entity' && (
+                  <EntityResolutionSection settings={settings} update={update} />
+                )}
+                {activeTab === 'pipeline' && (
+                  <PipelineSection settings={settings} update={update} />
+                )}
+                {activeTab === 'ingestion' && (
+                  <IngestionSection settings={settings} update={update} />
+                )}
+                {activeTab === 'jobs' && (
+                  <BackgroundJobsSection settings={settings} update={update} />
+                )}
+                {activeTab === 'community' && (
+                  <CommunitySection settings={settings} update={update} />
+                )}
               </motion.div>
             </AnimatePresence>
           </div>
-
         </div>
       </div>
     </div>

@@ -29,7 +29,7 @@ class Tools:
         self.embedding_service = ent_resolver.embedding_service
         self.topic_config = topic_config
         self.file_rag = file_rag
-        self.active_topics = topic_config.active_topics if topic_config else []
+        self.active_topics = topic_config.active_topics if topic_config else None
         self.search_cfg = search_config or {}
         self.mcp_manager = mcp_manager
     
@@ -728,7 +728,6 @@ class Tools:
         brave_key = self.search_cfg.get("brave_api_key", "")
         tavily_key = self.search_cfg.get("tavily_api_key", "")
 
-        # Explicit provider selection
         if provider == "brave" and brave_key:
             return await self._search_brave(query, limit, brave_key, freshness)
         elif provider == "tavily" and tavily_key:
@@ -736,7 +735,6 @@ class Tools:
         elif provider == "duckduckgo":
             return await self._search_duckduckgo(query, limit, freshness)
 
-        # Auto mode: use best available
         if brave_key:
             return await self._search_brave(query, limit, brave_key, freshness)
         if tavily_key:

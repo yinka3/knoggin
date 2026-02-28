@@ -7,7 +7,8 @@ def get_agent_prompt(
     files_context: str = "",
     agent_rules: str = "",
     agent_preferences: str = "",
-    agent_icks: str = ""
+    agent_icks: str = "",
+    custom_base_prompt: str = ""
 ) -> str:
     date_context = f"Current time: {current_time}." if current_time else ""
     voice = persona if persona else "Warm and direct. Match their energy. No corporate filler."
@@ -40,6 +41,9 @@ def get_agent_prompt(
         if agent_icks:
             agent_specific_section += f"<agent_icks>\n{agent_icks}</agent_icks>\n"
         agent_specific_section += "</agent_instructions>\n"
+
+    if custom_base_prompt:
+        return f"{custom_base_prompt}\n\n{date_context}\n{agent_specific_section}\n{memory_section}"
 
     return f"""You are {agent_name}, operating within the Knoggin knowledge system for {user_name}.
 

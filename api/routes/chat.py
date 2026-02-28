@@ -108,7 +108,8 @@ async def send_message(
                 file_rag=context.file_rag,
                 user_timezone=body.timezone,
                 mcp_manager=context.mcp_manager,
-                agent_temperature=agent.temperature if agent else 0.7
+                agent_temperature=agent.temperature if agent else 0.7,
+                agent_base_prompt=agent.base_prompt if agent else None
             ):
                 
                 if event["event"] == "tool_start":

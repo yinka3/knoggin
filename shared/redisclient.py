@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+from typing import Any
 from loguru import logger
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
@@ -57,6 +59,21 @@ class AsyncRedisClient:
                 await cls._instance.close()
                 cls._instance = None
                 logger.info("Redis connection closed")
+
+    @classmethod
+    async def publish(cls, channel: str, message: Any):
+        """Publish a message to a channel."""
+        redis = await cls.get_instance()
+        data = json.dumps(message) if not isinstance(message, str) else message
+        await redis.publish(channel, data)
+
+    @classmethod
+    async def subscribe(cls, channel: str):
+        """Get a pubsub instance and subscribe to a channel."""
+        redis = await cls.get_instance()
+        ps = redis.pubsub()
+        await ps.subscribe(channel)
+        return ps
 
 
 class RedisKeys:
@@ -181,4 +198,34 @@ class RedisKeys:
     @staticmethod
     def global_stats() -> str:
         return "global:stats"
+    
+    # ============ COMMUNITY (Global) ============
+
+    @staticmethod
+    def community_config() -> str:
+        return "community:config"
+
+    @staticmethod
+    def community_discussion_active() -> str:
+        return "community:discussion:active"
+
+    @staticmethod
+    def community_discussion_history() -> str:
+        return "community:discussion:history"
+
+    @staticmethod
+    def community_discussion_messages(discussion_id: str) -> str:
+        return f"community:discussion:{discussion_id}:messages"
+
+    @staticmethod
+    def community_agent_hierarchy() -> str:
+        return "community:agent_hierarchy"
+    
+    @staticmethod
+    def community_agent_memory(user_name: str, agent_id: str) -> str:
+        return f"community:{user_name}:agent_memory:{agent_id}"
+
+    @staticmethod
+    def community_pubsub_channel() -> str:
+        return "community:events"
     

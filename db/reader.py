@@ -654,3 +654,72 @@ class GraphReader:
         except Exception as e:
             logger.error(f"Failed to get relationships for entity {entity_id}: {e}")
             return []
+    
+    def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
+        """Get recently created facts."""
+        from datetime import datetime, timezone, timedelta
+        
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        
+        query = """
+        MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
+        WHERE f.valid_at > $cutoff
+        AND f.invalid_at IS NULL
+        RETURN f.id as id,
+            f.content as content,
+            f.valid_at as created_at,
+            e.canonical_name as entity_name,
+            e.type as entity_type
+        ORDER BY f.valid_at DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            result = session.run(query, cutoff=cutoff, limit=limit)
+            return [dict(r) for r in result]
+
+    def get_recently_active_entities(self, days: int = 7, limit: int = 10) -> List[Dict]:
+        """Get entities with recent fact activity."""
+        from datetime import datetime, timezone, timedelta
+        
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        
+        query = """
+        MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
+        WHERE f.valid_at > $cutoff
+        AND f.invalid_at IS NULL
+        WITH e, count(f) as recent_facts, max(f.valid_at) as last_activity
+        RETURN e.id as id,
+            e.canonical_name as name,
+            e.type as type,
+            e.topic as topic,
+            recent_facts,
+            last_activity
+        ORDER BY recent_facts DESC, last_activity DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            result = session.run(query, cutoff=cutoff, limit=limit)
+            return [dict(r) for r in result]
+
+    def get_notable_entities(self, limit: int = 10) -> List[Dict]:
+        """Get top entities by connection count with summary info."""
+        query = """
+        MATCH (e:Entity)
+        WHERE e.canonical_name IS NOT NULL
+        OPTIONAL MATCH (e)-[r]-()
+        WITH e, count(DISTINCT r) as connection_count
+        OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
+        WHERE f.invalid_at IS NULL
+        WITH e, connection_count, count(f) as fact_count
+        RETURN e.id as id,
+            e.canonical_name as name,
+            e.type as type,
+            e.topic as topic,
+            connection_count,
+            fact_count
+        ORDER BY connection_count DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            result = session.run(query, limit=limit)
+            return [dict(r) for r in result]

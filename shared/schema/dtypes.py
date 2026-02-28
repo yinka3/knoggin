@@ -175,10 +175,13 @@ class AgentConfig:
     id: str
     name: str
     persona: str
+    base_prompt: Optional[str] = None
     model: Optional[str] = None
     temperature: float = 0.7
     enabled_tools: Optional[List[str]] = None
     is_default: bool = False
+    is_spawned: bool = False
+    spawned_by: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict:
@@ -186,10 +189,13 @@ class AgentConfig:
             "id": self.id,
             "name": self.name,
             "persona": self.persona,
+            "base_prompt": self.base_prompt,
             "model": self.model,
             "temperature": self.temperature,
             "enabled_tools": self.enabled_tools,
             "is_default": self.is_default,
+            "is_spawned": self.is_spawned,
+            "spawned_by": self.spawned_by,
             "created_at": self.created_at.isoformat()
         }
 
@@ -202,10 +208,13 @@ class AgentConfig:
             id=data["id"],
             name=data["name"],
             persona=data["persona"],
+            base_prompt=data.get("base_prompt"),
             model=data.get("model"),
             temperature=data.get("temperature", 0.7),
             enabled_tools=data.get("enabled_tools"),
             is_default=data.get("is_default", False),
+            is_spawned=data.get("is_spawned", False),
+            spawned_by=data.get("spawned_by"),
             created_at=created or datetime.now(timezone.utc)
         )
 

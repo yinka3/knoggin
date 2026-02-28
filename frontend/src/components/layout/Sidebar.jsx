@@ -14,6 +14,7 @@ import {
   Trash2,
   LayoutDashboard,
   Code2,
+  Users,
 } from 'lucide-react'
 import {
   AlertDialog,
@@ -148,6 +149,27 @@ export default function Sidebar({ isOpen, onToggle }) {
         </Link>
       </div>
       <div className={`mx-3 border-t border-border/50 ${!isOpen && 'mx-2'}`} />
+
+      {/* COMMUNITY BUTTON */}
+      <Link to="/community" className="w-full">
+        <button
+          className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
+            location.pathname === '/community'
+              ? 'bg-primary/10 text-primary font-medium'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+          }`}
+        >
+          <Users
+            size={18}
+            className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
+          />
+          <span
+            className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+          >
+            Community
+          </span>
+        </button>
+      </Link>
 
       {/* New chat button */}
       <div className={`p-2 ${!isOpen && 'flex justify-center'}`}>

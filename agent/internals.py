@@ -18,21 +18,27 @@ from shared.mcp_client import parse_mcp_tool_name
 
 
 @dataclass(frozen=True)
-class AgentConfig:
+class AgentRunConfig:
     """Immutable settings for agent run."""
-    max_calls: int = 6
-    max_attempts: int = 8
+    max_calls: int = 12
+    max_attempts: int = 15
     max_history_turns: int = 7
     max_accumulated_messages: int = 30
     max_consecutive_errors: int = 3
     tool_timeout: float = 30.0
     tool_limits: Tuple[Tuple[str, int], ...] = (
-        ("search_messages", 2),
-        ("get_connections", 4),
-        ("search_entity", 4),
-        ("get_recent_activity", 5),
-        ("find_path", 5),
-        ("get_hierarchy", 5),
+        ("search_messages", 6),
+        ("get_connections", 8),
+        ("search_entity", 8),
+        ("get_recent_activity", 8),
+        ("find_path", 8),
+        ("get_hierarchy", 8),
+        ("web_search", 8),
+        ("news_search", 8),
+        ("save_memory", 4),
+        ("save_insight", 4),
+        ("forget_memory", 4),
+        ("spawn_specialist", 2),
         ("mcp__*", 3),
     )
     
@@ -62,7 +68,7 @@ class AgentState:
         call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
         return call_sig in self.previous_calls
     
-    def tool_limit_reached(self, tool_name: str, config: AgentConfig) -> bool:
+    def tool_limit_reached(self, tool_name: str, config: AgentRunConfig) -> bool:
         limit = config.get_tool_limit(tool_name, config.max_calls)
         return self.tool_call_counts.get(tool_name, 0) >= limit
     
@@ -91,7 +97,7 @@ class RetrievedEvidence:
 @dataclass
 class AgentContext:
     """Container for agent run."""
-    config: AgentConfig
+    config: AgentRunConfig
     state: AgentState
     evidence: RetrievedEvidence
     user_query: str = ""

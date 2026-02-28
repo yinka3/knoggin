@@ -1,7 +1,8 @@
 import os
 import json
+import copy
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 from loguru import logger
 from dotenv import load_dotenv
 
@@ -201,9 +202,7 @@ def get_default_config() -> dict:
             
             "ingestion": {
                 "batch_size": 8,
-                "batch_timeout": 300.0,
-                # "checkpoint_interval": 32,  # Optional override (default: 4x batch)
-                # "session_window": 24        # Optional override (default: 3x batch)
+                "batch_timeout": 300.0
             },
             
             "jobs": {
@@ -253,26 +252,26 @@ def get_default_config() -> dict:
                 "default_entity_limit": 5,
                 "default_activity_hours": 24
             },
-            
+
             "limits": {
                 "agent_history_turns": 7,
-                "max_tool_calls": 6,
-                "max_attempts": 8,
+                "max_tool_calls": 12,
+                "max_attempts": 15,
                 "max_consecutive_errors": 3,
                 "max_accumulated_messages": 30,
                 "conversation_context_turns": 10,
                 "tool_limits": {
-                    "search_messages": 2,
-                    "get_connections": 4,
-                    "search_entity": 4,
-                    "get_activity": 5,
-                    "find_path": 5,
-                    "get_hierarchy": 5,
-                    "save_memory": 2,
-                    "forget_memory": 2,
+                    "search_messages": 6,
+                    "get_connections": 8,
+                    "search_entity": 8,
+                    "get_activity": 8,
+                    "find_path": 8,
+                    "get_hierarchy": 8,
+                    "save_memory": 4,
+                    "forget_memory": 4,
                     "search_files": 3,
-                    "web_search": 2,
-                    "news_search": 2
+                    "web_search": 4,
+                    "news_search": 4
                 }
             },
             
@@ -288,8 +287,14 @@ def get_default_config() -> dict:
             "nlp_pipeline": {
                 "gliner_threshold": 0.85,
                 "vp01_min_confidence": 0.8
-            }
-
+            },
+            "community": {
+                "enabled": False,
+                "interval_minutes": 30,
+                "max_turns": 10,
+                "seeding_agent_id": None,
+                "agent_pool_ids": []
+            },
         }
     }
 
@@ -362,3 +367,46 @@ def get_config_value(key: str, default=None):
     if not config:
         return default
     return config.get(key, default)
+
+def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge updates into source dict."""
+    for key, value in updates.items():
+        if isinstance(value, dict) and key in source and isinstance(source[key], dict):
+            deep_merge(source[key], value)
+        else:
+            source[key] = value
+    return source
+
+
+def update_config_value(key: str, updates: dict) -> bool:
+    """
+    Update a top-level config key with deep merge.
+    Preserves existing nested values not included in updates.
+    """
+    import copy
+    config = load_config() or get_default_config()
+    
+    if key not in config:
+        config[key] = {}
+    
+    current = config[key]
+    if isinstance(current, dict) and isinstance(updates, dict):
+        deep_merge(current, updates)
+    else:
+        config[key] = updates
+    
+    return save_config(config)
+
+def redact_config(config: dict) -> dict:
+    """Redact sensitive fields before returning to client."""
+    out = copy.deepcopy(config)
+    llm = out.get("llm", {})
+    if llm.get("api_key"):
+        llm["api_key"] = f"...{llm['api_key'][-4:]}"
+    
+    search = out.get("search", {})
+    if search.get("brave_api_key"):
+        search["brave_api_key"] = f"...{search['brave_api_key'][-4:]}"
+    if search.get("tavily_api_key"):
+        search["tavily_api_key"] = f"...{search['tavily_api_key'][-4:]}"
+    return out

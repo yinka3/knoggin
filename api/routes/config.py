@@ -1,49 +1,21 @@
 
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, Request
-from typing import Dict, Any
 import copy
+from fastapi import APIRouter, Depends, HTTPException, Request
 from api.deps import get_app_state
 from api.state import AppState
-from shared.config import load_config, save_config, get_default_config
+from shared.config import load_config, save_config, get_default_config, deep_merge, redact_config
 from shared.schema.settings import ConfigUpdate
 from shared.schema.tool_schema import TOOL_SCHEMAS
 
 router = APIRouter()
-
-
-def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Recursively merge update dict into source dict.
-    This ensures we don't wipe out 'jobs' when updating 'ingestion'.
-    """
-    for key, value in updates.items():
-        if isinstance(value, dict) and key in source and isinstance(source[key], dict):
-            deep_merge(source[key], value)
-        else:
-            source[key] = value
-    return source
-
-def _redact_config(config: dict) -> dict:
-    """Redact sensitive fields before returning to client."""
-    out = copy.deepcopy(config)
-    llm = out.get("llm", {})
-    if llm.get("api_key"):
-        llm["api_key"] = f"...{llm['api_key'][-4:]}"
-    
-    search = out.get("search", {})
-    if search.get("brave_api_key"):
-        search["brave_api_key"] = f"...{search['brave_api_key'][-4:]}"
-    if search.get("tavily_api_key"):
-        search["tavily_api_key"] = f"...{search['tavily_api_key'][-4:]}"
-    return out
 
 @router.get("/")
 async def get_config():
     config = load_config()
     if not config:
         return get_default_config()
-    return _redact_config(config)
+    return redact_config(config)
 
 
 @router.get("/status")
@@ -173,4 +145,4 @@ async def update_config(
             await context.update_runtime_settings(merged_config)
             active_count += 1
     
-    return _redact_config(merged_config)
+    return redact_config(merged_config)
