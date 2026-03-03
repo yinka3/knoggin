@@ -12,19 +12,14 @@ from db.writer import GraphWriter
 from shared.schema.dtypes import Fact
 load_dotenv()
 
-MEMGRAPH_USER=os.environ.get("MEMGRAPH_USER")
-MEMGRAPH_PASSWORD=os.environ.get("MEMGRAPH_PASSWORD")
-MEMGRAPH_HOST=os.environ.get("MEMGRAPH_HOST")
-MEMGRAPH_PORT=os.environ.get("MEMGRAPH_PORT")
+MEMGRAPH_HOST=os.environ.get("MEMGRAPH_HOST", "localhost")
+MEMGRAPH_PORT=os.environ.get("MEMGRAPH_PORT", "7687")
 
 class MemGraphStore:
     def __init__(self, uri: str = None):
         if uri is None:
             uri = f"bolt://{MEMGRAPH_HOST}:{MEMGRAPH_PORT}"
-        self.driver = GraphDatabase.driver(
-            uri,
-            auth=(MEMGRAPH_USER, MEMGRAPH_PASSWORD)
-        )
+        self.driver = GraphDatabase.driver(uri)
         self._verify_conn()
         self._setup_schema()
         self._writer = GraphWriter(self.driver)
@@ -161,6 +156,12 @@ class MemGraphStore:
 
     def get_message_text(self, message_id: int) -> str:
         return self._reader.get_message_text(message_id)
+
+    def get_messages_by_ids(self, ids: List[int]) -> List[Dict]:
+        return self._reader.get_messages_by_ids(ids)
+
+    def get_surrounding_messages(self, message_id: int, forward: int = 3, target_total: int = 10) -> List[Dict]:
+        return self._reader.get_surrounding_messages(message_id, forward, target_total)
 
     def get_facts_for_entity(self, entity_id: int, active_only: bool = True) -> List[Fact]:
         return self._reader.get_facts_for_entity(entity_id, active_only)

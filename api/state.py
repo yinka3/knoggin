@@ -177,13 +177,14 @@ class AppState:
         
         return default_id
 
-    async def create_agent(self, name: str, persona: str, model: str = None, temperature: Optional[float] = 0.7, enabled_tools: Optional[List[str]] = None) -> AgentConfig:
+    async def create_agent(self, name: str, persona: str, instructions: Optional[str] = None, model: str = None, temperature: Optional[float] = 0.7, enabled_tools: Optional[List[str]] = None) -> AgentConfig:
         """Create a new agent."""
         agent_id = str(uuid.uuid4())
         config = AgentConfig(
             id=agent_id,
             name=name,
             persona=persona,
+            instructions=instructions,
             model=model,
             temperature=temperature,
             enabled_tools=enabled_tools,
@@ -199,7 +200,7 @@ class AppState:
         logger.info(f"Created agent: {name} ({agent_id})")
         return config
 
-    async def update_agent(self, agent_id: str, name: str = None, persona: str = None, model: str = None, temperature: Optional[float] = None, enabled_tools: Optional[List[str]] = None) -> Optional[AgentConfig]:
+    async def update_agent(self, agent_id: str, name: str = None, persona: str = None, instructions: str = None, model: str = None, temperature: Optional[float] = None, enabled_tools: Optional[List[str]] = None) -> Optional[AgentConfig]:
         """Update an existing agent. Returns None if not found."""
         config = await self.get_agent(agent_id)
         if not config:
@@ -209,6 +210,8 @@ class AppState:
             config.name = name
         if persona is not None:
             config.persona = persona
+        if instructions is not None:
+            config.instructions = instructions
         if model is not None:
             config.model = model if model else None
         if temperature is not None:

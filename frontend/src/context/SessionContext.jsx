@@ -16,6 +16,12 @@ export function SessionProvider({ children }) {
 
   useEffect(() => {
     loadSessions()
+
+    function handleSessionUpdated() {
+      loadSessions()
+    }
+    window.addEventListener('session_updated', handleSessionUpdated)
+    return () => window.removeEventListener('session_updated', handleSessionUpdated)
   }, [])
 
   async function loadSessions() {

@@ -22,6 +22,7 @@ class UpdateSessionRequest(BaseModel):
     model: Optional[str] = None
     agent_id: Optional[str] = None
     enabled_tools: Optional[List[str]] = None
+    title: Optional[str] = None
 
 @router.get("/")
 async def list_sessions(
@@ -150,6 +151,9 @@ async def update_session(
             raise HTTPException(status_code=400, detail=f"Invalid tool names: {invalid}")
         metadata["enabled_tools"] = body.enabled_tools
     
+    if body.title is not None:
+        metadata["title"] = body.title
+    
     metadata["last_active"] = datetime.now(timezone.utc).isoformat()
     
     await state.resources.redis.hset(
@@ -162,7 +166,7 @@ async def update_session(
         if body.model is not None:
             state.active_sessions[session_id].model = body.model
     
-    return {"success": True, "model": metadata.get("model"), "agent_id": metadata.get("agent_id"), "enabled_tools": metadata.get("enabled_tools")}
+    return {"success": True, "model": metadata.get("model"), "agent_id": metadata.get("agent_id"), "enabled_tools": metadata.get("enabled_tools"), "title": metadata.get("title")}
 
 @router.delete("/{session_id}")
 async def delete_session(

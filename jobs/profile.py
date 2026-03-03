@@ -34,7 +34,8 @@ class ProfileRefinementJob(BaseJob):
                 executor: ThreadPoolExecutor, embedding_service: EmbeddingService,
                 msg_window: int = 30, volume_threshold: int = 15, idle_threshold: int = 90,
                 contradiction_sim_low: float = 0.70, contradiction_sim_high: float = 0.95,
-                contradiction_batch_size: int = 4, profile_batch_size: int = 8):
+                contradiction_batch_size: int = 4, profile_batch_size: int = 8,
+                profile_prompt: str = None, contradiction_prompt: str = None):
         
         self.llm = llm
         self.resolver = resolver
@@ -51,6 +52,8 @@ class ProfileRefinementJob(BaseJob):
         self.contradiction_sim_low = contradiction_sim_low
         self.contradiction_sim_high = contradiction_sim_high
         self.contradiction_batch_size = contradiction_batch_size
+        self.profile_prompt = profile_prompt
+        self.contradiction_prompt = contradiction_prompt
         
 
     @property
@@ -301,7 +304,11 @@ class ProfileRefinementJob(BaseJob):
             logger.warning("Could not fetch user facts, skipping refinement")
             return False
         
-        system_reasoning = get_profile_extraction_prompt(ctx.user_name)
+        if self.profile_prompt:
+            system_reasoning = self.profile_prompt.replace("{user_name}", ctx.user_name)
+        else:
+            system_reasoning = get_profile_extraction_prompt(ctx.user_name)
+            
         enriched_facts = await enrich_facts_with_sources(existing_facts, self.store)
         llm_input = [{
                 "entity_name": ctx.user_name,
@@ -391,7 +398,11 @@ class ProfileRefinementJob(BaseJob):
 
             combined_conversation = "\n---\n".join([e["conversation_text"] for e in batch])
 
-            system_reasoning = get_profile_extraction_prompt(ctx.user_name)
+            if self.profile_prompt:
+                system_reasoning = self.profile_prompt.replace("{user_name}", ctx.user_name)
+            else:
+                system_reasoning = get_profile_extraction_prompt(ctx.user_name)
+                
             user_content = format_vp04_input(llm_input, combined_conversation)
 
             await emit(ctx.session_id, "job", "llm_call", {
@@ -734,7 +745,7 @@ class ProfileRefinementJob(BaseJob):
         if not pairs:
             return {}
         
-        system = get_contradiction_judgment_prompt()
+        system = self.contradiction_prompt if self.contradiction_prompt else get_contradiction_judgment_prompt()
         
         lines = []
         lines.append("## Facts to evaluate for contradictions:")

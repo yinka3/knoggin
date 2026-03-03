@@ -3,7 +3,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
-import { Settings, Tags, Wrench, BrainCircuit, Paperclip } from 'lucide-react'
+import { Settings, Tags, Wrench, BrainCircuit, Paperclip, GitMerge } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 function MenuRow({ icon: Icon, label, badge, onClick }) {
@@ -30,8 +30,10 @@ export default function SessionSettingsPopover({
   onOpenTools,
   onOpenMemory,
   onOpenFiles,
+  onOpenInbox,
   memoryCount = 0,
   fileCount = 0,
+  inboxCount = 0,
 }) {
   const [open, setOpen] = useState(false)
 
@@ -82,6 +84,12 @@ export default function SessionSettingsPopover({
             label="Files"
             badge={fileCount > 0 ? fileCount : null}
             onClick={() => handleAction(onOpenFiles)}
+          />
+          <MenuRow
+            icon={GitMerge}
+            label="Merge Inbox"
+            badge={inboxCount > 0 ? inboxCount : null}
+            onClick={() => handleAction(onOpenInbox)}
           />
           <MenuRow icon={Tags} label="Topics" onClick={() => handleAction(onOpenTopics)} />
         </div>

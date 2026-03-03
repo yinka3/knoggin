@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, memo } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
-import { ArrowDown, Network, Loader2 } from 'lucide-react'
+import { ArrowDown, Network, Loader2, Check, Info } from 'lucide-react'
 import ThinkingBox from './ThinkingBox'
 import ThinkingFace from './ThinkingFace'
 import MarkdownRenderer from './MarkdownRenderer'
@@ -9,6 +9,59 @@ import SourcesArtifact from './SourcesArtifact'
 import { extractMessageFacts } from '@/api/chat'
 import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'motion/react'
+
+const MessageItem = memo(({ msg, agentName, sessionId }) => {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, ease: 'easeOut' }}
+      className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
+    >
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="font-medium">{msg.role === 'user' ? 'You' : agentName}</span>
+        <span>{formatTimestamp(msg.timestamp)}</span>
+      </div>
+
+      <div
+        className={
+          msg.role === 'user'
+            ? 'bg-primary/15 text-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[85%] leading-relaxed'
+            : 'text-foreground leading-relaxed max-w-full'
+        }
+      >
+        {msg.role === 'assistant' ? (
+          <>
+            {(msg.toolCalls || msg.tool_calls) && (
+              <ThinkingBox
+                toolCalls={msg.toolCalls || msg.tool_calls}
+                streaming={false}
+                currentThinking={null}
+                defaultOpen={false}
+                totalDuration={msg.total_duration}
+              />
+            )}
+            <MarkdownRenderer content={msg.content} />
+            {msg.sources && <SourcesArtifact sources={msg.sources} />}
+            
+            {sessionId && msg.msg_id && msg.content?.trim() && (
+              <div className="flex items-center gap-2 mt-2 border-t border-border/10 pt-2">
+                <ExtractFactsButton sessionId={sessionId} message={msg} />
+              </div>
+            )}
+          </>
+        ) : (
+          <span className="whitespace-pre-wrap">{msg.content}</span>
+        )}
+      </div>
+    </motion.div>
+  )
+}, (prev, next) => {
+  return prev.msg.content === next.msg.content &&
+         prev.msg.timestamp === next.msg.timestamp &&
+         prev.agentName === next.agentName &&
+         prev.sessionId === next.sessionId
+})
 
 export default function MessageList({
   messages,
@@ -92,50 +145,7 @@ export default function MessageList({
               {messages
                 .filter(msg => !(msg.role === 'assistant' && !msg.content?.trim()))
                 .map((msg) => (
-                <motion.div
-                  key={`${msg.role}-${msg.timestamp}`}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3, ease: 'easeOut' }}
-                  className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
-                >
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="font-medium">{msg.role === 'user' ? 'You' : agentName}</span>
-                    <span>{formatTimestamp(msg.timestamp)}</span>
-                  </div>
-
-                  <div
-                    className={
-                      msg.role === 'user'
-                        ? 'bg-primary/15 text-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[85%] leading-relaxed'
-                        : 'text-foreground leading-relaxed max-w-full'
-                    }
-                  >
-                    {msg.role === 'assistant' ? (
-                      <>
-                        {(msg.toolCalls || msg.tool_calls) && (
-                          <ThinkingBox
-                            toolCalls={msg.toolCalls || msg.tool_calls}
-                            streaming={false}
-                            currentThinking={null}
-                            defaultOpen={false}
-                            totalDuration={msg.total_duration}
-                          />
-                        )}
-                        <MarkdownRenderer content={msg.content} />
-                        {msg.sources && <SourcesArtifact sources={msg.sources} />}
-                        
-                        {sessionId && msg.msg_id && msg.content?.trim() && !msg.sources && (
-                          <div className="flex items-center gap-2 mt-2 border-t border-border/10 pt-2">
-                            <ExtractFactsButton sessionId={sessionId} message={msg} />
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <span className="whitespace-pre-wrap">{msg.content}</span>
-                    )}
-                  </div>
-                </motion.div>
+                  <MessageItem key={`${msg.role}-${msg.timestamp}`} msg={msg} agentName={agentName} sessionId={sessionId} />
               ))}
             </AnimatePresence>
 
@@ -217,37 +227,70 @@ function formatTimestamp(ts) {
   }
 }
 
+
+
 function ExtractFactsButton({ sessionId, message }) {
-  const [extracting, setExtracting] = useState(false)
+  // 'idle' | 'extracting' | 'success' | 'empty'
+  const [status, setStatus] = useState('idle')
 
   const handleExtract = async () => {
-    if (extracting) return
-    setExtracting(true)
+    if (status === 'extracting' || status === 'success') return
+    setStatus('extracting')
     try {
-      await extractMessageFacts(sessionId, message.content, message.msg_id)
-      toast.success('Facts extracted successfully')
+      const res = await extractMessageFacts(sessionId, message.content, message.msg_id)
+      // Check if the backend actually found and saved facts
+      if (res.status === 'success' && res.facts_found) {
+        setStatus('success')
+        toast.success('Facts extracted and saved to memory')
+      } else {
+        setStatus('empty')
+        toast.info('No extractable facts found in this message')
+        // Automatically reset 'empty' state after a few seconds so they can try again if they want
+        setTimeout(() => setStatus('idle'), 3000)
+      }
     } catch (err) {
       console.error(err)
       toast.error('Failed to extract facts')
-    } finally {
-      setExtracting(false)
+      setStatus('idle')
     }
   }
 
   return (
     <button
       onClick={handleExtract}
-      disabled={extracting}
+      disabled={status === 'extracting' || status === 'success'}
       className={cn(
         "flex items-center gap-1.5 text-xs transition-all duration-200 px-2 py-1 rounded-md",
-        extracting 
+        status === 'extracting'
           ? "bg-primary/10 text-primary opacity-80" 
+          : status === 'success'
+          ? "bg-emerald-500/10 text-emerald-500 font-medium"
+          : status === 'empty'
+          ? "bg-muted/50 text-muted-foreground"
           : "text-muted-foreground hover:text-primary hover:bg-muted/50 active:scale-95"
       )}
       title="Extract facts from this message"
     >
-      {extracting ? <Loader2 size={14} className="animate-spin text-primary" /> : <Network size={14} />}
-      <span>{extracting ? 'Extracting...' : 'Extract facts'}</span>
+      {status === 'extracting' ? (
+        <Loader2 size={14} className="animate-spin text-primary" />
+      ) : status === 'success' ? (
+        <Check size={14} className="text-emerald-500" />
+      ) : status === 'empty' ? (
+        <Info size={14} />
+      ) : (
+        <Network size={14} />
+      )}
+      
+      <span>
+        {status === 'extracting' 
+          ? 'Extracting...' 
+          : status === 'success' 
+          ? 'Facts Extracted' 
+          : status === 'empty'
+          ? 'No Facts Found'
+          : 'Extract facts'
+        }
+      </span>
     </button>
   )
 }

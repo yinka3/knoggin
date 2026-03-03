@@ -6,9 +6,9 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - knoggin_redis_data:/data
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,11 +25,8 @@ services:
       - knoggin_mg_lib:/var/lib/memgraph
       - knoggin_mg_log:/var/log/memgraph
     command: ["--log-level=WARNING"]
-    environment:
-      - MEMGRAPH_USER=${MEMGRAPH_USER}
-      - MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD}
     healthcheck:
-      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --host localhost --port 7687 --username ${MEMGRAPH_USER} --password ${MEMGRAPH_PASSWORD}"]
+      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --host localhost --port 7687"]
       interval: 10s
       timeout: 10s
       retries: 3
@@ -59,11 +56,8 @@ services:
     volumes:
       - ./config:/app/config
     environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - MEMGRAPH_USER=${MEMGRAPH_USER}
-      - MEMGRAPH_PASSWORD=${MEMGRAPH_PASSWORD}
       - MEMGRAPH_HOST=memgraph
       - MEMGRAPH_PORT=7687
       - CONFIG_DIR=/app/config

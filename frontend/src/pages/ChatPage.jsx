@@ -11,18 +11,15 @@ import { toast } from 'sonner'
 import InputBar from '../components/chat/InputBar'
 import MessageList from '../components/chat/MessageList'
 import TopicsDrawer from '../components/chat/TopicsDrawer'
-import MCPBadge from '../components/chat/MCPBadge'
 import { useTools } from '@/context/ToolsContext'
-import TokenCounter from '../components/chat/TokenCounter'
 import WelcomeState from '../components/chat/WelcomeState'
-import AgentSelector from '../components/chat/AgentSelector'
 import FilesDrawer from '../components/chat/FilesDrawer'
 import MemoryDrawer from '../components/chat/MemoryDrawer'
-import SessionInfoTooltip from '../components/chat/SessionInfoTooltip'
-import SessionSettingsPopover from '../components/chat/SessionSettingsPopover'
+import ChatHeader from '../components/chat/ChatHeader'
 import { listAgents, addAgentMemory } from '@/api/agents'
 import useDelayedLoading from '@/hooks/useDelayedLoading'
 import ToolsDrawer from '../components/tools/ToolsDrawer'
+import MergeInboxDrawer from '../components/chat/MergeInboxDrawer'
 
 export default function ChatPage() {
   const { sessionId } = useParams()
@@ -36,8 +33,10 @@ export default function ChatPage() {
   const [toolsOpen, setToolsOpen] = useState(false)
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [inboxOpen, setInboxOpen] = useState(false)
   const [memoryCount, setMemoryCount] = useState(0)
   const [fileCount, setFileCount] = useState(0)
+  const [inboxCount, setInboxCount] = useState(0)
   const {
     messages,
     loading,
@@ -89,8 +88,18 @@ export default function ChatPage() {
     }
   }, [])
 
+  const handleMergeJudgmentsComplete = useCallback(data => {
+    if (data.data.hitl_count > 0) {
+      toast.info('New Merge Proposals', {
+        description: `Found ${data.data.hitl_count} potential merges needing human review.`,
+      })
+      setInboxCount(prev => prev + data.data.hitl_count)
+    }
+  }, [])
+
   useSocket('user_profile_refined', handleProfileRefined)
   useSocket('facts_changed', handleFactsChanged)
+  useSocket('merge_judgments_complete', handleMergeJudgmentsComplete)
 
   useEffect(() => {
     if (sessionId) {
@@ -213,34 +222,23 @@ export default function ChatPage() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header with Agent selector and Topics drawer */}
-      {sessionId && (
-        <div className="flex items-center justify-between px-4 py-2 border-b border-border">
-          {/* Left Zone */}
-          <div className="flex items-center gap-2">
-            <AgentSelector
-              currentAgentId={currentAgentId}
-              onAgentChange={handleAgentChange}
-              disabled={streaming}
-            />
-            <div className="w-px h-4 bg-border/50" />
-            <SessionInfoTooltip sessionId={sessionId} />
-            <div className="w-px h-4 bg-border/50" />
-            <TokenCounter value={totalTokens} />
-            <MCPBadge />
-          </div>
-
-          {/* Right Zone */}
-          <SessionSettingsPopover
-            onOpenTopics={() => setTopicsOpen(true)}
-            onOpenTools={() => setToolsOpen(true)}
-            onOpenMemory={() => setMemoryOpen(true)}
-            onOpenFiles={() => setFilesOpen(true)}
-            memoryCount={memoryCount}
-            fileCount={fileCount}
-          />
-        </div>
-      )}
+      {/* Header with Agent selector and Session Settings */}
+      <ChatHeader
+        sessionId={sessionId}
+        currentAgentId={currentAgentId}
+        onAgentChange={handleAgentChange}
+        disabled={streaming}
+        totalTokens={totalTokens}
+        memoryCount={memoryCount}
+        fileCount={fileCount}
+        onOpenTopics={() => setTopicsOpen(true)}
+        onOpenTools={() => setToolsOpen(true)}
+        onOpenMemory={() => setMemoryOpen(true)}
+        onOpenFiles={() => setFilesOpen(true)}
+        onOpenInbox={() => setInboxOpen(true)}
+        inboxCount={inboxCount}
+        isChatEmpty={messages.length === 0}
+      />
 
       {/* Message area */}
       <div className="flex-1 overflow-y-auto p-4">
@@ -291,6 +289,12 @@ export default function ChatPage() {
             open={filesOpen}
             onOpenChange={setFilesOpen}
             onCountChange={setFileCount}
+          />
+          <MergeInboxDrawer
+            sessionId={sessionId}
+            open={inboxOpen}
+            onOpenChange={setInboxOpen}
+            onCountChange={setInboxCount}
           />
         </>
       )}

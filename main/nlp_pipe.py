@@ -23,7 +23,8 @@ class NLPPipeline:
         gliner: GLiNER,
         spacy: spacy.Language,
         gliner_threshold: float = 0.85,
-        vp01_min_confidence: float = 0.8
+        vp01_min_confidence: float = 0.8,
+        ner_prompt: str = None
     ):
         self.llm_client = llm
         self.topic_config = topic_config
@@ -34,12 +35,15 @@ class NLPPipeline:
         self._gliner = gliner
         self.gliner_threshold = gliner_threshold
         self.vp01_min_confidence = vp01_min_confidence
+        self.ner_prompt = ner_prompt
 
-    def update_settings(self, gliner_threshold: float = None, vp01_min_confidence: float = None):
+    def update_settings(self, gliner_threshold: float = None, vp01_min_confidence: float = None, ner_prompt: str = None):
         if gliner_threshold is not None:
             self.gliner_threshold = gliner_threshold
         if vp01_min_confidence is not None:
             self.vp01_min_confidence = vp01_min_confidence
+        if ner_prompt is not None:
+            self.ner_prompt = ner_prompt
         logger.info(f"NLPPipeline updated: gliner={self.gliner_threshold}, vp01_conf={self.vp01_min_confidence}")
        
     def _build_label_to_topics(self) -> Dict[str, List[str]]:
@@ -215,7 +219,11 @@ class NLPPipeline:
         
         user_content = format_vp01_input(messages, known_ents, gliner_ents, ambiguous, covered_texts, self.topic_config.label_block)
         
-        system_prompt = ner_reasoning_prompt(user_name)
+        if self.ner_prompt:
+            system_prompt = self.ner_prompt.replace("{user_name}", user_name)
+        else:
+            system_prompt = ner_reasoning_prompt(user_name)
+            
         await emit(session_id, "pipeline", "llm_call", {
             "stage": "ner",
             "prompt": user_content

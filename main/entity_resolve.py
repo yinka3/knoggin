@@ -9,6 +9,7 @@ from main.utils import is_substring_match
 from shared.schema.dtypes import Fact
 from shared.events import emit_sync
 from jobs.jobs_utils import cosine_similarity
+from cachetools import LRUCache
 
 class EntityResolver:
     
@@ -25,8 +26,8 @@ class EntityResolver:
         self.hierarchy_config = hierarchy_config or {}
         self.session_id = session_id
         self.embedding_service = embedding_service
-        self.entity_profiles = {}
-        self._name_to_id = {}
+        self.entity_profiles = LRUCache(maxsize=1000000)
+        self._name_to_id = LRUCache(maxsize=3000000)
         self._lock = threading.RLock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
@@ -132,7 +133,7 @@ class EntityResolver:
 
     def get_profiles(self) -> Dict[int, Dict]:
         with self._lock:
-            return dict(self.entity_profiles)
+            return dict(list(self.entity_profiles.items()))
     
     def get_mentions_for_id(self, entity_id: int) -> List[str]:
         with self._lock:
@@ -141,7 +142,7 @@ class EntityResolver:
 
     def get_known_aliases(self) -> Dict[str, int]:
         with self._lock:
-            return dict(self._name_to_id)
+            return dict(list(self._name_to_id.items()))
     
     def get_embedding_for_id(self, entity_id: int) -> List[float]:
         """Retrieve embedding from graph by ID."""

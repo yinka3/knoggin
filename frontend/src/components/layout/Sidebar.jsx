@@ -30,6 +30,17 @@ import { deleteSession } from '@/api/sessions'
 import { toast } from 'sonner'
 import { AnimatePresence, motion } from 'motion/react'
 import { cn } from '@/lib/utils'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+
+function SidebarTooltip({ isOpen, label, children }) {
+  if (isOpen) return children;
+  return (
+    <Tooltip delayDuration={0}>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="right" className="font-medium">{label}</TooltipContent>
+    </Tooltip>
+  )
+}
 
 export default function Sidebar({ isOpen, onToggle }) {
   const { sessions, currentSessionId, createSession, selectSession, loadSessions, loading } =
@@ -84,111 +95,120 @@ export default function Sidebar({ isOpen, onToggle }) {
       {/* Nav links */}
       <div className={`p-2 space-y-1 ${!isOpen && 'flex flex-col items-center'}`}>
         {/* DASHBOARD BUTTON */}
-
-        <Link to="/dashboard" className="w-full">
-          <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
-              location.pathname === '/dashboard'
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            <LayoutDashboard
-              size={18}
-              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
-            />
-            <span
-              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+        <SidebarTooltip isOpen={isOpen} label="Dashboard">
+          <Link to="/dashboard" className="w-full flex justify-center">
+            <button
+              className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
+                location.pathname === '/dashboard'
+                  ? 'bg-primary/10 text-primary font-medium'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
             >
-              Dashboard
-            </span>
-          </button>
-        </Link>
+              <LayoutDashboard
+                size={18}
+                className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
+              />
+              <span
+                className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+              >
+                Dashboard
+              </span>
+            </button>
+          </Link>
+        </SidebarTooltip>
 
         {/* MEMORY BUTTON */}
-        <Link to="/memory" className="w-full">
-          <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
-              location.pathname === '/memory'
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            {/* ANIMATION: Scales up and tilts right */}
-            <Brain
-              size={18}
-              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
-            />
-            <span
-              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+        <SidebarTooltip isOpen={isOpen} label="Memory">
+          <Link to="/memory" className="w-full flex justify-center">
+            <button
+              className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
+                location.pathname === '/memory'
+                  ? 'bg-primary/10 text-primary font-medium'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
             >
-              Memory
-            </span>
-          </button>
-        </Link>
+              <Brain
+                size={18}
+                className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
+              />
+              <span
+                className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+              >
+                Memory
+              </span>
+            </button>
+          </Link>
+        </SidebarTooltip>
 
         {/* AGENTS BUTTON */}
-        <Link to="/agents" className="w-full">
-          <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
-              location.pathname === '/agents'
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            <Bot
-              size={18}
-              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
-            />
-            <span
-              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+        <SidebarTooltip isOpen={isOpen} label="Agents">
+          <Link to="/agents" className="w-full flex justify-center">
+            <button
+              className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
+                location.pathname === '/agents'
+                  ? 'bg-primary/10 text-primary font-medium'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
             >
-              Agents
-            </span>
-          </button>
-        </Link>
+              <Bot
+                size={18}
+                className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
+              />
+              <span
+                className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+              >
+                Agents
+              </span>
+            </button>
+          </Link>
+        </SidebarTooltip>
       </div>
       <div className={`mx-3 border-t border-border/50 ${!isOpen && 'mx-2'}`} />
 
       {/* COMMUNITY BUTTON */}
-      <Link to="/community" className="w-full">
-        <button
-          className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
-            location.pathname === '/community'
-              ? 'bg-primary/10 text-primary font-medium'
-              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-        >
-          <Users
-            size={18}
-            className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
-          />
-          <span
-            className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
-          >
-            Community
-          </span>
-        </button>
-      </Link>
+      <div className={`p-2 space-y-1 ${!isOpen && 'flex flex-col items-center'}`}>
+        <SidebarTooltip isOpen={isOpen} label="Community">
+          <Link to="/community" className="w-full flex justify-center">
+            <button
+              className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group relative ${
+                location.pathname === '/community'
+                  ? 'bg-primary/10 text-primary font-medium'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
+            >
+              <Users
+                size={18}
+                className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
+              />
+              <span
+                className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+              >
+                Community
+              </span>
+            </button>
+          </Link>
+        </SidebarTooltip>
+      </div>
 
       {/* New chat button */}
-      <div className={`p-2 ${!isOpen && 'flex justify-center'}`}>
-        <Button
-          variant="ghost"
-          onClick={createSession}
-          className={`${isOpen ? 'w-full justify-start' : 'w-10 justify-center px-0'} rounded-md border-primary/20 hover:border-primary/50 text-primary hover:bg-primary/5 transition-all shadow-none group`}
-        >
-          {/* ANIMATION: Rotates 90 degrees */}
-          <Plus
-            size={18}
-            className={`transition-transform duration-300 ease-out group-hover:rotate-90 ${isOpen ? 'mr-2' : ''}`}
-          />
-          <span
-            className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+      <div className={`px-2 pb-2 ${!isOpen && 'flex justify-center'}`}>
+        <SidebarTooltip isOpen={isOpen} label="New Chat">
+          <Button
+            variant="ghost"
+            onClick={createSession}
+            className={`${isOpen ? 'w-full justify-start' : 'w-10 justify-center px-0'} rounded-md border-primary/20 hover:border-primary/50 text-primary hover:bg-primary/5 transition-all shadow-none group relative`}
           >
-            New Chat
-          </span>
-        </Button>
+            <Plus
+              size={18}
+              className={`transition-transform duration-300 ease-out group-hover:rotate-90 ${isOpen ? 'mr-2' : ''}`}
+            />
+            <span
+              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+            >
+              New Chat
+            </span>
+          </Button>
+        </SidebarTooltip>
       </div>
 
       {/* Sessions list */}
@@ -252,65 +272,71 @@ export default function Sidebar({ isOpen, onToggle }) {
       <div
         className={`border-t border-border p-2 space-y-1 ${!isOpen && 'flex flex-col items-center'}`}
       >
-        <Link to="/settings" className="w-full">
-          <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group ${
-              location.pathname === '/settings'
-                ? 'bg-primary/10 text-primary'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            <Settings
-              size={18}
-              className="transition-transform duration-700 ease-out group-hover:rotate-180"
-            />
-            <span
-              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+        <SidebarTooltip isOpen={isOpen} label="Settings">
+          <Link to="/settings" className="w-full flex justify-center">
+            <button
+              className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group ${
+                location.pathname === '/settings'
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
             >
-              Settings
-            </span>
-          </button>
-        </Link>
+              <Settings
+                size={18}
+                className="transition-transform duration-700 ease-out group-hover:rotate-180"
+              />
+              <span
+                className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+              >
+                Settings
+              </span>
+            </button>
+          </Link>
+        </SidebarTooltip>
 
-        <Link to="/settings/developer" className="w-full">
-          <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group ${
-              location.pathname === '/settings/developer'
-                ? 'bg-primary/10 text-primary'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            <Code2
-              size={18}
-              className="transition-transform duration-300 ease-out group-hover:scale-110"
-            />
-            <span
-              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+        <SidebarTooltip isOpen={isOpen} label="Developer">
+          <Link to="/settings/developer" className="w-full flex justify-center">
+            <button
+              className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group ${
+                location.pathname === '/settings/developer'
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
             >
-              Developer
-            </span>
-          </button>
-        </Link>
+              <Code2
+                size={18}
+                className="transition-transform duration-300 ease-out group-hover:scale-110"
+              />
+              <span
+                className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+              >
+                Developer
+              </span>
+            </button>
+          </Link>
+        </SidebarTooltip>
 
-        <Link to="/debug" className="w-full">
-          <button
-            className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group ${
-              location.pathname === '/debug'
-                ? 'bg-primary/10 text-primary'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            <Terminal
-              size={18}
-              className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
-            />
-            <span
-              className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+        <SidebarTooltip isOpen={isOpen} label="Debug">
+          <Link to="/debug" className="w-full flex justify-center">
+            <button
+              className={`${isOpen ? 'w-full justify-start px-3' : 'w-10 justify-center'} flex items-center gap-2 py-2 rounded-md text-sm transition-all duration-200 group ${
+                location.pathname === '/debug'
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
             >
-              Debug
-            </span>
-          </button>
-        </Link>
+              <Terminal
+                size={18}
+                className="transition-transform duration-300 ease-out group-hover:scale-110 group-hover:text-primary"
+              />
+              <span
+                className={`whitespace-nowrap overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0'}`}
+              >
+                Debug
+              </span>
+            </button>
+          </Link>
+        </SidebarTooltip>
       </div>
 
       <AlertDialog open={!!deleteTarget} onOpenChange={open => !open && setDeleteTarget(null)}>

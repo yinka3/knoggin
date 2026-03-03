@@ -22,6 +22,7 @@ from api.routes.files import router as files_router
 from api.mcp_server import create_mcp_app
 from api.onboarding import router as onboarding_router
 from api.routes.community import router as community_router
+from api.routes.proposals import router as proposals_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -79,3 +80,4 @@ app.include_router(debug_router, prefix="/debug", tags=["debug"])
 app.include_router(stats_router, prefix="/stats", tags=["stats"])
 app.include_router(files_router, prefix="/files", tags=["files"])
 app.include_router(community_router, prefix="/community", tags=["community"])
+app.include_router(proposals_router, prefix="/proposals", tags=["proposals"])

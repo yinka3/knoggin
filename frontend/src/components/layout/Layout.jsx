@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import Sidebar from './Sidebar'
+import { TooltipProvider } from '@/components/ui/tooltip'
 
 function getInitialSidebarState() {
   try {
@@ -21,10 +22,12 @@ export default function Layout({ children }) {
     })
   }, [])
   return (
-    <div className="flex h-screen bg-background text-foreground overflow-hidden">
-      <div className="gradient-bg" />
-      <Sidebar isOpen={sidebarOpen} onToggle={handleToggle} />
-      <main className="flex-1 flex flex-col overflow-hidden">{children}</main>
-    </div>
+    <TooltipProvider delayDuration={0}>
+      <div className="flex h-screen bg-background text-foreground overflow-hidden">
+        <div className="gradient-bg" />
+        <Sidebar isOpen={sidebarOpen} onToggle={handleToggle} />
+        <main className="flex-1 flex flex-col overflow-hidden">{children}</main>
+      </div>
+    </TooltipProvider>
   )
 }
