@@ -20,7 +20,7 @@ class EmbeddingService:
         device: str = None,
         batch_size: int = 64
     ):
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or 'cpu'
         self.batch_size = batch_size
         self._lock = threading.Lock()
         self._embedder = SentenceTransformer(

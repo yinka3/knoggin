@@ -306,6 +306,15 @@ export function useChat(sessionId) {
                  break
               }
 
+              case 'session_title': {
+                 window.dispatchEvent(
+                   new CustomEvent('session_updated', {
+                     detail: { sessionId: currentSessionId, title: data.title },
+                   })
+                 )
+                 break
+              }
+
               case 'error':
                 stopReveal()
                 console.error('Stream error:', data.message)

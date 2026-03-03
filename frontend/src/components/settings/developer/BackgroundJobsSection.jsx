@@ -46,7 +46,7 @@ export default function BackgroundJobsSection({ settings, update }) {
 
       {/* Profile */}
       <SubSection title="Profile Refinement" icon={Users}>
-        <SettingRow label="Message Window" description="Messages to consider">
+        <SettingRow label="Message Context Size" description="Number of recent messages to analyze when building the user profile">
           <NumberInput
             value={settings?.jobs?.profile?.msg_window}
             onChange={v => update('jobs.profile.msg_window', v)}
@@ -54,7 +54,7 @@ export default function BackgroundJobsSection({ settings, update }) {
             max={100}
           />
         </SettingRow>
-        <SettingRow label="Volume Threshold" description="Min messages to trigger">
+        <SettingRow label="Activity Limit" description="Minimum messages required before a profile update is triggered">
           <NumberInput
             value={settings?.jobs?.profile?.volume_threshold}
             onChange={v => update('jobs.profile.volume_threshold', v)}
@@ -62,7 +62,7 @@ export default function BackgroundJobsSection({ settings, update }) {
             max={100}
           />
         </SettingRow>
-        <SettingRow label="Idle Threshold" description="Seconds idle before profiling">
+        <SettingRow label="Idle Time Requirement" description="Seconds of chat silence needed before profile processing begins">
           <NumberInput
             value={settings?.jobs?.profile?.idle_threshold}
             onChange={v => update('jobs.profile.idle_threshold', v)}
@@ -79,7 +79,7 @@ export default function BackgroundJobsSection({ settings, update }) {
             max={20}
           />
         </SettingRow>
-        <SettingRow label="Contradiction Sim Low" description="Lower similarity bound">
+        <SettingRow label="Minimum Conflict Similarity" description="Lowest semantic similarity needed to suspect two facts contradict">
           <NumberInput
             value={settings?.jobs?.profile?.contradiction_sim_low}
             onChange={v => update('jobs.profile.contradiction_sim_low', v)}
@@ -88,7 +88,7 @@ export default function BackgroundJobsSection({ settings, update }) {
             step={0.05}
           />
         </SettingRow>
-        <SettingRow label="Contradiction Sim High" description="Upper similarity bound">
+        <SettingRow label="Maximum Conflict Similarity" description="Upper similarity bound for contradiction checks">
           <NumberInput
             value={settings?.jobs?.profile?.contradiction_sim_high}
             onChange={v => update('jobs.profile.contradiction_sim_high', v)}
@@ -97,7 +97,7 @@ export default function BackgroundJobsSection({ settings, update }) {
             step={0.05}
           />
         </SettingRow>
-        <SettingRow label="Contradiction Batch" description="Contradictions per batch">
+        <SettingRow label="Conflict Checks per Batch" description="How many contradictions to analyze at once">
           <NumberInput
             value={settings?.jobs?.profile?.contradiction_batch_size}
             onChange={v => update('jobs.profile.contradiction_batch_size', v)}
@@ -109,7 +109,7 @@ export default function BackgroundJobsSection({ settings, update }) {
 
       {/* Merger */}
       <SubSection title="Entity Merger" icon={Combine}>
-        <SettingRow label="Auto Threshold" description="Auto-merge above this score">
+        <SettingRow label="Automatic Merge Certainty" description="Safely combine facts if the AI confidence is above this score">
           <NumberInput
             value={settings?.jobs?.merger?.auto_threshold}
             onChange={v => update('jobs.merger.auto_threshold', v)}
@@ -118,7 +118,7 @@ export default function BackgroundJobsSection({ settings, update }) {
             step={0.01}
           />
         </SettingRow>
-        <SettingRow label="HITL Threshold" description="Suggest merge above this">
+        <SettingRow label="Human Review Certainty" description="Ask for your permission to merge if confidence is above this score">
           <NumberInput
             value={settings?.jobs?.merger?.hitl_threshold}
             onChange={v => update('jobs.merger.hitl_threshold', v)}
@@ -127,7 +127,7 @@ export default function BackgroundJobsSection({ settings, update }) {
             step={0.01}
           />
         </SettingRow>
-        <SettingRow label="Cosine Threshold" description="Embedding similarity floor">
+        <SettingRow label="Initial Similarity Filter" description="Minimum semantic similarity required to even compare two facts">
           <NumberInput
             value={settings?.jobs?.merger?.cosine_threshold}
             onChange={v => update('jobs.merger.cosine_threshold', v)}
@@ -192,7 +192,7 @@ export default function BackgroundJobsSection({ settings, update }) {
 
       {/* Topic Config */}
       <SubSection title="Topic Extraction" icon={MessageSquare}>
-        <SettingRow label="Interval Messages" description="Messages between topic checks">
+        <SettingRow label="Messages per Topic Check" description="How frequently (in messages) the AI scans for a new conversation topic">
           <NumberInput
             value={settings?.jobs?.topic_config?.interval_msgs}
             onChange={v => update('jobs.topic_config.interval_msgs', v)}
@@ -200,7 +200,7 @@ export default function BackgroundJobsSection({ settings, update }) {
             max={200}
           />
         </SettingRow>
-        <SettingRow label="Conversation Window" description="Messages in analysis window">
+        <SettingRow label="Topic Context Window" description="Number of recent messages to analyze when finding a topic">
           <NumberInput
             value={settings?.jobs?.topic_config?.conversation_window}
             onChange={v => update('jobs.topic_config.conversation_window', v)}

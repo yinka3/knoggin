@@ -53,7 +53,8 @@ class BatchProcessor:
             user_name: str,
             topic_config: TopicConfig,
             get_next_ent_id,
-            resolution_threshold: float = 0.85):
+            resolution_threshold: float = 0.85,
+            connection_prompt: str = None):
 
         self.session_id = session_id
         self.redis = redis_client
@@ -66,6 +67,7 @@ class BatchProcessor:
         self.topic_config = topic_config
         self._get_next_ent_id = get_next_ent_id
         self.resolution_threshold = resolution_threshold
+        self.connection_prompt = connection_prompt
     
         
     async def run(self, messages: List[Dict], session_text: str) -> BatchResult:
@@ -451,7 +453,11 @@ class BatchProcessor:
                     "source_msgs": entity_msg_map.get(ent_id, [])
                 })
                 
-        system_03 = get_connection_reasoning_prompt(self.user_name)
+        if self.connection_prompt:
+            system_03 = self.connection_prompt.replace("{user_name}", self.user_name)
+        else:
+            system_03 = get_connection_reasoning_prompt(self.user_name)
+            
         user_03 = format_vp03_input(
             candidates, 
             [{"id": m["id"], "text": m["message"]} for m in messages],

@@ -332,7 +332,10 @@ export default function DebugPage() {
             <div className="w-px h-4 bg-neutral-800 mx-0.5" />
 
             {/* Filter */}
-            <div className="relative">
+            <div
+              className="relative"
+              title="Filter by component (e.g. 'agent', 'pipeline'), event name, or JSON data text"
+            >
               <Search
                 size={11}
                 className="absolute left-2 top-1/2 -translate-y-1/2 text-neutral-600"
@@ -340,8 +343,8 @@ export default function DebugPage() {
               <input
                 value={filter}
                 onChange={e => setFilter(e.target.value)}
-                placeholder="filter"
-                className="pl-6 pr-2 py-1 w-28 bg-neutral-900 border border-neutral-800 rounded text-[11px] text-neutral-400 font-mono placeholder:text-neutral-700 focus:outline-none focus:border-neutral-600"
+                placeholder="filter logs..."
+                className="pl-6 pr-2 py-1 w-auto min-w-[120px] bg-neutral-900 border border-neutral-800 rounded text-[11px] text-neutral-400 font-mono placeholder:text-neutral-700 focus:outline-none focus:border-neutral-600"
               />
             </div>
 

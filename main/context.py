@@ -187,6 +187,7 @@ class Context:
         )
         
         jobs_cfg = dev_settings.get("jobs", {})
+        nlp_cfg = dev_settings.get("nlp_pipeline", {})
         
         prof_cfg = jobs_cfg.get("profile", {})
         instance.profile_job = ProfileRefinementJob(
@@ -201,7 +202,9 @@ class Context:
             profile_batch_size=prof_cfg.get("profile_batch_size", 8),
             contradiction_sim_low=prof_cfg.get("contradiction_sim_low", 0.70),
             contradiction_sim_high=prof_cfg.get("contradiction_sim_high", 0.95),
-            contradiction_batch_size=prof_cfg.get("contradiction_batch_size", 4)
+            contradiction_batch_size=prof_cfg.get("contradiction_batch_size", 4),
+            profile_prompt=nlp_cfg.get("profile_prompt"),
+            contradiction_prompt=nlp_cfg.get("contradiction_prompt")
         )
         
         merge_cfg = jobs_cfg.get("merger", {})
@@ -214,7 +217,8 @@ class Context:
             executor=instance.executor,
             auto_threshold=merge_cfg.get("auto_threshold", 0.93),
             hitl_threshold=merge_cfg.get("hitl_threshold", 0.65),
-            cosine_threshold=merge_cfg.get("cosine_threshold", 0.65)
+            cosine_threshold=merge_cfg.get("cosine_threshold", 0.65),
+            merge_prompt=nlp_cfg.get("merge_prompt")
         )
         
         instance.scheduler = Scheduler(user_name, instance.session_id, resources.redis)
@@ -384,6 +388,35 @@ class Context:
         
         await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
         await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
+        
+        from shared.config import load_config
+        config = load_config() or {}
+        limit = config.get("developer_settings", {}).get("limits", {}).get("max_conversation_history", 10000)
+        
+        count = await self.redis_client.zcard(sorted_key)
+        if count > limit:
+            num_to_remove = count - limit
+            old_turns = await self.redis_client.zrange(sorted_key, 0, num_to_remove - 1)
+            
+            if old_turns:
+                old_turn_data = await self.redis_client.hmget(conv_key, *old_turns)
+                msgs_to_delete = []
+                for data_str in old_turn_data:
+                    if data_str:
+                        data = json.loads(data_str)
+                        if "user_msg_id" in data:
+                            msgs_to_delete.append(f"msg_{data['user_msg_id']}")
+                
+                pipe = self.redis_client.pipeline()
+                pipe.zremrangebyrank(sorted_key, 0, num_to_remove - 1)
+                pipe.hdel(conv_key, *old_turns)
+                
+                if msgs_to_delete:
+                    pipe.hdel(RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id), *msgs_to_delete)
+                    pipe.hdel(RedisKeys.message_content(self.user_name, self.session_id), *msgs_to_delete)
+                    
+                await pipe.execute()
+                
         return turn_id
     
     async def add_to_redis(self, msg: MessageData):

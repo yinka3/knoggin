@@ -9,6 +9,9 @@ import { ToolsProvider } from './context/ToolsContext'
 import ConfigGate from './components/ConfigGate'
 import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/layout/Layout'
+import PageTransition from './components/layout/PageTransition'
+import { AnimatePresence } from 'motion/react'
+import { useLocation } from 'react-router-dom'
 import './index.css'
 
 const OnboardingPage = lazy(() => import('./pages/OnboardingPage'))
@@ -39,24 +42,28 @@ function LoadingFallback() {
 }
 
 function AppRoutes() {
+  const location = useLocation()
+  
   return (
     <SessionProvider>
       <SocketProvider>
         <ToolsProvider>
           <Layout>
             <Suspense fallback={<LoadingFallback />}>
-              <Routes>
-                <Route path="/" element={<Navigate to="/chat" replace />} />
-                <Route path="/chat" element={<ChatPage />} />
-                <Route path="/chat/:sessionId" element={<ChatPage />} />
-                <Route path="/dashboard" element={<DashboardPage />} />
-                <Route path="/memory" element={<MemoryPage />} />
-                <Route path="/agents" element={<AgentsPage />} />
-                <Route path="/community" element={<CommunityPage />} />
-                <Route path="/debug" element={<DebugPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-                <Route path="/settings/developer" element={<DeveloperSettingsPage />} />
-              </Routes>
+              <AnimatePresence mode="wait">
+                <Routes location={location} key={location.pathname}>
+                  <Route path="/" element={<Navigate to="/chat" replace />} />
+                  <Route path="/chat" element={<PageTransition><ChatPage /></PageTransition>} />
+                  <Route path="/chat/:sessionId" element={<PageTransition><ChatPage /></PageTransition>} />
+                  <Route path="/dashboard" element={<PageTransition><DashboardPage /></PageTransition>} />
+                  <Route path="/memory" element={<PageTransition><MemoryPage /></PageTransition>} />
+                  <Route path="/agents" element={<PageTransition><AgentsPage /></PageTransition>} />
+                  <Route path="/community" element={<PageTransition><CommunityPage /></PageTransition>} />
+                  <Route path="/debug" element={<PageTransition><DebugPage /></PageTransition>} />
+                  <Route path="/settings" element={<PageTransition><SettingsPage /></PageTransition>} />
+                  <Route path="/settings/developer" element={<PageTransition><DeveloperSettingsPage /></PageTransition>} />
+                </Routes>
+              </AnimatePresence>
             </Suspense>
           </Layout>
         </ToolsProvider>

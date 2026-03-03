@@ -8,9 +8,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-REDIS_HOST = os.environ.get("REDIS_HOST")
-REDIS_PORT = os.environ.get("REDIS_PORT")
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = os.environ.get("REDIS_PORT", "6379")
 
 
 
@@ -24,15 +23,9 @@ class AsyncRedisClient:
         """Async-safe singleton accessor."""
         async with cls._lock:
             if cls._instance is None:
-                if not REDIS_PASSWORD:
-                    raise ValueError(
-                        "REDIS_PASSWORD not set in environment. "
-                        "Please set REDIS_PASSWORD in your .env file or environment variables."
-                    )
-                
                 try:
                     pool = aioredis.ConnectionPool.from_url(
-                        url=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}",
+                        url=f"redis://{REDIS_HOST}:{REDIS_PORT}",
                         decode_responses=True,
                         max_connections=10,
                         retry_on_timeout=True,

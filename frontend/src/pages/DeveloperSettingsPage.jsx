@@ -25,13 +25,18 @@ import PipelineSection from '@/components/settings/developer/PipelineSection'
 import IngestionSection from '@/components/settings/developer/IngestionSection'
 import BackgroundJobsSection from '@/components/settings/developer/BackgroundJobsSection'
 import CommunitySection from '@/components/settings/developer/CommunitySection'
+import PromptsSection from '@/components/settings/developer/PromptsSection'
+import DeveloperModesSection from '@/components/settings/developer/DeveloperModesSection'
 import { motion, AnimatePresence } from 'motion/react'
+import { LayoutGrid } from 'lucide-react'
 
 const TABS = [
+  { id: 'modes', label: 'Curated Modes', icon: LayoutGrid },
   { id: 'limits', label: 'Agent Limits', icon: Zap },
   { id: 'search', label: 'Search', icon: Search },
   { id: 'entity', label: 'Entity Resolution', icon: Fingerprint },
-  { id: 'pipeline', label: 'Pipeline', icon: Workflow },
+  { id: 'pipeline', label: 'NLP Pipeline', icon: Workflow },
+  { id: 'prompts', label: 'System Prompts', icon: Code2 },
   { id: 'ingestion', label: 'Ingestion', icon: Database },
   { id: 'jobs', label: 'Background Jobs', icon: PlaySquare },
   { id: 'community', label: 'Community', icon: Users },
@@ -42,7 +47,7 @@ export default function DeveloperSettingsPage() {
   const [saving, setSaving] = useState(false)
   const [settings, setSettings] = useState(null)
   const [original, setOriginal] = useState(null)
-  const [activeTab, setActiveTab] = useState('limits')
+  const [activeTab, setActiveTab] = useState('modes')
 
   useEffect(() => {
     loadSettings()
@@ -221,6 +226,9 @@ export default function DeveloperSettingsPage() {
                 transition={{ duration: 0.25, ease: 'easeOut' }}
                 className="w-full h-full overflow-y-auto"
               >
+                {activeTab === 'modes' && (
+                  <DeveloperModesSection settings={settings} setSettings={setSettings} />
+                )}
                 {activeTab === 'limits' && (
                   <AgentLimitsSection settings={settings} update={update} />
                 )}
@@ -230,6 +238,9 @@ export default function DeveloperSettingsPage() {
                 )}
                 {activeTab === 'pipeline' && (
                   <PipelineSection settings={settings} update={update} />
+                )}
+                {activeTab === 'prompts' && (
+                  <PromptsSection settings={settings} update={update} />
                 )}
                 {activeTab === 'ingestion' && (
                   <IngestionSection settings={settings} update={update} />

@@ -50,7 +50,7 @@ async def call_agent_streaming(
     agent_preferences: str = "",
     agent_ticks: str = "",
     agent_temperature: float = 0.7,
-    agent_base_prompt: str = None
+    agent_instructions: str = None
 ) -> AsyncGenerator[Union[Dict, AgentResponse], None]:
     """
     Streaming version of call_agent.
@@ -62,7 +62,7 @@ async def call_agent_streaming(
         agent_rules=agent_rules,
         agent_preferences=agent_preferences,
         agent_icks=agent_icks,
-        custom_base_prompt=agent_base_prompt
+        instructions=agent_instructions
     )
     user_message = build_user_message(ctx, last_result)
 
@@ -174,7 +174,7 @@ async def run_stream(
     user_timezone: str = None,
     mcp_manager=None,
     agent_temperature: float = 0.7,
-    agent_base_prompt: str = None
+    agent_instructions: str = None
 ) -> AsyncGenerator[Dict, None]:
     """Streaming version of orchestrator.run()"""
     
@@ -288,7 +288,7 @@ async def run_stream(
                 agent_preferences=a_prefs,
                 agent_icks=a_icks,
                 agent_temperature=agent_temperature,
-                agent_base_prompt=agent_base_prompt
+                agent_instructions=agent_instructions
             ):
                 
                 # Token - pass through to frontend

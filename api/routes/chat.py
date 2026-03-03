@@ -162,6 +162,25 @@ async def send_message(
                 # Yield a final event with the msg_id
                 yield f"event: msg_id\ndata: {json.dumps({'msg_id': msg.id})}\n\n"
 
+                if len(history) == 0 and not session_meta.get("title"):
+                    try:
+                        title_prompt = f"User message: {body.message}\nAssistant response: {final_response}\n\nGenerate a short, concise (3-5 words) title for this conversation. Reply with ONLY the title."
+                        title = await state.resources.llm_service.call_llm(
+                            system="You are an AI that generates concise titles for chat sessions. Respond with only the title, no quotes or prefix.",
+                            user=title_prompt
+                        )
+                        if title:
+                            title = title.strip('"').strip()
+                            session_meta["title"] = title
+                            await state.resources.redis.hset(
+                                RedisKeys.sessions(state.user_name),
+                                session_id,
+                                json.dumps(session_meta)
+                            )
+                            yield f"event: session_title\ndata: {json.dumps({'title': title})}\n\n"
+                    except Exception as e:
+                        logger.warning(f"Failed to generate session title: {e}")
+
                 
         except Exception as e:
             error_payload = {
@@ -239,5 +258,9 @@ async def extract_message_facts(
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
         
-    await context._maybe_extract_assistant(body.content, body.user_msg_id)
-    return {"status": "success", "message": "Fact extraction triggered successfully"}
+    facts_found = await context._maybe_extract_assistant(body.content, body.user_msg_id)
+    return {
+        "status": "success", 
+        "message": "Fact extraction triggered successfully",
+        "facts_found": facts_found
+    }

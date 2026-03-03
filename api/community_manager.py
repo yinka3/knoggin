@@ -224,7 +224,7 @@ class CommunityManager:
             agent_rules=memory_blocks.get("rules", ""),
             agent_preferences=memory_blocks.get("preferences", ""),
             agent_icks=memory_blocks.get("icks", ""),
-            custom_base_prompt=agent.base_prompt
+            instructions=agent.instructions
         )
 
         aac_context = (
@@ -359,7 +359,7 @@ class CommunityManager:
             agent_rules=memory_blocks.get("rules", ""),
             agent_preferences=memory_blocks.get("preferences", ""),
             agent_icks=memory_blocks.get("icks", ""),
-            custom_base_prompt=seeding_agent.base_prompt
+            instructions=seeding_agent.instructions
         )
 
         seeding_instructions = """

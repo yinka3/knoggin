@@ -4,11 +4,14 @@ import { Section, SettingRow, NumberInput } from './SettingsPrimitives'
 export default function EntityResolutionSection({ settings, update }) {
   return (
     <Section
-      title="Entity Resolution"
-      description="Deduplication and matching thresholds"
+      title="Graph Match Sensitivity"
+      description="Fine-tune how strictly the system merges memories and finds related concepts"
       icon={GitMerge}
     >
-      <SettingRow label="Fuzzy Substring" description="Threshold for partial matches">
+      <SettingRow
+        label="Partial Match Strictness"
+        description="How closely a word must match to be considered the same (e.g., 'React' vs 'ReactJS')"
+      >
         <NumberInput
           value={settings?.entity_resolution?.fuzzy_substring_threshold}
           onChange={v => update('entity_resolution.fuzzy_substring_threshold', v)}
@@ -17,7 +20,10 @@ export default function EntityResolutionSection({ settings, update }) {
           unit="%"
         />
       </SettingRow>
-      <SettingRow label="Fuzzy Non-Substring" description="Stricter full-name matching">
+      <SettingRow
+        label="Exact Match Strictness"
+        description="How intensely complete phrases must align before merging"
+      >
         <NumberInput
           value={settings?.entity_resolution?.fuzzy_non_substring_threshold}
           onChange={v => update('entity_resolution.fuzzy_non_substring_threshold', v)}
@@ -26,7 +32,10 @@ export default function EntityResolutionSection({ settings, update }) {
           unit="%"
         />
       </SettingRow>
-      <SettingRow label="Candidate Fuzzy" description="Initial candidate filter">
+      <SettingRow
+        label="Initial Filter Baseline"
+        description="The minimum similarity score needed before deep semantic checking begins"
+      >
         <NumberInput
           value={settings?.entity_resolution?.candidate_fuzzy_threshold}
           onChange={v => update('entity_resolution.candidate_fuzzy_threshold', v)}
@@ -35,7 +44,10 @@ export default function EntityResolutionSection({ settings, update }) {
           unit="%"
         />
       </SettingRow>
-      <SettingRow label="Vector Threshold" description="Semantic similarity cutoff">
+      <SettingRow
+        label="Semantic Meaning Cutoff"
+        description="How similar the core meaning of two concepts must be to link them"
+      >
         <NumberInput
           value={settings?.entity_resolution?.candidate_vector_threshold}
           onChange={v => update('entity_resolution.candidate_vector_threshold', v)}
@@ -44,7 +56,10 @@ export default function EntityResolutionSection({ settings, update }) {
           step={0.05}
         />
       </SettingRow>
-      <SettingRow label="Resolution Threshold" description="Mention resolution similarity">
+      <SettingRow
+        label="Final Merge Threshold"
+        description="The ultimate confidence score required to officially merge two concepts"
+      >
         <NumberInput
           value={settings?.entity_resolution?.resolution_threshold}
           onChange={v => update('entity_resolution.resolution_threshold', v)}
@@ -53,7 +68,10 @@ export default function EntityResolutionSection({ settings, update }) {
           step={0.05}
         />
       </SettingRow>
-      <SettingRow label="Generic Token Freq" description="Ignore high-frequency tokens">
+      <SettingRow
+        label="Common Word Ignore List"
+        description="Ignore extremely common words (like 'the', 'and') if they appear this many times"
+      >
         <NumberInput
           value={settings?.entity_resolution?.generic_token_freq}
           onChange={v => update('entity_resolution.generic_token_freq', v)}

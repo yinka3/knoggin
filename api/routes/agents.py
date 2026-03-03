@@ -16,6 +16,7 @@ router = APIRouter()
 class CreateAgentRequest(BaseModel):
     name: str
     persona: str
+    instructions: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = 0.7
     enabled_tools: Optional[list[str]] = None
@@ -24,6 +25,7 @@ class CreateAgentRequest(BaseModel):
 class UpdateAgentRequest(BaseModel):
     name: Optional[str] = None
     persona: Optional[str] = None
+    instructions: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = None
     enabled_tools: Optional[list[str]] = None
@@ -37,20 +39,7 @@ class AgentMemoryEntry(BaseModel):
 async def get_agent_defaults(state: AppState = Depends(get_app_state)):
     return {
         "default_persona": "Warm and direct. Match their energy. No corporate filler.",
-        "default_base_prompt": (
-            "You are {agent_name}, operating within the Knoggin knowledge system for {user_name}.\n\n"
-            "{date_context}\n\n"
-            "<persona>{voice}</persona>\n"
-            "{agent_specific_section}\n"
-            "<system_guidelines>\n"
-            "You have access to tools that browse and manage {user_name}'s knowledge graph and memory.\n"
-            "- Use tools naturally to pull facts, analyze relationships, or review past conversations. If the graph lacks info, state that directly.\n"
-            "- Prefer structured knowledge (search_entity) over raw text parsing (search_messages).\n"
-            "- Use get_recent_activity for temporal questions (\"lately\", \"this week\").\n"
-            "- Use request_clarification if the query is too vague to act on.\n"
-            "</system_guidelines>\n\n"
-            "{memory_section}"
-        )
+        "default_instructions": ""
     }
 
 
@@ -74,6 +63,7 @@ async def create_agent(
     agent = await state.create_agent(
         name=body.name,
         persona=body.persona,
+        instructions=body.instructions,
         model=body.model,
         temperature=body.temperature,
         enabled_tools=body.enabled_tools
@@ -119,6 +109,7 @@ async def update_agent(
         agent_id=agent_id,
         name=body.name,
         persona=body.persona,
+        instructions=body.instructions,
         model=body.model,
         temperature=body.temperature,
         enabled_tools=body.enabled_tools

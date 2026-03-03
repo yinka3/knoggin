@@ -283,34 +283,43 @@ export default function WelcomeState({ onFirstMessage, userName }) {
             {/* Core orb */}
             <div
               className={cn(
-                'w-full h-full rounded-full relative orb-breathe',
+                'w-full h-full relative overflow-hidden orb-breathe',
                 isReady ? 'opacity-100' : 'opacity-80'
               )}
               style={{
-                background: `
-                  radial-gradient(circle at 35% 35%, rgba(52, 216, 130, 0.9), transparent 50%),
-                  radial-gradient(circle at 65% 65%, rgba(46, 170, 110, 0.8), transparent 50%),
-                  radial-gradient(circle at 50% 50%, rgba(46, 170, 110, 0.95), rgba(30, 120, 80, 0.6))
-                `,
+                background: 'rgba(30, 120, 80, 1)',
                 boxShadow: `
-                  0 0 30px rgba(46, 170, 110, 0.4),
-                  0 0 60px rgba(46, 170, 110, 0.2),
-                  inset 0 0 20px rgba(255, 255, 255, 0.1)
+                  0 0 30px rgba(46, 170, 110, 0.5),
+                  inset 0 0 20px rgba(0, 0, 0, 0.3),
+                  inset 0 0 10px rgba(255, 255, 255, 0.1)
                 `,
               }}
             >
-              {/* Inner highlight */}
+              {/* Swirling energy layers */}
               <div
-                className="absolute rounded-full"
+                className="absolute inset-0 orb-swirl-1"
                 style={{
-                  width: '40%',
-                  height: '40%',
-                  top: '18%',
-                  left: '22%',
-                  background: 'radial-gradient(circle, rgba(255,255,255,0.25), transparent 70%)',
-                  filter: 'blur(4px)',
+                  background: 'radial-gradient(circle at 30% 70%, rgba(52, 216, 130, 0.9), transparent 60%)',
+                  filter: 'blur(5px)',
                 }}
               />
+              <div
+                className="absolute inset-0 orb-swirl-2"
+                style={{
+                  background: 'radial-gradient(circle at 80% 40%, rgba(132, 250, 180, 0.8), transparent 60%)',
+                  filter: 'blur(5px)',
+                }}
+              />
+              <div
+                className="absolute inset-0 orb-swirl-3"
+                style={{
+                  background: 'radial-gradient(circle at 40% 20%, rgba(16, 90, 50, 0.9), transparent 60%)',
+                  filter: 'blur(5px)',
+                }}
+              />
+
+              {/* Glassy reflection */}
+              <div className="absolute inset-0 orb-glass-reflection pointer-events-none" style={{ borderRadius: 'inherit' }} />
             </div>
 
             {/* Outer glow */}
@@ -320,9 +329,9 @@ export default function WelcomeState({ onFirstMessage, userName }) {
                 isReady ? 'opacity-100' : 'opacity-0'
               )}
               style={{
-                inset: -12,
-                background: 'radial-gradient(circle, rgba(46, 170, 110, 0.15), transparent 70%)',
-                filter: 'blur(10px)',
+                inset: -20,
+                background: 'radial-gradient(circle, rgba(46, 170, 110, 0.25), transparent 70%)',
+                filter: 'blur(15px)',
               }}
             />
           </motion.div>

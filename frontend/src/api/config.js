@@ -12,6 +12,10 @@ export function getConfigStatus() {
   return apiGet('/config/status')
 }
 
+export function getDeveloperModes() {
+  return apiGet('/config/developer-modes')
+}
+
 export function getAvailableModels() {
   return apiGet('/config/models')
 }

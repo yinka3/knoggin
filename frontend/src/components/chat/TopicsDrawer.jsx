@@ -170,7 +170,7 @@ export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
   return (
     <>
       <Sheet open={open} onOpenChange={onOpenChange}>
-        <SheetContent className="bg-background border-border w-72">
+        <SheetContent className="bg-background border-border w-80 sm:w-96 px-6">
           <SheetHeader>
             <SheetTitle className="flex items-center gap-2">
               <span>Topics</span>
@@ -209,7 +209,7 @@ export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
                         className={cn(
                           'inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300 border shadow-sm',
                           isActive
-                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20 hover:border-emerald-500/40 hover:scale-[1.02] active:scale-[0.98]'
+                            ? 'bg-primary/10 text-primary border-primary/20 hover:bg-primary/20 hover:border-primary/40 hover:scale-[1.02] active:scale-[0.98]'
                             : 'bg-muted/10 text-muted-foreground/40 border-border/20 hover:bg-muted/20 hover:text-muted-foreground/60 hover:border-border/40 hover:scale-[1.02] active:scale-[0.98]'
                         )}
                       >
@@ -218,7 +218,7 @@ export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
                           <span className={cn(
                             "flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-md text-[10px] font-bold transition-colors",
                             isActive 
-                              ? "bg-emerald-500/20 text-emerald-400/80" 
+                              ? "bg-primary/20 text-primary/80" 
                               : "bg-muted-foreground/10 text-muted-foreground/40"
                           )}>
                             {labelCount}

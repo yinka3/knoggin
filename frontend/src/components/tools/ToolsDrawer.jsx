@@ -117,7 +117,7 @@ export default function ToolsDrawer({ open, onOpenChange }) {
   }, {})
 
   const sortedGroups = Object.keys(groups).sort((a, b) => {
-    const priority = { Memory: 1, Graph: 2, History: 3, RAG: 4 }
+    const priority = { Memory: 1, Connections: 2, History: 3, Files: 4, Web: 5 }
     return (priority[a] || 99) - (priority[b] || 99)
   })
 

@@ -22,7 +22,8 @@ class MergeDetectionJob(BaseJob):
 
     def __init__(self, user_name: str, ent_resolver: EntityResolver, store: MemGraphStore, 
                     llm_client: LLMService, topic_config: TopicConfig, executor: ThreadPoolExecutor,
-                    auto_threshold: float = 0.93, hitl_threshold: float = 0.65, cosine_threshold: float = 0.65):
+                    auto_threshold: float = 0.93, hitl_threshold: float = 0.65, cosine_threshold: float = 0.65,
+                    merge_prompt: str = None):
         
         self.user_name = user_name
         self.ent_resolver = ent_resolver
@@ -34,6 +35,7 @@ class MergeDetectionJob(BaseJob):
         self.auto_threshold = auto_threshold
         self.hitl_threshold = hitl_threshold
         self.cosine_threshold = cosine_threshold
+        self.merge_prompt = merge_prompt
     
     @property
     def name(self) -> str:
@@ -88,7 +90,7 @@ class MergeDetectionJob(BaseJob):
     
     
     async def _get_merge_judgment(self, candidate: dict, session_id: str = None) -> Optional[float]:
-        system = get_merge_judgment_prompt()
+        system = self.merge_prompt if self.merge_prompt else get_merge_judgment_prompt()
         
         enriched_facts_a = await enrich_facts_with_sources(candidate.get("facts_a", []), self.store)
         enriched_facts_b = await enrich_facts_with_sources(candidate.get("facts_b", []), self.store)

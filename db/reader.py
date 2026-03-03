@@ -28,6 +28,84 @@ class GraphReader:
             logger.error(f"Failed to get message text for {message_id}: {e}")
             return ""
 
+    def get_messages_by_ids(self, ids: List[int]) -> List[Dict]:
+        """Batch fetch messages by their IDs."""
+        if not ids:
+            return []
+        query = """
+        MATCH (m:Message)
+        WHERE m.id IN $ids
+        RETURN m.id as id,
+               m.role as role,
+               m.content as content,
+               m.timestamp as timestamp
+        ORDER BY id ASC
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, {"ids": ids})
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to fetch messages by ids: {e}")
+            return []
+
+    def get_surrounding_messages(self, message_id: int, forward: int = 3, target_total: int = 10) -> List[Dict]:
+        """Fetch surrounding messages for context from Memgraph."""
+        back_limit = max(0, target_total - forward - 1)
+        query = """
+        MATCH (target:Message {id: $msg_id})
+        WITH target.timestamp AS target_ts, target
+        
+        OPTIONAL MATCH (prev:Message)
+        WHERE prev.timestamp <= target_ts AND prev.id <> $msg_id
+        WITH target_ts, target, collect(prev) AS all_prev
+        WITH target_ts, target, [p IN all_prev | p] AS prev_msgs_raw
+        """
+        
+        safe_query = """
+        MATCH (target:Message {id: $msg_id})
+        WITH target.timestamp AS target_ts, target
+        
+        CALL {
+            WITH target_ts, target
+            MATCH (prev:Message) 
+            WHERE prev.timestamp <= target_ts AND prev.id <> target.id
+            RETURN prev
+            ORDER BY prev.timestamp DESC
+            LIMIT $back_limit
+        }
+        WITH target_ts, target, collect(prev) AS prev_msgs
+        
+        CALL {
+            WITH target_ts, target
+            MATCH (next:Message)
+            WHERE next.timestamp >= target_ts AND next.id <> target.id
+            RETURN next
+            ORDER BY next.timestamp ASC
+            LIMIT $forward_limit
+        }
+        WITH target, prev_msgs, collect(next) AS next_msgs
+        
+        UNWIND (prev_msgs + [target] + next_msgs) AS m
+        WITH m WHERE m IS NOT NULL
+        RETURN m.id as id,
+               m.role as role,
+               m.content as content,
+               m.timestamp as timestamp
+        ORDER BY timestamp ASC
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run(safe_query, {
+                    "msg_id": message_id,
+                    "back_limit": back_limit,
+                    "forward_limit": forward
+                })
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Failed to fetch surrounding messages for {message_id}: {e}")
+            return []
+
     def validate_existing_ids(self, ids: List[int]) -> Optional[Set[int]]:
         """
         Liveness Check: Returns the subset of IDs that actually exist in the DB.
@@ -173,7 +251,6 @@ class GraphReader:
             e.aliases AS aliases,
             e.type AS type,
             t.name AS topic,
-            e.embedding AS embedding,
             e.session_id AS session_id
         """
         try:

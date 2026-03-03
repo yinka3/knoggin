@@ -54,6 +54,8 @@ class Tools:
             return []
         
         results = []
+        missing_ids_numerical = []
+        
         for msg_id, raw in zip(evidence_ids, raw_results):
             if raw:
                 data = json.loads(raw)
@@ -62,6 +64,32 @@ class Tools:
                     "message": data["message"],
                     "timestamp": data["timestamp"]
                 })
+            else:
+                if msg_id.startswith("msg_"):
+                    try:
+                        missing_ids_numerical.append(int(msg_id.split("_")[1]))
+                    except (ValueError, IndexError):
+                        pass
+
+        if missing_ids_numerical:
+            loop = asyncio.get_running_loop()
+            from functools import partial
+            from datetime import datetime, timezone
+            fallback_msgs = await loop.run_in_executor(
+                None, 
+                partial(self.store.get_messages_by_ids, missing_ids_numerical)
+            )
+            for m in fallback_msgs:
+                ts_iso = ""
+                if "timestamp" in m and isinstance(m["timestamp"], (int, float)):
+                    ts_iso = datetime.fromtimestamp(m["timestamp"]/1000.0, timezone.utc).isoformat()
+                
+                results.append({
+                    "id": f"msg_{m['id']}",
+                    "message": m["content"],
+                    "timestamp": ts_iso
+                })
+                
         return results
     
     def _normalize_output(self, entity_list: List[Dict]) -> List[Dict]:
@@ -82,13 +110,42 @@ class Tools:
         lookup_key = RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id)
         
         target_turn_id = msg_id
-        if msg_id.startswith("msg_"):
+        is_msg_id = msg_id.startswith("msg_")
+        if is_msg_id:
             target_turn_id = await self.redis.hget(lookup_key, msg_id)
-            if not target_turn_id:
-                return []
-        
-        rank = await self.redis.zrank(sorted_key, target_turn_id)
+            
+        rank = None
+        if target_turn_id:
+            rank = await self.redis.zrank(sorted_key, target_turn_id)
+            
         if rank is None:
+            if is_msg_id:
+                try:
+                    numerical_msg_id = int(msg_id.split("_")[1])
+                    loop = asyncio.get_running_loop()
+                    from functools import partial
+                    from datetime import datetime, timezone
+                    fallback_msgs = await loop.run_in_executor(
+                        None,
+                        partial(self.store.get_surrounding_messages, numerical_msg_id, forward, target_total)
+                    )
+                    
+                    formatted_fallback = []
+                    for m in fallback_msgs:
+                        ts_iso = ""
+                        if "timestamp" in m and isinstance(m["timestamp"], (int, float)):
+                            ts_iso = datetime.fromtimestamp(m["timestamp"]/1000.0, timezone.utc).isoformat()
+                            
+                        formatted_fallback.append({
+                            "role": m["role"],
+                            "timestamp": ts_iso,
+                            "content": m["content"],
+                            "id": f"msg_{m['id']}",
+                            "is_hit": m["id"] == numerical_msg_id
+                        })
+                    return formatted_fallback
+                except (ValueError, IndexError):
+                    pass
             return []
 
             

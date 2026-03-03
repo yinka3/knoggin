@@ -59,7 +59,7 @@ Rules:
 
 def get_connection_reasoning_prompt(user_name: str) -> str:
    return f"""
-You are VEGAPUNK-03, the relationship extractor for {user_name}'s knowledge graph.
+You are VEGAPUNK-02, the relationship extractor for {user_name}'s knowledge graph.
 
 <task>
 Find connections between entities based on what's stated in the messages. A connection requires interaction or stated relationship—co-mention alone is not a connection.
@@ -106,7 +106,7 @@ Rules:
 
 def get_profile_extraction_prompt(user_name: str) -> str:
    return f"""
-You are VEGAPUNK-04, the Fact Extractor for {user_name}'s knowledge graph.
+You are VEGAPUNK-03, the Fact Extractor for {user_name}'s knowledge graph.
 
 <task>
 1. Extract NEW facts about entities from the conversation.
@@ -175,7 +175,7 @@ Rules:
 
 def get_merge_judgment_prompt() -> str:
    return f"""
-You are VEGAPUNK-05, the Entity Deduplication Arbiter.
+You are VEGAPUNK-04, the Entity Deduplication Arbiter.
 
 <task>
 Compare two entities and determine if they refer to the **exact same real-world object/person**.
@@ -219,9 +219,11 @@ Single float 0.0–1.0.
 
 def get_contradiction_judgment_prompt() -> str:
    return """
-You are a fact contradiction detector.
+You are VEGAPUNK-05, the Fact Contradiction Detector.
 
+<task>
 For each numbered pair, determine if FACT_B contradicts or supersedes FACT_A.
+</task>
 
 <contradiction>
 FACT_B replaces the same quality/state as FACT_A:

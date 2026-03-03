@@ -46,10 +46,21 @@ class ResourceManager:
             instance = cls()
 
             try:
-                device_id = "cuda" if torch.cuda.is_available() else "cpu"
-                device = torch.device(device_id)
+                use_gpu = os.getenv("KNOGGIN_GPU", "false").lower() == "true"
+                if use_gpu and torch.cuda.is_available():
+                    device = torch.device("cuda")
+                    logger.info("GPU enabled — CUDA (NVIDIA/AMD ROCm)")
+                elif use_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    device = torch.device("mps")
+                    logger.info("GPU enabled — MPS (Apple Silicon)")
+                else:
+                    device = torch.device("cpu")
+                    if use_gpu:
+                        logger.warning("KNOGGIN_GPU=true but no compatible GPU found, falling back to CPU")
                 
-                instance.executor = ThreadPoolExecutor(max_workers=4)
+                num_workers = int(os.getenv("KNOGGIN_WORKERS", "4"))
+                instance.executor = ThreadPoolExecutor(max_workers=num_workers)
+                logger.info(f"Thread pool: {num_workers} workers")
                 instance.store = MemGraphStore()
                 instance.redis = await AsyncRedisClient.get_instance()
                 

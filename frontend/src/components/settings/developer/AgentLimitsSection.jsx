@@ -18,12 +18,15 @@ export default function AgentLimitsSection({ settings, update }) {
 
   return (
     <Section
-      title="Agent Limits"
-      description="Control reasoning depth and resource usage"
+      title="Agent Capability Limits"
+      description="Control how deep the AI thinks and how much memory it uses"
       icon={Zap}
       defaultOpen
     >
-      <SettingRow label="Max Tool Calls" description="Per query limit">
+      <SettingRow
+        label="Max Tool Usage"
+        description="The maximum number of tools the agent can use to answer a single question"
+      >
         <NumberInput
           value={settings?.limits?.max_tool_calls}
           onChange={v => update('limits.max_tool_calls', v)}
@@ -31,7 +34,10 @@ export default function AgentLimitsSection({ settings, update }) {
           max={20}
         />
       </SettingRow>
-      <SettingRow label="Max Attempts" description="Before fallback response">
+      <SettingRow
+        label="Max Retry Attempts"
+        description="How many times the agent is allowed to try again if a tool fails before giving up"
+      >
         <NumberInput
           value={settings?.limits?.max_attempts}
           onChange={v => update('limits.max_attempts', v)}
@@ -39,7 +45,10 @@ export default function AgentLimitsSection({ settings, update }) {
           max={15}
         />
       </SettingRow>
-      <SettingRow label="Max Consecutive Errors" description="Error tolerance per run">
+      <SettingRow
+        label="Consecutive Error Tolerance"
+        description="Failsafe limit to stop infinite error loops if a tool is broken"
+      >
         <NumberInput
           value={settings?.limits?.max_consecutive_errors}
           onChange={v => update('limits.max_consecutive_errors', v)}
@@ -47,7 +56,10 @@ export default function AgentLimitsSection({ settings, update }) {
           max={10}
         />
       </SettingRow>
-      <SettingRow label="History Turns" description="Context for agent">
+      <SettingRow
+        label="Brief Context Memory"
+        description="How many recent chat turns to send the agent on every request for quick context"
+      >
         <NumberInput
           value={settings?.limits?.agent_history_turns}
           onChange={v => update('limits.agent_history_turns', v)}
@@ -55,7 +67,10 @@ export default function AgentLimitsSection({ settings, update }) {
           max={20}
         />
       </SettingRow>
-      <SettingRow label="Context Turns" description="Full conversation context">
+      <SettingRow
+        label="Full Conversation Depth"
+        description="Maximum depth the agent can traverse backward if it needs absolute full context"
+      >
         <NumberInput
           value={settings?.limits?.conversation_context_turns}
           onChange={v => update('limits.conversation_context_turns', v)}
@@ -63,7 +78,21 @@ export default function AgentLimitsSection({ settings, update }) {
           max={30}
         />
       </SettingRow>
-      <SettingRow label="Max Accumulated" description="Messages in evidence">
+      <SettingRow
+        label="Global History Cache limit"
+        description="Maximum logs kept in fast memory before forcefully offloading to the graph database"
+      >
+        <NumberInput
+          value={settings?.limits?.max_conversation_history}
+          onChange={v => update('limits.max_conversation_history', v)}
+          min={100}
+          max={100000}
+        />
+      </SettingRow>
+      <SettingRow
+        label="Maximum Evidence Size"
+        description="The max amount of internal reasoning notes the agent can accumulate per answer"
+      >
         <NumberInput
           value={settings?.limits?.max_accumulated_messages}
           onChange={v => update('limits.max_accumulated_messages', v)}
@@ -72,9 +101,13 @@ export default function AgentLimitsSection({ settings, update }) {
         />
       </SettingRow>
 
-      <SubSection title="Per-Tool Limits" icon={Zap}>
+      <SubSection title="Individual Tool Allowances" icon={Zap}>
         {TOOL_NAMES.map(tool => (
-          <SettingRow key={tool.id} label={tool.label} description={`Max calls for ${tool.id}`}>
+          <SettingRow
+            key={tool.id}
+            label={tool.label}
+            description={`Maximum times the agent can use ${tool.label} in one question`}
+          >
             <NumberInput
               value={toolLimits[tool.id]}
               onChange={v => update(`limits.tool_limits.${tool.id}`, v)}

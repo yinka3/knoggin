@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from loguru import logger
 from dotenv import load_dotenv
-
+from main.prompts import (
+    ner_reasoning_prompt, 
+    get_connection_reasoning_prompt, 
+    get_profile_extraction_prompt,
+    get_merge_judgment_prompt,
+    get_contradiction_judgment_prompt
+)
 load_dotenv()
 
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
@@ -102,6 +108,7 @@ _config_cache: Optional[dict] = None
 _config_mtime: Optional[float] = None
 
 def get_default_config() -> dict:
+    
     return {
         "_warning": "This file is auto-generated. Use the UI to modify settings. Manual edits may be overwritten.",
         "user_name": "",
@@ -260,6 +267,7 @@ def get_default_config() -> dict:
                 "max_consecutive_errors": 3,
                 "max_accumulated_messages": 30,
                 "conversation_context_turns": 10,
+                "max_conversation_history": 10000,
                 "tool_limits": {
                     "search_messages": 6,
                     "get_connections": 8,
@@ -286,7 +294,12 @@ def get_default_config() -> dict:
 
             "nlp_pipeline": {
                 "gliner_threshold": 0.85,
-                "vp01_min_confidence": 0.8
+                "vp01_min_confidence": 0.8,
+                "ner_prompt": ner_reasoning_prompt("{user_name}"),
+                "connection_prompt": get_connection_reasoning_prompt("{user_name}"),
+                "profile_prompt": get_profile_extraction_prompt("{user_name}"),
+                "merge_prompt": get_merge_judgment_prompt(),
+                "contradiction_prompt": get_contradiction_judgment_prompt()
             },
             "community": {
                 "enabled": False,
@@ -297,6 +310,93 @@ def get_default_config() -> dict:
             },
         }
     }
+
+def get_developer_mode_presets() -> list[dict]:
+    return [
+        {
+            "id": "default",
+            "name": "Default Knoggin",
+            "description": "Balanced speed and deep context (current standard defaults).",
+            "settings": get_default_config()["developer_settings"]
+        },
+        {
+            "id": "speed",
+            "name": "Speed & Lightweight",
+            "description": "Optimized for fast responses by using smaller batch sizes and tighter limits. Suitable for simple chats.",
+            "settings": {
+                "ingestion": {
+                    "batch_size": 4,
+                    "batch_timeout": 30.0
+                },
+                "jobs": {
+                    "cleaner": {"enabled": True, "interval_hours": 12, "orphan_age_hours": 12, "stale_junk_days": 15},
+                    "profile": {"msg_window": 15, "volume_threshold": 8, "idle_threshold": 30, "profile_batch_size": 4, "contradiction_sim_low": 0.70, "contradiction_sim_high": 0.95, "contradiction_batch_size": 2},
+                    "merger": {"enabled": True, "auto_threshold": 0.95, "hitl_threshold": 0.75, "cosine_threshold": 0.65},
+                    "dlq": {"interval_seconds": 120, "batch_size": 20, "max_attempts": 2},
+                    "archival": {"enabled": True, "retention_days": 7, "fallback_interval_hours": 24},
+                    "topic_config": {"enabled": False, "interval_msgs": 40, "conversation_window": 50}
+                },
+                "limits": {
+                    "agent_history_turns": 4,
+                    "max_tool_calls": 5,
+                    "max_attempts": 6,
+                    "max_consecutive_errors": 2,
+                    "max_accumulated_messages": 10,
+                    "conversation_context_turns": 4,
+                    "max_conversation_history": 2000,
+                    "tool_limits": {
+                        "search_messages": 2, "get_connections": 2, "search_entity": 2, "get_activity": 2, "find_path": 2, 
+                        "get_hierarchy": 2, "save_memory": 2, "forget_memory": 2, "search_files": 2, "web_search": 2, "news_search": 2
+                    }
+                },
+                "search": {
+                    "vector_limit": 10, "fts_limit": 10, "rerank_candidates": 10, "default_message_limit": 4, "default_entity_limit": 3, "default_activity_hours": 12
+                },
+                "community": {
+                    "enabled": False, "interval_minutes": 60, "max_turns": 5, "seeding_agent_id": None, "agent_pool_ids": []
+                }
+            }
+        },
+        {
+            "id": "deep",
+            "name": "Deep Research",
+            "description": "Large context windows and intensive thresholding for deep analysis. Suitable for extensive investigations. WARNING: Autonomous Agent Community (AAC) is active and agents will discuss automatically.",
+            "settings": {
+                "ingestion": {
+                    "batch_size": 16,
+                    "batch_timeout": 600.0
+                },
+                "jobs": {
+                    "cleaner": {"enabled": False, "interval_hours": 48, "orphan_age_hours": 48, "stale_junk_days": 60},
+                    "profile": {"msg_window": 60, "volume_threshold": 25, "idle_threshold": 120, "profile_batch_size": 16, "contradiction_sim_low": 0.70, "contradiction_sim_high": 0.95, "contradiction_batch_size": 8},
+                    "merger": {"enabled": True, "auto_threshold": 0.90, "hitl_threshold": 0.50, "cosine_threshold": 0.50},
+                    "dlq": {"interval_seconds": 30, "batch_size": 100, "max_attempts": 3},
+                    "archival": {"enabled": True, "retention_days": 30, "fallback_interval_hours": 12},
+                    "topic_config": {"enabled": True, "interval_msgs": 20, "conversation_window": 100}
+                },
+                "limits": {
+                    "agent_history_turns": 15,
+                    "max_tool_calls": 25,
+                    "max_attempts": 30,
+                    "max_consecutive_errors": 5,
+                    "max_accumulated_messages": 100,
+                    "conversation_context_turns": 25,
+                    "max_conversation_history": 50000,
+                    "tool_limits": {
+                        "search_messages": 15, "get_connections": 20, "search_entity": 20, "get_activity": 15, "find_path": 15, 
+                        "get_hierarchy": 15, "save_memory": 10, "forget_memory": 10, "search_files": 10, "web_search": 15, "news_search": 15
+                    }
+                },
+                "search": {
+                    "vector_limit": 100, "fts_limit": 100, "rerank_candidates": 100, "default_message_limit": 20, "default_entity_limit": 15, "default_activity_hours": 72
+                },
+                "community": {
+                    "enabled": True, "interval_minutes": 15, "max_turns": 25, "seeding_agent_id": None, "agent_pool_ids": []
+                }
+            }
+        }
+    ]
+
 
 def _get_file_mtime() -> Optional[float]:
     """Get file modification time, or None if file doesn't exist."""

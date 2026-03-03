@@ -5,23 +5,23 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: #0a0a0a;
-  --foreground: #e5e5e5;
+  --background: #fdfdfd;
+  --foreground: #09090b;
   --primary: #2eaa6e;
-  --primary-foreground: #0a0a0a;
-  --muted: #141414;
-  --muted-foreground: #737373;
-  --border: #1a1a1a;
+  --primary-foreground: #ffffff;
+  --muted: #f4f4f5;
+  --muted-foreground: #71717a;
+  --border: #e4e4e7;
   --accent: #34d882;
-  --card: #111111;
-  --card-foreground: #e5e5e5;
-  --popover: #111111;
-  --popover-foreground: #e5e5e5;
-  --secondary: #161616;
-  --secondary-foreground: #e5e5e5;
-  --accent-foreground: #0a0a0a;
-  --destructive: #dc2626;
-  --input: #141414;
+  --card: #ffffff;
+  --card-foreground: #09090b;
+  --popover: #ffffff;
+  --popover-foreground: #09090b;
+  --secondary: #f4f4f5;
+  --secondary-foreground: #09090b;
+  --accent-foreground: #ffffff;
+  --destructive: #ef4444;
+  --input: #f4f4f5;
   --ring: #2eaa6e;
   --radius: 0.5rem;
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.5);
@@ -85,25 +85,32 @@
 }
 
 .dark {
-  /* Deeper, cooler darks for premium feel */
-  --background: oklch(0.12 0.005 220);
-  --foreground: oklch(0.95 0.002 220);
-  --card: oklch(0.14 0.005 220);
-  --card-foreground: oklch(0.95 0.002 220);
-  --popover: oklch(0.14 0.005 220);
-  --popover-foreground: oklch(0.95 0.002 220);
-  /* Slightly more neon primary */
+  /* Ultra-crisp, high-contrast Obsidian dark theme */
+  --background: oklch(0.13 0.01 240);
+  --foreground: oklch(0.98 0 0); /* Pure stark white for max readability */
+  
+  --card: oklch(0.15 0.01 240);
+  --card-foreground: oklch(0.98 0 0);
+  
+  --popover: oklch(0.15 0.01 240);
+  --popover-foreground: oklch(0.98 0 0);
+  
+  /* Retain signature Knoggin emerald */
   --primary: oklch(0.65 0.16 155);
-  --primary-foreground: oklch(0.12 0.005 220);
-  --secondary: oklch(0.16 0.006 220);
-  --secondary-foreground: oklch(0.95 0.002 220);
-  --muted: oklch(0.17 0.005 220);
-  --muted-foreground: oklch(0.65 0.01 220);
-  --accent: oklch(0.72 0.16 155);
-  --accent-foreground: oklch(0.12 0.005 220);
-  --destructive: oklch(0.55 0.2 25);
-  --border: oklch(0.2 0.008 220);
-  --input: oklch(0.16 0.005 220);
+  --primary-foreground: oklch(0.98 0 0);
+  
+  --secondary: oklch(0.18 0.01 240);
+  --secondary-foreground: oklch(0.98 0 0);
+  
+  --muted: oklch(0.18 0.01 240);
+  --muted-foreground: oklch(0.7 0.02 240);
+  
+  --accent: oklch(0.72 0.16 155); 
+  --accent-foreground: oklch(0.98 0 0);
+  
+  --destructive: oklch(0.6 0.2 25);
+  --border: oklch(0.22 0.01 240);
+  --input: oklch(0.18 0.01 240);
   --ring: oklch(0.65 0.16 155);
 
   --chart-1: oklch(0.65 0.16 155);
@@ -239,8 +246,9 @@ input[type='number'] {
   inset: 0;
   z-index: -1;
   background:
-    radial-gradient(ellipse at 15% 10%, rgba(46, 170, 110, 0.07) 0%, transparent 45%),
-    radial-gradient(ellipse at 85% 90%, rgba(46, 170, 110, 0.04) 0%, transparent 45%), #0a0a0a;
+    radial-gradient(ellipse at 15% 10%, rgba(46, 170, 110, 0.09) 0%, transparent 45%),
+    radial-gradient(ellipse at 85% 90%, rgba(46, 170, 110, 0.04) 0%, transparent 45%),
+    var(--background);
   background-size:
     200% 200%,
     200% 200%,
@@ -388,7 +396,68 @@ input[type='number'] {
 }
 
 .orb-breathe {
-  animation: orb-breathe 6s ease-in-out infinite;
+  animation: orb-breathe 6s ease-in-out infinite, orb-morph 12s linear infinite;
+}
+
+@keyframes orb-morph {
+  0% {
+    border-radius: 40% 60% 30% 70% / 55% 35% 65% 45%;
+    transform: rotate(0deg);
+  }
+  20% {
+    border-radius: 65% 35% 60% 40% / 40% 70% 30% 60%;
+  }
+  40% {
+    border-radius: 40% 60% 45% 55% / 70% 30% 50% 50%;
+  }
+  50% {
+    transform: rotate(180deg);
+  }
+  60% {
+    border-radius: 55% 45% 70% 30% / 35% 60% 40% 65%;
+  }
+  80% {
+    border-radius: 35% 65% 50% 50% / 60% 40% 70% 30%;
+  }
+  100% {
+    border-radius: 40% 60% 30% 70% / 55% 35% 65% 45%;
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes orb-swirl {
+  0% { transform: rotate(0deg) scale(1.2); }
+  50% { transform: rotate(180deg) scale(1.5); }
+  100% { transform: rotate(360deg) scale(1.2); }
+}
+
+@keyframes orb-swirl-reverse {
+  0% { transform: rotate(360deg) scale(1.2); }
+  50% { transform: rotate(180deg) scale(1.4); }
+  100% { transform: rotate(0deg) scale(1.2); }
+}
+
+.orb-swirl-1 {
+  animation: orb-swirl 12s linear infinite;
+  transform-origin: 45% 55%;
+}
+
+.orb-swirl-2 {
+  animation: orb-swirl-reverse 18s linear infinite;
+  transform-origin: 60% 40%;
+}
+
+.orb-swirl-3 {
+  animation: orb-swirl 15s ease-in-out infinite;
+  transform-origin: 50% 50%;
+}
+
+.orb-glass-reflection {
+  background: radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.6), transparent 45%),
+              radial-gradient(circle at 75% 75%, rgba(255, 255, 255, 0.25), transparent 35%),
+              radial-gradient(circle at 50% 10%, rgba(255, 255, 255, 0.4), transparent 25%);
+  mix-blend-mode: overlay;
+  animation: orb-morph 12s linear infinite;
 }
 
 @keyframes orb-glow-pulse {

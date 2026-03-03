@@ -170,26 +170,34 @@ class BatchConsumer:
                     for msg in messages
                 ]
                 try:
-                    await loop.run_in_executor(None, self.store.save_message_logs, batch)
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, self.store.save_message_logs, batch),
+                        timeout=30.0
+                    )
                 except Exception as e:
                     logger.error(f"Failed to save message logs: {e}")
                 
                 graph_success = True
                 if result.extraction_result:
-                    for attempt in range(3):
-                        success, error_msg = await self.write_to_graph(result)
+                        try:
+                            success, error_msg = await asyncio.wait_for(
+                                self.write_to_graph(result),
+                                timeout=self.batch_timeout
+                            )
+                        except asyncio.TimeoutError:
+                            success, error_msg = False, "GRAPH_WRITE_TIMEOUT"
+                        except Exception as e:
+                            success, error_msg = False, str(e)
+                            
                         if success:
-                            break
-                        if attempt < 2:
-                            logger.warning(f"Graph write failed (attempt {attempt + 1}/3)")
-                            await emit(self.session_id, "pipeline", "graph_write_retry", {
-                                "attempt": attempt + 2
-                            })
-                            await asyncio.sleep(1 * (attempt + 1))
-                        else:
-                            logger.error(f"Graph write failed after 3 attempts")
+                            # If graph write is successful, we continue processing the batch,
+                            # not break out of the drain loop.
+                            pass 
+                    
+                        if not success:
+                            logger.error(f"Graph write failed. Error: {error_msg}")
                             await emit(self.session_id, "pipeline", "graph_write_failed", {
-                                "attempts": 3
+                                "error": error_msg
                             })
                             graph_success = False
 

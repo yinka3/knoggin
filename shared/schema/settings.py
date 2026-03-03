@@ -40,13 +40,6 @@ class TopicConfigSettings(BaseModel):
     interval_msgs: Optional[int] = Field(None, ge=5)
     conversation_window: Optional[int] = Field(None, ge=5)
 
-class CommunitySettings(BaseModel):
-    enabled: bool = Field(False)
-    interval_minutes: int = Field(30, ge=1)
-    max_turns: int = Field(10, ge=1)
-    seeding_agent_id: Optional[str] = None
-    agent_pool_ids: List[str] = Field(default_factory=list)
-
 class JobSettings(BaseModel):
     cleaner: Optional[CleanerSettings] = None
     profile: Optional[ProfileSettings] = None
@@ -67,6 +60,11 @@ class AgentLimitSettings(BaseModel):
 class NLPPipelineSettings(BaseModel):
     gliner_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
     vp01_min_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    ner_prompt: Optional[str] = None
+    connection_prompt: Optional[str] = None
+    profile_prompt: Optional[str] = None
+    merge_prompt: Optional[str] = None
+    contradiction_prompt: Optional[str] = None
 
 class SearchSettings(BaseModel):
     vector_limit: Optional[int] = Field(None, ge=1)
@@ -93,6 +91,13 @@ class SearchAPIKeySettings(BaseModel):
     brave_api_key: Optional[str] = None
     tavily_api_key: Optional[str] = None
 
+class CommunitySettings(BaseModel):
+    enabled: bool = Field(False)
+    interval_minutes: int = Field(30, ge=1)
+    max_turns: int = Field(10, ge=1)
+    seeding_agent_id: Optional[str] = None
+    agent_pool_ids: List[str] = Field(default_factory=list)
+
 class DeveloperSettings(BaseModel):
     ingestion: Optional[IngestionSettings] = None
     jobs: Optional[JobSettings] = None
@@ -101,6 +106,12 @@ class DeveloperSettings(BaseModel):
     nlp_pipeline: Optional[NLPPipelineSettings] = None
     search: Optional[SearchSettings] = None
     community: Optional[CommunitySettings] = None
+
+class DeveloperModePreset(BaseModel):
+    id: str
+    name: str
+    description: str
+    settings: DeveloperSettings
 
 class ConfigUpdate(BaseModel):
     user_name: Optional[str] = None

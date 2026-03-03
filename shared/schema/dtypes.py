@@ -175,7 +175,7 @@ class AgentConfig:
     id: str
     name: str
     persona: str
-    base_prompt: Optional[str] = None
+    instructions: Optional[str] = None
     model: Optional[str] = None
     temperature: float = 0.7
     enabled_tools: Optional[List[str]] = None
@@ -189,7 +189,7 @@ class AgentConfig:
             "id": self.id,
             "name": self.name,
             "persona": self.persona,
-            "base_prompt": self.base_prompt,
+            "instructions": self.instructions,
             "model": self.model,
             "temperature": self.temperature,
             "enabled_tools": self.enabled_tools,
@@ -208,7 +208,7 @@ class AgentConfig:
             id=data["id"],
             name=data["name"],
             persona=data["persona"],
-            base_prompt=data.get("base_prompt"),
+            instructions=data.get("instructions"),
             model=data.get("model"),
             temperature=data.get("temperature", 0.7),
             enabled_tools=data.get("enabled_tools"),

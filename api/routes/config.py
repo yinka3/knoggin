@@ -1,4 +1,3 @@
-
 import asyncio
 import copy
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -13,14 +12,25 @@ router = APIRouter()
 @router.get("/")
 async def get_config():
     config = load_config()
+    default_cfg = get_default_config()
     if not config:
-        return get_default_config()
-    return redact_config(config)
+        return default_cfg
+    
+    # Deep merge to ensure any newly added default keys (like system prompts)
+    # exist even if the user's config file is old.
+    merged = deep_merge(copy.deepcopy(default_cfg), config)
+    return redact_config(merged)
+
+
+@router.get("/developer-modes")
+async def get_developer_modes():
+    from shared.config import get_developer_mode_presets
+    return {"modes": get_developer_mode_presets()}
 
 
 @router.get("/status")
 async def get_config_status():
-    config = load_config()
+    config = load_config() or get_default_config()
     
     has_api_key = bool(config and config.get("llm", {}).get("api_key"))
     has_user_name = bool(config and config.get("user_name"))
