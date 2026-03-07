@@ -4,8 +4,8 @@ from typing import Dict, Optional
 
 from loguru import logger
 import redis.asyncio as aioredis
-from shared.events import emit
-from shared.redisclient import RedisKeys
+from shared.utils.events import emit
+from shared.infra.redis import RedisKeys
 from jobs.base import BaseJob, JobContext
 
 
@@ -120,6 +120,8 @@ class Scheduler:
         ctx = await self._build_context()
         
         for job_name, job in self._jobs.items():
+            if not getattr(job, 'enabled', True):
+                continue
             pending_key = RedisKeys.job_pending(self.user_name, self.session_id, job_name)
             if await self.redis.get(pending_key):
                 logger.info(f"Found pending work for job: {job_name}")
@@ -142,10 +144,12 @@ class Scheduler:
                         logger.debug(f"Skipping {job_name}: previous run still active.")
                         continue
 
+                    if not getattr(job, 'enabled', True):
+                        continue
                     if await job.should_run(ctx):
                         task = asyncio.create_task(self._execute_job(job, ctx))
                         self._running_tasks[job_name] = task
-                        task.add_done_callback(lambda t, name=job_name: self._cleanup_task(name))
+                        task.add_done_callback(lambda t, name=job_name: self._cleanup_task(name, t))
 
                 except Exception as e:
                     logger.error(f"Job {job_name} check failed: {e}")
@@ -170,7 +174,9 @@ class Scheduler:
                 logger.info(f"Job {job.name}: {result.summary}")
             
             if result.reschedule_seconds:
-                asyncio.create_task(self._delayed_run(job, result.reschedule_seconds))
+                task = asyncio.create_task(self._delayed_run(job, result.reschedule_seconds))
+                self._running_tasks[job.name] = task
+                task.add_done_callback(lambda t, name=job.name: self._cleanup_task(name, t))
         
         except asyncio.TimeoutError:
             logger.error(f"Job {job.name} timed out after {self.JOB_EXECUTION_TIMEOUT}s")
@@ -190,7 +196,7 @@ class Scheduler:
             ctx = await self._build_context()
             await self._execute_job(job, ctx)
     
-    def _cleanup_task(self, job_name: str):
+    def _cleanup_task(self, job_name: str, task: asyncio.Task):
         """Remove finished task from tracking."""
-        if job_name in self._running_tasks:
+        if self._running_tasks.get(job_name) is task:
             del self._running_tasks[job_name]

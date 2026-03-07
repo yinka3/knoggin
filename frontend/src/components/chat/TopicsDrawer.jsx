@@ -23,7 +23,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { toast } from 'sonner'
-import { Plus, Trash2, Pencil, ArrowRight, X } from 'lucide-react'
+import { Plus, Trash2, Pencil, ArrowRight, X, Flame } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { createTopic, getTopics, updateTopic, deleteTopic } from '../../api/topics'
 import HierarchyEditor from '@/components/HierarchyEditor'
@@ -34,8 +34,7 @@ export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
   const [error, setError] = useState(null)
 
   const [editOpen, setEditOpen] = useState(false)
-  const [editTopic, setEditTopic] = useState({ name: '', labels: '', aliases: '', active: true, hierarchy: {} })
-  const [isNew, setIsNew] = useState(false)
+  const [editTopic, setEditTopic] = useState({ name: '', labels: '', aliases: '', active: true, hot: false, hierarchy: {} })
   const [saving, setSaving] = useState(false)
 
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -107,8 +106,8 @@ export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
       aliases: config.aliases?.join(', ') || '',
       hierarchy: config.hierarchy || {},
       active: config.active !== false,
+      hot: config.hot || false,
     })
-    setIsNew(false)
     setEditOpen(true)
   }
 
@@ -130,6 +129,7 @@ export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
           : [],
         hierarchy: editTopic.hierarchy,
         active: editTopic.active,
+        hot: editTopic.hot,
       }
 
       await updateTopic(sessionId, editTopic.name, payload)
@@ -214,6 +214,9 @@ export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
                         )}
                       >
                         <span className="tracking-tight">{name}</span>
+                        {topics[name].hot && (
+                          <Flame size={11} className="text-orange-500" />
+                        )}
                         {labelCount > 0 && (
                           <span className={cn(
                             "flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-md text-[10px] font-bold transition-colors",
@@ -324,6 +327,21 @@ export default function TopicsDrawer({ sessionId, open, onOpenChange }) {
               config={editTopic}
               updateField={(name, field, val) => setEditTopic(prev => ({ ...prev, [field]: val }))}
             />
+
+            <div className="flex items-center justify-between p-3 rounded-lg border border-border/30 bg-white/[0.01]">
+              <div>
+                <Label htmlFor="hot" className="text-sm flex items-center gap-1.5">
+                  <Flame size={13} className="text-orange-500" />
+                  Hot Topic
+                </Label>
+                <p className="text-[10px] text-muted-foreground">Pre-fetch context for this topic every message</p>
+              </div>
+              <Switch
+                id="hot"
+                checked={editTopic.hot}
+                onCheckedChange={checked => setEditTopic({ ...editTopic, hot: checked })}
+              />
+            </div>
 
             <div className="flex items-center justify-between p-3 rounded-lg border border-border/30 bg-white/[0.01]">
               <div>

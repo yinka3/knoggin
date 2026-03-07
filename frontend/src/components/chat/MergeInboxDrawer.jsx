@@ -11,7 +11,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Check, X, GitMerge } from 'lucide-react'
 import { toast } from 'sonner'
-import { getMergeProposals, approveMergeProposal, rejectMergeProposal } from '@/api/proposals'
+import { getMergeProposals, approveMergeProposal, rejectMergeProposal, undoMergeProposal } from '@/api/proposals'
 
 export default function MergeInboxDrawer({ sessionId, open, onOpenChange, onCountChange }) {
   const [proposals, setProposals] = useState([])
@@ -51,9 +51,23 @@ export default function MergeInboxDrawer({ sessionId, open, onOpenChange, onCoun
 
   async function handleApprove(index) {
     setProcessingId(index)
+    const proposal = proposals.find((p) => p.index === index)
     try {
-      await approveMergeProposal(sessionId, index)
-      toast.success('Merge approved')
+      await approveMergeProposal(sessionId, index, proposal.primary_id, proposal.secondary_id)
+      toast.success('Merge approved', {
+        action: {
+          label: 'Undo',
+          onClick: async () => {
+            try {
+              await undoMergeProposal(sessionId, proposal.primary_id, proposal.secondary_id)
+              toast.success('Merge undone')
+              loadProposals()
+            } catch {
+              toast.error('Failed to undo merge')
+            }
+          }
+        }
+      })
       // Remove from list
       const updated = proposals.filter((p) => p.index !== index)
       setProposals(updated)
@@ -68,8 +82,9 @@ export default function MergeInboxDrawer({ sessionId, open, onOpenChange, onCoun
 
   async function handleReject(index) {
     setProcessingId(index)
+    const proposal = proposals.find((p) => p.index === index)
     try {
-      await rejectMergeProposal(sessionId, index)
+      await rejectMergeProposal(sessionId, index, proposal.primary_id, proposal.secondary_id)
       toast.info('Merge rejected')
       // Remove from list
       const updated = proposals.filter((p) => p.index !== index)

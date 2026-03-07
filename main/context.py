@@ -19,21 +19,22 @@ from jobs.cleaner import EntityCleanupJob
 from main.utils import handle_background_task_result, extract_xml_content
 
 from main.consumer import BatchConsumer
-from shared.embedding import EmbeddingService
+from shared.rag.embedding import EmbeddingService
 from main.processor import BatchProcessor, BatchResult
-from shared.service import LLMService
+from shared.services.graph import write_batch_callback, write_batch_to_graph
+from shared.services.llm import LLMService
 from typing import Dict, List, Optional
 from functools import partial
-from shared.topics_config import TopicConfig
+from shared.config.topics import TopicConfig
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
-from shared.file_rag import FileRAGService
-from shared.schema.dtypes import MessageConnections, MessageData, Fact
+from shared.rag.processor import FileRAGService
+from shared.models.schema.dtypes import MessageData, Fact
 
-from shared.events import DebugEventEmitter, emit
-from shared.redisclient import RedisKeys
-from shared.resource import ResourceManager
+from shared.utils.events import DebugEventEmitter, emit
+from shared.infra.redis import RedisKeys
+from shared.infra.resources import ResourceManager
 
 class Context:
 
@@ -73,7 +74,7 @@ class Context:
         model: str = None
     ) -> "Context":
         
-        from shared.config import load_config, get_default_config
+        from shared.config.base import load_config, get_default_config
         
         full_config = load_config() or get_default_config()
         dev_settings = full_config.get("developer_settings", {})
@@ -292,23 +293,28 @@ class Context:
     async def _verify_user_entity(self, user_name: str):
         loop = asyncio.get_running_loop()
         
+        user_id = self.ent_resolver.get_id(user_name)
+        if user_id is None:
+            logger.critical(f"User entity not found for '{user_name}' in resolver. Onboarding may not have completed.")
+            return
+            
         entity = await loop.run_in_executor(
-            self.executor, self.store.get_entity_by_id, 1
+            self.executor, self.store.get_entity_by_id, user_id
         )
         
-        if not entity or entity["canonical_name"] != user_name:
+        if not entity or entity.get("canonical_name") != user_name:
             logger.critical(
-                f"User entity not found for '{user_name}'. "
-                f"Expected entity id=1. Onboarding may not have completed."
+                f"User entity lookup mismatch for '{user_name}' (id={user_id}). "
+                f"Onboarding may not have completed."
             )
             return
         
-        profile = self.ent_resolver.entity_profiles.get(1)
+        profile = self.ent_resolver.entity_profiles.get(user_id)
         if profile and profile["canonical_name"] == user_name:
-            logger.info(f"User entity verified: {user_name} (id=1)")
+            logger.info(f"User entity verified: {user_name} (id={user_id})")
             await emit(self.session_id, "system", "user_entity_verified", {
                 "user_name": user_name,
-                "entity_id": 1
+                "entity_id": user_id
             })
             return
         
@@ -318,7 +324,7 @@ class Context:
             self.executor,
             partial(
                 self.ent_resolver.register_entity,
-                1, user_name, all_aliases, "person", "Identity"
+                user_id, user_name, all_aliases, "person", "Identity"
             )
         )
         await emit(self.session_id, "system", "user_entity_recovered", {
@@ -389,7 +395,7 @@ class Context:
         await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
         await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
         
-        from shared.config import load_config
+        from shared.config.base import load_config
         config = load_config() or {}
         limit = config.get("developer_settings", {}).get("limits", {}).get("max_conversation_history", 10000)
         
@@ -535,13 +541,17 @@ class Context:
                 # Check candidates
                 candidates = self.ent_resolver.get_candidate_ids(subject, precomputed_embedding=subject_emb)
                 
-                # Default to User (1) if no candidate found
+                # Default to User if no candidate found
+                user_id = self.ent_resolver.get_id(self.user_name)
                 if candidates:
                     target_id = candidates[0] # Best match
                     clean_content = fact_content
-                else:
-                    target_id = 1
+                elif user_id is not None:
+                    target_id = user_id
                     clean_content = f"[{subject}] {fact_content}" # Add context since attached to user
+                else:
+                    logger.warning(f"Skipping fact extraction: Subject '{subject}' unresolved and user entity not found.")
+                    continue
                 
                 # Create Fact object
                 fact_id = f"fact_{uuid.uuid4().hex[:16]}"
@@ -637,20 +647,22 @@ class Context:
             )
             if turn_key:
                 turn_score = await self.redis_client.zscore(sorted_key, turn_key)
-                turn_ids = await self.redis_client.zrevrangebyscore(
+                turn_ids = await self.redis_client.zrange(
                     sorted_key,
                     f"({turn_score}",
                     "-inf",
-                    start=0,
+                    desc=True,
+                    byscore=True,
+                    offset=0,
                     num=num_turns
                 )
                 turn_ids = list(reversed(turn_ids))
             else:
-                turn_ids = await self.redis_client.zrevrange(sorted_key, 0, num_turns - 1)
+                turn_ids = await self.redis_client.zrange(sorted_key, 0, num_turns - 1, desc=True)
                 turn_ids = list(turn_ids)
                 turn_ids.reverse()
         else:
-            turn_ids = await self.redis_client.zrevrange(sorted_key, 0, num_turns - 1)
+            turn_ids = await self.redis_client.zrange(sorted_key, 0, num_turns - 1, desc=True)
             turn_ids = list(turn_ids)
             turn_ids.reverse()
         
@@ -688,156 +700,38 @@ class Context:
         entity_ids: list[int],
         new_entity_ids: set[int],
         alias_updated_ids: set[int],
-        extraction_result: List[MessageConnections],
-        alias_updates: Dict[int, List[str]] = None
+        extraction_result,
+        alias_updates=None,
     ):
-
-        loop = asyncio.get_running_loop()
-        
-        valid_existing_ids = set()
-        existing_candidates = list(set(entity_ids) - new_entity_ids)
-
-        if existing_candidates:
-            validation_result = await loop.run_in_executor(
-                self.executor,
-                self.store.validate_existing_ids,
-                existing_candidates
-            )
-            
-
-            if validation_result is None:
-                logger.warning(f"Could not validate {len(existing_candidates)} entities, assuming valid")
-                valid_existing_ids = set(existing_candidates)
-            else:
-                valid_existing_ids = validation_result
-                missing = set(existing_candidates) - valid_existing_ids
-                if missing:
-                    logger.critical(f"SPLIT BRAIN DETECTED: Resolver thinks IDs {missing} exist, but Graph does not. Dropping writes for these IDs to prevent Zombie Resurrection.")
-                    self.ent_resolver.remove_entities(list(missing))
-        
-        if alias_updates:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                self.executor,
-                self.store.update_entity_aliases,
-                alias_updates
-            )
-            logger.info(f"Persisted alias updates for {len(alias_updates)} entities")
-
-        safe_ids = valid_existing_ids.union(new_entity_ids)
-
-        entity_lookup = {}
-        entities_to_write = []
-
-        for ent_id in new_entity_ids:
-            profile = self.ent_resolver.entity_profiles.get(ent_id)
-            if profile:
-                entities_to_write.append({
-                    "id": ent_id,
-                    "canonical_name": profile["canonical_name"],
-                    "type": profile.get("type", ""),
-                    "confidence": 1.0,
-                    "topic": profile.get("topic", "General"),
-                    "embedding": self.ent_resolver.get_embedding_for_id(ent_id),
-                    "aliases": self.ent_resolver.get_mentions_for_id(ent_id),
-                    "session_id": profile.get("session_id")
-                })
-
-        for ent_id in alias_updated_ids:
-            if ent_id in new_entity_ids: continue
-            
-            if ent_id not in safe_ids:
-                logger.warning(f"Skipping alias update for Zombie ID {ent_id}")
-                continue
-                
-            profile = self.ent_resolver.entity_profiles.get(ent_id)
-            if profile:
-                entities_to_write.append({
-                    "id": ent_id,
-                    "canonical_name": profile["canonical_name"],
-                    "type": profile.get("type", ""),
-                    "confidence": 1.0,
-                    "topic": profile.get("topic", "General"),
-                    "embedding": self.ent_resolver.get_embedding_for_id(ent_id),
-                    "aliases": self.ent_resolver.get_mentions_for_id(ent_id),
-                    "session_id": profile.get("session_id")
-                })
-
-
-        for ent_id in safe_ids:
-            profile = self.ent_resolver.entity_profiles.get(ent_id)
-            if profile:
-                canonical = profile["canonical_name"]
-                entry = {
-                    "id": ent_id,
-                    "canonical_name": canonical,
-                    "type": profile.get("type"),
-                    "topic": profile.get("topic", "General")
-                }
-                entity_lookup[canonical.lower()] = entry
-                for mention in self.ent_resolver.get_mentions_for_id(ent_id):
-                    entity_lookup[mention.lower()] = entry
-
-        relationships = []
-        for msg_result in extraction_result:
-            msg_id = msg_result.message_id
-            
-            for pair in msg_result.entity_pairs:
-                ent_a = entity_lookup.get(pair.entity_a.lower())
-                ent_b = entity_lookup.get(pair.entity_b.lower())
-                
-                if ent_a and ent_b:
-                    relationships.append({
-                        "entity_a": ent_a["canonical_name"],
-                        "entity_b": ent_b["canonical_name"],
-                        "message_id": f"msg_{msg_id}",
-                        "confidence": pair.confidence,
-                        "context": pair.context
-                    })
-                else:
-                    logger.warning(f"Skipping pair: {pair.entity_a} - {pair.entity_b} (Entity missing or Zombie)")
-
-        if entities_to_write or relationships:
-            await loop.run_in_executor(
-                self.executor,
-                partial(self.store.write_batch, entities_to_write, relationships)
-            )
-        
-        if safe_ids:
-            dirty_key = RedisKeys.dirty_entities(self.user_name, self.session_id)
-            await self.redis_client.sadd(dirty_key, *[str(eid) for eid in safe_ids])
-            await self.redis_client.delete(RedisKeys.profile_complete(self.user_name, self.session_id))
-        
-        zombies_filtered = len(existing_candidates) - len(valid_existing_ids)
-        
-        await emit(self.session_id, "pipeline", "graph_write_complete", {
-            "entities_written": len(entities_to_write),
-            "relationships_written": len(relationships),
-            "zombies_filtered": zombies_filtered
-        })
-        
-        logger.info(f"Wrote {len(entities_to_write)} entities, {len(relationships)} relationships (Filtered {len(existing_candidates) - len(valid_existing_ids)} Zombies)")
+        """Delegate to shared graph write logic."""
+        batch = BatchResult(
+            entity_ids=entity_ids,
+            new_entity_ids=new_entity_ids,
+            alias_updated_ids=alias_updated_ids,
+            extraction_result=extraction_result,
+            alias_updates=alias_updates or {},
+        )
+        await write_batch_to_graph(
+            batch,
+            store=self.store,
+            executor=self.executor,
+            resolver=self.ent_resolver,
+            session_id=self.session_id,
+            user_name=self.user_name,
+            redis_client=self.redis_client,
+        )
     
 
     async def _write_to_graph_callback(self, result: BatchResult) -> tuple[bool, str | None]:
-        if not result.extraction_result:
-            return True, None
-        
-        try:
-            await self._write_to_graph(
-                result.entity_ids,
-                result.new_entity_ids,
-                result.alias_updated_ids,
-                result.extraction_result,
-                result.alias_updates
-            )
-            return True, None
-        except Exception as e:
-            logger.error(f"Graph write callback failed: {e}")
-            if result.new_entity_ids:
-                self.ent_resolver.remove_entities(list(result.new_entity_ids))
-                logger.info(f"Cleaned {len(result.new_entity_ids)} phantom entities from resolver")
-            return False, str(e)
+        return await write_batch_callback(
+            result,
+            store=self.store,
+            executor=self.executor,
+            resolver=self.ent_resolver,
+            session_id=self.session_id,
+            user_name=self.user_name,
+            redis_client=self.redis_client,
+        )
 
 
     async def update_runtime_settings(self, new_config: dict):
@@ -868,10 +762,6 @@ class Context:
                     session_window=current_win
                 )
             
-
-
-
-
         jobs_cfg = dev_settings.get("jobs", {})
         
         if "profile" in jobs_cfg and self.profile_job:
@@ -943,7 +833,8 @@ class Context:
         if nlp_cfg and self.nlp_pipe:
             self.nlp_pipe.update_settings(
                 gliner_threshold=nlp_cfg.get("gliner_threshold"),
-                vp01_min_confidence=nlp_cfg.get("vp01_min_confidence")
+                vp01_min_confidence=nlp_cfg.get("vp01_min_confidence"),
+                llm_ner=nlp_cfg.get("llm_ner"),
             )
             
         await emit(self.session_id, "system", "config_updated", {

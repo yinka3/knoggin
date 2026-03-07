@@ -8,12 +8,12 @@ from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from jobs.jobs_utils import cosine_similarity, enrich_facts_with_sources, find_duplicate_facts, format_vp05_input, has_sufficient_facts, parse_merge_score
 from main.prompts import get_merge_judgment_prompt
-from shared.service import MERGE_MODEL, LLMService
+from shared.services.llm import MERGE_MODEL, LLMService
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
-from shared.topics_config import TopicConfig
-from shared.events import emit
-from shared.redisclient import RedisKeys
+from shared.config.topics import TopicConfig
+from shared.utils.events import emit
+from shared.infra.redis import RedisKeys
 
 class MergeDetectionJob(BaseJob):
     """
@@ -97,13 +97,13 @@ class MergeDetectionJob(BaseJob):
         
         user_content = format_vp05_input(
             {
-                "canonical_name": candidate["primary_name"],
+                "canonical_name": candidate.get("primary_name", "Unknown"),
                 "type": candidate.get("primary_type"),
                 "aliases": self.ent_resolver.get_mentions_for_id(candidate["primary_id"]),
                 "facts": enriched_facts_a
             },
             {
-                "canonical_name": candidate["secondary_name"],
+                "canonical_name": candidate.get("secondary_name", "Unknown"),
                 "type": candidate.get("secondary_type"),
                 "aliases": self.ent_resolver.get_mentions_for_id(candidate["secondary_id"]),
                 "facts": enriched_facts_b
@@ -111,12 +111,12 @@ class MergeDetectionJob(BaseJob):
         )
         await emit(session_id, "job", "llm_call", {
             "stage": "merge_judgment",
-            "primary": candidate["primary_name"],
-            "secondary": candidate["secondary_name"],
+            "primary": candidate.get("primary_name", "Unknown"),
+            "secondary": candidate.get("secondary_name", "Unknown"),
             "prompt": user_content
         }, verbose_only=True)
         
-        result = await self.llm.call_llm(system, user_content, model=MERGE_MODEL, reasoning="medium")
+        result = await self.llm.call_llm(system, user_content, model=self.llm.merge_model, reasoning="medium")
         
         if not result:
             return None
@@ -182,7 +182,10 @@ class MergeDetectionJob(BaseJob):
         hitl = []
         
         loop = asyncio.get_running_loop()
-        collisions = await loop.run_in_executor(None, self.store.find_alias_collisions)
+        dirty_ids = {c["primary_id"] for c in candidates} | {c["secondary_id"] for c in candidates}
+        collisions = await loop.run_in_executor(
+            None, self.ent_resolver.find_alias_collisions_targeted, dirty_ids
+        )
         collision_set = {tuple(sorted([a, b])) for a, b in collisions}
 
         for candidate in candidates:
@@ -309,8 +312,8 @@ class MergeDetectionJob(BaseJob):
                         "primary_id": p_id,
                         "secondary_id": s_id,
                         "duplicate_fact_ids": duplicate_ids,
-                        "primary_name": c["primary_name"],
-                        "secondary_name": c["secondary_name"]
+                        "primary_name": c.get("primary_name", "Unknown"),
+                        "secondary_name": c.get("secondary_name", "Unknown")
                     }
                 except Exception as e:
                     logger.error(f"Failed to prepare merge ({c['primary_id']}, {c['secondary_id']}): {e}")
@@ -346,7 +349,10 @@ class MergeDetectionJob(BaseJob):
                         True
                     )
                     
-                    resolution_text = f"{item['primary_name']}. " + " ".join([f.content for f in all_facts])
+                    if all_facts:
+                        resolution_text = f"{item['primary_name']}. " + " ".join([f.content for f in all_facts])
+                    else:
+                        resolution_text = f"{item['primary_name']} (merged with {item['secondary_name']})"
                     
                     new_embedding = await loop.run_in_executor(
                         self.executor,
@@ -469,8 +475,8 @@ class MergeDetectionJob(BaseJob):
             proposal = {
                 "primary_id": candidate["primary_id"],
                 "secondary_id": candidate["secondary_id"],
-                "primary_name": candidate["primary_name"],
-                "secondary_name": candidate["secondary_name"],
+                "primary_name": candidate.get("primary_name", "Unknown"),
+                "secondary_name": candidate.get("secondary_name", "Unknown"),
                 "llm_score": candidate["llm_score"],
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "status": "pending"
@@ -478,6 +484,9 @@ class MergeDetectionJob(BaseJob):
             
             await ctx.redis.rpush(proposal_key, json.dumps(proposal))
             stored += 1
+        
+        if stored > 0:
+            await ctx.redis.expire(proposal_key, 7 * 24 * 3600)
         
         return stored
     

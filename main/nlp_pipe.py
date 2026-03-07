@@ -1,7 +1,7 @@
 import asyncio
 from main.prompts import ner_reasoning_prompt
-from shared.service import LLMService
-from shared.topics_config import TopicConfig
+from shared.services.llm import LLMService
+from shared.config.topics import TopicConfig
 from main.utils import PRONOUNS, format_vp01_input, is_covered, is_generic_phrase, parse_entities, validate_entity
 from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
@@ -9,7 +9,7 @@ import spacy
 from spacy.matcher import PhraseMatcher
 from gliner import GLiNER
 
-from shared.events import emit
+from shared.utils.events import emit
 
 
 class NLPPipeline:
@@ -37,13 +37,17 @@ class NLPPipeline:
         self.vp01_min_confidence = vp01_min_confidence
         self.ner_prompt = ner_prompt
 
-    def update_settings(self, gliner_threshold: float = None, vp01_min_confidence: float = None, ner_prompt: str = None):
+    def update_settings(self, gliner_threshold=None, vp01_min_confidence=None, ner_prompt=None, llm_ner=None):
         if gliner_threshold is not None:
             self.gliner_threshold = gliner_threshold
         if vp01_min_confidence is not None:
             self.vp01_min_confidence = vp01_min_confidence
         if ner_prompt is not None:
             self.ner_prompt = ner_prompt
+        if llm_ner is not None:
+            self.llm_ner = llm_ner
+            logger.info(f"NLPPipeline: llm_ner={self.llm_ner}")
+            
         logger.info(f"NLPPipeline updated: gliner={self.gliner_threshold}, vp01_conf={self.vp01_min_confidence}")
        
     def _build_label_to_topics(self) -> Dict[str, List[str]]:

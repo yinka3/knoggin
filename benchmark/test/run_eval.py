@@ -11,10 +11,10 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from main.setup import _create_user_entity
-from shared.service import LLMService
+from shared.services.llm import LLMService
 from main.prompts import get_topic_seed_prompt
-from shared.resource import ResourceManager
-from shared.redisclient import RedisKeys
+from shared.infra.resources import ResourceManager
+from shared.infra.redis import RedisKeys
 from agent.streaming import run_stream
 from main.context import Context
 from shared.schema.dtypes import MessageData

@@ -2,7 +2,7 @@
 import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from dataclasses import asdict
-from shared.events import DebugEventEmitter
+from shared.utils.events import DebugEventEmitter
 
 router = APIRouter()
 

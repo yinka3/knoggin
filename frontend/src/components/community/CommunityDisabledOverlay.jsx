@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 import { Lock, MessageSquare, Sparkles, GitBranch } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 

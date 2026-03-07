@@ -27,14 +27,15 @@ from agent.formatters import (
     format_path_results,
     format_hierarchy_results
 )
-from shared.file_rag import FileRAGService
-from shared.mcp_bridge import mcp_tools_to_schemas
-from shared.service import LLMService
-from shared.topics_config import TopicConfig
-from shared.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
-from shared.schema.tool_schema import get_filtered_schemas, TOOL_SCHEMAS
-from shared.config import get_config_value
-from shared.events import emit
+
+from shared.mcp.bridge import mcp_tools_to_schemas
+from shared.services.memory import MemoryManager
+from shared.services.llm import LLMService
+from shared.config.topics import TopicConfig
+from shared.models.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
+from shared.models.schema.tool_schema import get_filtered_schemas, TOOL_SCHEMAS
+from shared.config.base import get_config_value
+from shared.utils.events import emit
 
 
 async def call_agent_streaming(
@@ -46,19 +47,22 @@ async def call_agent_streaming(
     model: str = None,
     tools: List[Dict] = None,
     memory_context: str = "",
+    files_context: str = "",
     agent_rules: str = "",
     agent_preferences: str = "",
-    agent_ticks: str = "",
+    agent_icks: str = "",
     agent_temperature: float = 0.7,
     agent_instructions: str = None
 ) -> AsyncGenerator[Union[Dict, AgentResponse], None]:
     """
-    Streaming version of call_agent.
-    Yields token dicts for text, then final ToolCall/ClarificationRequest/FinalResponse.
+    Core LLM interaction loop for the streaming agent.
+    Yields token dictionaries for real-time text visualization, followed by the final resolved 
+    `ToolCall`, `ClarificationRequest`, or `FinalResponse` object parsed from the model's output.
     """
     system_prompt = get_agent_prompt(
         user_name, date, ctx.agent_persona, ctx.agent_name,
         memory_context=memory_context,
+        files_context=files_context,
         agent_rules=agent_rules,
         agent_preferences=agent_preferences,
         agent_icks=agent_icks,
@@ -115,18 +119,34 @@ async def call_agent_streaming(
             if content:
                 logger.info(f"[AGENT THOUGHT]: {content[:200]}")
             
+            def safe_parse(json_str):
+                import ast
+                if isinstance(json_str, dict):
+                    return json_str
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    try:
+                        return json.loads(json_str.replace('\n', '\\n'))
+                    except Exception:
+                        try:
+                            val = ast.literal_eval(json_str)
+                            if isinstance(val, dict):
+                                return val
+                        except Exception:
+                            pass
+                return {"_parse_error": json_str}
+
             if len(tool_calls) == 1:
                 tc = tool_calls[0]
                 name = tc["name"]
-                try:
-                    args = json.loads(tc["arguments"])
-                except json.JSONDecodeError:
+                args = safe_parse(tc["arguments"])
+                
+                if "_parse_error" in args:
                     logger.warning(f"Malformed tool args for {name}: {tc['arguments']}")
-                    yield FinalResponse(content="I encountered an issue processing that request. Could you try rephrasing?", usage=usage)
-                    return
                 
                 if name == "request_clarification":
-                    yield ClarificationRequest(question=args.get("question", ""), usage=usage)
+                    yield ClarificationRequest(question=args.get("question", "I need to clarify something but my response was malformed."), usage=usage)
                     return
                 
                 yield ToolCall(name=name, args=args, thinking=content if content else None)
@@ -135,11 +155,10 @@ async def call_agent_streaming(
             
             parsed_calls = []
             for tc in tool_calls:
-                try:
-                    args = json.loads(tc["arguments"])
-                    parsed_calls.append(ToolCall(name=tc["name"], args=args, thinking=content if content else None))
-                except json.JSONDecodeError:
+                args = safe_parse(tc["arguments"])
+                if "_parse_error" in args:
                     logger.warning(f"Malformed tool args for {tc['name']}: {tc['arguments']}")
+                parsed_calls.append(ToolCall(name=tc["name"], args=args, thinking=content if content else None))
 
             if parsed_calls:
                 yield parsed_calls
@@ -152,6 +171,105 @@ async def call_agent_streaming(
         elif chunk_type == "error":
             yield FinalResponse(content=f"System Error: {chunk.get('message', 'Unknown error')}")
             return
+
+
+
+async def execute_pending_tools(ctx: AgentContext, tools: Tools, pending_tool_calls: List[ToolCall], all_results: List[Dict]) -> AsyncGenerator[Dict, None]:
+    """
+    Process an array of `ToolCall`s requested by the LLM by executing the corresponding python methods.
+    Yields granular event dicts (`tool_start`, `tool_result`) used by the frontend to render progress spinners.
+    """
+    if pending_tool_calls and pending_tool_calls[0].thinking:
+        yield {"event": "thinking", "data": {"content": pending_tool_calls[0].thinking}}
+
+    for tc in pending_tool_calls:
+        tool_name = tc.name
+        args = tc.args
+
+        if "_parse_error" in args:
+            error_msg = f"Failed to parse tool arguments as JSON: {args['_parse_error']}. Please fix the JSON syntax (e.g. escape newlines)."
+            ctx.state.last_error = error_msg
+            all_results.append({"tool": tool_name, "error": error_msg})
+            yield {"event": "tool_start", "data": {"tool": tool_name, "args": {}}}
+            yield {"event": "tool_result", "data": {"tool": tool_name, "summary": "JSON Error", "count": 1}}
+            continue
+
+        if ctx.state.is_duplicate(tool_name, args):
+            ctx.state.consecutive_errors += 1
+            if ctx.state.consecutive_errors >= ctx.config.max_consecutive_errors:
+                break
+            ctx.state.last_error = f"Already called {tool_name} with these args."
+            continue
+
+        if ctx.state.call_count >= ctx.config.max_calls:
+            ctx.state.last_error = "Call limit reached."
+            break
+
+        if ctx.state.tool_limit_reached(tool_name, ctx.config):
+            ctx.state.last_error = f"{tool_name} limit reached ({ctx.config.get_tool_limit(tool_name)}). Use a different tool."
+            all_results.append({"tool": tool_name, "error": ctx.state.last_error})
+            continue
+
+        ctx.state.consecutive_errors = 0
+
+        yield {"event": "tool_start", "data": {"tool": tool_name, "args": args}}
+
+        try:
+            result = await asyncio.wait_for(
+                execute_tool(tools, tool_name, args),
+                timeout=ctx.config.tool_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Tool {tool_name} timed out after 30s")
+            result = {"error": f"Tool {tool_name} timed out"}
+        result_summary, result_count = summarize_result(tool_name, result)
+
+        await emit(ctx.session_id, "agent", "tool_executed", {
+            "tool": tool_name,
+            "args": args,
+            "result_count": result_count,
+            "success": "error" not in result
+        })
+
+        yield {"event": "tool_result", "data": {
+            "tool": tool_name,
+            "summary": result_summary,
+            "count": result_count
+        }}
+
+        ctx.state.record_call(tool_name, args)
+        update_accumulators(ctx, tool_name, result)
+        all_results.append({"tool": tool_name, "result": result})
+
+
+async def generate_fallback_summary(ctx: AgentContext, llm: LLMService, user_name: str, user_query: str) -> Optional[str]:
+    """
+    Generate a final response summary when the agent exhausts its maximum allowed reasoning attempts.
+    Passes all accumulated evidence directly to the fallback prompt.
+    """
+    evidence_ctx = ""
+    if ctx.evidence.profiles:
+        evidence_ctx += f"Profiles:\n{format_entity_results(ctx.evidence.profiles)}\n\n"
+    if ctx.evidence.messages:
+        evidence_ctx += f"Messages:\n{format_retrieved_messages(ctx.evidence.messages)}\n\n"
+    if ctx.evidence.graph:
+        evidence_ctx += f"Connections:\n{format_graph_results(ctx.evidence.graph)}\n\n"
+    if ctx.evidence.paths:
+        evidence_ctx += f"Paths:\n{format_path_results(ctx.evidence.paths)}\n\n"
+    if ctx.evidence.hierarchy:
+        evidence_ctx += f"Hierarchy:\n{format_hierarchy_results(ctx.evidence.hierarchy)}\n\n"
+
+    try:
+        return await asyncio.wait_for(
+            llm.call_llm(
+                system=get_fallback_summary_prompt(user_name, ctx.agent_name),
+                user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
+            ),
+            timeout=30.0
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Fallback summary timed out")
+        return None
 
 
 async def run_stream(
@@ -176,7 +294,11 @@ async def run_stream(
     agent_temperature: float = 0.7,
     agent_instructions: str = None
 ) -> AsyncGenerator[Dict, None]:
-    """Streaming version of orchestrator.run()"""
+    """
+    Top-level streaming orchestrator loop.
+    Initializes the agent's context, pre-fetches active memory and hot topics, constructs the 
+    tools manifest, and orchestrates the cyclical reasoning stream until a final response is generated.
+    """
     
     try:
         dev_settings = get_config_value("developer_settings", {})
@@ -230,10 +352,22 @@ async def run_stream(
 
         search_cfg = dev_settings.get("search", {}).copy()
         search_cfg.update(get_config_value("search", {}))
+
+        memory_mgr = MemoryManager(
+            redis=redis_client,
+            user_name=user_name,
+            session_id=session_id,
+            agent_id=agent_id,
+            topic_config=topic_config,
+            on_event=lambda src, evt, data: asyncio.create_task(
+                emit(session_id, src, evt, data)
+            ),
+        )            
+
         tools = Tools(
             user_name, store, ent_resolver, redis_client, session_id, 
             topic_config, search_config=search_cfg, file_rag=file_rag,
-            mcp_manager=mcp_manager
+            mcp_manager=mcp_manager, memory=memory_mgr
         )
 
         if hot_topics:
@@ -242,17 +376,7 @@ async def run_stream(
         memory_blocks = await tools.get_memory_blocks(valid_hot_topics)
         memory_context = format_memory_context(memory_blocks)
         
-        from shared.redisclient import RedisKeys
-        agent_memory_blocks = {"rules": "", "preferences": "", "icks": ""}
-        for category in agent_memory_blocks:
-            key = RedisKeys.agent_working_memory(agent_id, category)
-            raw = await redis_client.hgetall(key)
-            if raw:
-                entries = []
-                for val in raw.values():
-                    data = json.loads(val)
-                    entries.append(f"- {data['content']}")
-                agent_memory_blocks[category] = "\n".join(entries)
+        rules_str, prefs_str, icks_str = await memory_mgr._load_working_memory_strings()
 
         last_result = None
         try:
@@ -277,9 +401,9 @@ async def run_stream(
             active_schemas = get_filtered_schemas(enabled_tools)
             if mcp_manager:
                 active_schemas = active_schemas + mcp_tools_to_schemas(mcp_manager.get_all_tools())
-            a_rules = str(agent_memory_blocks.get("rules", ""))
-            a_prefs = str(agent_memory_blocks.get("preferences", ""))
-            a_icks = str(agent_memory_blocks.get("icks", ""))
+            a_rules = rules_str
+            a_prefs = prefs_str
+            a_icks = icks_str
             
             async for chunk in call_agent_streaming(
                 llm, ctx, user_name, last_result, current_time, model, active_schemas,
@@ -347,84 +471,14 @@ async def run_stream(
                 yield {"event": "thinking", "data": {"content": pending_tool_calls[0].thinking}}
 
             all_results = []
-
-            for tc in pending_tool_calls:
-                tool_name = tc.name
-                args = tc.args
-
-                if ctx.state.is_duplicate(tool_name, args):
-                    ctx.state.consecutive_errors += 1
-                    if ctx.state.consecutive_errors >= ctx.config.max_consecutive_errors:
-                        break
-                    ctx.state.last_error = f"Already called {tool_name} with these args."
-                    continue
-
-                if ctx.state.tool_limit_reached(tool_name, ctx.config):
-                    ctx.state.last_error = f"{tool_name} limit reached."
-                    continue
-
-                if ctx.state.call_count >= ctx.config.max_calls:
-                    ctx.state.last_error = "Call limit reached."
-                    break
-
-                ctx.state.consecutive_errors = 0
-
-                yield {"event": "tool_start", "data": {"tool": tool_name, "args": args}}
-
-                try:
-                    result = await asyncio.wait_for(
-                        execute_tool(tools, tool_name, args),
-                        timeout=ctx.config.tool_timeout
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"Tool {tool_name} timed out after 30s")
-                    result = {"error": f"Tool {tool_name} timed out"}
-                result_summary, result_count = summarize_result(tool_name, result)
-
-                await emit(ctx.session_id, "agent", "tool_executed", {
-                    "tool": tool_name,
-                    "args": args,
-                    "result_count": result_count,
-                    "success": "error" not in result
-                })
-
-                yield {"event": "tool_result", "data": {
-                    "tool": tool_name,
-                    "summary": result_summary,
-                    "count": result_count
-                }}
-
-                ctx.state.record_call(tool_name, args)
-                update_accumulators(ctx, tool_name, result)
-                all_results.append({"tool": tool_name, "result": result})
+            async for event in execute_pending_tools(ctx, tools, pending_tool_calls, all_results):
+                yield event
 
             last_result = all_results
 
         # Max attempts - fallback
         if ctx.evidence.has_any():
-            evidence_ctx = ""
-            if ctx.evidence.profiles:
-                evidence_ctx += f"Profiles:\n{format_entity_results(ctx.evidence.profiles)}\n\n"
-            if ctx.evidence.messages:
-                evidence_ctx += f"Messages:\n{format_retrieved_messages(ctx.evidence.messages)}\n\n"
-            if ctx.evidence.graph:
-                evidence_ctx += f"Connections:\n{format_graph_results(ctx.evidence.graph)}\n\n"
-            if ctx.evidence.paths:
-                evidence_ctx += f"Paths:\n{format_path_results(ctx.evidence.paths)}\n\n"
-            if ctx.evidence.hierarchy:
-                evidence_ctx += f"Hierarchy:\n{format_hierarchy_results(ctx.evidence.hierarchy)}\n\n"
-
-            try:
-                summary = await asyncio.wait_for(
-                    llm.call_llm(
-                        system=get_fallback_summary_prompt(user_name, ctx.agent_name),
-                        user=f"Query: {user_query}\n\nEvidence:\n{evidence_ctx}"
-                    ),
-                    timeout=30.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Fallback summary timed out")
-                summary = None
+            summary = await generate_fallback_summary(ctx, llm, user_name, user_query)
 
             yield {"event": "response", "data": {
                 "content": summary or "I found information but couldn't summarize it.",

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { getAgentCommunityMemory, getAgentHierarchy } from '@/api/community'
 import { listAgents } from '@/api/agents'
 import { formatDistanceToNow } from 'date-fns'
@@ -19,13 +19,7 @@ function AgentCard({ agent, hierarchy, allAgents, isOpen, onToggle }) {
   const spawnedBy = hierarchy.find(h => h.child === agent.id)
   const spawned = hierarchy.filter(h => h.parent === agent.id)
 
-  useEffect(() => {
-    if (isOpen && !loaded) {
-      loadData()
-    }
-  }, [isOpen])
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     setLoading(true)
     try {
       const memRes = await getAgentCommunityMemory(agent.id)
@@ -36,7 +30,13 @@ function AgentCard({ agent, hierarchy, allAgents, isOpen, onToggle }) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [agent.id])
+
+  useEffect(() => {
+    if (isOpen && !loaded) {
+      loadData()
+    }
+  }, [isOpen, loaded, loadData])
 
   return (
     <div className="border border-border/30 rounded-lg overflow-hidden">

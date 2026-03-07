@@ -6,16 +6,16 @@ from loguru import logger
 from typing import Dict
 
 from wordfreq import word_frequency
-from shared.topics_config import TopicConfig
+from shared.config.topics import TopicConfig
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
 
-from shared.schema.dtypes import EntityItem, EntityPair, MessageConnections
+from shared.models.schema.dtypes import EntityItem, EntityPair, MessageConnections
 
 
 PRONOUNS = {
         "my", "his", "her", "their", "our", "your", "its",
-        "he", "she", "they", "we", "i", "me", "him", "them", "us",
+        "he", "she", "they", "we", "i", "me", "him", "them",
         "this", "that", "these", "those"
     }
 
@@ -197,8 +197,11 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8, topic_config: To
         line = line.strip()
         if not line or line.lower().startswith("msg_id"):
             continue
-        
-        parts = line.split("|")
+            
+        # Allow the last field (confidence or topic) to contain extra pipes if the LLM hallucinated them, 
+        # but realistically we just want exactly 5 fields. Splitting with a max prevents unpacking errors
+        # if the 'name' or 'label' somehow contains a pipe.
+        parts = line.split("|", 4)
         
         if len(parts) == 5:
             msg_id_str, name, label, topic, conf_str = [p.strip() for p in parts]

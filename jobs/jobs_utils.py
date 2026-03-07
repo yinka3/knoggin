@@ -9,12 +9,12 @@ from rapidfuzz import fuzz
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 
 from db.store import MemGraphStore
-from shared.schema.dtypes import Fact, FactMergeResult, ProfileUpdate
+from shared.models.schema.dtypes import Fact, FactMergeResult, ProfileUpdate
 
 
 
 def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
-    if not vec_a or not vec_b:
+    if not vec_a or not vec_b or None in vec_a or None in vec_b:
         return 0.0
     
     a = np.array(vec_a).reshape(1, -1)
@@ -82,7 +82,7 @@ def process_extracted_facts(
     for fact_str in new_facts:
         fact_str = fact_str.strip()
 
-        sup_match = re.search(r"^\[SUPERSEDES:\s*(.+?)\]\s*(.+)$", fact_str)
+        sup_match = re.search(r"^\[SUPERSEDES:\s*(.+?)\]\s*(.+)$", fact_str, re.DOTALL)
         if sup_match:
             old_text = sup_match.group(1).strip()
             new_text = sup_match.group(2).strip()
@@ -107,7 +107,7 @@ def process_extracted_facts(
                 new_contents.append(fact_str)
             continue
 
-        inv_match = re.search(r"^\[INVALIDATES:\s*(.+?)\](?:\s*\[MSG_?\d+\])?\s*$", fact_str)
+        inv_match = re.search(r"^\[INVALIDATES:\s*(.+?)\](?:\s*\[MSG_?\d+\])?\s*$", fact_str, re.DOTALL)
         if inv_match:
             old_text = inv_match.group(1).strip()
             if not old_text:
@@ -254,55 +254,50 @@ def format_recorded_date(recorded: str) -> str:
     except (ValueError, AttributeError):
         return str(recorded)[:10]
 
+def _format_entity_block(ent: Dict, label: str = None) -> List[str]:
+    name = ent.get("canonical_name", ent.get("entity_name", "Unknown"))
+    etype = ent.get("type", ent.get("entity_type", "Unknown"))
+    
+    header = f"### {label}: {name} [{etype}]" if label else f"### {name} [{etype}]"
+    output = [header]
+    
+    aliases = ent.get("aliases", ent.get("known_aliases", []))
+    if aliases:
+        output.append(f"Aliases: {', '.join(aliases)}")
+    else:
+        output.append("Aliases: (none)")
+        
+    facts = ent.get("facts", ent.get("existing_facts", []))
+    if facts:
+        output.append("Facts:")
+        for f in facts:
+            content = f.get("content", "")
+            recorded = f.get("recorded_at", "")
+            source = f.get("source_message")
+            
+            if recorded:
+                recorded_str = format_recorded_date(recorded)
+            else:
+                recorded_str = "unknown"
+            
+            source_info = f", source: \"{source}\"" if source else ""
+            output.append(f"  - {content} (recorded: {recorded_str}{source_info})")
+            
+    return output
+
 def format_vp04_input(
     entities: List[Dict],
     conversation_text: str
 ) -> str:
-    """
-    Format input for VP-04 (Profile Extraction).
-    
-    entities: List of {
-        "entity_name": str,
-        "entity_type": str,
-        "existing_facts": List[{"content", "recorded_at", "source_message"}],
-        "known_aliases": List[str]
-    }
-    """
+    """Format prompt for extraction verification phase."""
     lines = []
-    
     lines.append("## Entities")
     
     for ent in entities:
-        name = ent.get("entity_name", "Unknown")
-        etype = ent.get("entity_type", "unknown")
-        aliases = ent.get("known_aliases", [])
-        facts = ent.get("existing_facts", [])
+        lines.extend(_format_entity_block(ent))
+        lines.append("")
         
-        lines.append(f"\n### {name} [{etype}]")
-        
-        if aliases:
-            lines.append(f"Aliases: {', '.join(aliases)}")
-        
-        if facts:
-            lines.append("Existing Facts:")
-            for f in facts:
-                content = f.get("content", "")
-                recorded = f.get("recorded_at", "")
-                source = f.get("source_message")
-                
-                if recorded:
-                    recorded_str = format_recorded_date(f.get("recorded_at", ""))
-                else:
-                    recorded_str = "unknown"
-                
-                if source:
-                    lines.append(f"  - {content} (recorded: {recorded_str}, source: \"{source}\")")
-                else:
-                    lines.append(f"  - {content} (recorded: {recorded_str})")
-        else:
-            lines.append("Existing Facts: (none)")
-    
-    lines.append("\n## Prior Conversation For Context")
+    lines.append("## Prior Conversation For Context")
     lines.append(conversation_text)
     
     return "\n".join(lines)
@@ -312,55 +307,12 @@ def format_vp05_input(
     entity_a: Dict,
     entity_b: Dict
 ) -> str:
-    """
-    Format input for VP-05 (Merge Judgment).
-    
-    entity: {
-        "canonical_name": str,
-        "type": str,
-        "aliases": List[str],
-        "facts": List[{"content", "recorded_at", "source_message"}]
-    }
-    """
-    def _format_entity(ent: Dict, label: str) -> List[str]:
-        lines = []
-        name = ent.get("canonical_name", "Unknown")
-        etype = ent.get("type", "unknown")
-        aliases = ent.get("aliases", [])
-        facts = ent.get("facts", [])
-        
-        lines.append(f"## {name} [{etype}]")
-        
-        if aliases:
-            lines.append(f"Aliases: {', '.join(aliases)}")
-        else:
-            lines.append("Aliases: (none)")
-        
-        if facts:
-            lines.append("Facts:")
-            for f in facts:
-                content = f.get("content", "")
-                recorded = f.get("recorded_at", "")
-                source = f.get("source_message")
-                
-                if recorded:
-                   recorded_str = format_recorded_date(f.get("recorded_at", ""))
-                else:
-                    recorded_str = "unknown"
-                
-                if source:
-                    lines.append(f"  - {content} (recorded: {recorded_str}, source: \"{source}\")")
-                else:
-                    lines.append(f"  - {content} (recorded: {recorded_str})")
-        else:
-            lines.append("Facts: (none)")
-        
-        return lines
+    """Format prompt for merge profile validation phase."""
     
     output = []
-    output.extend(_format_entity(entity_a, "Entity A"))
+    output.extend(_format_entity_block(entity_a, "Entity A"))
     output.append("")
-    output.extend(_format_entity(entity_b, "Entity B"))
+    output.extend(_format_entity_block(entity_b, "Entity B"))
     
     return "\n".join(output)
 

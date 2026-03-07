@@ -1,13 +1,14 @@
 import asyncio
 import os
 from functools import partial
+import re
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from loguru import logger
 
 from api.deps import get_app_state
 from api.state import AppState
-from shared.file_rag import ALLOWED_EXTENSIONS, MAX_FILE_SIZE
+from shared.rag.processor import ALLOWED_EXTENSIONS, MAX_FILE_SIZE
 
 router = APIRouter()
 
@@ -39,16 +40,23 @@ async def upload_file(
     upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads", "tmp")
     os.makedirs(upload_dir, exist_ok=True)
     
-    tmp_path = os.path.join(upload_dir, f"{session_id}_{file.filename}")
+    def secure_filename(name: str) -> str:
+        if not name: return "unnamed"
+        name = re.sub(r'[^a-zA-Z0-9_.-]', '_', name).lstrip('._')
+        return name or "unnamed"
+        
+    safe_filename = secure_filename(file.filename)
+    tmp_path = os.path.join(upload_dir, f"{session_id}_{safe_filename}")
     
     try:
         size = 0
+        loop = asyncio.get_running_loop()
         with open(tmp_path, "wb") as f:
             while chunk := await file.read(1024 * 64): 
                 size += len(chunk)
                 if size > MAX_FILE_SIZE:
                     raise HTTPException(status_code=400, detail=f"File too large. Max: {MAX_FILE_SIZE // (1024*1024)}MB")
-                f.write(chunk)
+                await loop.run_in_executor(None, f.write, chunk)
         
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(

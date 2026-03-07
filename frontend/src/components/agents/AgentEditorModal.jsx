@@ -610,7 +610,7 @@ export default function AgentEditorModal({
                                   m => m.id !== item.id
                                 ),
                               }))
-                            } catch (e) {
+                            } catch {
                               toast.error('Failed to delete memory')
                             }
                           }}
@@ -651,7 +651,7 @@ export default function AgentEditorModal({
                         ],
                       }))
                       setNewMemoryContent('')
-                    } catch (err) {
+                    } catch {
                       toast.error('Failed to save memory')
                     }
                   }
@@ -680,7 +680,7 @@ export default function AgentEditorModal({
                       ],
                     }))
                     setNewMemoryContent('')
-                  } catch (err) {
+                  } catch {
                     toast.error('Failed to save memory')
                   }
                 }}

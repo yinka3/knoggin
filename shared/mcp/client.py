@@ -58,7 +58,8 @@ class MCPClientManager:
 
         for name, config in servers_config.items():
             conn = MCPServerConnection(name, config)
-            instance._servers[name] = conn
+            async with instance._lock:
+                instance._servers[name] = conn
 
             if conn.enabled:
                 await instance._connect_server(conn)
@@ -108,7 +109,8 @@ class MCPClientManager:
                     continue
 
                 namespaced = f"mcp__{conn.name}__{tool.name}"
-                self._tool_registry[namespaced] = (conn.name, tool.name)
+                async with self._lock:
+                    self._tool_registry[namespaced] = (conn.name, tool.name)
 
                 discovered.append({
                     "name": tool.name,
@@ -145,8 +147,8 @@ class MCPClientManager:
             if conn.exit_stack:
                 try:
                     await conn.exit_stack.aclose()
-                except Exception:
-                    pass
+                except Exception as ex:
+                    logger.warning(f"[MCP] Exit stack close failed for '{conn.name}': {ex}")
                 conn.exit_stack = None
                 conn.session = None
 
@@ -163,9 +165,10 @@ class MCPClientManager:
             conn.exit_stack = None
             conn.session = None
 
-        stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == conn.name]
-        for k in stale_keys:
-            del self._tool_registry[k]
+        async with self._lock:
+            stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == conn.name]
+            for k in stale_keys:
+                del self._tool_registry[k]
 
         conn.tools = []
         conn.connected = False
@@ -259,9 +262,10 @@ class MCPClientManager:
         conn.config["enabled"] = False
 
         if conn.connected:
-            stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == conn.name]
-            for k in stale_keys:
-                del self._tool_registry[k]
+            async with self._lock:
+                stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == conn.name]
+                for k in stale_keys:
+                    del self._tool_registry[k]
 
             conn.tools = []
             conn.connected = False
@@ -283,7 +287,8 @@ class MCPClientManager:
             return {"error": f"Server '{name}' already exists"}
 
         conn = MCPServerConnection(name, config)
-        self._servers[name] = conn
+        async with self._lock:
+            self._servers[name] = conn
 
         if connect and conn.enabled:
             success = await self._connect_server(conn)
@@ -313,11 +318,12 @@ class MCPClientManager:
             except Exception:
                 pass
 
-        stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == name]
-        for k in stale_keys:
-            del self._tool_registry[k]
+        async with self._lock:
+            stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == name]
+            for k in stale_keys:
+                del self._tool_registry[k]
 
-        del self._servers[name]
+            del self._servers[name]
         logger.info(f"[MCP] Removed server '{name}'")
         return True
 
@@ -330,8 +336,9 @@ class MCPClientManager:
                 except Exception as e:
                     logger.warning(f"[MCP] Error disconnecting from '{name}': {e}")
 
-        self._servers.clear()
-        self._tool_registry.clear()
+        async with self._lock:
+            self._servers.clear()
+            self._tool_registry.clear()
         logger.info("[MCP] Manager shutdown complete")
 
 

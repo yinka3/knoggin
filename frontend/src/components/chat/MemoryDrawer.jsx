@@ -5,7 +5,6 @@ import { BrainCircuit, ChevronDown, ChevronUp } from 'lucide-react'
 import { getSessionMemory } from '@/api/agents'
 import { useSocket } from '@/context/SocketContext'
 import { formatDate } from '@/lib/format'
-import { cn } from '@/lib/utils'
 
 const PREVIEW_COUNT = 4
 

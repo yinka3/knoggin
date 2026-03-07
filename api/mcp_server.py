@@ -5,9 +5,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, List
 from loguru import logger
-from shared.schema.dtypes import Fact
+from shared.models.schema.dtypes import Fact
 from mcp.server.fastmcp import FastMCP
-from shared.redisclient import RedisKeys
+from shared.infra.redis import RedisKeys
 
 
 def create_mcp_app(get_resources) -> FastMCP:
@@ -43,42 +43,8 @@ def create_mcp_app(get_resources) -> FastMCP:
     async def _resolve_or_create_entity(store, embedding, name, entity_type, topic, loop) -> Optional[int]:
         """
         Find existing entity by name or create a new one.
-        Uses active resolver if a session is running, falls back to direct graph ops.
+        Always uses DB operations — no session resolver dependency.
         """
-        resources = get_resources()
-        resolver = resources.active_resolver
-
-        if resolver:
-            entity_id = resolver.get_id(name)
-            if entity_id:
-                return entity_id
-
-            new_id = await resources.redis.incr(RedisKeys.global_next_ent_id())
-            await loop.run_in_executor(
-                _executor(),
-                lambda: resolver.register_entity(
-                    new_id, name, [name], entity_type, topic, "mcp"
-                )
-            )
-
-            entity_data = {
-                "id": new_id,
-                "canonical_name": name,
-                "type": entity_type,
-                "confidence": 0.8,
-                "topic": topic,
-                "embedding": resolver.get_embedding_for_id(new_id),
-                "aliases": [name],
-                "session_id": "mcp"
-            }
-            await loop.run_in_executor(
-                _executor(),
-                lambda: store.write_batch([entity_data], [])
-            )
-
-            logger.info(f"[MCP] Created entity '{name}' (id={new_id}) via resolver")
-            return new_id
-
         fts_results = await loop.run_in_executor(
             _executor(),
             lambda: store.search_entity(name, active_topics=None, limit=3)
@@ -459,10 +425,12 @@ def create_mcp_app(get_resources) -> FastMCP:
 
             if id_a is None or id_b is None:
                 return json.dumps({"error": "Failed to resolve one or both entities"})
-
+            
             relationship = {
                 "entity_a": entity_a,
                 "entity_b": entity_b,
+                "entity_a_id": id_a,
+                "entity_b_id": id_b,
                 "message_id": "mcp_write",
                 "context": context
             }

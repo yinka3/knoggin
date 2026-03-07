@@ -1,5 +1,6 @@
 import json
 import time
+import html
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
@@ -11,9 +12,9 @@ from pydantic import BaseModel
 from api.deps import get_app_state
 from api.state import AppState
 from agent.streaming import run_stream
-from shared.schema.dtypes import MessageData, AgentConfig
-from shared.config import get_config_value
-from shared.redisclient import RedisKeys
+from shared.models.schema.dtypes import MessageData, AgentConfig
+from shared.config.base import get_config_value
+from shared.infra.redis import RedisKeys
 
 router = APIRouter()
 
@@ -64,8 +65,11 @@ async def send_message(
     
     effective_model = body.model or context.model or (agent.model if agent else None)
     
+    # HTML sanitization to prevent prompt injection 
+    safe_message = html.escape(body.message)
+    
     msg = MessageData(
-        message=body.message,
+        message=safe_message,
         timestamp=datetime.now(timezone.utc)
     )
     await context.add(msg)
@@ -90,7 +94,7 @@ async def send_message(
             ]
 
             async for event in run_stream(
-                user_query=body.message,
+                user_query=safe_message,
                 user_name=state.user_name,
                 session_id=session_id,
                 agent_id=agent_id,
@@ -109,7 +113,7 @@ async def send_message(
                 user_timezone=body.timezone,
                 mcp_manager=context.mcp_manager,
                 agent_temperature=agent.temperature if agent else 0.7,
-                agent_base_prompt=agent.base_prompt if agent else None
+                agent_instructions=agent.instructions if agent else None
             ):
                 
                 if event["event"] == "tool_start":
@@ -162,7 +166,7 @@ async def send_message(
                 # Yield a final event with the msg_id
                 yield f"event: msg_id\ndata: {json.dumps({'msg_id': msg.id})}\n\n"
 
-                if len(history) == 0 and not session_meta.get("title"):
+                if len(history) <= 1 and not session_meta.get("title"):
                     try:
                         title_prompt = f"User message: {body.message}\nAssistant response: {final_response}\n\nGenerate a short, concise (3-5 words) title for this conversation. Reply with ONLY the title."
                         title = await state.resources.llm_service.call_llm(
@@ -183,8 +187,9 @@ async def send_message(
 
                 
         except Exception as e:
+            logger.error(f"Chat stream generic exception: {e}")
             error_payload = {
-                "message": str(e),
+                "message": "An unexpected error occurred while processing your message.",
                 "msg_id": msg.id if msg.id != -1 else None,
                 "partial_response": final_response,
                 "retryable": True

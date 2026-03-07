@@ -15,7 +15,7 @@ export default function useCommunityStream(onEvent, enabled = true) {
     onEventRef.current = onEvent
   }, [onEvent])
 
-  const connect = useCallback(() => {
+  const connect = useCallback(function doConnect() {
     if (disposedRef.current) return
 
     closeRef.current = connectCommunityWS(
@@ -35,7 +35,7 @@ export default function useCommunityStream(onEvent, enabled = true) {
           reconnectTimeout.current = setTimeout(() => {
             if (!disposedRef.current) {
               reconnectAttempts.current += 1
-              connect()
+              doConnect()
             }
           }, delay)
         }

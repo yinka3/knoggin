@@ -1,8 +1,16 @@
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { KeyRound, CheckCircle2, AlertCircle, Search, Zap, Shield } from 'lucide-react'
-import { useState } from 'react'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { KeyRound, CheckCircle2, AlertCircle, Search, Zap, Shield, Cpu, Bot, Sparkles, GitMerge } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { getCuratedModels } from '@/api/config'
 
 const PROVIDERS = [
   { 
@@ -44,13 +52,39 @@ const PROVIDERS = [
   },
 ]
 
+const MODEL_ROLES = [
+  {
+    key: 'agent',
+    label: 'Agent',
+    icon: Bot,
+    description: 'Powers the chat agent — must support tool calling',
+    configKey: 'agentModel',
+  },
+  {
+    key: 'extraction',
+    label: 'Extraction',
+    icon: Sparkles,
+    description: 'NER, fact extraction, and connection reasoning',
+    configKey: 'extractionModel',
+  },
+  {
+    key: 'merge',
+    label: 'Merge',
+    icon: GitMerge,
+    description: 'Entity deduplication and profile refinement',
+    configKey: 'mergeModel',
+  },
+]
+
 export default function LLMSection({
   openrouterKey,
   setOpenrouterKey,
   searchConfig,
   setSearchConfig,
+  models,
+  setModels,
 }) {
-  const [activeTab, setActiveTab] = useState('openrouter')
+  const [activeTab, setActiveTab] = useState('provider')
   const [isEditing, setIsEditing] = useState(false)
 
   // Determine active search provider for display
@@ -65,19 +99,28 @@ export default function LLMSection({
   return (
     <>
       <section>
-        <SectionHeader description="Configure LLM and web search providers">API Keys</SectionHeader>
+        <SectionHeader description="Configure LLM provider, models, and web search">API Keys & Models</SectionHeader>
         <div className="bg-card rounded-xl border border-border overflow-hidden transition-all">
-          {/* Main Tab Switcher */}
+          {/* Tab Switcher */}
           <div className="flex border-b border-border">
             <button
-              onClick={() => { setActiveTab('openrouter'); setIsEditing(false) }}
+              onClick={() => { setActiveTab('provider'); setIsEditing(false) }}
               className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium transition-all relative
-                ${activeTab === 'openrouter' ? 'text-foreground bg-muted/30' : 'text-muted-foreground hover:text-foreground hover:bg-muted/10'}`}
+                ${activeTab === 'provider' ? 'text-foreground bg-muted/30' : 'text-muted-foreground hover:text-foreground hover:bg-muted/10'}`}
             >
               <KeyRound size={14} />
-              OpenRouter
+              LLM Provider
               {hasOpenrouterKey && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
-              {activeTab === 'openrouter' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
+              {activeTab === 'provider' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
+            </button>
+            <button
+              onClick={() => { setActiveTab('models'); setIsEditing(false) }}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium transition-all relative
+                ${activeTab === 'models' ? 'text-foreground bg-muted/30' : 'text-muted-foreground hover:text-foreground hover:bg-muted/10'}`}
+            >
+              <Cpu size={14} />
+              Models
+              {activeTab === 'models' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
             </button>
             <button
               onClick={() => { setActiveTab('search'); setIsEditing(false) }}
@@ -91,13 +134,15 @@ export default function LLMSection({
             </button>
           </div>
 
-          {activeTab === 'openrouter' ? (
-            <OpenRouterPanel
+          {activeTab === 'provider' ? (
+            <ProviderPanel
               apiKey={openrouterKey}
               setApiKey={setOpenrouterKey}
               isEditing={isEditing}
               setIsEditing={setIsEditing}
             />
+          ) : activeTab === 'models' ? (
+            <ModelsPanel models={models} setModels={setModels} />
           ) : (
             <SearchProvidersPanel
               searchConfig={searchConfig}
@@ -111,7 +156,7 @@ export default function LLMSection({
   )
 }
 
-function OpenRouterPanel({ apiKey, setApiKey, isEditing, setIsEditing }) {
+function ProviderPanel({ apiKey, setApiKey, isEditing, setIsEditing }) {
   const hasKey = Boolean(apiKey?.trim())
   return (
     <>
@@ -121,7 +166,7 @@ function OpenRouterPanel({ apiKey, setApiKey, isEditing, setIsEditing }) {
             <KeyRound size={18} />
           </div>
           <div className="space-y-0.5">
-            <Label className="text-sm font-semibold">OpenRouter API Key</Label>
+            <Label className="text-sm font-semibold">LLM API Key</Label>
             <div className="flex items-center gap-1.5">
               {hasKey ? (
                 <>
@@ -153,15 +198,15 @@ function OpenRouterPanel({ apiKey, setApiKey, isEditing, setIsEditing }) {
               type="password"
               value={apiKey}
               onChange={e => setApiKey(e.target.value)}
-              placeholder="sk-or-..."
+              placeholder="sk-or-... or your provider's key"
               className="bg-background border-border rounded-lg font-mono text-sm focus:border-primary transition-colors h-9"
               autoFocus
             />
             <div className="flex items-center justify-between px-1">
               <p className="text-[11px] text-muted-foreground leading-tight">
-                Get your key at{' '}
+                Default: OpenRouter.{' '}
                 <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-medium">
-                  openrouter.ai/keys
+                  Get a key
                 </a>
               </p>
               <Button size="sm" onClick={() => setIsEditing(false)} className="h-7 text-[11px] px-3 rounded-md">
@@ -172,6 +217,89 @@ function OpenRouterPanel({ apiKey, setApiKey, isEditing, setIsEditing }) {
         </div>
       )}
     </>
+  )
+}
+
+function ModelsPanel({ models, setModels }) {
+  const [curatedModels, setCuratedModels] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    getCuratedModels()
+      .then(data => setCuratedModels(data.models || []))
+      .catch(() => setCuratedModels([]))
+      .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="p-6 text-center text-sm text-muted-foreground">
+        Loading models...
+      </div>
+    )
+  }
+
+  return (
+    <div className="divide-y divide-border/40">
+      {MODEL_ROLES.map(role => {
+        const Icon = role.icon
+        const currentValue = models?.[role.configKey] || ''
+
+        return (
+          <div key={role.key} className="px-4 py-3.5">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="p-2 rounded-lg bg-muted/50 text-muted-foreground shrink-0">
+                  <Icon size={16} />
+                </div>
+                <div className="space-y-0.5 min-w-0">
+                  <span className="text-sm font-medium text-foreground">{role.label}</span>
+                  <p className="text-[11px] text-muted-foreground">{role.description}</p>
+                </div>
+              </div>
+
+              <Select
+                value={currentValue || '__default__'}
+                onValueChange={v => {
+                  const newVal = v === '__default__' ? '' : v
+                  setModels({ [role.configKey]: newVal })
+                }}
+              >
+                <SelectTrigger className="h-8 w-[200px] shrink-0 border-border bg-muted/30 text-xs rounded-lg focus:ring-1 focus:ring-primary/30">
+                  <SelectValue placeholder="Default">
+                    {currentValue
+                      ? (curatedModels.find(m => m.id === currentValue)?.name || currentValue.split('/').pop())
+                      : 'Default'}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent align="end" className="min-w-[260px] max-h-[280px]">
+                  <SelectItem value="__default__" className="text-xs">
+                    <span className="text-muted-foreground">Default</span>
+                  </SelectItem>
+                  {curatedModels.map(model => (
+                    <SelectItem key={model.id} value={model.id} className="text-xs">
+                      <div className="flex items-center justify-between gap-3 w-full">
+                        <span className="truncate">{model.name}</span>
+                        <span className="text-[10px] text-muted-foreground shrink-0">
+                          {model.input_price === 0 ? 'Free' : `$${model.input_price}/M`}
+                        </span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        )
+      })}
+
+      <div className="px-4 py-2.5">
+        <p className="text-[11px] text-muted-foreground">
+          Custom model IDs can be typed directly into the selector.
+          The Agent model must support tool calling.
+        </p>
+      </div>
+    </div>
   )
 }
 

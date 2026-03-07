@@ -6,8 +6,8 @@ from pydantic import BaseModel
 
 from api.deps import get_app_state
 from api.state import AppState
-from shared.topics_config import TopicConfig
-from shared.topic_gen import generate_topics
+from shared.config.topics import TopicConfig
+from shared.services.topics import generate_topics
 
 router = APIRouter()
 
@@ -18,6 +18,7 @@ class CreateTopicRequest(BaseModel):
     hierarchy: Dict = {}
     aliases: List[str] = []
     active: bool = True
+    hot: bool = False
 
 
 class UpdateTopicRequest(BaseModel):
@@ -25,6 +26,7 @@ class UpdateTopicRequest(BaseModel):
     hierarchy: Optional[Dict] = None
     aliases: Optional[List[str]] = None
     active: Optional[bool] = None
+    hot: Optional[bool] = None
 
 class GenerateFromDescriptionRequest(BaseModel):
     description: str
@@ -74,7 +76,7 @@ async def generate_topics_from_description(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Topic generation from description failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Topic generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Topic generation failed due to an internal error.")
 
     # Increment counter
     await state.resources.redis.incr(limit_key)
@@ -91,7 +93,8 @@ async def list_topics(
     
     return {
         "topics": topic_config.raw,
-        "active_topics": topic_config.active_topics
+        "active_topics": topic_config.active_topics,
+        "hot_topics": topic_config.hot_topics
     }
 
 
@@ -110,7 +113,8 @@ async def create_topic(
         "labels": body.labels,
         "hierarchy": body.hierarchy,
         "aliases": body.aliases,
-        "active": body.active
+        "active": body.active,
+        "hot": body.hot
     })
     
     await topic_config.save(state.resources.redis, state.user_name, session_id)
@@ -165,6 +169,9 @@ async def update_topic(
         current["aliases"] = body.aliases
     if body.active is not None:
         topic_config.toggle_active(topic_name, body.active)
+    if body.hot is not None:
+        current["hot"] = body.hot
+        topic_config._clear_cache()
     
     await topic_config.save(state.resources.redis, state.user_name, session_id)
     

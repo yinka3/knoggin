@@ -6,16 +6,17 @@ from datetime import datetime, timezone
 from typing import List, Dict
 
 from agent.tools import Tools as BaseTools
-from shared.config import get_config_value
-from shared.events import emit_community
-from shared.redisclient import RedisKeys
+from shared.config.base import get_config_value
+from shared.utils.events import emit_community
+from shared.infra.redis import RedisKeys
 from db.community_store import CommunityStore
-from shared.schema.dtypes import AgentConfig
+from shared.models.schema.dtypes import AgentConfig
 
 class CommunityTools:
     """
-    Restricted tools for AAC agents.
-    Read access to main graph, Write access only to community's own space.
+    Restricted suite of tools specifically designed for Autonomous Agent Community (AAC) agents.
+    Provides read access to the main knowledge graph, but restricts write operations 
+    strictly to the community's isolated discussion space to prevent main graph contamination.
     """
     def __init__(self, user_name: str, base_tools: BaseTools, community_store: CommunityStore, discussion_id: str, agent_id: str):
         self.user_name = user_name
@@ -25,6 +26,7 @@ class CommunityTools:
         self.agent_id = agent_id
 
     async def save_insight(self, content: str) -> Dict:
+        """Saves a synthesized insight back to the community discussion stream."""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
@@ -39,6 +41,10 @@ class CommunityTools:
         return {"saved": True, "type": "insight"}
     
     async def save_memory(self, content: str) -> Dict:
+        """
+        Saves a short-term working memory specifically for this active agent instance.
+        Capped at 10 memories per sub-agent to force summarization over accumulation.
+        """
         redis = self.base.redis
         key = RedisKeys.community_agent_memory(self.user_name, self.agent_id)
         existing = await redis.hgetall(key)

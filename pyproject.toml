@@ -32,10 +32,23 @@ dependencies = [
     "mcp>=1.2.0,<2.0",
     "duckduckgo-search>=8.0.0",
     "cachetools>=5.4.0",
+    "markitdown>=0.1.5",
+    "rank-bm25>=0.2.2",
 ]
 
+[project.scripts]
+knoggin = "cli.main:app"
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cli*", "api*", "db*", "main*", "shared*", "agent*", "jobs*", "log*", "scripts*"]
+exclude = ["frontend*", "benchmark*", "knoggin-website*"]
+
 [tool.setuptools.package-data]
-knoggin = ["setup.sh", "docker-compose.yml", ".env.example"]
+cli = ["templates/*"]
 
 [tool.uvicorn]
 reload-exclude = ["redis_data", "memgraph_data", "*.log"]

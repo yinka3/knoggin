@@ -79,6 +79,16 @@ class FactMergeResult:
 
 
 @dataclass
+class ResolutionResult:
+    """Result from EntityResolver batch resolution."""
+    entity_ids: List[int]
+    new_ids: Set[int]
+    alias_ids: Set[int]
+    entity_msg_map: Dict[int, List[int]]
+    alias_updates: Dict[int, List[str]]
+
+
+@dataclass
 class BatchResult:
     """Result of processing a batch of messages."""
     entity_ids: List[int] = field(default_factory=list)

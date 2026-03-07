@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
-import { ChevronDown, ChevronRight, Trash2, GripVertical } from 'lucide-react'
+import { ChevronDown, ChevronRight, Trash2, GripVertical, Flame } from 'lucide-react'
 import { Reorder, AnimatePresence, motion } from 'motion/react'
 
 /**
@@ -73,6 +73,9 @@ export default function TopicEditor({
                     off
                   </span>
                 )}
+                {config.hot && (
+                  <Flame size={12} className="text-orange-500" />
+                )}
                 <span className="text-[11px] text-muted-foreground hidden sm:inline-block truncate max-w-[200px]">
                   {config.labels?.length > 0 ? config.labels.join(', ') : '—'}
                 </span>
@@ -118,17 +121,33 @@ export default function TopicEditor({
 
                   {renderExtra && renderExtra(name, config, updateField)}
 
-                  {!protectedNames.includes(name) && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => removeTopic(name)}
-                      className="text-xs text-muted-foreground hover:text-destructive h-7"
-                    >
-                      <Trash2 size={12} className="mr-1" />
-                      Remove
-                    </Button>
-                  )}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => updateField(name, 'hot', !config.hot)}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs transition-all ${
+                          config.hot
+                            ? 'bg-orange-500/15 text-orange-500 border border-orange-500/30'
+                            : 'bg-muted text-muted-foreground hover:text-foreground border border-transparent'
+                        }`}
+                      >
+                        <Flame size={12} />
+                        {config.hot ? 'Hot' : 'Set Hot'}
+                      </button>
+                    </div>
+
+                    {!protectedNames.includes(name) && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => removeTopic(name)}
+                        className="text-xs text-muted-foreground hover:text-destructive h-7"
+                      >
+                        <Trash2 size={12} className="mr-1" />
+                        Remove
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </motion.div>
             )}

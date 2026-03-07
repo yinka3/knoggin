@@ -2,12 +2,14 @@ from datetime import datetime, timezone
 import json
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from api.deps import get_app_state
 from api.state import AppState
-from shared.redisclient import RedisKeys
-from shared.schema.tool_schema import ALL_TOOL_NAMES
+from shared.infra.redis import RedisKeys
+from shared.config.topics import TopicConfig
+from shared.models.schema.tool_schema import ALL_TOOL_NAMES
 router = APIRouter()
 
 
@@ -43,6 +45,7 @@ async def list_sessions(
     for session_id, metadata in paginated:
         result.append({
             "session_id": session_id,
+            "title": metadata.get("title"),
             "created_at": metadata.get("created_at"),
             "last_active": metadata.get("last_active"),
             "is_active": session_id in state.active_sessions
@@ -99,6 +102,49 @@ async def create_session(
         "agent_id": agent_id
     }
 
+@router.get("/export/all")
+async def export_all_sessions(
+    state: AppState = Depends(get_app_state)
+):
+    """Export all sessions' conversation histories as JSON."""
+    sessions = await state.list_sessions()
+    
+    all_exports = []
+    for session_id, metadata in sessions.items():
+        try:
+            if session_id in state.active_sessions:
+                history = await state.active_sessions[session_id].get_conversation_context(num_turns=1000)
+                messages = [
+                    {"role": turn["role"], "content": turn["content"], "timestamp": turn["timestamp"]}
+                    for turn in history
+                ]
+            else:
+                messages = await state.get_session_history_readonly(session_id)
+            
+            all_exports.append({
+                "session_id": session_id,
+                "title": metadata.get("title", "Untitled"),
+                "created_at": metadata.get("created_at"),
+                "last_active": metadata.get("last_active"),
+                "agent_id": metadata.get("agent_id"),
+                "messages": messages
+            })
+        except Exception:
+            continue
+    
+    export_data = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "total_sessions": len(all_exports),
+        "sessions": all_exports
+    }
+    
+    return JSONResponse(
+        content=export_data,
+        headers={
+            "Content-Disposition": 'attachment; filename="knoggin_all_sessions.json"'
+        }
+    )
+
 @router.get("/{session_id}")
 async def get_session(
     session_id: str,
@@ -113,6 +159,7 @@ async def get_session(
     
     return {
         "session_id": session_id,
+        "title": metadata.get("title"),
         "created_at": metadata.get("created_at"),
         "last_active": metadata.get("last_active"),
         "topics_config": metadata.get("topics_config"),
@@ -191,3 +238,85 @@ async def delete_session(
     await state.resources.redis.hdel(RedisKeys.sessions(state.user_name), session_id)
     
     return {"success": True, "keys_deleted": deleted_count}
+
+
+@router.get("/{session_id}/memory")
+async def get_session_memory(
+    session_id: str,
+    state: AppState = Depends(get_app_state)
+):
+    """Read agent-saved memory notes for a session."""
+    sessions = await state.list_sessions()
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    topic_config = await TopicConfig.load(
+        state.resources.redis,
+        state.user_name,
+        session_id
+    )
+    
+    all_topics = list(topic_config.raw.keys())
+    memories = {}
+    total = 0
+    
+    for topic in all_topics:
+        memory_key = RedisKeys.agent_memory(state.user_name, session_id, topic)
+        raw = await state.resources.redis.hgetall(memory_key)
+        
+        if not raw:
+            continue
+        
+        entries = []
+        for mem_id, payload in raw.items():
+            data = json.loads(payload)
+            entries.append({
+                "id": mem_id,
+                "content": data.get("content", ""),
+                "created_at": data.get("created_at", ""),
+                "source_session": data.get("source_session", "")
+            })
+        entries.sort(key=lambda x: x["created_at"])
+        memories[topic] = entries
+        total += len(entries)
+    
+    return {"memories": memories, "total": total}
+
+
+@router.get("/{session_id}/export")
+async def export_session(
+    session_id: str,
+    state: AppState = Depends(get_app_state)
+):
+    """Export a single session's conversation history as JSON."""
+    context = await state.get_or_resume_session(session_id)
+    if not context:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    sessions = await state.list_sessions()
+    metadata = sessions.get(session_id, {})
+    history = await context.get_conversation_context(num_turns=1000)
+    
+    export_data = {
+        "session_id": session_id,
+        "title": metadata.get("title", "Untitled"),
+        "created_at": metadata.get("created_at"),
+        "last_active": metadata.get("last_active"),
+        "agent_id": metadata.get("agent_id"),
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "messages": [
+            {
+                "role": turn["role"],
+                "content": turn["content"],
+                "timestamp": turn["timestamp"]
+            }
+            for turn in history
+        ]
+    }
+    
+    return JSONResponse(
+        content=export_data,
+        headers={
+            "Content-Disposition": f'attachment; filename="knoggin_session_{session_id[:8]}.json"'
+        }
+    )

@@ -4,8 +4,8 @@ from datetime import datetime, timezone, timedelta
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from db.store import MemGraphStore
-from shared.events import emit
-from shared.redisclient import RedisKeys
+from shared.utils.events import emit
+from shared.infra.redis import RedisKeys
 
 
 class FactArchivalJob(BaseJob):
@@ -37,7 +37,12 @@ class FactArchivalJob(BaseJob):
         )
         if not last_run_ts:
             return False
-        elapsed = time.time() - float(last_run_ts)
+            
+        try:
+            elapsed = time.time() - float(last_run_ts)
+        except ValueError:
+            return False
+            
         return elapsed >= self._fallback_interval_seconds
 
     async def execute(self, ctx: JobContext) -> JobResult:

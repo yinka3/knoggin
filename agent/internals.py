@@ -14,12 +14,13 @@ from agent.formatters import (
     format_hot_topic_context,
 )
 from agent.tools import Tools
-from shared.mcp_client import parse_mcp_tool_name
+from shared.models.memory import PromptContext
+from shared.mcp.client import parse_mcp_tool_name
 
 
 @dataclass(frozen=True)
 class AgentRunConfig:
-    """Immutable settings for agent run."""
+    """Immutable settings governing limits and timeouts for an agent run."""
     max_calls: int = 12
     max_attempts: int = 15
     max_history_turns: int = 7
@@ -55,7 +56,7 @@ class AgentRunConfig:
 
 @dataclass
 class AgentState:
-    """Mutable tracking during run."""
+    """Mutable tracking state maintained during a single agent reasoning loop."""
     call_count: int = 0
     attempt_count: int = 0
     consecutive_errors: int = 0
@@ -82,7 +83,7 @@ class AgentState:
 
 @dataclass
 class RetrievedEvidence:
-    """Accumulated results from tool calls."""
+    """Accumulated contextual results gathered from tool executions."""
     messages: List[Dict] = field(default_factory=list)
     profiles: List[Dict] = field(default_factory=list)
     graph: List[Dict] = field(default_factory=list)
@@ -96,7 +97,7 @@ class RetrievedEvidence:
 
 @dataclass
 class AgentContext:
-    """Container for agent run."""
+    """Core container aggregating configuration, state, and evidence for an agent execution."""
     config: AgentRunConfig
     state: AgentState
     evidence: RetrievedEvidence
@@ -110,6 +111,7 @@ class AgentContext:
     hot_topics: List[str] = field(default_factory=list)
     active_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
+    prompt: PromptContext = field(default_factory=PromptContext)
 
 def build_user_message(ctx: AgentContext, last_result=None) -> str:
     msg = ""
@@ -124,7 +126,7 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
                 try:
                     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                     msg += f"[{dt.strftime('%H:%M')}] {role}: {turn['content']}\n"
-                except:
+                except Exception:
                     msg += f"{role}: {turn['content']}\n"
             else:
                 msg += f"{role}: {turn['content']}\n"
@@ -237,6 +239,10 @@ def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
     return msg
 
 def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
+    """
+    Merge the newly retrieved tool results into the agent's accumulated evidence context.
+    Prevents duplicate entries and applies ranking or limits where required.
+    """
     if not result or "error" in result:
         return
 
@@ -255,7 +261,7 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
     if tool_name == "search_messages":
         _merge_unique(ctx.evidence.messages, data if isinstance(data, list) else [], lambda x: x['id'])
         if len(ctx.evidence.messages) > ctx.config.max_accumulated_messages:
-            ctx.evidence.messages.sort(key=lambda x: x.get('score', 0), reverse=True)
+            ctx.evidence.messages.sort(key=lambda x: x.get('score') if x.get('score') is not None else 0.5, reverse=True)
             ctx.evidence.messages = ctx.evidence.messages[:ctx.config.max_accumulated_messages]
     elif tool_name == "search_entity":
         _merge_unique(ctx.evidence.profiles, data if isinstance(data, list) else [], lambda x: x['id'])
@@ -274,7 +280,17 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             ctx.evidence.hierarchy.extend(data)
     elif tool_name == "search_files":
         if isinstance(data, list) and data and "error" not in data[0]:
-            _merge_unique(ctx.evidence.messages, data, lambda x: f"{x.get('file_id')}_{x.get('chunk_index')}")
+            normalized = []
+            for chunk in data:
+                normalized.append({
+                    "id": f"{chunk.get('file_id', 'file')}_{chunk.get('chunk_index', 0)}",
+                    "content": chunk.get("content", ""),
+                    "message": chunk.get("content", ""),
+                    "role": "file",
+                    "score": chunk.get("score", 0.5),
+                    "source": chunk.get("file_name", "uploaded file")
+                })
+            _merge_unique(ctx.evidence.messages, normalized, lambda x: x["id"])
     elif tool_name == "web_search":
         if isinstance(data, list):
             _merge_unique(ctx.evidence.sources, data, lambda x: x.get('url'))
@@ -282,23 +298,19 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
         if isinstance(data, list):
             _merge_unique(ctx.evidence.sources, data, lambda x: x.get('url'))
     elif tool_name.startswith("mcp__"):
-        if isinstance(data, str):
-            ctx.evidence.messages.append({
-                "id": f"mcp_{ctx.state.call_count}",
-                "role": "tool",
-                "message": data,
-                "source": tool_name
-            })
-        elif isinstance(data, list):
-            for item in data:
-                ctx.evidence.messages.append(item)
-    elif tool_name in ("save_memory", "forget_memory"):
+        content = data if isinstance(data, str) else json.dumps(data, default=str) if data else ""
         ctx.evidence.messages.append({
-            "id": f"{tool_name}_{ctx.state.call_count}",
-            "role": "tool",
-            "message": f"{tool_name} completed successfully",
-            "source": tool_name
+            "id": f"mcp_{ctx.state.call_count}",
+            "score": 0.5,
+            "context": [{
+                "role": "tool",
+                "content": content[:2000],
+                "timestamp": "",
+                "is_hit": True
+            }]
         })
+    elif tool_name in ("save_memory", "forget_memory"):
+        pass 
 
 
 def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
@@ -339,6 +351,10 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
     return "Completed", 1
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
+    """
+    Dispatch a native tool or MCP tool execution based on the requested name and arguments.
+    Returns the raw tool result payload or an error dictionary on failure.
+    """
     parsed = parse_mcp_tool_name(name)
     if parsed:
         server_name, tool_name = parsed

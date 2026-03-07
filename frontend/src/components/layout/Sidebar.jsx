@@ -1,6 +1,6 @@
 import { useSession } from '../../context/SessionContext'
-import { Link, useLocation } from 'react-router-dom'
-import { useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import React, { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
@@ -42,11 +42,181 @@ function SidebarTooltip({ isOpen, label, children }) {
   )
 }
 
+function SidebarSessionItem({ session, currentSessionId, onSelect, onDelete, loadSessions }) {
+  const isDefaultTitle = !session?.title || session.title.startsWith('Session ')
+  const initialTitle = session?.title || `Session ${session.session_id?.slice(0, 4)}`
+
+  const [isEditing, setIsEditing] = useState(false)
+  const [title, setTitle] = useState(initialTitle)
+  const [displayedTitle, setDisplayedTitle] = useState(initialTitle)
+  
+  const [isTyping, setIsTyping] = useState(false)
+  
+  // To avoid showing pending state for ALL historical chats that happen to keep default titles,
+  // we only show the shimmer if this is the currently active session and it is relatively new.
+  // Alternatively, simply checking if it's the active session and has a default title.
+  const isPending = isDefaultTitle && !isTyping && session.session_id === currentSessionId
+
+  const inputRef = React.useRef(null)
+  const typingIntervalRef = React.useRef(null)
+
+  useEffect(() => {
+    const newTitle = session?.title || `Session ${session.session_id?.slice(0, 4)}`
+    
+    if (newTitle !== title && !newTitle.startsWith('Session ') && title.startsWith('Session ')) {
+      setTitle(newTitle)
+      setDisplayedTitle('') 
+      setIsTyping(true)
+      
+      let i = 0
+      if (typingIntervalRef.current) clearInterval(typingIntervalRef.current)
+      
+      typingIntervalRef.current = setInterval(() => {
+        if (i < newTitle.length) {
+          setDisplayedTitle(newTitle.slice(0, i + 1))
+          i++
+        } else {
+          clearInterval(typingIntervalRef.current)
+          setIsTyping(false)
+        }
+      }, 50)
+    } else if (newTitle !== title && !isTyping) {
+       setTitle(newTitle)
+       setDisplayedTitle(newTitle)
+    }
+    
+    return () => {
+      if (typingIntervalRef.current) clearInterval(typingIntervalRef.current)
+    }
+  }, [session?.title, session.session_id, title, isTyping])
+
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus()
+    }
+  }, [isEditing])
+
+  async function handleSave() {
+    setIsEditing(false)
+    const newTitle = title.trim()
+    if (!newTitle || newTitle === session?.title) {
+        setTitle(initialTitle)
+        setDisplayedTitle(initialTitle)
+        return
+    }
+
+    setDisplayedTitle(newTitle)
+    try {
+      import('@/api/sessions').then(({ updateSession }) => {
+        updateSession(session.session_id, { title: newTitle }).then(() => {
+          loadSessions()
+        })
+      })
+    } catch (err) {
+      console.error('Failed to update session title:', err)
+      toast.error('Failed to update session title')
+      setTitle(session?.title || `Session ${session.session_id?.slice(0, 4)}`)
+      setDisplayedTitle(session?.title || `Session ${session.session_id?.slice(0, 4)}`)
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter') handleSave()
+    if (e.key === 'Escape') {
+      setIsEditing(false)
+      setTitle(initialTitle)
+      setDisplayedTitle(initialTitle)
+    }
+  }
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.95, filter: 'blur(4px)' }}
+      transition={{ duration: 0.2, ease: 'easeOut' }}
+      className="group relative mb-0.5"
+    >
+      <button
+        onClick={() => {
+          if (!isEditing) onSelect()
+        }}
+        className={cn(
+          'w-full text-left px-3 py-2 rounded-lg text-sm transition-all duration-200 flex items-center',
+          session.session_id === currentSessionId
+            ? 'bg-white/[0.05] border border-primary/20 text-primary'
+            : 'text-muted-foreground hover:text-foreground hover:bg-white/[0.03]'
+        )}
+      >
+        {isEditing ? (
+          <input
+            ref={inputRef}
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            onBlur={handleSave}
+            onKeyDown={handleKeyDown}
+            className="flex-1 min-w-0 bg-transparent border-b border-primary/50 focus:outline-none focus:border-primary px-1 -mx-1"
+          />
+        ) : (
+          <div className="flex-1 min-w-0 flex items-center gap-1.5" onClick={(e) => {
+            if (session.session_id === currentSessionId && !isPending && !isTyping) {
+              e.stopPropagation()
+              setIsEditing(true)
+            }
+          }}>
+            <AnimatePresence mode="wait">
+              {isPending ? (
+                <motion.div
+                  key="pending"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex items-center gap-2 w-full"
+                >
+                  <div className="h-4 w-16 bg-muted/50 animate-pulse rounded-sm" />
+                  <div className="h-4 w-10 bg-muted/50 animate-pulse rounded-sm" />
+                </motion.div>
+              ) : (
+                <motion.span 
+                  key="title"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="truncate relative"
+                >
+                  {displayedTitle}
+                  {isTyping && (
+                    <motion.span
+                      animate={{ opacity: [0, 1, 0] }}
+                      transition={{ repeat: Infinity, duration: 0.8 }}
+                      className="inline-block w-[2px] h-4 bg-primary ml-0.5 align-middle"
+                    />
+                  )}
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+      </button>
+
+      {!isEditing && (
+        <button
+          onClick={e => onDelete(e, session.session_id)}
+          className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 rounded-md opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
+        >
+          <Trash2 size={14} />
+        </button>
+      )}
+    </motion.div>
+  )
+}
+
 export default function Sidebar({ isOpen, onToggle }) {
   const { sessions, currentSessionId, createSession, selectSession, loadSessions, loading } =
     useSession()
   const [deleteTarget, setDeleteTarget] = useState(null)
   const location = useLocation()
+  const navigate = useNavigate()
 
   function handleDeleteClick(e, sessionId) {
     e.stopPropagation()
@@ -59,7 +229,7 @@ export default function Sidebar({ isOpen, onToggle }) {
       await deleteSession(deleteTarget, true)
       await loadSessions()
       if (currentSessionId === deleteTarget) {
-        selectSession(null)
+        navigate('/chat')
       }
       toast.success('Session deleted')
     } catch (err) {
@@ -230,36 +400,14 @@ export default function Sidebar({ isOpen, onToggle }) {
               ) : (
                 <AnimatePresence initial={false} mode="popLayout">
                   {sessions.map(session => (
-                    <motion.div
+                    <SidebarSessionItem
                       key={session.session_id}
-                      layout
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.95, filter: 'blur(4px)' }}
-                      transition={{ duration: 0.2, ease: 'easeOut' }}
-                      className="group relative mb-0.5"
-                    >
-                      <button
-                        onClick={() => selectSession(session.session_id)}
-                        className={cn(
-                          'w-full text-left px-3 py-2 rounded-lg text-sm truncate transition-all duration-200',
-                          session.session_id === currentSessionId
-                            ? 'bg-white/[0.05] border border-primary/20 text-primary'
-                            : 'text-muted-foreground hover:text-foreground hover:bg-white/[0.03]'
-                        )}
-                      >
-                        <span className="truncate flex-1">
-                          {session.title || `Session ${session.session_id.slice(0, 4)}`}
-                        </span>
-                      </button>
-
-                      <button
-                        onClick={e => handleDeleteClick(e, session.session_id)}
-                        className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 rounded-md opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </motion.div>
+                      session={session}
+                      currentSessionId={currentSessionId}
+                      onSelect={() => selectSession(session.session_id)}
+                      onDelete={handleDeleteClick}
+                      loadSessions={loadSessions}
+                    />
                   ))}
                 </AnimatePresence>
               )}

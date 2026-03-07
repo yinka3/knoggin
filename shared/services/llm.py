@@ -5,13 +5,10 @@ from typing import AsyncGenerator, Dict, List, Optional
 from openai import AsyncOpenAI
 from loguru import logger
 import redis.asyncio as aioredis
-from shared.redisclient import RedisKeys
+from shared.infra.redis import RedisKeys
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_RETRIES = 3
-
-EXTRACTION_MODEL = "google/gemini-2.5-flash"
-MERGE_MODEL = "google/gemini-2.5-pro"
 
 
 class LLMService:
@@ -19,24 +16,33 @@ class LLMService:
     def __init__(
         self,
         api_key: str = None,
+        base_url: str = None,
         trace_logger=None,
         agent_model: str = "google/gemini-3.1-pro-preview",
+        extraction_model: str = "google/gemini-2.5-flash",
+        merge_model: str = "google/gemini-2.5-pro",
         redis_client: aioredis.Redis = None
     ):
         self._api_key = api_key
+        self._base_url = base_url or OPENROUTER_BASE_URL
+        self._is_openrouter = "openrouter.ai" in self._base_url
         self._trace = trace_logger
         self._agent_model = agent_model
+        self._extraction_model = extraction_model
+        self._merge_model = merge_model
         self._redis = redis_client
         self._client = None
         self._http_client = httpx.AsyncClient(timeout=10.0)
+        self._background_tasks: set = set()
         
         if api_key:
             self._client = AsyncOpenAI(
-                base_url=OPENROUTER_BASE_URL,
+                base_url=self._base_url,
                 api_key=self._api_key,
                 timeout=60.0
             )
-            logger.info(f"LLMService initialized | extraction={EXTRACTION_MODEL} | merge={MERGE_MODEL} | agent={agent_model}")
+            provider_label = "OpenRouter" if self._is_openrouter else self._base_url
+            logger.info(f"LLMService initialized ({provider_label}) | extraction={extraction_model} | merge={merge_model} | agent={agent_model}")
         else:
             logger.warning("LLMService initialized without API key")
     
@@ -45,21 +51,32 @@ class LLMService:
         return self._agent_model
     
     @property
+    def extraction_model(self) -> str:
+        return self._extraction_model
+    
+    @property
+    def merge_model(self) -> str:
+        return self._merge_model
+    
+    @property
     def is_configured(self) -> bool:
         return self._client is not None
     
     def _ensure_client(self):
         if self._client is None:
             raise ValueError(
-                "OpenRouter API key not configured. "
+                "LLM API key not configured. "
                 "Please add your API key in Settings > Configuration."
             )
     
-    def update_settings(self, api_key: str = None, agent_model: str = None):
+    def update_settings(self, api_key: str = None, base_url: str = None, agent_model: str = None, extraction_model: str = None, merge_model: str = None):
         if api_key and api_key != self._api_key:
             self._api_key = api_key
+            if base_url:
+                self._base_url = base_url
+                self._is_openrouter = "openrouter.ai" in self._base_url
             self._client = AsyncOpenAI(
-                base_url=OPENROUTER_BASE_URL,
+                base_url=self._base_url,
                 api_key=self._api_key,
                 timeout=60.0
             )
@@ -68,8 +85,19 @@ class LLMService:
         if agent_model:
             logger.info(f"LLMService: agent model {self._agent_model} -> {agent_model}")
             self._agent_model = agent_model
+        
+        if extraction_model:
+            logger.info(f"LLMService: extraction model {self._extraction_model} -> {extraction_model}")
+            self._extraction_model = extraction_model
+
+        if merge_model:
+            logger.info(f"LLMService: merge model {self._merge_model} -> {merge_model}")
+            self._merge_model = merge_model
     
     def _extra_body(self, reasoning: str = None) -> Dict:
+        """Build provider-specific extra_body. Only sent for OpenRouter."""
+        if not self._is_openrouter:
+            return {}
         body = {
             "provider": {
                 "allow_fallbacks": True,
@@ -82,7 +110,7 @@ class LLMService:
     
     async def _record_usage_stats(self, generation_id: str):
         """Fetch exact usage/cost from OpenRouter and increment global limits in Redis."""
-        if not self._redis or not generation_id:
+        if not self._is_openrouter or not self._redis or not generation_id:
             return
             
         # OpenRouter may take time to finalize generation stats, retry with backoff
@@ -120,7 +148,7 @@ class LLMService:
     
     async def _record_cost_only(self, generation_id: str):
         """Fetch cost from OpenRouter generation API and record it (tokens tracked separately)."""
-        if not self._redis or not generation_id:
+        if not self._is_openrouter or not self._redis or not generation_id:
             return
         
         # OpenRouter may take time to finalize generation stats, retry with backoff
@@ -159,7 +187,7 @@ class LLMService:
         Defaults to EXTRACTION_MODEL. Callers can override for specific use cases.
         """
         self._ensure_client()
-        model = model or EXTRACTION_MODEL
+        model = model or self._extraction_model
         
         for attempt in range(MAX_RETRIES):
             try:
@@ -170,9 +198,16 @@ class LLMService:
                         {"role": "user", "content": user}
                     ],
                     temperature=temperature,
-                    extra_body=self._extra_body(reasoning)
+                    **(dict(extra_body=self._extra_body(reasoning)) if self._is_openrouter else {})
                 )
                 
+                if not response.choices:
+                    if attempt < MAX_RETRIES - 1:
+                        logger.warning(f"Empty response choices, retrying ({attempt+1}/{MAX_RETRIES})")
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    return None
+                    
                 content = response.choices[0].message.content
                 
                 if not content or not content.strip():
@@ -189,9 +224,10 @@ class LLMService:
                         f"RESPONSE:\n{content}"
                     )
                 
-                # Fire and forget usage tracking
                 if response.id:
-                    asyncio.create_task(self._record_usage_stats(response.id))
+                    task = asyncio.create_task(self._record_usage_stats(response.id))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
                 
                 return content
                 
@@ -217,7 +253,7 @@ class LLMService:
         
         for attempt in range(MAX_RETRIES):
             try:
-                response = await self._client.chat.completions.create(
+                create_kwargs = dict(
                     model=model,
                     messages=[
                         {"role": "system", "content": system},
@@ -227,9 +263,12 @@ class LLMService:
                     tool_choice="auto",
                     temperature=temperature,
                     stream=True,
-                    stream_options={"include_usage": True},
-                    extra_body=self._extra_body(reasoning="low")
                 )
+                if self._is_openrouter:
+                    create_kwargs["stream_options"] = {"include_usage": True}
+                    create_kwargs["extra_body"] = self._extra_body(reasoning="low")
+                
+                response = await self._client.chat.completions.create(**create_kwargs)
                 
                 content = ""
                 tool_calls_by_index = {}
@@ -291,15 +330,22 @@ class LLMService:
                         except Exception as e:
                             logger.warning(f"Failed to record stream tokens: {e}")
                 
-                # Background fetch for cost (needs OpenRouter generation API, may take ~2s)
+                # Background fetch for cost (needs OpenRouter generation API)
                 if generation_id:
-                    asyncio.create_task(self._record_cost_only(generation_id))
+                    task = asyncio.create_task(self._record_cost_only(generation_id))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
                 
                 yield {"type": "done", "content": content, "usage": usage}
                 return
                 
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:
+                    if content or tool_calls_detected:
+                        # Cannot retry safely if we already generated partial streaming content before crashing
+                        logger.error(f"Stream failed ({model}) mid-generation: {e}. Cannot retry safely.")
+                        yield {"type": "error", "message": f"Stream interrupted mid-generation: {str(e)}"}
+                        return
                     logger.warning(f"Stream failed ({model}): {e}. Retrying in {0.5 * (attempt + 1)}s...")
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
@@ -335,5 +381,12 @@ class LLMService:
         return None
 
     async def close(self):
-        if self._http_client:
-            await self._http_client.aclose()
+        if self._background_tasks:
+            # Wait with shield to protect crucial stats requests
+            shielded = [asyncio.shield(t) for t in self._background_tasks]
+            try:
+                await asyncio.wait(shielded, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for LLM usage stats recording tasks")
+        if self._client:
+            await self._client.close()

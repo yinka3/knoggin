@@ -26,6 +26,7 @@ class DebugEventEmitter:
     _instance: Optional["DebugEventEmitter"] = None
     
     def __init__(self):
+        self._emit_count = 0
         self._subscribers: Dict[str, Set[asyncio.Queue]] = {}
         self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
@@ -76,7 +77,6 @@ class DebugEventEmitter:
             verbose_only=verbose_only
         )
         
-        # Always record in history, even with no subscribers
         if session_id not in self._history:
             self._history[session_id] = deque(maxlen=HISTORY_SIZE)
         self._history[session_id].append(evt)
@@ -94,14 +94,47 @@ class DebugEventEmitter:
                 try:
                     queue.get_nowait()
                     queue.put_nowait(evt)
-                    logger.debug(f"Event queued up: {evt}")
                 except asyncio.QueueEmpty:
-                    pass
+                    # In case another task popped it right after it reported Full
+                    try:
+                        queue.put_nowait(evt)
+                    except asyncio.QueueFull:
+                        pass
+        
+        self._emit_count += 1
+        if self._emit_count % 1000 == 0:
+            asyncio.create_task(self.cleanup_stale_sessions())
     
     async def cleanup_session(self, session_id: str):
         async with self._lock:
             self._history.pop(session_id, None)
             self._subscribers.pop(session_id, None)
+    
+    async def cleanup_stale_sessions(self, max_age_hours: int = 24):
+        """Remove history for sessions with no subscribers and old events."""
+        async with self._lock:
+            stale = []
+            now = datetime.now(timezone.utc)
+            
+            for session_id, history in self._history.items():
+                if session_id in self._subscribers and self._subscribers[session_id]:
+                    continue
+                if not history:
+                    stale.append(session_id)
+                    continue
+                last_event = history[-1]
+                try:
+                    last_ts = datetime.fromisoformat(last_event.ts)
+                    if (now - last_ts).total_seconds() > max_age_hours * 3600:
+                        stale.append(session_id)
+                except (ValueError, AttributeError):
+                    stale.append(session_id)
+            
+            for session_id in stale:
+                self._history.pop(session_id, None)
+            
+            if stale:
+                logger.debug(f"Pruned {len(stale)} stale debug event histories")
 
 
 class CommunityEventEmitter:
@@ -110,6 +143,7 @@ class CommunityEventEmitter:
     _instance: Optional["CommunityEventEmitter"] = None
     
     def __init__(self):
+        self._emit_count = 0
         self._subscribers: Dict[str, Set[asyncio.Queue]] = {}
         self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
@@ -152,12 +186,10 @@ class CommunityEventEmitter:
             "data": data or {}
         }
         
-        # 1. Update in-memory history (for local subscribers)
         if user_name not in self._history:
             self._history[user_name] = deque(maxlen=20)
         self._history[user_name].append(evt)
         
-        # 2. Notify local in-process subscribers
         async with self._lock:
             queues = self._subscribers.get(user_name, set()).copy()
         
@@ -169,14 +201,45 @@ class CommunityEventEmitter:
                     queue.get_nowait()
                     queue.put_nowait(evt)
                 except asyncio.QueueEmpty:
-                    pass
-
-        # 3. Publish to Redis for cross-component/process communication
+                    try:
+                        queue.put_nowait(evt)
+                    except asyncio.QueueFull:
+                        pass
         try:
-            from shared.redisclient import AsyncRedisClient, RedisKeys
+            from shared.infra.redis import AsyncRedisClient, RedisKeys
             await AsyncRedisClient.publish(RedisKeys.community_pubsub_channel(), evt)
         except Exception as e:
             logger.error(f"Failed to publish community event to Redis: {e}")
+        
+        self._emit_count += 1
+        if self._emit_count % 1000 == 0:
+            asyncio.create_task(self.cleanup())
+        
+    async def cleanup(self, max_age_hours: int = 24):
+        """Remove history for users with no subscribers and old events."""
+        async with self._lock:
+            stale = []
+            now = datetime.now(timezone.utc)
+            
+            for user_name, history in self._history.items():
+                if user_name in self._subscribers and self._subscribers[user_name]:
+                    continue
+                if not history:
+                    stale.append(user_name)
+                    continue
+                last_event = history[-1]
+                try:
+                    last_ts = datetime.fromisoformat(last_event.get("ts", ""))
+                    if (now - last_ts).total_seconds() > max_age_hours * 3600:
+                        stale.append(user_name)
+                except (ValueError, AttributeError):
+                    stale.append(user_name)
+            
+            for user_name in stale:
+                self._history.pop(user_name, None)
+            
+            if stale:
+                logger.debug(f"Pruned {len(stale)} stale community event histories")
 
 
 # Convenience wrappers
@@ -203,7 +266,7 @@ def emit_sync(
     emitter = DebugEventEmitter.get()
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(emitter.emit(session_id, component, event, data, verbose_only))
+        asyncio.run_coroutine_threadsafe(emitter.emit(session_id, component, event, data, verbose_only), loop)
     except RuntimeError:
         # No running loop - event dropped (expected during shutdown/init)
         pass

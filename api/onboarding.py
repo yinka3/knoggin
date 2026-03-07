@@ -8,10 +8,9 @@ from loguru import logger
 from api.deps import get_app_state
 from api.state import AppState
 from main.setup import run_setup
-from shared.config import load_config, save_config, get_default_config
-from shared.topics_config import TopicConfig
-from shared.setup_questions import ONBOARDING_QUESTIONS
-from shared.topic_gen import generate_topics as generate_topics_from_text
+from shared.config.base import load_config, save_config, get_default_config
+from shared.config.topics import TopicConfig, ONBOARDING_QUESTIONS
+from shared.services.topics import generate_topics as generate_topics_from_text
 
 router = APIRouter()
 
@@ -71,7 +70,8 @@ async def save_topics(
     config = load_config() or get_default_config()
     config["default_topics"] = body.topics
 
-    success = save_config(config)
+    loop = asyncio.get_running_loop()
+    success = await loop.run_in_executor(None, save_config, config)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save config")
 
@@ -120,7 +120,8 @@ async def extract(
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
 
     config["configured_at"] = datetime.now(timezone.utc).isoformat()
-    save_config(config)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, save_config, config)
 
     return result
 

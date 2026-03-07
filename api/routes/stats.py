@@ -5,7 +5,7 @@ from loguru import logger
 
 from api.deps import get_app_state
 from api.state import AppState
-from shared.redisclient import RedisKeys
+from shared.infra.redis import RedisKeys
 
 _stats_cache = {"data": None, "ts": 0}
 _breakdown_cache = {"data": None, "ts": 0}

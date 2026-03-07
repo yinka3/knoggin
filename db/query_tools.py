@@ -1,7 +1,7 @@
 import re
 import time
 from loguru import logger
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any, Optional
 from neo4j import Driver
 
 
@@ -42,7 +42,7 @@ class GraphToolQueries:
         WITH t, e, r ORDER BY e.last_mentioned DESC
         WITH t, 
             collect(DISTINCT {entity_projection})[..3] as entities,
-            reduce(flat = [], arr IN collect(DISTINCT r.message_ids) | flat + arr) as flat_msgs
+            reduce(flat = [], arr IN collect(DISTINCT r.message_ids)[..5] | flat + arr) as flat_msgs
         
         RETURN t.name as topic, 
             entities,
@@ -63,11 +63,24 @@ class GraphToolQueries:
             logger.error(f"Failed to get hot topic context: {e}")
             return {}
     
+    @staticmethod
+    def _sanitize_fts_query(query: str) -> str:
+        """Strip characters that can break Memgraph full-text search."""
+        # Remove FTS operators and special chars
+        sanitized = re.sub(r'[+\-"*~^\\:(){}[\]]', ' ', query)
+        # Collapse whitespace
+        sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+        return sanitized
+
     def search_messages_fts(self, query: str, limit: int = 50) -> List[Tuple[int, float]]:
         """
         Perform native Full-Text Search on Message nodes.
         Returns list of (message_id, score).
         """
+
+        sanitized = self._sanitize_fts_query(query)
+        if not sanitized:
+            return []
 
         cypher = """
         CALL text_search.search_all('message_search', $q, $limit) YIELD node, score
@@ -77,13 +90,13 @@ class GraphToolQueries:
         
         try:
             with self.driver.session() as session:
-                result = session.run(cypher, {"q": query, "limit": limit})
+                result = session.run(cypher, {"q": sanitized, "limit": limit})
                 return [(record["id"], record["score"]) for record in result]
         except Exception as e:
             logger.error(f"FTS Message search failed: {e}")
             return []
     
-    def search_entity(self, query: str, active_topics: List[str] = None, limit: int = 5, connections_limit: int = 5, evidence_limit: int = 5) -> list[dict]:
+    def search_entity(self, query: str, active_topics: Optional[List[str]] = None, limit: int = 5, connections_limit: int = 5, evidence_limit: int = 5) -> list[dict]:
         """
         Search for entities by name/alias with top connections included.
         """
@@ -135,7 +148,7 @@ class GraphToolQueries:
             with self.driver.session() as session:
                 result = session.run(cypher, params)
                 
-                entities = {}
+                entities: Dict[int, Any] = {}
                 for row in result:
                     eid = row["id"]
                     
@@ -163,14 +176,14 @@ class GraphToolQueries:
                             "facts": row["conn_facts"] or [],
                             "weight": row["conn_weight"],
                             "context": row["conn_context"],
-                            "evidence_ids": (row["evidence_ids"] or [])[:evidence_limit]
+                            "evidence_ids": list(row["evidence_ids"] or [])[:evidence_limit]
                         })
                 return list(entities.values())
         except Exception as e:
             logger.error(f"Entity search failed: {e}")
             return []
 
-    def get_related_entities(self, entity_names: List[str], active_topics: List[str] = None, limit: int = 25):
+    def get_related_entities(self, entity_names: List[str], active_topics: Optional[List[str]] = None, limit: int = 25):
         """
         Find all entities connected to the given entities.
         Use this when the user asks about someone's connections, relationships, network, or "who/what is related to X".
@@ -214,7 +227,7 @@ class GraphToolQueries:
             return []
         
     
-    def get_recent_activity(self, entity_name: str, active_topics: List[str] = None, hours: int = 24):
+    def get_recent_activity(self, entity_name: str, active_topics: Optional[List[str]] = None, hours: int = 24):
         """
         Get recent interactions. Filtered by active_topics if provided.
         """
@@ -245,15 +258,15 @@ class GraphToolQueries:
             logger.error(f"Failed to get recent activity for {entity_name}: {e}")
             return []
     
-    def _find_shortest_path(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[str], List[str], List[List[str]], bool] | None:
+    def _find_shortest_path(self, start_name: str, end_name: str, active_topics: Optional[List[str]] = None, max_depth: int = 4) -> tuple[List[str], List[str], List[List[str]], bool] | None:
         """
         Find shortest path. Calculates 'has_inactive' dynamically based on passed active_topics list.
         Returns: (names, topics, evidence_ids, has_inactive)
         """
-        query = """
-        MATCH (start:Entity {canonical_name: $start_name})
-        MATCH (end:Entity {canonical_name: $end_name})
-        MATCH p = (start)-[:RELATED_TO *BFS ..4]-(end)
+        query = f"""
+        MATCH (start:Entity {{canonical_name: $start_name}})
+        MATCH (end:Entity {{canonical_name: $end_name}})
+        MATCH p = (start)-[:RELATED_TO *BFS ..{max_depth}]-(end)
         UNWIND nodes(p) AS n
         OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
         WITH p, 
@@ -284,15 +297,15 @@ class GraphToolQueries:
             logger.error(f"Shortest path search failed: {e}")
             return None
 
-    def _find_active_only_path(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[str], List[List[str]]] | None:
+    def _find_active_only_path(self, start_name: str, end_name: str, active_topics: Optional[List[str]] = None, max_depth: int = 4) -> tuple[List[str], List[str], List[List[str]]] | None:
         """
         Find shortest path excluding inactive-topic entities.
         Returns: (names, evidence_ids) or None if no path.
         """
-        query = """
-        MATCH (start:Entity {canonical_name: $start_name})
-        MATCH (end:Entity {canonical_name: $end_name})
-        MATCH p = (start)-[:RELATED_TO *BFS ..4]-(end)
+        query = f"""
+        MATCH (start:Entity {{canonical_name: $start_name}})
+        MATCH (end:Entity {{canonical_name: $end_name}})
+        MATCH p = (start)-[:RELATED_TO *BFS ..{max_depth}]-(end)
         
         UNWIND nodes(p) AS n
         OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
@@ -300,8 +313,8 @@ class GraphToolQueries:
         WITH p, n, t
         WHERE t IS NULL OR t.name IN $active_topics
         
-        WITH p, collect(n) AS valid_nodes
-        WHERE size(valid_nodes) = size(nodes(p))
+        WITH p, count(DISTINCT n) AS valid_count
+        WHERE valid_count = size(nodes(p))
         
         WITH p LIMIT 1
         UNWIND nodes(p) AS n
@@ -330,13 +343,13 @@ class GraphToolQueries:
             return None
 
 
-    def _find_path_filtered(self, start_name: str, end_name: str, active_topics: List[str] = None) -> tuple[List[Dict], bool]:
+    def _find_path_filtered(self, start_name: str, end_name: str, active_topics: Optional[List[str]] = None, max_depth: int = 4) -> tuple[List[Dict], bool]:
         """
         Find path between entities with topic filtering.
         Returns: (path_data, has_inactive_shortcut)
         """
         
-        shortest = self._find_shortest_path(start_name, end_name, active_topics)
+        shortest = self._find_shortest_path(start_name, end_name, active_topics, max_depth)
         
         if not shortest:
             return [], False
@@ -346,7 +359,7 @@ class GraphToolQueries:
         if not has_inactive:
             return self._build_path_data(names, topics, evidence), False
         
-        active_path = self._find_active_only_path(start_name, end_name, active_topics)
+        active_path = self._find_active_only_path(start_name, end_name, active_topics, max_depth)
         
         if active_path:
             active_names, active_topics_list, active_evidence = active_path

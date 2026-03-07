@@ -10,11 +10,11 @@ import torch
 from db.community_store import CommunityStore
 from db.store import MemGraphStore
 from log.llm_trace import get_trace_logger
-from shared.config import get_config_value
-from shared.embedding import EmbeddingService
-from shared.mcp_client import MCPClientManager
-from shared.redisclient import AsyncRedisClient
-from shared.service import LLMService
+from shared.config.base import get_config_value
+from shared.rag.embedding import EmbeddingService
+from shared.mcp.client import MCPClientManager
+from shared.infra.redis import AsyncRedisClient
+from shared.services.llm import LLMService
 import chromadb
 
 class ResourceManager:
@@ -65,6 +65,7 @@ class ResourceManager:
                 instance.redis = await AsyncRedisClient.get_instance()
                 
                 llm_config = get_config_value("llm", {})
+                #TODO - add to config setting, extraction and merge models also
                 instance.llm_service = LLMService(
                     api_key=llm_config.get("api_key"),
                     agent_model=llm_config.get("agent_model", "google/gemini-3-flash-preview"),

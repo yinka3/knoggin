@@ -1,14 +1,13 @@
 import asyncio
-from http.client import HTTPException
 import json
 from functools import partial
 
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from loguru import logger
 from api.community_manager import CommunityManager
-from shared.events import CommunityEventEmitter
-from shared.redisclient import RedisKeys
-from shared.config import update_config_value, get_config_value
+from shared.utils.events import CommunityEventEmitter
+from shared.infra.redis import RedisKeys
+from shared.config.base import update_config_value, get_config_value
 
 router = APIRouter()
 
@@ -80,6 +79,8 @@ async def get_community_status(request: Request):
     redis = app_state.resources.redis
     
     active_id = await redis.get(RedisKeys.community_discussion_active())
+    if active_id:
+        active_id = active_id.decode("utf-8") if isinstance(active_id, bytes) else active_id
     dev_settings = get_config_value("developer_settings") or {}
     config = dev_settings.get("community", {})
     
@@ -140,6 +141,8 @@ async def trigger_discussion_manual(request: Request):
         await manager.trigger_discussion()
         
         active_id = await app_state.resources.redis.get(RedisKeys.community_discussion_active())
+        if active_id:
+            active_id = active_id.decode("utf-8") if isinstance(active_id, bytes) else active_id
         
         return {
             "status": "triggered",
@@ -148,7 +151,7 @@ async def trigger_discussion_manual(request: Request):
         }
     except Exception as e:
         logger.error(f"Manual trigger failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to start manual discussion due to an internal error.")
 
 @router.post("/close")
 async def close_discussion_manual(request: Request):
@@ -168,4 +171,4 @@ async def close_discussion_manual(request: Request):
         }
     except Exception as e:
         logger.error(f"Failed to manually close discussion: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to close discussion due to an internal error.")

@@ -18,6 +18,7 @@ class ProfileSettings(BaseModel):
     volume_threshold: Optional[int] = Field(None, ge=1)
     idle_threshold: Optional[int] = Field(None, ge=10)
     profile_batch_size: Optional[int] = Field(None, ge=1)
+    max_facts_context: Optional[int] = Field(None, ge=1)
     contradiction_sim_low: Optional[float] = Field(None, ge=0.0, le=1.0)
     contradiction_sim_high: Optional[float] = Field(None, ge=0.0, le=1.0)
     contradiction_batch_size: Optional[int] = Field(None, ge=1)
@@ -60,6 +61,7 @@ class AgentLimitSettings(BaseModel):
 class NLPPipelineSettings(BaseModel):
     gliner_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
     vp01_min_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    llm_ner: Optional[bool] = None
     ner_prompt: Optional[str] = None
     connection_prompt: Optional[str] = None
     profile_prompt: Optional[str] = None
@@ -84,7 +86,10 @@ class EntityResolutionSettings(BaseModel):
 
 class LLMSettings(BaseModel):
     api_key: Optional[str] = None
+    base_url: Optional[str] = None
     agent_model: Optional[str] = None
+    extraction_model: Optional[str] = None
+    merge_model: Optional[str] = None
 
 class SearchAPIKeySettings(BaseModel):
     provider: Optional[str] = None

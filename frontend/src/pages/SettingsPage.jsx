@@ -30,6 +30,8 @@ export default function SettingsPage() {
   const [userAliases, setUserAliases] = useState('')
 
   const [agentModel, setAgentModel] = useState('')
+  const [extractionModel, setExtractionModel] = useState('')
+  const [mergeModel, setMergeModel] = useState('')
   const [defaultTopics, setDefaultTopics] = useState({})
 
   const [devJobs, setDevJobs] = useState({
@@ -52,7 +54,7 @@ export default function SettingsPage() {
     async function load() {
       try {
 
-        const [config, models] = await Promise.all([getConfig(), getCuratedModels()])
+        const [config] = await Promise.all([getConfig(), getCuratedModels()])
 
         setUserName(config.user_name || '')
         setUserAliases((config.user_aliases || []).join(', '))
@@ -64,6 +66,8 @@ export default function SettingsPage() {
           tavily_api_key: config.search?.tavily_api_key || '',
         })
         setAgentModel(config.llm?.agent_model || '')
+        setExtractionModel(config.llm?.extraction_model || '')
+        setMergeModel(config.llm?.merge_model || '')
 
         const dSettings = config.developer_settings || {}
         const jobs = dSettings.jobs || {}
@@ -85,6 +89,8 @@ export default function SettingsPage() {
             tavily_api_key: config.search?.tavily_api_key || '',
           },
           agentModel: config.llm?.agent_model || '',
+          extractionModel: config.llm?.extraction_model || '',
+          mergeModel: config.llm?.merge_model || '',
           devJobs: {
             cleaner: jobs.cleaner?.enabled !== false,
             merger: jobs.merger?.enabled !== false,
@@ -110,6 +116,8 @@ export default function SettingsPage() {
       openrouterKey,
       searchConfig,
       agentModel,
+      extractionModel,
+      mergeModel,
       devJobs,
     }) !== initialState.current
   useEffect(() => {
@@ -160,6 +168,8 @@ export default function SettingsPage() {
         llm: {
           api_key: openrouterKey,
           agent_model: agentModel,
+          extraction_model: extractionModel,
+          merge_model: mergeModel,
         },
         search: searchConfig,
         developer_settings: updatedDevSettings,
@@ -170,6 +180,8 @@ export default function SettingsPage() {
         openrouterKey,
         searchConfig,
         agentModel,
+        extractionModel,
+        mergeModel,
         devJobs,
       })
       toast.success('Settings saved')
@@ -179,7 +191,7 @@ export default function SettingsPage() {
     } finally {
       setSaving(false)
     }
-  }, [userAliases, defaultTopics, openrouterKey, searchConfig, agentModel, devJobs])
+  }, [userAliases, defaultTopics, openrouterKey, searchConfig, agentModel, extractionModel, mergeModel, devJobs])
 
   function handleAddTopic() {
     const name = newTopicName.trim()
@@ -283,6 +295,12 @@ export default function SettingsPage() {
             setOpenrouterKey={setOpenrouterKey}
             searchConfig={searchConfig}
             setSearchConfig={setSearchConfig}
+            models={{ agentModel, extractionModel, mergeModel }}
+            setModels={updates => {
+              if ('agentModel' in updates) setAgentModel(updates.agentModel)
+              if ('extractionModel' in updates) setExtractionModel(updates.extractionModel)
+              if ('mergeModel' in updates) setMergeModel(updates.mergeModel)
+            }}
           />
 
           {/* Topics Section */}
@@ -388,6 +406,45 @@ export default function SettingsPage() {
               MCP Servers
             </SectionHeader>
             <MCPSection />
+          </section>
+
+          {/* Export Section */}
+          <section>
+            <SectionHeader description="Download your conversation data as JSON">
+              Export Data
+            </SectionHeader>
+            <div className="bg-card rounded-xl p-4 border border-border">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <span className="text-sm font-medium text-foreground">All Conversations</span>
+                  <p className="text-xs text-muted-foreground">Export every session's messages as a single JSON file</p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="rounded-lg h-8 text-xs gap-1.5"
+                  onClick={async () => {
+                    try {
+                      const { exportAllSessions } = await import('@/api/sessions')
+                      const data = await exportAllSessions()
+                      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = 'knoggin_all_sessions.json'
+                      a.click()
+                      URL.revokeObjectURL(url)
+                      toast.success(`Exported ${data.total_sessions} sessions`)
+                    } catch (err) {
+                      console.error('Export failed:', err)
+                      toast.error('Failed to export conversations')
+                    }
+                  }}
+                >
+                  Export All
+                </Button>
+              </div>
+            </div>
           </section>
         </div>
       </div>

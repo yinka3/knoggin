@@ -10,11 +10,11 @@ from main.nlp_pipe import NLPPipeline
 from main.prompts import get_connection_reasoning_prompt, get_profile_extraction_prompt
 from main.utils import format_vp03_input, parse_connection_response
 from jobs.jobs_utils import format_vp04_input, parse_new_facts
-from shared.config import get_config_value
-from shared.resource import ResourceManager
-from shared.topics_config import TopicConfig
-from shared.redisclient import RedisKeys
-from shared.schema.dtypes import Fact
+from shared.config.base import get_config_value
+from shared.infra.resources import ResourceManager
+from shared.config.topics import TopicConfig
+from shared.infra.redis import RedisKeys
+from shared.models.schema.dtypes import Fact
 
 def _build_messages(responses: List[dict]) -> List[dict]:
     messages = []
@@ -40,7 +40,17 @@ async def _create_user_entity(resources, user_name: str) -> int:
         logger.info(f"[SETUP] User entity already exists, reusing id=1")
         return 1
     
+    # If a different entity is at ID=1, we can't assume a clean database.
+    # We must use proper graph counter logic to determine the next ID
     ent_id = 1
+    if existing and existing["canonical_name"] != user_name:
+        logger.warning(f"[SETUP] User name changed but database not wiped. Generating new ID.")
+        max_id = await loop.run_in_executor(
+            resources.executor,
+            resources.store.get_max_entity_id
+        )
+        ent_id = max_id + 1
+        
     await resources.redis.set(RedisKeys.global_next_ent_id(), ent_id)
     
     user_aliases = get_config_value("user_aliases") or []
@@ -135,10 +145,22 @@ async def run_setup(
     user_id = await _create_user_entity(resources, user_name)
 
     user_aliases = get_config_value("user_aliases") or []
-    known_aliases = {user_name.lower(): user_id}
+
+    entity_lookup: Dict[str, dict] = {}
+    entity_lookup[user_name.lower()] = {
+        "id": user_id,
+        "canonical_name": user_name,
+        "type": "person",
+        "topic": "Identity"
+    }
     for alias in user_aliases:
         if alias.strip():
             entity_lookup[alias.strip().lower()] = entity_lookup[user_name.lower()]
+
+    known_aliases = {user_name.lower(): user_id}
+    for alias in user_aliases:
+        if alias.strip():
+            known_aliases[alias.strip().lower()] = user_id
 
     nlp = NLPPipeline(
         llm=resources.llm_service,
@@ -188,14 +210,6 @@ async def run_setup(
     )
 
     entities = []
-    entity_lookup: Dict[str, dict] = {}
-
-    entity_lookup[user_name.lower()] = {
-        "id": user_id,
-        "canonical_name": user_name,
-        "type": "person",
-        "topic": "Identity"
-    }
 
     for i, (key, entry) in enumerate(seen.items()):
         ent_id = await resources.redis.incr(RedisKeys.global_next_ent_id())
@@ -242,6 +256,8 @@ async def run_setup(
                     relationships.append({
                         "entity_a": ent_a["canonical_name"],
                         "entity_b": ent_b["canonical_name"],
+                        "entity_a_id": ent_a["id"],
+                        "entity_b_id": ent_b["id"],
                         "message_id": f"msg_{mc.message_id}",
                         "confidence": pair.confidence,
                         "context": pair.context
@@ -291,51 +307,91 @@ async def run_setup(
         parsed_profiles = parse_new_facts(reasoning_04)
 
         if parsed_profiles:
-            for profile in parsed_profiles:
+            # Optimize: Batch all fact encodings together
+            all_fact_contents = []
+            fact_mapping = [] # (profile_idx, fact_idx)
+            
+            for p_idx, profile in enumerate(parsed_profiles):
                 entity = entity_lookup.get(profile.canonical_name.lower())
                 if not entity:
                     continue
+                for f_idx, fact_content in enumerate(profile.facts):
+                    all_fact_contents.append(fact_content)
+                    fact_mapping.append((p_idx, f_idx))
+                    
+            if all_fact_contents:
+                all_fact_embeddings = await loop.run_in_executor(
+                    resources.executor,
+                    resources.embedding.encode,
+                    all_fact_contents
+                )
+                
+                # Map embeddings back to profiles
+                fact_embeddings_map = {}
+                for i, (p_idx, f_idx) in enumerate(fact_mapping):
+                    if p_idx not in fact_embeddings_map:
+                        fact_embeddings_map[p_idx] = []
+                    fact_embeddings_map[p_idx].append(all_fact_embeddings[i])
 
-                ent_id = entity["id"]
-                new_facts = []
+                write_tasks = []
+                resolution_texts = []
+                resolution_entities = []
 
-                for fact_content in profile.facts:
-                    fact_embedding = await loop.run_in_executor(
-                        resources.executor,
-                        resources.embedding.encode_single,
-                        fact_content
-                    )
-                    new_facts.append(Fact(
-                        id=str(uuid.uuid4()),
-                        content=fact_content,
-                        valid_at=datetime.now(timezone.utc),
-                        embedding=fact_embedding,
-                        source_entity_id=ent_id
-                    ))
+                for p_idx, profile in enumerate(parsed_profiles):
+                    entity = entity_lookup.get(profile.canonical_name.lower())
+                    if not entity or p_idx not in fact_embeddings_map:
+                        continue
 
-                if new_facts:
-                    count = await loop.run_in_executor(
-                        resources.executor,
-                        partial(resources.store.create_facts_batch, ent_id, new_facts)
-                    )
-                    facts_created += count
+                    ent_id = entity["id"]
+                    new_facts = []
+                    
+                    for f_idx, fact_content in enumerate(profile.facts):
+                        fact_embedding = fact_embeddings_map[p_idx][f_idx]
+                        new_facts.append(Fact(
+                            id=str(uuid.uuid4()),
+                            content=fact_content,
+                            valid_at=datetime.now(timezone.utc),
+                            embedding=fact_embedding,
+                            source_entity_id=ent_id
+                        ))
 
-                    resolution_text = f"{entity['canonical_name']}. " + " ".join(
-                        f.content for f in new_facts
-                    )
-                    new_embedding = await loop.run_in_executor(
-                        resources.executor,
-                        resources.embedding.encode_single,
-                        resolution_text
-                    )
-                    await loop.run_in_executor(
-                        resources.executor,
-                        partial(
-                            resources.store.update_entity_embedding,
-                            ent_id,
-                            new_embedding
+                    if new_facts:
+                        write_tasks.append(
+                            loop.run_in_executor(
+                                resources.executor,
+                                partial(resources.store.create_facts_batch, ent_id, new_facts)
+                            )
                         )
+                        
+                        resolution_text = f"{entity['canonical_name']}. " + " ".join(
+                            f.content for f in new_facts
+                        )
+                        resolution_texts.append(resolution_text)
+                        resolution_entities.append(ent_id)
+
+                if write_tasks:
+                    counts = await asyncio.gather(*write_tasks)
+                    facts_created += sum(counts)
+                    
+                if resolution_texts:
+                    res_embeddings = await loop.run_in_executor(
+                        resources.executor,
+                        resources.embedding.encode,
+                        resolution_texts
                     )
+                    
+                    update_tasks = [
+                        loop.run_in_executor(
+                            resources.executor,
+                            partial(
+                                resources.store.update_entity_embedding,
+                                ent_id,
+                                emb
+                            )
+                        )
+                        for ent_id, emb in zip(resolution_entities, res_embeddings)
+                    ]
+                    await asyncio.gather(*update_tasks)
 
     logger.info(f"[SETUP] Created {facts_created} facts across {len(entities)} entities")
 

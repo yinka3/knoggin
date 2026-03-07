@@ -1,4 +1,4 @@
-from shared.schema.tool_schema import TOOL_SCHEMAS
+from shared.models.schema.tool_schema import TOOL_SCHEMAS
 
 AAC_READ_TOOLS = [
     "search_entity",
