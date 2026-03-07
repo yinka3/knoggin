@@ -1,15 +1,15 @@
 from collections import defaultdict
 from loguru import logger
 import threading
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 from rapidfuzz import fuzz, process
 from db.store import MemGraphStore
-from shared.embedding import EmbeddingService
+from shared.rag.embedding import EmbeddingService
 from main.utils import is_substring_match
-from shared.schema.dtypes import Fact
-from shared.events import emit_sync
+from shared.models.schema.dtypes import Fact
+from shared.utils.events import emit_sync
 from jobs.jobs_utils import cosine_similarity
-from cachetools import LRUCache
+from cachetools import LRUCache, cached, TTLCache
 
 class EntityResolver:
     
@@ -28,6 +28,7 @@ class EntityResolver:
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
         self._name_to_id = LRUCache(maxsize=3000000)
+        self._id_to_names: Dict[int, Set[str]] = {}
         self._lock = threading.RLock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
@@ -63,6 +64,12 @@ class EntityResolver:
                         "topic": ent.get("topic", "General"),
                         "session_id": ent.get("session_id")
                     }
+                
+                self._id_to_names = {}
+                for name, eid in self._name_to_id.items():
+                    if eid not in self._id_to_names:
+                        self._id_to_names[eid] = set()
+                    self._id_to_names[eid].add(name)
 
             logger.info(f"Hydrated {len(self.entity_profiles)} entities from Memgraph")
 
@@ -115,9 +122,14 @@ class EntityResolver:
             
             with self._lock:
                 self._name_to_id[lower_name] = eid
+                if eid not in self._id_to_names:
+                    self._id_to_names[eid] = set()
+                self._id_to_names[eid].add(lower_name)
+
                 if entity.get("aliases"):
                     for a in entity["aliases"]:
                         self._name_to_id[a.lower()] = eid
+                        self._id_to_names[eid].add(a.lower())
                 
                 if eid not in self.entity_profiles:
                     self.entity_profiles[eid] = {
@@ -137,8 +149,7 @@ class EntityResolver:
     
     def get_mentions_for_id(self, entity_id: int) -> List[str]:
         with self._lock:
-            items = list(self._name_to_id.items())
-        return [mention for mention, eid in items if eid == entity_id]
+            return list(self._id_to_names.get(entity_id, set()))
 
     def get_known_aliases(self) -> Dict[str, int]:
         with self._lock:
@@ -160,8 +171,12 @@ class EntityResolver:
         if not texts:
             return []
             
-        embeddings = self.embedding_service.encode(texts)
-        return embeddings
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            return asyncio.run_coroutine_threadsafe(self.embedding_service.encode(texts), loop).result()
+        except RuntimeError:
+            return asyncio.run(self.embedding_service.encode(texts))
         
     
     def validate_existing(self, canonical_name: str, mentions: List[str]) -> Tuple[Optional[int], bool, List[str]]:
@@ -198,9 +213,13 @@ class EntityResolver:
                 return
             for mention in aliases:
                 self._name_to_id[mention.lower()] = entity_id
+                if entity_id not in self._id_to_names:
+                    self._id_to_names[entity_id] = set()
+                self._id_to_names[entity_id].add(mention.lower())
     
+    @cached(cache=TTLCache(maxsize=1, ttl=300))
     def _build_generic_tokens(self) -> set:
-        """Tokens appearing in N+ distinct entities are generic."""
+        """Tokens appearing in N+ distinct entities are generic. Cached for 5 minutes."""
         token_to_entities = defaultdict(set)
     
         with self._lock:
@@ -253,7 +272,12 @@ class EntityResolver:
         vector = precomputed_embedding
         if vector is None:
             try:
-                vector = self.embedding_service.encode_single(mention)
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    vector = asyncio.run_coroutine_threadsafe(self.embedding_service.encode_single(mention), loop).result()
+                except RuntimeError:
+                    vector = asyncio.run(self.embedding_service.encode_single(mention))
             except Exception as e:
                 logger.warning(f"Encoding failed: {e}")
                 vector = None
@@ -293,7 +317,12 @@ class EntityResolver:
         else:
             text_to_embed = f"{canonical_name} ({entity_type})"
 
-        embedding = self.embedding_service.encode_single(text_to_embed)
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            embedding = asyncio.run_coroutine_threadsafe(self.embedding_service.encode_single(text_to_embed), loop).result()
+        except RuntimeError:
+            embedding = asyncio.run(self.embedding_service.encode_single(text_to_embed))
         
         with self._lock:
             logger.info(f"Adding entity {entity_id}-{canonical_name} to resolver indexes.")
@@ -305,7 +334,11 @@ class EntityResolver:
                 "session_id": session_id,
                 "embedding": embedding
             }
-            
+
+            if entity_id not in self._id_to_names:
+                self._id_to_names[entity_id] = set()
+            self._id_to_names[entity_id].add(canonical_name.lower())
+
             self._name_to_id[canonical_name.lower()] = entity_id
             for mention in mentions:
                 mention_lower = mention.lower()
@@ -314,6 +347,7 @@ class EntityResolver:
                     logger.warning(f"Alias collision: '{mention}' belongs to {existing_id}, skipping for {entity_id}")
                     continue
                 self._name_to_id[mention_lower] = entity_id
+                self._id_to_names[entity_id].add(mention_lower)
         
         return embedding
     
@@ -327,7 +361,12 @@ class EntityResolver:
             
             logger.info(f"Updating embedding for entity {entity_id}-{profile['canonical_name']}")
         
-        embedding = self.embedding_service.encode_single(resolution_text)
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            embedding = asyncio.run_coroutine_threadsafe(self.embedding_service.encode_single(resolution_text), loop).result()
+        except RuntimeError:
+            embedding = asyncio.run(self.embedding_service.encode_single(resolution_text))
         
         with self._lock:
             if entity_id in self.entity_profiles:
@@ -345,6 +384,11 @@ class EntityResolver:
             
             for alias in secondary_aliases:
                 self._name_to_id[alias] = primary_id
+
+            secondary_names = self._id_to_names.pop(secondary_id, set())
+            if primary_id not in self._id_to_names:
+                self._id_to_names[primary_id] = set()
+            self._id_to_names[primary_id].update(secondary_names)
             
             if secondary_id in self.entity_profiles:
                 del self.entity_profiles[secondary_id]
@@ -355,6 +399,29 @@ class EntityResolver:
                 "secondary_id": secondary_id,
                 "aliases_transferred": len(secondary_aliases)
             })
+    
+    def find_alias_collisions_targeted(self, target_ids: set) -> List[Tuple[int, int]]:
+        """Check alias collisions only involving the given entity IDs."""
+        collisions = []
+        
+        with self._lock:
+            profiles_snapshot = {eid: self.entity_profiles[eid] 
+                            for eid in target_ids 
+                            if eid in self.entity_profiles}
+        
+        for eid, profile in profiles_snapshot.items():
+            names = self.get_mentions_for_id(eid)
+            names.append(profile["canonical_name"].lower())
+            
+            for name in names:
+                with self._lock:
+                    mapped_id = self._name_to_id.get(name.lower())
+                if mapped_id and mapped_id != eid:
+                    pair = tuple(sorted((eid, mapped_id)))
+                    if pair not in collisions:
+                        collisions.append(pair)
+        
+        return collisions
     
     def resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
@@ -422,6 +489,8 @@ class EntityResolver:
                 to_remove = [alias for alias, id_ in self._name_to_id.items() if id_ == eid]
                 for alias in to_remove:
                     del self._name_to_id[alias]
+                
+                self._id_to_names.pop(eid, None)
         
         if removed > 0:
             logger.info(f"Removed {removed} entities from resolver")

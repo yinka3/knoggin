@@ -1,9 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from loguru import logger
 from typing import Dict, List, Optional, Set, Tuple
 from neo4j import Driver
 
-from shared.schema.dtypes import Fact
+from shared.models.schema.dtypes import Fact
 
 
 class GraphReader:
@@ -52,16 +52,7 @@ class GraphReader:
     def get_surrounding_messages(self, message_id: int, forward: int = 3, target_total: int = 10) -> List[Dict]:
         """Fetch surrounding messages for context from Memgraph."""
         back_limit = max(0, target_total - forward - 1)
-        query = """
-        MATCH (target:Message {id: $msg_id})
-        WITH target.timestamp AS target_ts, target
-        
-        OPTIONAL MATCH (prev:Message)
-        WHERE prev.timestamp <= target_ts AND prev.id <> $msg_id
-        WITH target_ts, target, collect(prev) AS all_prev
-        WITH target_ts, target, [p IN all_prev | p] AS prev_msgs_raw
-        """
-        
+
         safe_query = """
         MATCH (target:Message {id: $msg_id})
         WITH target.timestamp AS target_ts, target
@@ -264,13 +255,14 @@ class GraphReader:
     def find_alias_collisions(self) -> List[Tuple[int, int]]:
         """Find entity pairs sharing exact canonical names or aliases."""
         query = """
-        MATCH (a:Entity), (b:Entity)
-        WHERE a.id < b.id 
-        AND (toLower(a.canonical_name) = toLower(b.canonical_name)
-            OR ANY(alias IN a.aliases WHERE toLower(alias) IN [x IN b.aliases | toLower(x)])
-            OR toLower(a.canonical_name) IN [x IN b.aliases | toLower(x)]
-            OR toLower(b.canonical_name) IN [x IN a.aliases | toLower(x)])
-        RETURN a.id AS id_a, b.id AS id_b
+        MATCH (e:Entity)
+        UNWIND (e.aliases + [e.canonical_name]) AS name
+        WITH toLower(name) AS lower_name, collect(e.id) AS ids
+        WHERE size(ids) > 1
+        UNWIND ids AS id_a
+        UNWIND ids AS id_b
+        WITH id_a, id_b WHERE id_a < id_b
+        RETURN DISTINCT id_a, id_b
         """
         try:
             with self.driver.session() as session:
@@ -734,8 +726,6 @@ class GraphReader:
     
     def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
         """Get recently created facts."""
-        from datetime import datetime, timezone, timedelta
-        
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         
         query = """
@@ -756,8 +746,6 @@ class GraphReader:
 
     def get_recently_active_entities(self, days: int = 7, limit: int = 10) -> List[Dict]:
         """Get entities with recent fact activity."""
-        from datetime import datetime, timezone, timedelta
-        
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         
         query = """

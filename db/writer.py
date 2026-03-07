@@ -3,7 +3,7 @@ from loguru import logger
 from typing import Dict, List
 from neo4j import Driver, ManagedTransaction
 
-from shared.schema.dtypes import Fact
+from shared.models.schema.dtypes import Fact
 
 
 class GraphWriter:
@@ -66,7 +66,10 @@ class GraphWriter:
                 "batch": fact_params
             }).single()
             
-            return result["created_count"] if result else 0
+            count = result["created_count"] if result else 0
+            if count == 0:
+                raise Exception(f"Failed to create facts for entity {entity_id} (parent may not exist)")
+            return count
 
         try:
             with self.driver.session() as session:
@@ -83,12 +86,15 @@ class GraphWriter:
         RETURN f.id as id
         """
 
-        with self.driver.session() as session:
-            result = session.run(query, {
+        def _update(tx):
+            result = tx.run(query, {
                 "fact_id": fact_id,
                 "invalid_at": invalid_at.isoformat()
             }).single()
             return result is not None
+
+        with self.driver.session() as session:
+            return session.execute_write(_update)
 
     
     def delete_old_invalidated_facts(self, cutoff: datetime) -> int:
@@ -100,10 +106,13 @@ class GraphWriter:
         DETACH DELETE f
         RETURN count(*) as deleted
         """
+        def _delete(tx):
+            result = tx.run(query, {"cutoff": cutoff.isoformat()}).single()
+            return result["deleted"] if result else 0
+            
         try:
             with self.driver.session() as session:
-                result = session.run(query, {"cutoff": cutoff.isoformat()}).single()
-                deleted = result["deleted"] if result else 0
+                deleted = session.execute_write(_delete)
                 if deleted > 0:
                     logger.info(f"Deleted {deleted} old invalidated facts")
                 return deleted
@@ -127,8 +136,11 @@ class GraphWriter:
             m.embedding = msg.embedding
         """
         
+        def _save(tx):
+            tx.run(query, {"batch": messages}).consume()
+            
         with self.driver.session() as session:
-            session.run(query, {"batch": messages}).consume()
+            session.execute_write(_save)
             logger.info(f"Saved {len(messages)} message logs to Memgraph.")
             return True
         
@@ -188,8 +200,8 @@ class GraphWriter:
             if relationship_params:
                 tx.run("""
                     UNWIND $batch AS rel
-                    MATCH (a:Entity {canonical_name: rel.entity_a})
-                    MATCH (b:Entity {canonical_name: rel.entity_b})
+                    MATCH (a:Entity {id: rel.entity_a_id})
+                    MATCH (b:Entity {id: rel.entity_b_id})
                     WITH a, b, rel,
                         CASE WHEN a.id < b.id THEN a ELSE b END AS node_a,
                         CASE WHEN a.id < b.id THEN b ELSE a END AS node_b
@@ -247,7 +259,7 @@ class GraphWriter:
             session.execute_write(_update)
         logger.info(f"Updated entity {entity_id} (checkpoint: msg_{last_msg_id})")
     
-    def update_entity_embedding(self, entity_id: int, embedding: List[float]):
+    def update_entity_embedding(self, entity_id: int, embedding: List[float]) -> None:
         """
         Persists a new embedding for an entity.
         """
@@ -256,10 +268,13 @@ class GraphWriter:
         SET e.embedding = $embedding,
             e.last_updated = timestamp()
         """
+        def _update(tx):
+            tx.run(query, {"id": entity_id, "embedding": embedding}).consume()
+            
         with self.driver.session() as session:
-            session.run(query, {"id": entity_id, "embedding": embedding}).consume()
+            session.execute_write(_update)
 
-    def update_entity_checkpoint(self, entity_id: int, last_msg_id: int):
+    def update_entity_checkpoint(self, entity_id: int, last_msg_id: int) -> None:
         """
         Update ONLY the entity's profiled message checkpoint.
         """
@@ -267,8 +282,11 @@ class GraphWriter:
         MATCH (e:Entity {id: $id})
         SET e.last_profiled_msg_id = $last_msg_id
         """
+        def _update(tx):
+            tx.run(query, {"id": entity_id, "last_msg_id": last_msg_id}).consume()
+            
         with self.driver.session() as session:
-            session.run(query, {"id": entity_id, "last_msg_id": last_msg_id}).consume()
+            session.execute_write(_update)
 
     def cleanup_null_entities(self) -> int:
         """Remove entities with null type and their relationships."""
@@ -278,10 +296,13 @@ class GraphWriter:
         DETACH DELETE e
         RETURN count(e) as deleted
         """
-        with self.driver.session() as session:
-            result = session.run(query)
+        def _cleanup(tx):
+            result = tx.run(query)
             record = result.single()
-            deleted = record["deleted"] if record else 0
+            return record["deleted"] if record else 0
+            
+        with self.driver.session() as session:
+            deleted = session.execute_write(_cleanup)
             if deleted > 0:
                 logger.info(f"Cleaned up {deleted} null-type entities")
             return deleted
@@ -295,10 +316,13 @@ class GraphWriter:
         DETACH DELETE e, f
         RETURN count(e) as deleted
         """
+        def _delete(tx):
+            result = tx.run(query, {"id": entity_id}).single()
+            return result["deleted"] if result else 0
+            
         try:
             with self.driver.session() as session:
-                result = session.run(query, {"id": entity_id}).single()
-                deleted = result["deleted"] if result else 0
+                deleted = session.execute_write(_delete)
                 if deleted > 0:
                     logger.info(f"Deleted entity {entity_id} with facts")
                 return deleted > 0
@@ -316,10 +340,13 @@ class GraphWriter:
         DETACH DELETE e
         RETURN count(e) as deleted
         """
-        with self.driver.session() as session:
-            result = session.run(query, {"ids": entity_ids})
+        def _delete(tx):
+            result = tx.run(query, {"ids": entity_ids})
             record = result.single()
-            deleted = record["deleted"] if record else 0
+            return record["deleted"] if record else 0
+            
+        with self.driver.session() as session:
+            deleted = session.execute_write(_delete)
             if deleted > 0:
                 logger.info(f"Bulk deleted {deleted} orphan entities")
             return deleted
@@ -413,8 +440,11 @@ class GraphWriter:
                         THEN r_old.confidence ELSE r_new.confidence END,
                     r_new.last_seen = CASE 
                         WHEN r_old.last_seen > r_new.last_seen 
-                        THEN r_old.last_seen ELSE r_new.last_seen END,
-                    r_new.message_ids = coalesce(r_new.message_ids, []) + coalesce(r_old.message_ids, [])
+                        THEN r_old.last_seen ELSE r_new.last_seen END
+                WITH r_new, r_old
+                UNWIND coalesce(r_new.message_ids, []) + coalesce(r_old.message_ids, []) AS mid
+                WITH r_new, r_old, collect(DISTINCT mid) AS unique_ids
+                SET r_new.message_ids = unique_ids
             """, primary_id=primary_id, secondary_id=secondary_id)
             
             # Step 4: Transfer HAS_FACT edges
@@ -433,13 +463,11 @@ class GraphWriter:
                 DELETE r
             """, primary_id=primary_id, secondary_id=secondary_id)
 
-            # Step 4b: Transfer Hierarchy Children (Entities that are PART_OF secondary)
             # The children now become part of the primary
             tx.run("""
                 MATCH (child:Entity)-[r:PART_OF]->(s:Entity {id: $secondary_id})
                 MATCH (p:Entity {id: $primary_id})
                 MERGE (child)-[:PART_OF]->(p)
-                ON CREATE SET r.transferred = true
                 DELETE r
             """, primary_id=primary_id, secondary_id=secondary_id)
 
@@ -486,13 +514,16 @@ class GraphWriter:
         RETURN true as created
         """
         
+        def _create(tx):
+            result = tx.run(query, {
+                "child_id": child_id,
+                "parent_id": parent_id
+            })
+            return len(list(result)) > 0
+
         try:
             with self.driver.session() as session:
-                result = session.run(query, {
-                    "child_id": child_id,
-                    "parent_id": parent_id
-                })
-                return len(list(result)) > 0
+                return session.execute_write(_create)
             
         except Exception as e:
             logger.error(f"Failed to create hierarchy edge ({child_id})-[:PART_OF]->({parent_id}): {e}")
@@ -516,15 +547,18 @@ class GraphWriter:
         })
         RETURN p.id AS id
         """
+        def _create(tx):
+            result = tx.run(query, {
+                "id": id,
+                "content": content,
+                "kind": kind,
+                "session_id": session_id
+            }).single()
+            return result is not None
+
         try:
             with self.driver.session() as session:
-                result = session.run(query, {
-                    "id": id,
-                    "content": content,
-                    "kind": kind,
-                    "session_id": session_id
-                }).single()
-                return result is not None
+                return session.execute_write(_create)
         except Exception as e:
             logger.error(f"Failed to create preference: {e}")
             return False
@@ -536,10 +570,13 @@ class GraphWriter:
         DELETE p
         RETURN count(*) AS deleted
         """
+        def _delete(tx):
+            result = tx.run(query, {"id": pref_id}).single()
+            return result and result["deleted"] > 0
+            
         try:
             with self.driver.session() as session:
-                result = session.run(query, {"id": pref_id}).single()
-                return result and result["deleted"] > 0
+                return session.execute_write(_delete)
         except Exception as e:
             logger.error(f"Failed to delete preference: {e}")
             return False
@@ -551,10 +588,13 @@ class GraphWriter:
         DELETE r
         RETURN count(r) as deleted
         """
+        def _delete(tx):
+            result = tx.run(query, {"a_id": entity_a_id, "b_id": entity_b_id}).single()
+            return result and result["deleted"] > 0
+            
         try:
             with self.driver.session() as session:
-                result = session.run(query, {"a_id": entity_a_id, "b_id": entity_b_id}).single()
-                return result and result["deleted"] > 0
+                return session.execute_write(_delete)
         except Exception as e:
             logger.error(f"Failed to delete relationship ({entity_a_id}, {entity_b_id}): {e}")
             return False

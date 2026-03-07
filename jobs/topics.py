@@ -3,11 +3,11 @@ import asyncio
 import re
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
-from shared.service import MERGE_MODEL, LLMService
-from shared.topics_config import TopicConfig
+from shared.services.llm import MERGE_MODEL, LLMService
+from shared.config.topics import TopicConfig
 from main.prompts import get_topic_evolution_prompt
-from shared.events import emit
-from shared.redisclient import RedisKeys
+from shared.utils.events import emit
+from shared.infra.redis import RedisKeys
 
 
 class TopicConfigJob(BaseJob):

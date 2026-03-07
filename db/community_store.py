@@ -3,6 +3,8 @@ from loguru import logger
 from typing import Dict, List
 from neo4j import Driver
 
+from datetime import datetime, timezone, timedelta
+
 class CommunityStore:
     def __init__(self, driver: Driver):
         self.driver = driver
@@ -14,8 +16,11 @@ class CommunityStore:
             created_at: $ts, status: 'active'
         })
         """
+        def _create(tx):
+            tx.run(query, id=discussion_id, topic=topic, agent_ids=agent_ids, ts=datetime.now(timezone.utc).isoformat())
+            
         with self.driver.session() as session:
-            session.run(query, id=discussion_id, topic=topic, agent_ids=agent_ids, ts=datetime.now(timezone.utc).isoformat())
+            session.execute_write(_create)
 
     def add_message(self, discussion_id: str, agent_id: str, content: str, role: str = "agent"):
         query = """
@@ -23,16 +28,22 @@ class CommunityStore:
         CREATE (m:AAC_Message {agent_id: $agent_id, content: $content, role: $role, timestamp: $ts})
         CREATE (d)-[:HAS_MESSAGE]->(m)
         """
+        def _add(tx):
+            tx.run(query, discussion_id=discussion_id, agent_id=agent_id, content=content, role=role, ts=datetime.now(timezone.utc).isoformat())
+            
         with self.driver.session() as session:
-            session.run(query, discussion_id=discussion_id, agent_id=agent_id, content=content, role=role, ts=datetime.now(timezone.utc).isoformat())
+            session.execute_write(_add)
 
     def close_discussion(self, discussion_id: str):
         query = """
         MATCH (d:AAC_Discussion {id: $id})
         SET d.status = 'closed', d.closed_at = $ts
         """
+        def _close(tx):
+            tx.run(query, id=discussion_id, ts=datetime.now(timezone.utc).isoformat())
+            
         with self.driver.session() as session:
-            session.run(query, id=discussion_id, ts=datetime.now(timezone.utc).isoformat())
+            session.execute_write(_close)
 
     def register_agent_spawn(self, parent_id: str, child_id: str, detail: str = ""):
         query = """
@@ -40,8 +51,11 @@ class CommunityStore:
         MERGE (c:AAC_Agent {id: $child_id})
         CREATE (p)-[:SPAWNED {detail: $detail, ts: $ts}]->(c)
         """
+        def _register(tx):
+            tx.run(query, parent_id=parent_id, child_id=child_id, detail=detail, ts=datetime.now(timezone.utc).isoformat())
+            
         with self.driver.session() as session:
-            session.run(query, parent_id=parent_id, child_id=child_id, detail=detail, ts=datetime.now(timezone.utc).isoformat())
+            session.execute_write(_register)
 
     def get_discussions(self) -> List[Dict]:
         query = """
@@ -107,3 +121,24 @@ class CommunityStore:
         with self.driver.session() as session:
             result = session.run(query, limit=limit)
             return [dict(r) for r in result]
+    
+    def delete_old_discussions(self, retention_days: int = 30) -> int:
+        """Delete discussions and their messages older than retention period."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        
+        query = """
+        MATCH (d:AAC_Discussion)
+        WHERE d.created_at < $cutoff
+        OPTIONAL MATCH (d)-[:HAS_MESSAGE]->(m:AAC_Message)
+        DETACH DELETE d, m
+        RETURN count(DISTINCT d) as deleted_discussions
+        """
+        def _delete(tx):
+            result = tx.run(query, cutoff=cutoff).single()
+            return result["deleted_discussions"] if result else 0
+            
+        with self.driver.session() as session:
+            count = session.execute_write(_delete)
+            if count > 0:
+                logger.info(f"Cleaned up {count} old AAC discussions")
+            return count

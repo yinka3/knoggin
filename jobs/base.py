@@ -5,7 +5,7 @@ from typing import Optional
 from loguru import logger
 import redis.asyncio as aioredis
 
-from shared.resource import ResourceManager
+from shared.infra.resources import ResourceManager
 
 
 

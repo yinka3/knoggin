@@ -9,23 +9,24 @@ import redis.asyncio as aioredis
 from loguru import logger
 from typing import Dict, List, Set, Tuple, Optional
 from db.store import MemGraphStore
-from shared.service import LLMService
+from shared.services.llm import LLMService
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from main.prompts import (
     get_connection_reasoning_prompt
 )
-from shared.topics_config import TopicConfig
+from shared.config.topics import TopicConfig
 from main.utils import ( 
     format_vp03_input, 
     parse_connection_response
 )
-from shared.schema.dtypes import (
+from shared.models.schema.dtypes import (
     BatchResult,
-    MessageConnections
+    MessageConnections,
+    ResolutionResult
 )
-from shared.events import emit
-from shared.redisclient import RedisKeys
+from shared.utils.events import emit
+from shared.infra.redis import RedisKeys
 
 
 def _safe_json(obj):
@@ -94,16 +95,7 @@ class BatchProcessor:
                 "mentions": [(msg_id, text, typ) for msg_id, text, typ, _ in mentions]
             }, verbose_only=True)
 
-            valid_mentions = []
-            for msg_id, text, typ, topic in mentions:
-                if not text: 
-                    continue # Skip empty names
-                
-                safe_topic = topic if topic else "General"
-                norm_topic = self.topic_config.normalize_topic(safe_topic)
-                valid_mentions.append((msg_id, text, typ, norm_topic))
-            
-            mentions = valid_mentions
+            mentions = [(msg_id, text, typ, topic) for msg_id, text, typ, topic in mentions if text]
             
             msg_texts = [m['message'] for m in messages]
     
@@ -122,29 +114,29 @@ class BatchProcessor:
                 logger.info("No mentions found in batch, skipping LLM calls")
                 return result
             
-            entity_ids, new_ids, alias_ids, entity_msg_map, alias_updates = await self._resolve_mentions(mentions, messages)
+            res = await self._resolve_mentions(mentions, messages)
 
             await emit(self.session_id, "pipeline", "resolution_complete", {
-                "new": len(new_ids),
-                "existing": len(entity_ids) - len(new_ids),
-                "aliases_added": len(alias_ids)
+                "new": len(res.new_ids),
+                "existing": len(res.entity_ids) - len(res.new_ids),
+                "aliases_added": len(res.alias_ids)
             })
 
-            result.entity_ids = entity_ids
-            result.new_entity_ids = new_ids
-            result.alias_updated_ids = alias_ids
-            result.alias_updates = alias_updates
+            result.entity_ids = res.entity_ids
+            result.new_entity_ids = res.new_ids
+            result.alias_updated_ids = res.alias_ids
+            result.alias_updates = res.alias_updates
             user_id = self.ent_resolver.get_id(self.user_name)
-            if user_id and user_id not in entity_ids:
-                entity_ids.append(user_id)
+            if user_id and user_id not in res.entity_ids:
+                res.entity_ids.append(user_id)
             
-            connections = await self._extract_connections(entity_ids, entity_msg_map, messages, session_text)
+            connections = await self._extract_connections(res.entity_ids, res.entity_msg_map, messages, session_text)
             if connections is None:
                 logger.error("Connection extraction failed")
                 result.success = False
                 result.error = "Connection extraction failed (VP-03)"
                 await emit(self.session_id, "pipeline", "connections_failed", {
-                    "entity_count": len(entity_ids)
+                    "entity_count": len(res.entity_ids)
                 })
                 return result
             
@@ -183,17 +175,20 @@ class BatchProcessor:
 
         normalized_mentions = []
         for msg_id, text, typ, topic in mentions:
-            norm_topic = self.topic_config.normalize_topic(topic)
+            norm_topic = self.topic_config.normalize_topic(topic or "General")
+            if norm_topic is None:
+                logger.debug(f"Skipping mention '{text}' — topic '{topic}' could not be resolved")
+                continue
             normalized_mentions.append((msg_id, text, typ, norm_topic))
         
-        logger.debug(f"Extracted {normalized_mentions} mentions")
+        logger.debug(f"Extracted {len(normalized_mentions)} mentions from {len(mentions)} raw")
         return normalized_mentions
 
     async def _resolve_mentions(
         self,
         mentions: List[Tuple[int, str, str, str]],
         messages: List[Dict]
-    ) -> Tuple[List[int], Set[int], Set[int], Dict[int, List[int]], Dict[int, List[str]]]:
+    ) -> ResolutionResult:
         """
         Deterministic entity resolution using 4 scoring signals.
         Replaces VP-02 LLM disambiguation.
@@ -225,6 +220,7 @@ class BatchProcessor:
 
         # First pass: collect base candidates for all mentions
         mention_candidates = []
+        first_pass_results = {}
         for msg_id, name, typ, topic in mentions:
             if not name:
                 mention_candidates.append(None)
@@ -232,8 +228,8 @@ class BatchProcessor:
 
             canonical_lower = name.strip().lower()
 
-            if canonical_lower in created_in_batch:
-                mention_candidates.append(("batch_dedup", created_in_batch[canonical_lower]))
+            if canonical_lower in first_pass_results:
+                mention_candidates.append(first_pass_results[canonical_lower])
                 continue
 
             precomputed = embedding_map.get(name)
@@ -244,11 +240,14 @@ class BatchProcessor:
             if candidates:
                 top_id, top_score = candidates[0]
                 if top_score >= self.resolution_threshold:
-                    mention_candidates.append(("candidate", top_id, top_score))
+                    entry = ("candidate", top_id, top_score)
                 else:
-                    mention_candidates.append(("new", None))
+                    entry = ("new", None)
             else:
-                mention_candidates.append(("new", None))
+                entry = ("new", None)
+                
+            first_pass_results[canonical_lower] = entry
+            mention_candidates.append(entry)
 
         # Second pass: batch-boost all candidates with graph signals
         pairs_to_boost = []
@@ -304,7 +303,10 @@ class BatchProcessor:
                         alias_ids.add(existing_id)
                         alias_updates[existing_id] = new_aliases
                 else:
-                    verified = self.store.validate_existing_ids([top_id])
+                    verified = await loop.run_in_executor(
+                        self.executor,
+                        self.store.validate_existing_ids, [top_id]
+                    )
                     if not verified:
                         logger.warning(f"Zombie candidate {top_id} for '{name}', evicting")
                         self.ent_resolver.remove_entities([top_id])
@@ -320,12 +322,10 @@ class BatchProcessor:
 
                         await loop.run_in_executor(
                             self.executor,
-                            partial(
-                                self.ent_resolver.register_entity,
-                                ent_id, name.strip(), [name.strip()],
-                                typ, topic, self.session_id,
-                                source_context
-                            )
+                            self.ent_resolver.register_entity,
+                            ent_id, name.strip(), [name.strip()],
+                            typ, topic, self.session_id,
+                            source_context
                         )
                         new_ids.add(ent_id)
                         created_in_batch[canonical_lower] = ent_id
@@ -340,7 +340,13 @@ class BatchProcessor:
                     entity_msg_map[ent_id] = []
                 entity_msg_map[ent_id].append(msg_id)
 
-        return entity_ids, new_ids, alias_ids, entity_msg_map, alias_updates
+        return ResolutionResult(
+            entity_ids=entity_ids,
+            new_ids=new_ids,
+            alias_ids=alias_ids,
+            entity_msg_map=entity_msg_map,
+            alias_updates=alias_updates
+        )
     
     async def _boost_candidates(
         self,
@@ -397,23 +403,44 @@ class BatchProcessor:
                 )
 
                 if response:
-                    judgments = response.strip().split("\n")
-                    for i, (candidate_id, base_score) in enumerate(pair_keys):
-                        if i < len(judgments) and "YES" in judgments[i].upper():
-                            results[candidate_id] = base_score + 0.05
-                        else:
-                            results[candidate_id] = base_score
+                    import re
+                    # Match patterns like "1. YES", "2: NO", "3 YES"
+                    matches = re.findall(r"^\s*\d+[\.\:\-]?\s*(YES|NO)", response, re.IGNORECASE | re.MULTILINE)
+                    
+                    if matches:
+                        for i, (candidate_id, base_score) in enumerate(pair_keys):
+                            current = results.get(candidate_id, base_score)
+                            if i < len(matches) and "YES" in matches[i].upper():
+                                results[candidate_id] = max(current, base_score + 0.05)
+                            else:
+                                results[candidate_id] = max(current, base_score)
+                    else:
+                        # Fallback if the LLM didn't number them but just output YES/NO lines
+                        lines = [line.strip().upper() for line in response.strip().split("\n") if line.strip()]
+                        valid_lines = [line for line in lines if "YES" in line or "NO" in line]
+                        
+                        for i, (candidate_id, base_score) in enumerate(pair_keys):
+                            current = results.get(candidate_id, base_score)
+                            if i < len(valid_lines) and "YES" in valid_lines[i]:
+                                results[candidate_id] = max(current, base_score + 0.05)
+                            else:
+                                results[candidate_id] = max(current, base_score)
                 else:
                     for candidate_id, base_score in pair_keys:
-                        results[candidate_id] = base_score
+                        results[candidate_id] = max(results.get(candidate_id, base_score), base_score)
 
             except Exception as e:
                 logger.warning(f"Fact relevance LLM failed, using base scores: {e}")
                 for candidate_id, base_score in pair_keys:
-                    results[candidate_id] = base_score
+                    results[candidate_id] = max(results.get(candidate_id, base_score), base_score)
 
         # --- Signal 4: Connection co-occurrence ---
+        processed_candidates = set()
         for candidate_id, base_score, msg_id in candidate_pairs:
+            if candidate_id in processed_candidates:
+                continue
+            processed_candidates.add(candidate_id)
+            
             score = results.get(candidate_id, base_score)
 
             if batch_matched_ids:

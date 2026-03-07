@@ -5,8 +5,8 @@ from loguru import logger
 from db.store import MemGraphStore
 import redis.asyncio as aioredis
 from main.processor import BatchProcessor, BatchResult
-from shared.events import emit, emit_sync
-from shared.redisclient import RedisKeys
+from shared.utils.events import emit, emit_sync
+from shared.infra.redis import RedisKeys
 
 
 class BatchConsumer:
@@ -250,8 +250,14 @@ class BatchConsumer:
             lines.append(f"[{turn['role_label']}]: {content}")
         return "\n".join(lines)
     
-    def update_ingestion_settings(self, batch_size: int = None, batch_timeout: float = None, 
-                              checkpoint_interval: int = None, session_window: int = None):
+    def update_ingestion_settings(
+        self,
+        batch_size: Optional[int] = None,
+        batch_timeout: Optional[float] = None,
+        checkpoint_interval: Optional[int] = None,
+        session_window: Optional[int] = None
+    ):
+        """Update settings dynamically while running."""
         if batch_size is not None:
             self.batch_size = batch_size
         if batch_timeout is not None:

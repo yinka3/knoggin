@@ -4,8 +4,8 @@ from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from db.store import MemGraphStore
 from main.entity_resolve import EntityResolver
-from shared.events import emit
-from shared.redisclient import RedisKeys
+from shared.utils.events import emit
+from shared.infra.redis import RedisKeys
 
 
 class EntityCleanupJob(BaseJob):
@@ -42,7 +42,12 @@ class EntityCleanupJob(BaseJob):
             await ctx.redis.set(last_run_key, time.time())
             return False
         
-        elapsed = time.time() - float(last_run_ts)
+        try:
+            elapsed = time.time() - float(last_run_ts)
+        except ValueError:
+            await ctx.redis.set(last_run_key, time.time())
+            return False
+            
         return elapsed >= self.run_interval_seconds
     
 
@@ -55,7 +60,10 @@ class EntityCleanupJob(BaseJob):
         orphan_cutoff = now_ms - self.orphan_cutoff_ms
         junk_cutoff = now_ms - self.stale_cutoff_ms
         
-        user_id = self.ent_resolver.get_id(self.user_name) or 1
+        user_id = self.ent_resolver.get_id(self.user_name)
+        if not user_id:
+            await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
+            return JobResult(success=True, summary="User entity not initialized")
 
         orphan_ids = await loop.run_in_executor(
             None,

@@ -10,15 +10,15 @@ from loguru import logger
 import numpy as np
 from db.store import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobResult
-from shared.embedding import EmbeddingService
-from shared.service import LLMService
+from shared.services.embeddings import EmbeddingService
+from shared.services.llm import LLMService
 from main.entity_resolve import EntityResolver
 from main.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
 from jobs.jobs_utils import enrich_facts_with_sources, extract_fact_with_source, format_vp04_input, process_extracted_facts, parse_new_facts
-from shared.schema.dtypes import Fact, FactMergeResult
-from shared.events import emit
-from shared.redisclient import RedisKeys
-from shared.config import get_config_value
+from shared.models.schema.dtypes import Fact, FactMergeResult
+from shared.utils.events import emit
+from shared.infra.redis import RedisKeys
+from shared.config.base import get_config_value
 
 class ProfileRefinementJob(BaseJob):
     """
@@ -35,6 +35,7 @@ class ProfileRefinementJob(BaseJob):
                 msg_window: int = 30, volume_threshold: int = 15, idle_threshold: int = 90,
                 contradiction_sim_low: float = 0.70, contradiction_sim_high: float = 0.95,
                 contradiction_batch_size: int = 4, profile_batch_size: int = 8,
+                max_facts_context: int = 50,
                 profile_prompt: str = None, contradiction_prompt: str = None):
         
         self.llm = llm
@@ -52,6 +53,7 @@ class ProfileRefinementJob(BaseJob):
         self.contradiction_sim_low = contradiction_sim_low
         self.contradiction_sim_high = contradiction_sim_high
         self.contradiction_batch_size = contradiction_batch_size
+        self.max_facts_context = max_facts_context
         self.profile_prompt = profile_prompt
         self.contradiction_prompt = contradiction_prompt
         
@@ -131,20 +133,22 @@ class ProfileRefinementJob(BaseJob):
             )
             if turn_key:
                 turn_score = await ctx.redis.zscore(sorted_key, turn_key)
-                turn_ids = await ctx.redis.zrevrangebyscore(
+                turn_ids = await ctx.redis.zrange(
                     sorted_key,
                     f"({turn_score}",
                     "-inf",
-                    start=0,
+                    desc=True,
+                    byscore=True,
+                    offset=0,
                     num=fetch_count
                 )
                 turn_ids = list(reversed(turn_ids))
             else:
-                turn_ids = await ctx.redis.zrevrange(sorted_key, 0, fetch_count - 1)
+                turn_ids = await ctx.redis.zrange(sorted_key, 0, fetch_count - 1, desc=True)
                 turn_ids = list(turn_ids)
                 turn_ids.reverse()
         else:
-            turn_ids = await ctx.redis.zrevrange(sorted_key, 0, fetch_count - 1)
+            turn_ids = await ctx.redis.zrange(sorted_key, 0, fetch_count - 1, desc=True)
             if not turn_ids:
                 return []
             turn_ids = list(turn_ids)
@@ -310,12 +314,15 @@ class ProfileRefinementJob(BaseJob):
             system_reasoning = get_profile_extraction_prompt(ctx.user_name)
             
         enriched_facts = await enrich_facts_with_sources(existing_facts, self.store)
+        if len(enriched_facts) > self.max_facts_context:
+            enriched_facts = enriched_facts[-self.max_facts_context:]
+            
         llm_input = [{
-                "entity_name": ctx.user_name,
-                "entity_type": "person",
-                "existing_facts": enriched_facts,
-                "known_aliases": [alias for alias in profile.get("aliases", [ctx.user_name])]
-            }]
+            "entity_name": ctx.user_name,
+            "entity_type": "person",
+            "existing_facts": enriched_facts,
+            "known_aliases": [alias for alias in profile.get("aliases", [ctx.user_name])]
+        }]
         user_content = format_vp04_input(llm_input, conversation_text)
 
         await emit(ctx.session_id, "job", "llm_call", {
@@ -389,6 +396,8 @@ class ProfileRefinementJob(BaseJob):
             llm_input = []
             for e in batch:
                 enriched_facts = await enrich_facts_with_sources(e["existing_facts"], self.store)
+                if len(enriched_facts) > self.max_facts_context:
+                    enriched_facts = enriched_facts[-self.max_facts_context:]
                 llm_input.append({
                     "entity_name": e["entity_name"],
                     "entity_type": e["entity_type"],
@@ -576,7 +585,13 @@ class ProfileRefinementJob(BaseJob):
             content, msg_id = extract_fact_with_source(raw_content)
             
             if msg_id and valid_msg_ids and msg_id not in valid_msg_ids:
-                logger.warning(f"Invalid msg_id {msg_id} (type {type(msg_id)}) not in conversation window {valid_msg_ids} (type {type(list(valid_msg_ids)[0]) if valid_msg_ids else 'empty'}), setting to None")
+                msg_type = type(msg_id).__name__
+                valid_type = type(list(valid_msg_ids)[0]).__name__ if valid_msg_ids else "empty"
+                logger.warning(
+                    f"[{self.session_id}] ProfileRefinementJob: "
+                    f"Invalid msg_id {msg_id} (type {msg_type}) not in conversation window "
+                    f"{valid_msg_ids} (type {valid_type})"
+                )
                 msg_id = None
             
             embedding = await loop.run_in_executor(
@@ -786,8 +801,11 @@ class ProfileRefinementJob(BaseJob):
                 continue  # Skip malformed lines instead of raising
             
             idx = int(line_match.group(1)) - 1
-            value = line_match.group(2).lower() == "true"
-            judgments[idx] = value
+            if 0 <= idx < len(pairs):
+                value = line_match.group(2).lower() == "true"
+                judgments[idx] = value
+            else:
+                logger.warning(f"LLM contradiction judgment returned out-of-bounds index: {idx+1}")
         
         if len(judgments) != len(pairs):
             missing = len(pairs) - len(judgments)

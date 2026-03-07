@@ -5,8 +5,8 @@ from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from main.entity_resolve import EntityResolver
 from main.processor import BatchProcessor, BatchResult
-from shared.events import emit
-from shared.redisclient import RedisKeys
+from shared.utils.events import emit
+from shared.infra.redis import RedisKeys
 
 
 class DLQReplayJob(BaseJob):
@@ -172,13 +172,19 @@ class DLQReplayJob(BaseJob):
         })
 
         batch_size = min(queue_len, self.batch_size)
-        raw_entries = await ctx.redis.lrange(dlq_key, 0, batch_size - 1)
 
         processed = 0
         retried = 0
         parked = 0
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 5
         
-        for raw_item in raw_entries:
+        for _ in range(batch_size):
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.error(f"DLQ circuit breaker triggered: {consecutive_failures} consecutive failures. Halting batch.")
+                break
+                
+            raw_item = await ctx.redis.lpop(dlq_key)
             if not raw_item:
                 break
                 
@@ -200,11 +206,13 @@ class DLQReplayJob(BaseJob):
                     
                     if success:
                         retried += 1
+                        consecutive_failures = 0
                         await emit(ctx.session_id, "job", "dlq_retry_success", {
                             "stage": stage,
                             "attempt": attempt
                         })
                     else:
+                        consecutive_failures += 1
                         entry["attempt"] = attempt + 1
                         await ctx.redis.rpush(dlq_key, json.dumps(entry))
                         logger.info(f"DLQ: Retry failed, re-queued (attempt {attempt + 1}/{self.max_attempts})")
@@ -214,6 +222,7 @@ class DLQReplayJob(BaseJob):
                             "max_attempts": self.max_attempts
                         })
                 else:
+                    consecutive_failures = 0
                     await ctx.redis.rpush(park_key, raw_item)
                     parked += 1
                     
@@ -226,16 +235,15 @@ class DLQReplayJob(BaseJob):
                     })
                     
             except json.JSONDecodeError:
+                consecutive_failures = 0
                 logger.error("DLQ: Corrupt entry, parking")
                 await ctx.redis.rpush(park_key, raw_item)
                 parked += 1
             except Exception as e:
+                consecutive_failures += 1
                 logger.error(f"DLQ: Unexpected error: {e}")
                 await ctx.redis.rpush(park_key, raw_item)
                 parked += 1
-        
-        if processed > 0:
-            await ctx.redis.ltrim(dlq_key, processed, -1)
         
         await ctx.redis.set(RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id), time.time())
         

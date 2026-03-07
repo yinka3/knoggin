@@ -9,7 +9,7 @@ import os
 from db.query_tools import GraphToolQueries
 from db.reader import GraphReader
 from db.writer import GraphWriter
-from shared.schema.dtypes import Fact
+from shared.models.schema.dtypes import Fact
 load_dotenv()
 
 MEMGRAPH_HOST=os.environ.get("MEMGRAPH_HOST", "localhost")
@@ -61,7 +61,10 @@ class MemGraphStore:
             "CREATE INDEX ON :Fact(created_at);",
             "CREATE INDEX ON :Message(timestamp);",
             "CREATE INDEX ON :Entity(canonical_name);",
-            "CREATE INDEX ON :Entity(last_mentioned);"
+            "CREATE INDEX ON :Entity(last_mentioned);",
+            "CREATE INDEX ON :AAC_Discussion(created_at);",
+            "CREATE INDEX ON :AAC_Discussion(status);",
+            "CREATE INDEX ON :AAC_Message(timestamp);",
         ]
 
         vector_indices = [
@@ -267,7 +270,7 @@ class MemGraphStore:
     def get_recent_activity(self, entity_name: str, active_topics: List[str] = None, hours: int = 24) -> List[Dict]:
         return self._tools.get_recent_activity(entity_name, active_topics, hours)
 
-    def find_path_filtered(self, start_name: str, end_name: str, active_topics: List[str] = None) -> Tuple[List[Dict], bool]:
-        return self._tools._find_path_filtered(start_name, end_name, active_topics)
+    def find_path_filtered(self, start_name: str, end_name: str, active_topics: List[str] = None, max_depth: int = 4) -> Tuple[List[Dict], bool]:
+        return self._tools._find_path_filtered(start_name, end_name, active_topics, max_depth)
     
     
