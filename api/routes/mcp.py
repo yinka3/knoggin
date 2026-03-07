@@ -3,8 +3,8 @@ from loguru import logger
 
 from api.deps import get_app_state
 from api.state import AppState
-from shared.config import load_config, get_default_config, save_config
-from shared.schema.settings import MCPServerCreate
+from shared.config.base import load_config, get_default_config, save_config
+from shared.models.schema.settings import MCPServerCreate
 
 router = APIRouter()
 
@@ -12,7 +12,7 @@ router = APIRouter()
 @router.get("/presets")
 async def get_mcp_presets():
     """Return curated list of MCP server presets."""
-    from shared.config import MCP_SERVER_PRESETS
+    from shared.config.base import MCP_SERVER_PRESETS
     return {"presets": MCP_SERVER_PRESETS}
 
 

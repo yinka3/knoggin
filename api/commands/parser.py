@@ -1,6 +1,6 @@
 from typing import Tuple, Optional
 
-SUBCOMMAND_PARENTS = ["/merge"]
+SUBCOMMAND_PARENTS = []
 
 def parse_command(input: str) -> Tuple[Optional[str], Optional[str]]:
     """

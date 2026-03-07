@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from api.deps import get_app_state
 from api.state import AppState
-from shared.redisclient import RedisKeys
+from shared.infra.redis import RedisKeys
 from datetime import datetime, timezone
 
 router = APIRouter()

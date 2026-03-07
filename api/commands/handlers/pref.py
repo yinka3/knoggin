@@ -2,16 +2,17 @@ import uuid
 import json
 from datetime import datetime, timezone
 from api.commands.registry import command, CommandContext
-from shared.redisclient import RedisKeys
+from shared.infra.redis import RedisKeys
 
 async def _save_to_agent_memory(ctx: CommandContext, category: str, content: str) -> dict:
-    session = await ctx.state.get_session(ctx.session_id)
-    if not session:
+    sessions = await ctx.state.list_sessions()
+    session_meta = sessions.get(ctx.session_id)
+    if not session_meta:
         raise ValueError("Session not found")
         
-    agent_id = session.agent_id
+    agent_id = session_meta.get("agent_id")
     if not agent_id:
-        raise ValueError("No active agent in this session")
+        agent_id = await ctx.state.get_default_agent_id()
         
     mem_id = f"mem_{uuid.uuid4().hex[:8]}"
     

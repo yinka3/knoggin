@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import httpx
 from fastapi import APIRouter, HTTPException
 
-from shared.config import load_config
+from shared.config.base import load_config
 
 router = APIRouter()
 
@@ -32,17 +32,19 @@ async def get_available_models():
 
     try:
         async with httpx.AsyncClient() as client:
-            reasoning_resp = await client.get(
+            reasoning_req = client.get(
                 "https://openrouter.ai/api/v1/models",
                 params={"supported_parameters": "reasoning"},
                 timeout=15.0
             )
             
-            tools_resp = await client.get(
+            tools_req = client.get(
                 "https://openrouter.ai/api/v1/models",
                 params={"supported_parameters": "tools"},
                 timeout=15.0
             )
+            
+            reasoning_resp, tools_resp = await asyncio.gather(reasoning_req, tools_req)
             
             if reasoning_resp.status_code != 200 or tools_resp.status_code != 200:
                 raise HTTPException(status_code=502, detail="Failed to fetch models from OpenRouter")

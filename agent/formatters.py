@@ -3,7 +3,7 @@ from typing import Dict, List
 
 # Timestamp bounds (Unix seconds)
 TS_MIN = 946684800    # 2000-01-01 00:00:00 UTC
-TS_MAX = 2524608000   # 2050-01-01 00:00:00 UTC
+TS_MAX = 4102444800   # 2100-01-01 00:00:00 UTC
 
 
 def _normalize_timestamp(ts: float) -> float | None:
@@ -17,6 +17,8 @@ def _normalize_timestamp(ts: float) -> float | None:
     
     return None
 
+
+from loguru import logger
 
 def _format_timestamp(ts) -> str:
     """Convert timestamp to readable datetime string. Handles s, ms, us, ns."""
@@ -34,13 +36,14 @@ def _format_timestamp(ts) -> str:
                 return "unknown"
             return datetime.fromtimestamp(ts_normalized, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             
-    except (ValueError, OSError, OverflowError):
-        pass
+    except (ValueError, OSError, OverflowError) as e:
+        logger.debug(f"Failed to parse timestamp {ts}: {e}")
     
     return "unknown"
 
 
 def format_retrieved_messages(messages: List[Dict]) -> str:
+    """Format an array of raw message evidence into a human-readable transcription block."""
     if not messages:
         return "No messages found."
 
@@ -59,8 +62,8 @@ def format_retrieved_messages(messages: List[Dict]) -> str:
                 if "T" in ts_str:
                     dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                     ts_display = dt.strftime("%Y-%m-%d %H:%M")
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Failed to format retrieved message timestamp {ts_str}: {e}")
             
             role = "USER" if msg['role'] == 'user' else "AGENT"
             content = msg.get('content', '')
@@ -235,6 +238,7 @@ def format_hot_topic_context(context: Dict[str, Dict]) -> str:
 
 
 def format_hierarchy_results(results: List[Dict]) -> str:
+    """Format hierarchical ancestry and descendants for a given entity."""
     if not results:
         return "No hierarchy found."
     
@@ -265,7 +269,7 @@ def format_hierarchy_results(results: List[Dict]) -> str:
     return "\n".join(blocks)
 
 def format_memory_context(blocks: dict) -> str:
-    """Format memory blocks for prompt injection."""
+    """Format short-term and persistent memory blocks for the agent's system prompt context."""
     if not blocks:
         return ""
     
@@ -287,7 +291,7 @@ def format_memory_context(blocks: dict) -> str:
 
 
 def format_files_context(files: list) -> str:
-    """Format file manifest for prompt injection."""
+    """Format the metadata of uploaded files into a digest for the agent's system prompt context."""
     if not files:
         return ""
     

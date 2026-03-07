@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import re
 import httpx
 from typing import List, Dict, Optional
@@ -9,10 +8,9 @@ from loguru import logger
 import redis.asyncio as aioredis
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
-from shared.file_rag import FileRAGService
-from shared.topics_config import TopicConfig
-from shared.redisclient import RedisKeys 
-from shared.events import emit
+from shared.rag.processor import FileRAGService
+from shared.config.topics import TopicConfig
+from shared.infra.redis import RedisKeys
 
 
 
@@ -20,7 +18,7 @@ class Tools:
     
     def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, 
                 redis_client: aioredis.Redis, session_id: str, topic_config: TopicConfig = None, 
-                search_config: dict = None, file_rag: FileRAGService =None, mcp_manager=None):
+                search_config: dict = None, file_rag: FileRAGService =None, mcp_manager=None, memory=None):
         self.session_id = session_id
         self.store = store
         self.resolver = ent_resolver
@@ -32,13 +30,22 @@ class Tools:
         self.active_topics = topic_config.active_topics if topic_config else None
         self.search_cfg = search_config or {}
         self.mcp_manager = mcp_manager
+        self.memory = memory
     
     def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
         return self.resolver.resolve_entity_name(entity)
     
+    @staticmethod
+    def _is_message_id(msg_id: int) -> bool:
+        """Check if numeric ID belongs to message collection or turn collection."""
+        return msg_id < 1_000_000_000
 
     async def _hydrate_evidence(self, evidence_ids: list[str], timeout: float = 5.0) -> list[dict]:
+        """
+        Fetch full message payloads from Redis for a list of string evidence IDs.
+        Falls back to PostgreSQL lookup if Redis cache misses.
+        """
         if not evidence_ids:
             return []
         
@@ -58,12 +65,15 @@ class Tools:
         
         for msg_id, raw in zip(evidence_ids, raw_results):
             if raw:
-                data = json.loads(raw)
-                results.append({
-                    "id": msg_id,
-                    "message": data["message"],
-                    "timestamp": data["timestamp"]
-                })
+                try:
+                    data = json.loads(raw)
+                    results.append({
+                        "id": msg_id,
+                        "message": data.get("message", ""),
+                        "timestamp": data.get("timestamp", "")
+                    })
+                except json.JSONDecodeError:
+                    logger.warning(f"Malformed evidence data for {msg_id}")
             else:
                 if msg_id.startswith("msg_"):
                     try:
@@ -104,7 +114,10 @@ class Tools:
         
 
     async def _get_surrounding_context(self, msg_id: str, forward: int = 3, target_total: int = 10) -> List[Dict]:
-        """Get surrounding turns for context."""
+        """
+        Given a specific message or turn ID, retrieve the surrounding conversational 
+        context (previous and succeeding turns) to provide continuity in search results.
+        """
         sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
         conv_key = RedisKeys.conversation(self.user_name, self.session_id)
         lookup_key = RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id)
@@ -177,7 +190,11 @@ class Tools:
             tid = turn_ids[i]
             if tid not in raw_map: continue
             
-            data = json.loads(raw_map[tid])
+            try:
+                data = json.loads(raw_map[tid])
+            except json.JSONDecodeError:
+                continue
+                
             role = data.get("role", "unknown")
             content = data.get("content", "") or ""
             
@@ -194,20 +211,32 @@ class Tools:
 
         pre_context.reverse()
 
-        tgt_data = json.loads(raw_map[target_turn_id])
-        target_msg = {
-            "role": tgt_data.get("role", "unknown"),
-            "timestamp": tgt_data.get("timestamp", ""),
-            "content": tgt_data.get("content", ""),
-            "id": target_turn_id,
-            "is_hit": True
-        }
+        try:
+            tgt_data = json.loads(raw_map[target_turn_id])
+            target_msg = {
+                "role": tgt_data.get("role", "unknown"),
+                "timestamp": tgt_data.get("timestamp", ""),
+                "content": tgt_data.get("content", ""),
+                "id": target_turn_id,
+                "is_hit": True
+            }
+        except json.JSONDecodeError:
+            target_msg = {
+                "role": "unknown",
+                "timestamp": "",
+                "content": "",
+                "id": target_turn_id,
+                "is_hit": True
+            }
 
         for i in range(target_index + 1, min(len(turn_ids), target_index + forward + 1)):
             tid = turn_ids[i]
             if tid not in raw_map: continue
             
-            data = json.loads(raw_map[tid])
+            try:
+                data = json.loads(raw_map[tid])
+            except json.JSONDecodeError:
+                continue
             post_context.append({
                 "role": data.get("role", "unknown"),
                 "timestamp": data.get("timestamp", ""),
@@ -219,6 +248,10 @@ class Tools:
 
 
     def _search_messages(self, query: str, k: int) -> list[tuple[str, float]]:
+        """
+        Synchronous internal method executing hybrid vector + FTS search over messages, 
+        followed by an optional cross-encoder reranking step if candidates exceed 1.
+        """
 
         vector_limit = self.search_cfg.get("vector_limit", 50)
         fts_limit = self.search_cfg.get("fts_limit", 50)
@@ -229,7 +262,7 @@ class Tools:
         sem_results = self.store.search_messages_vector(query_embedding, limit=vector_limit)
 
         for msg_id, score in sem_results:
-            msg_key = f"msg_{msg_id}" if msg_id < 1_000_000_000 else f"turn_{msg_id - 1_000_000_000}"
+            msg_key = f"msg_{msg_id}" if self._is_message_id(msg_id) else f"turn_{msg_id - 1_000_000_000}"
             results[msg_key] = ("semantic", float(score))
         
         fts_results = self.store.search_messages_fts(query, limit=fts_limit)
@@ -256,8 +289,11 @@ class Tools:
                 candidate_keys = list(results.keys())[:rerank_candidates]
                 texts = []
                 for msg_key in candidate_keys:
-                    msg_id = int(msg_key.split("_")[1])
-                    texts.append(self.store.get_message_text(msg_id))
+                    try:
+                        numeric_id = int(msg_key.split("_")[1])
+                        texts.append(self.store.get_message_text(numeric_id))
+                    except (ValueError, IndexError):
+                        texts.append("")
                 
                 scores = self.embedding_service.rerank(query, texts)
                 reranked = sorted(zip(candidate_keys, scores), key=lambda x: x[1], reverse=True)
@@ -344,23 +380,23 @@ class Tools:
                     output.append({
                         "id": msg_key,
                         "role": "user",
-                        "message": data["message"],
-                        "timestamp": data["timestamp"],
-                        "score": scores[msg_key],
-                        "context": context
-                    })
+                        "message": data.get("message", ""),
+                        "timestamp": data.get("timestamp", ""),
+                    "score": scores[msg_key],
+                    "context": context
+                })
             else:
                 raw = assistant_contents.get(msg_key)
                 if raw:
                     data = json.loads(raw)
                     output.append({
                         "id": msg_key,
-                        "role": data["role"],
-                        "message": data["content"],
-                        "timestamp": data["timestamp"],
-                        "score": scores[msg_key],
-                        "context": context
-                    })
+                        "role": data.get("role", "assistant"),
+                        "message": data.get("content", ""),
+                        "timestamp": data.get("timestamp", ""),
+                    "score": scores[msg_key],
+                    "context": context
+                })
         
         return output
         
@@ -375,7 +411,8 @@ class Tools:
             query: Name or partial name to search
             limit: Max results to return (default 5)
         
-        Returns: List of matching entities with id, name, summary snippet, type.
+        Returns: 
+            List of matching entities with id, name, summary snippet, type, and top connections.
         """
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
         results = self.store.search_entity(query, self.active_topics, limit)
@@ -395,13 +432,13 @@ class Tools:
         """
         Get the full relationship network for an entity.
         Returns all connections (up to 50) with evidence — the actual messages that established each connection. 
-        Use when you need comprehensive relationship details beyond the top 5 from search_entity..
+        Use when you need comprehensive relationship details beyond the top 5 from search_entity.
         
         Args:
-            entity_name: The entity to find connections for
-            active_only: If True, exclude entities from inactive topics (default True)
+            entity_name: The entity to find connections for.
         
-        Returns: List of connections with target entity, connection strength, evidence message IDs.
+        Returns: 
+            List of connections with target entity, connection strength, and hydrated evidence messages.
         """
         canonical = self._resolve_entity_name(entity_name)
         if not canonical:
@@ -429,7 +466,7 @@ class Tools:
         """
         Get recent interactions involving an entity within a time window. 
         Use for 'what happened with X lately' or 'any updates on X this week'. 
-        Default is 24 hours; use 168 for a week..
+        Default is 24 hours; use 168 for a week.
         
         Args:
             entity_name: Entity to check activity for
@@ -451,7 +488,7 @@ class Tools:
 
     async def find_path(self, entity_a: str, entity_b: str) -> List[Dict]:
         """
-        "Trace the connection chain between two specific entities. 
+        Trace the connection chain between two specific entities. 
         Use for 'how is X connected to Y' or 'what links X to Y'. Returns the shortest path showing each hop. 
         Requires both entities to exist in memory.
 
@@ -474,7 +511,7 @@ class Tools:
             return [{"error": f"Entity not found: '{entity_b}'"}]
             
 
-        path, has_inactive_shortcut = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=self.active_topics)
+        path, has_inactive_shortcut = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=self.active_topics, max_depth=4)
         
         if path:
             for step in path:
@@ -484,23 +521,26 @@ class Tools:
             return path
         
         if has_inactive_shortcut:
-            full_path, _ = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=None)
+            full_path, _ = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=None, max_depth=4)
 
             safe_path = []
             for step in full_path:
                 topic_a = step.get('topic_a', 'General')
                 topic_b = step.get('topic_b', 'General')
                 
-                both_active = topic_a in self.active_topics and topic_b in self.active_topics
+                both_active = self.active_topics is not None and topic_a in self.active_topics and topic_b in self.active_topics
                 
                 if both_active:
                     safe_path.append(step)
                 else:
                     inactive_topics = []
-                    if topic_a not in self.active_topics:
-                        inactive_topics.append(topic_a)
-                    if topic_b not in self.active_topics:
-                        inactive_topics.append(topic_b)
+                    if self.active_topics is not None:
+                        if topic_a not in self.active_topics:
+                            inactive_topics.append(topic_a)
+                        if topic_b not in self.active_topics:
+                            inactive_topics.append(topic_b)
+                    else:
+                        inactive_topics.extend([topic_a, topic_b])
 
                     safe_path.append({
                         "step": step.get('step'),
@@ -609,93 +649,24 @@ class Tools:
         return [result]
 
     async def save_memory(self, content: str, topic: str = "General") -> Dict:
-        """
-        Save a note to persistent session memory.
-        
-        Args:
-            content: The fact or note to remember
-            topic: Topic this memory belongs to (default: General)
-        
-        Returns:
-            Confirmation with memory ID, or error if limit reached.
-        """
-        if not content or not content.strip():
-            return {"error": "Empty memory content"}
-        
-        content = content.strip()
-        if len(content) > 200:
-            return {
-                "error": f"Memory too long ({len(content)} chars). Max 200. Condense and retry."
-            }
-        
-        normalized_topic = self.topic_config.normalize_topic(topic) if topic else None
-        if not normalized_topic:
-            # If no topic resolved (e.g. General disabled), try to use first active topic
-            normalized_topic = self.active_topics[0] if self.active_topics else None
-            if not normalized_topic:
-                return {"error": "No active topics available to save memory to."}
-        if normalized_topic not in self.active_topics:
-            return {"error": f"Topic '{topic}' is not active. Use an active topic."}
-        
-        memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, normalized_topic)
-        
-        existing = await self.redis.hgetall(memory_key)
-        if len(existing) >= 10:
-            return {
-                "error": f"Memory block '{normalized_topic}' is full (10/10). Use forget_memory to remove outdated entries first.",
-                "current_entries": len(existing)
-            }
-        
-        import uuid
-        from datetime import datetime, timezone
-        
-        memory_id = f"mem_{uuid.uuid4().hex[:8]}"
-        payload = json.dumps({
-            "content": content,
-            "topic": normalized_topic,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "source_session": self.session_id
-        })
-        
-        await self.redis.hset(memory_key, memory_id, payload)
-        
-        await emit(self.session_id, "agent", "memory_saved", {
-            "topic": normalized_topic,
-            "memory_id": memory_id
-        })
-        
-        return {
-            "saved": True,
-            "memory_id": memory_id,
-            "topic": normalized_topic,
-            "content": content
-        }
+        """Save a note to persistent session memory."""
+        if self.memory:
+            return await self.memory.save_memory_dict(content, topic)
+
+        return {"error": "No memory manager configured"}
     
     async def forget_memory(self, memory_id: str) -> Dict:
-        """
-        Remove a memory by ID.
-        
-        Args:
-            memory_id: The ID of the memory to remove
-        
-        Returns:
-            Confirmation or error if not found.
-        """
-        if not memory_id:
-            return {"error": "No memory_id provided"}
-        
-        all_topics = list(set(self.active_topics + list(self.topic_config.raw.keys())))
-        for topic in all_topics:
-            memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, topic)
-            removed = await self.redis.hdel(memory_key, memory_id)
-            if removed:
-                await emit(self.session_id, "agent", "memory_forgotten", {
-                    "topic": topic,
-                    "memory_id": memory_id
-                })
-                return {"removed": True, "memory_id": memory_id, "topic": topic}
-        
-        return {"error": f"Memory '{memory_id}' not found in any block"}
+        """Remove a memory by ID."""
+        if self.memory:
+            return await self.memory.forget_memory_dict(memory_id)
+        return {"error": "No memory manager configured"}
+    
+    
+    async def get_memory_blocks(self, hot_topics: List[str] = None) -> Dict[str, List[Dict]]:
+        """Fetch memory blocks for prompt injection."""
+        if self.memory:
+            return await self.memory.get_memory_blocks_dict(hot_topics)
+        return {}
     
     
     async def search_files(self, query: str, file_name: str = None, limit: int = 5) -> List[Dict]:
@@ -741,40 +712,7 @@ class Tools:
         
         return results
     
-    async def get_memory_blocks(self, hot_topics: List[str]) -> Dict[str, List[Dict]]:
-        """
-        Fetch memory blocks for prompt injection.
-        Always includes General. Adds hot topic blocks.
-        """
-        topics_to_fetch = []
-        if self.topic_config.is_active("General"):
-            topics_to_fetch.append("General")
-        for t in hot_topics:
-            if t not in topics_to_fetch:
-                topics_to_fetch.append(t)
-        
-        blocks = {}
-        
-        for topic in topics_to_fetch:
-            memory_key = RedisKeys.agent_memory(self.user_name, self.session_id, topic)
-            raw = await self.redis.hgetall(memory_key)
-            
-            if not raw:
-                continue
-            
-            entries = []
-            for mem_id, payload in raw.items():
-                data = json.loads(payload)
-                entries.append({
-                    "id": mem_id,
-                    "content": data["content"],
-                    "created_at": data.get("created_at", "")
-                })
-            
-            entries.sort(key=lambda x: x["created_at"])
-            blocks[topic] = entries
-        
-        return blocks
+    
     
     async def web_search(self, query: str, limit: int = 5, freshness: str = None) -> List[Dict]:
         """

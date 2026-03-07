@@ -7,12 +7,13 @@ from typing import List, Dict, Optional
 from loguru import logger
 
 from main.entity_resolve import EntityResolver
-from shared.redisclient import RedisKeys
-from shared.events import emit_community
-from shared.config import get_config_value
-from shared.resource import ResourceManager
-from shared.schema.dtypes import AgentConfig
-from shared.schema.community_tool_schema import COMMUNITY_TOOL_SCHEMAS
+from shared.services.memory import MemoryManager
+from shared.infra.redis import RedisKeys
+from shared.utils.events import emit, emit_community
+from shared.config.base import get_config_value
+from shared.infra.resources import ResourceManager
+from shared.models.schema.dtypes import AgentConfig
+from shared.models.schema.community_tool_schema import COMMUNITY_TOOL_SCHEMAS
 
 from db.community_store import CommunityStore
 from agent.community_tools import CommunityTools
@@ -25,6 +26,7 @@ from agent.internals import (
     build_user_message,
     update_accumulators
 )
+from shared.config.topics import TopicConfig
 
 class CommunityManager:
     """Orchestrates autonomous agent discussions."""
@@ -245,13 +247,25 @@ class CommunityManager:
 
         system_prompt = base_prompt + aac_context
 
+        memory_mgr = MemoryManager(
+            redis=self.resources.redis,
+            user_name=self.user_name,
+            session_id=f"aac_{discussion_id}",
+            agent_id=agent.id,
+            topic_config=TopicConfig(TopicConfig.DEFAULT_CONFIG),
+            on_event=lambda src, evt, data: asyncio.create_task(
+                emit(f"aac_{discussion_id}", src, evt, data)
+            ),
+        )
+
         base_tools = BaseTools(
             user_name=self.user_name,
             store=self.resources.store,
             ent_resolver=resolver,
             redis_client=self.resources.redis,
             session_id=f"aac_{discussion_id}",
-            topic_config=None
+            topic_config=None,
+            memory=memory_mgr
         )
         comm_tools = CommunityTools(self.user_name, base_tools, self.store, discussion_id, agent.id)
 
@@ -486,6 +500,10 @@ class CommunityManager:
                 initial_preferences=args.get("initial_preferences"),
                 initial_icks=args.get("initial_icks")
             )
+            # Assuming 'result' contains the new agent's ID if successful
+            new_agent_id = result.get("id") if isinstance(result, dict) else None
+            if new_agent_id and new_agent_id not in discussion_participants:
+                discussion_participants.append(new_agent_id)
             return {"data": result}
             
         return await execute_tool(comm_tools.base, name, args)
@@ -495,21 +513,13 @@ class CommunityManager:
         loop = asyncio.get_running_loop()
         lines = []
 
-        # Start all tasks concurrently
-        task_stats = loop.run_in_executor(self.resources.executor, self.resources.store.get_graph_stats)
-        task_notable = loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_notable_entities, 8))
-        task_recent_ent = loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_recently_active_entities, 7, 5))
-        task_recent_facts = loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_recent_facts, 7, 10))
-        task_past_disc = loop.run_in_executor(self.resources.executor, partial(self.store.get_recent_discussions, 5))
-        task_insights = loop.run_in_executor(self.resources.executor, partial(self.store.get_discussion_insights, 5))
-
         try:
-            results = await asyncio.gather(
-                task_stats, task_notable, task_recent_ent, 
-                task_recent_facts, task_past_disc, task_insights, 
-                return_exceptions=True
-            )
-            stats, notable, recent_entities, recent_facts, past_discussions, insights = results
+            stats = await loop.run_in_executor(self.resources.executor, self.resources.store.get_graph_stats)
+            notable = await loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_notable_entities, 8))
+            recent_entities = await loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_recently_active_entities, 7, 5))
+            recent_facts = await loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_recent_facts, 7, 10))
+            past_discussions = await loop.run_in_executor(self.resources.executor, partial(self.store.get_recent_discussions, 5))
+            insights = await loop.run_in_executor(self.resources.executor, partial(self.store.get_discussion_insights, 5))
         except Exception as e:
             logger.warning(f"Failed to gather seeding context: {e}")
             return "Knowledge graph is available for exploration."
@@ -572,8 +582,6 @@ class CommunityManager:
             lines.append("")
         elif isinstance(insights, Exception):
             logger.warning(f"Failed to get insights: {insights}")
-
-        return "\n".join(lines) if lines else "Knowledge graph is available for exploration."
 
         return "\n".join(lines) if lines else "Knowledge graph is available for exploration."
 

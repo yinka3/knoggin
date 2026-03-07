@@ -1,8 +1,10 @@
+import html
+
 def get_agent_prompt(
     user_name: str, 
     current_time: str = "", 
     persona: str = "", 
-    agent_name: str = "STELLA",
+    agent_name: str = "Agent",
     memory_context: str = "",
     files_context: str = "",
     agent_rules: str = "",
@@ -26,12 +28,12 @@ def get_agent_prompt(
                 f"<your_memory>\n"
                 f"Notes you saved from previous interactions. Use save_memory to add, forget_memory to remove by ID.\n"
                 f"Do not save things already here. Do not save transient conversation details.\n"
-                f"{memory_context}\n"
+                f"{html.escape(memory_context)}\n"
                 f"</your_memory>\n"
             )
         
         if files_context:
-            memory_section += f"<uploaded_files>\nFiles available in this session. Use search_files to query them.\n{files_context}\n</uploaded_files>\n"
+            memory_section += f"<uploaded_files>\nFiles available in this session. Use search_files to query them.\n{html.escape(files_context)}\n</uploaded_files>\n"
         
         memory_section += "</persistent_context>\n"
 
@@ -39,11 +41,11 @@ def get_agent_prompt(
     if agent_rules or agent_preferences or agent_icks:
         agent_specific_section = "\n<agent_instructions>\n"
         if agent_rules:
-            agent_specific_section += f"<agent_rules>\n{agent_rules}</agent_rules>\n"
+            agent_specific_section += f"<agent_rules>\n{html.escape(agent_rules)}</agent_rules>\n"
         if agent_preferences:
-            agent_specific_section += f"<agent_preferences>\n{agent_preferences}</agent_preferences>\n"
+            agent_specific_section += f"<agent_preferences>\n{html.escape(agent_preferences)}</agent_preferences>\n"
         if agent_icks:
-            agent_specific_section += f"<agent_icks>\n{agent_icks}</agent_icks>\n"
+            agent_specific_section += f"<agent_icks>\n{html.escape(agent_icks)}</agent_icks>\n"
         agent_specific_section += "</agent_instructions>\n"
 
     return f"""You are {agent_name}, operating within the Knoggin knowledge system for {user_name}.
@@ -80,5 +82,5 @@ Before acting, briefly identify:
 {user_name} is about to speak."""
 
 
-def get_fallback_summary_prompt(user_name: str, agent_name: str = "STELLA") -> str:
+def get_fallback_summary_prompt(user_name: str, agent_name: str = "Agent") -> str:
     return f"""Summarize the findings for {user_name}. Be direct. State facts found or explicitly state what is missing."""

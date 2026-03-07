@@ -4,12 +4,13 @@ from typing import Dict, List, Optional
 import uuid
 
 from loguru import logger
+import asyncio
 from main.context import Context
-from shared.topics_config import TopicConfig
-from shared.schema.dtypes import AgentConfig
-from shared.redisclient import RedisKeys
-from shared.resource import ResourceManager
-from shared.config import load_config
+from shared.config.topics import TopicConfig
+from shared.models.schema.dtypes import AgentConfig
+from shared.infra.redis import RedisKeys
+from shared.infra.resources import ResourceManager
+from shared.config.base import load_config
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,11 +21,19 @@ class AppState:
         self.resources = resources
         self.active_sessions = active_sessions
         self.user_name = user_name
+        self._session_locks: Dict[str, asyncio.Lock] = {}
+        self._lock = asyncio.Lock()
     
     async def list_sessions(self) -> Dict[str, dict]:
         try:
             raw = await self.resources.redis.hgetall(RedisKeys.sessions(self.user_name))
-            return {sid: json.loads(data) for sid, data in raw.items()}
+            result = {}
+            for sid, data in raw.items():
+                try:
+                    result[sid] = json.loads(data)
+                except json.JSONDecodeError:
+                    logger.warning(f"Malformed session data for {sid}")
+            return result
         except Exception as e:
             logger.warning(f"Failed to list sessions: {e}")
             return {}  # type: ignore
@@ -84,39 +93,52 @@ class AppState:
         if session_id in self.active_sessions:
             return self.active_sessions[session_id]
         
-        raw = await self.resources.redis.hget(RedisKeys.sessions(self.user_name), session_id)
-        if not raw:
-            return None
+        async with self._lock:
+            if session_id not in self._session_locks:
+                self._session_locks[session_id] = asyncio.Lock()
+            lock = self._session_locks[session_id]
         
-        metadata = json.loads(raw)
+        async with lock:
+            if session_id in self.active_sessions:
+                return self.active_sessions[session_id]
+            
+            raw = await self.resources.redis.hget(RedisKeys.sessions(self.user_name), session_id)
+            if not raw:
+                return None
+            
+            try:
+                metadata = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(f"Malformed session data for {session_id}")
+                return None
 
-        current_topics = await TopicConfig.load(
-            self.resources.redis,
-            self.user_name,
-            session_id
-        )
+            current_topics = await TopicConfig.load(
+                self.resources.redis,
+                self.user_name,
+                session_id
+            )
         
-        topics_to_use = current_topics.raw if current_topics.raw != TopicConfig.DEFAULT_CONFIG else metadata.get("topics_config")
-    
-        context = await Context.create(
-            user_name=self.user_name,
-            resources=self.resources,
-            topics_config=topics_to_use,
-            session_id=session_id,
-            model=metadata.get("model")
-        )
+            topics_to_use = current_topics.raw if current_topics.raw != TopicConfig.DEFAULT_CONFIG else metadata.get("topics_config")
         
-        self.active_sessions[session_id] = context
-        
-        metadata["last_active"] = datetime.now(timezone.utc).isoformat()
-        await self.resources.redis.hset(
-            RedisKeys.sessions(self.user_name),
-            session_id,
-            json.dumps(metadata)
-        )
-        
-        logger.info(f"Resumed session: {session_id}")
-        return context
+            context = await Context.create(
+                user_name=self.user_name,
+                resources=self.resources,
+                topics_config=topics_to_use,
+                session_id=session_id,
+                model=metadata.get("model")
+            )
+            
+            self.active_sessions[session_id] = context
+            
+            metadata["last_active"] = datetime.now(timezone.utc).isoformat()
+            await self.resources.redis.hset(
+                RedisKeys.sessions(self.user_name),
+                session_id,
+                json.dumps(metadata)
+            )
+            
+            logger.info(f"Resumed session: {session_id}")
+            return context
     
     async def close_session(self, session_id: str) -> bool:
         if session_id not in self.active_sessions:
@@ -125,6 +147,7 @@ class AppState:
         context = self.active_sessions[session_id]
         await context.shutdown()
         del self.active_sessions[session_id]
+        self._session_locks.pop(session_id, None)
         
         raw = await self.resources.redis.hget(RedisKeys.sessions(self.user_name), session_id)
         if raw:
@@ -147,7 +170,13 @@ class AppState:
             await self._seed_default_agents()
             raw_agents = await self.resources.redis.hgetall(RedisKeys.agents(self.user_name))
         
-        return [AgentConfig.from_dict(json.loads(data)) for data in raw_agents.values()]
+        agents = []
+        for agent_id, data in raw_agents.items():
+            try:
+                agents.append(AgentConfig.from_dict(json.loads(data)))
+            except json.JSONDecodeError:
+                logger.warning(f"Malformed agent data for {agent_id}")
+        return agents
 
     async def get_agent(self, agent_id: str) -> Optional[AgentConfig]:
         """Get agent by ID."""
@@ -155,8 +184,12 @@ class AppState:
         if not raw:
             return None
             
-        data = json.loads(raw)
-        return AgentConfig.from_dict(data)
+        try:
+            data = json.loads(raw)
+            return AgentConfig.from_dict(data)
+        except json.JSONDecodeError:
+            logger.warning(f"Malformed agent data for {agent_id}")
+            return None
 
     async def get_agent_by_name(self, name: str) -> Optional[AgentConfig]:
         """Get agent by name (case-insensitive)."""
@@ -286,6 +319,30 @@ class AppState:
         
         logger.info("Seeded default agents")
     
+    async def get_session_history_readonly(self, session_id: str, limit: int = 1000) -> List[Dict]:
+        """Read conversation history from Redis without resuming the session."""
+        sorted_key = RedisKeys.recent_conversation(self.user_name, session_id)
+        conv_key = RedisKeys.conversation(self.user_name, session_id)
+        
+        turn_ids = await self.resources.redis.zrange(sorted_key, 0, limit - 1)
+        if not turn_ids:
+            return []
+        
+        turn_data = await self.resources.redis.hmget(conv_key, *turn_ids)
+        
+        turns = []
+        for raw in turn_data:
+            if not raw:
+                continue
+            parsed = json.loads(raw)
+            turns.append({
+                "role": parsed["role"],
+                "content": parsed["content"],
+                "timestamp": parsed["timestamp"]
+            })
+        
+        return turns
+    
     async def delete_session_data(self, session_id: str) -> int:
         """
         Delete all Redis keys associated with a session.
@@ -329,7 +386,7 @@ class AppState:
                 ctx.file_rag.cleanup_session()
         else:
             import os
-            from shared.file_rag import FileRAGService
+            from shared.rag.processor import FileRAGService
             upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
             temp_rag = FileRAGService(
                 session_id=session_id,

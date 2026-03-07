@@ -27,6 +27,12 @@ def command(name: str, description: str = ""):
 
 async def execute(command_name: str, ctx: CommandContext) -> dict:
     """Execute a command by name."""
+    if not command_name:
+        return {
+            "success": False,
+            "error": "Invalid command format"
+        }
+        
     handler = COMMANDS.get(command_name.lower())
     
     if not handler:

@@ -3,9 +3,9 @@ import copy
 from fastapi import APIRouter, Depends, HTTPException, Request
 from api.deps import get_app_state
 from api.state import AppState
-from shared.config import load_config, save_config, get_default_config, deep_merge, redact_config
-from shared.schema.settings import ConfigUpdate
-from shared.schema.tool_schema import TOOL_SCHEMAS
+from shared.config.base import load_config, save_config, get_default_config, deep_merge, redact_config
+from shared.models.schema.settings import ConfigUpdate
+from shared.models.schema.tool_schema import TOOL_SCHEMAS
 
 router = APIRouter()
 
@@ -24,7 +24,7 @@ async def get_config():
 
 @router.get("/developer-modes")
 async def get_developer_modes():
-    from shared.config import get_developer_mode_presets
+    from shared.config.base import get_developer_mode_presets
     return {"modes": get_developer_mode_presets()}
 
 
@@ -147,7 +147,10 @@ async def update_config(
         if llm_cfg:
             state.resources.llm_service.update_settings(
                 api_key=llm_cfg.get("api_key"),
-                agent_model=llm_cfg.get("agent_model")
+                base_url=llm_cfg.get("base_url"),
+                agent_model=llm_cfg.get("agent_model"),
+                extraction_model=llm_cfg.get("extraction_model"),
+                merge_model=llm_cfg.get("merge_model"),
             )
         
         active_count = 0

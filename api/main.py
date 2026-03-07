@@ -2,9 +2,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from loguru import logger
 from fastapi.middleware.cors import CORSMiddleware
-from shared.resource import ResourceManager
+from shared.infra.resources import ResourceManager
 from api.state import AppState
-from shared.config import get_config_value
+from shared.config.base import get_config_value
 
 from api.routes.sessions import router as sessions_router
 from api.routes.chat import router as chat_router
@@ -28,7 +28,7 @@ from api.routes.proposals import router as proposals_router
 async def lifespan(app: FastAPI):
     logger.info("Starting Knoggin...")
     resources = await ResourceManager.initialize()
-    user_name = get_config_value("user_name") or "User"
+    user_name = get_config_value("user_name")
     if not user_name:
         raise RuntimeError("user_name not configured")
     
