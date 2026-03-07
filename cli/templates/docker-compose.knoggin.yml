@@ -1,0 +1,105 @@
+# ──────────────────────────────────────────────────────────
+# Knoggin Infrastructure
+# Managed by `knoggin start` / `knoggin end`
+#
+# This file is safe to modify. Knoggin will not overwrite
+# an existing copy — run `knoggin init --force` to reset.
+# ──────────────────────────────────────────────────────────
+
+services:
+  redis:
+    image: redis:8-alpine
+    container_name: knoggin-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - knoggin_redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  memgraph:
+    image: memgraph/memgraph-mage:latest
+    container_name: knoggin-memgraph
+    ports:
+      - "127.0.0.1:7687:7687"
+      - "127.0.0.1:7444:7444"
+    volumes:
+      - knoggin_mg_lib:/var/lib/memgraph
+      - knoggin_mg_log:/var/log/memgraph
+    command: ["--log-level=WARNING", "--auth-module-mappings="]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "echo 'RETURN 1;' | mgconsole --host localhost --port 7687",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  memgraph-lab:
+    image: memgraph/lab:latest
+    container_name: knoggin-memgraph-lab
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on:
+      memgraph:
+        condition: service_healthy
+    environment:
+      - QUICK_CONNECT_MG_HOST=memgraph
+      - QUICK_CONNECT_MG_PORT=7687
+    restart: unless-stopped
+
+  knoggin-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: knoggin-api
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./config:/app/config
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MEMGRAPH_HOST=memgraph
+      - MEMGRAPH_PORT=7687
+      - CONFIG_DIR=/app/config
+    depends_on:
+      redis:
+        condition: service_healthy
+      memgraph:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  knoggin-ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: knoggin-ui
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on:
+      knoggin-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  knoggin_mg_lib:
+  knoggin_mg_log:
+  knoggin_redis_data:
