@@ -24,7 +24,7 @@ services:
     volumes:
       - knoggin_mg_lib:/var/lib/memgraph
       - knoggin_mg_log:/var/log/memgraph
-    command: ["--log-level=WARNING"]
+    command: ["--log-level=WARNING", "--auth-module-mappings="]
     healthcheck:
       test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --host localhost --port 7687"]
       interval: 10s
@@ -52,9 +52,10 @@ services:
       dockerfile: Dockerfile
     container_name: knoggin-api
     ports:
-      - "127.0.0.1:3000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./config:/app/config
+    env_file: .env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
