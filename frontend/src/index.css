@@ -257,7 +257,8 @@ input[type='number'] {
   will-change: background-position;
 }
 
-.gradient-bg.streaming {
+.gradient-bg.streaming,
+html.streaming .gradient-bg {
   animation-play-state: paused;
 }
 

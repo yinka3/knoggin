@@ -29,3 +29,15 @@ export function deleteSession(sessionId, force = false) {
   const query = force ? '?force=true' : ''
   return apiDelete(`/sessions/${sessionId}${query}`)
 }
+
+export function getSessionMemory(sessionId) {
+  return apiGet(`/sessions/${sessionId}/memory`)
+}
+
+export function exportSession(sessionId) {
+  return apiGet(`/sessions/${sessionId}/export`)
+}
+
+export function exportAllSessions() {
+  return apiGet('/sessions/export/all')
+}

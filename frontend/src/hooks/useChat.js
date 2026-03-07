@@ -13,23 +13,6 @@ function formatCommandResult(command, result) {
     case '/ick':
       return `✅ Saved ick: **"${result.content}"**`
 
-    case '/merge list': {
-      if (!result.proposals?.length) return '📋 No pending merge proposals.'
-      const lines = result.proposals.map(
-        p => `${p.index}. **${p.primary_name}** ← ${p.secondary_name} (score: ${p.score})`
-      )
-      return `📋 **Pending merge proposals:**\n\n${lines.join('\n')}\n\nUse \`/merge approve <index>\` or \`/merge reject <index>\`.`
-    }
-
-    case '/merge approve':
-      return `✅ Merged **${result.secondary}** into **${result.primary}**.\n\n${result.undo_hint}`
-
-    case '/merge reject':
-      return `❌ Rejected merge of **${result.secondary}** into **${result.primary}**.`
-
-    case '/merge undo':
-      return `↩️ Undone! Restored **${result.restored_entity}** (${result.facts_restored} facts, ${result.relationships_restored} relationships recovered).`
-
     default:
       return `✅ \`${command}\` completed successfully.`
   }
@@ -122,7 +105,7 @@ export function useChat(sessionId) {
   }, [sessionId])
 
   const send = useCallback(
-    async content => {
+    async (content, hotTopics = []) => {
       const trimmed = content.trim()
       const currentSessionId = sessionIdRef.current
       if (!currentSessionId || !trimmed) return
@@ -207,7 +190,7 @@ export function useChat(sessionId) {
         await sendMessage(
           currentSessionId,
           content,
-          [],
+          hotTopics,
           (eventType, data) => {
             switch (eventType) {
               case 'thinking':
@@ -251,6 +234,7 @@ export function useChat(sessionId) {
 
               case 'response': {
                 stopReveal()
+                setStreaming(false)
                 setMessages(prev => [
                   ...prev,
                   {
@@ -273,6 +257,7 @@ export function useChat(sessionId) {
 
               case 'clarification': {
                 stopReveal()
+                setStreaming(false)
                 setMessages(prev => [
                   ...prev,
                   {
@@ -317,6 +302,7 @@ export function useChat(sessionId) {
 
               case 'error':
                 stopReveal()
+                setStreaming(false)
                 console.error('Stream error:', data.message)
                 setMessages(prev => [
                   ...prev,

@@ -1,12 +1,13 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
 import { useChat } from '../hooks/useChat'
 import { useSocket } from '@/context/SocketContext'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getConfig } from '@/api/config'
-import { getSession, updateSession } from '@/api/sessions'
+import { getSession, updateSession, exportSession } from '@/api/sessions'
 import { createSession as apiCreateSession } from '@/api/sessions'
+import { getTopics } from '@/api/topics'
 import { toast } from 'sonner'
 import InputBar from '../components/chat/InputBar'
 import MessageList from '../components/chat/MessageList'
@@ -14,12 +15,38 @@ import TopicsDrawer from '../components/chat/TopicsDrawer'
 import { useTools } from '@/context/ToolsContext'
 import WelcomeState from '../components/chat/WelcomeState'
 import FilesDrawer from '../components/chat/FilesDrawer'
-import MemoryDrawer from '../components/chat/MemoryDrawer'
+import AgentNotesDrawer from '../components/chat/AgentNotesDrawer'
 import ChatHeader from '../components/chat/ChatHeader'
 import { listAgents, addAgentMemory } from '@/api/agents'
 import useDelayedLoading from '@/hooks/useDelayedLoading'
 import ToolsDrawer from '../components/tools/ToolsDrawer'
 import MergeInboxDrawer from '../components/chat/MergeInboxDrawer'
+
+async function processSlashCommand(command, currentAgentId) {
+  const match = command.match(/^\/(rules?|prefs?|icks?)\s+(.+)$/i)
+  if (!match) return false
+  
+  if (!currentAgentId) {
+    toast.error('Please select an agent first')
+    return true
+  }
+  
+  const rawCat = match[1].toLowerCase()
+  let category = 'rules'
+  if (rawCat.startsWith('pref')) category = 'preferences'
+  if (rawCat.startsWith('ick')) category = 'icks'
+
+  const content = match[2].trim()
+  
+  try {
+    await addAgentMemory(currentAgentId, category, content)
+    toast.success(`Saved to Agent ${category}`)
+  } catch (err) {
+    console.error('Failed to save memory:', err)
+    toast.error(`Failed to save ${category}`)
+  }
+  return true
+}
 
 export default function ChatPage() {
   const { sessionId } = useParams()
@@ -31,12 +58,13 @@ export default function ChatPage() {
   const [userName, setUserName] = useState('')
   const [topicsOpen, setTopicsOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
-  const [memoryOpen, setMemoryOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
   const [inboxOpen, setInboxOpen] = useState(false)
-  const [memoryCount, setMemoryCount] = useState(0)
+  const [notesOpen, setNotesOpen] = useState(false)
+  const [notesCount, setNotesCount] = useState(0)
   const [fileCount, setFileCount] = useState(0)
   const [inboxCount, setInboxCount] = useState(0)
+  const [hotTopics, setHotTopics] = useState([])
   const {
     messages,
     loading,
@@ -50,24 +78,25 @@ export default function ChatPage() {
   } = useChat(sessionId)
   const showSkeleton = useDelayedLoading(loading)
 
-  // Ref to always hold the latest send function (avoids stale closure in effects)
-  const sendRef = useRef(send)
-  useEffect(() => { sendRef.current = send }, [send])
   const pendingMessageRef = useRef(null)
 
-
   useEffect(() => {
-    getConfig().then(config => {
-      setUserName(config.user_name || '')
-    })
+    getConfig()
+      .then(config => {
+        setUserName(config.user_name || '')
+      })
+      .catch(err => console.error('Failed to get config:', err))
   }, [])
 
   // Pause gradient-bg animation during streaming to free GPU
   useEffect(() => {
-    const bg = document.querySelector('.gradient-bg')
-    if (bg) bg.classList.toggle('streaming', streaming)
+    if (streaming) {
+      document.documentElement.classList.add('streaming')
+    } else {
+      document.documentElement.classList.remove('streaming')
+    }
     return () => {
-      if (bg) bg.classList.remove('streaming')
+      document.documentElement.classList.remove('streaming')
     }
   }, [streaming])
 
@@ -126,24 +155,27 @@ export default function ChatPage() {
         })
         .catch(err => console.error('Failed to load session:', err))
 
+      getTopics(sessionId)
+        .then(data => {
+          setHotTopics(data.hot_topics || [])
+        })
+        .catch(() => {})
+
       loadHistory().then(() => {
         // After history is loaded, send the pending message if one exists
         const pending = pendingMessageRef.current
         if (pending) {
           pendingMessageRef.current = null
-          // Use a small timeout to let useChat hook sync the new sessionIdRef before sending
-          setTimeout(() => {
-            sendRef.current(pending)
-          }, 50)
+          send(pending)
         }
       })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId])
+  }, [sessionId, loadHistory, send])
 
   // userName is already set by the getConfig() call above
 
-  async function handleAgentChange(newAgentId) {
+  const handleAgentChange = useCallback(async (newAgentId) => {
     const prevAgent = currentAgentId
     const prevName = currentAgentName
     setCurrentAgentId(newAgentId)
@@ -159,9 +191,9 @@ export default function ChatPage() {
       setCurrentAgentId(prevAgent)
       setCurrentAgentName(prevName)
     }
-  }
+  }, [currentAgentId, currentAgentName, sessionId])
 
-  async function handleModelChange(newModel) {
+  const handleModelChange = useCallback(async (newModel) => {
     const prev = currentModel
     const effectiveModel = newModel || null
     setCurrentModel(effectiveModel)
@@ -173,9 +205,9 @@ export default function ChatPage() {
       toast.error('Failed to switch model')
       setCurrentModel(prev)
     }
-  }
+  }, [currentModel, sessionId])
 
-  async function handleFirstMessage(message) {
+  const handleFirstMessage = useCallback(async (message) => {
     try {
       const config = await getConfig()
       const topicsConfig = config.default_topics || null
@@ -190,35 +222,31 @@ export default function ChatPage() {
       console.error('Failed to create session:', err)
       toast.error('Failed to start conversation')
     }
-  }
+  }, [setCurrentSessionId, loadSessions, navigate])
 
-  async function handleSend(message) {
-    const match = message.match(/^\/(rules?|prefs?|icks?)\s+(.+)$/i)
-    if (match) {
-      if (!currentAgentId) {
-        toast.error('Please select an agent first')
-        return
-      }
-      
-      const rawCat = match[1].toLowerCase()
-      let category = 'rules'
-      if (rawCat.startsWith('pref')) category = 'preferences'
-      if (rawCat.startsWith('ick')) category = 'icks'
+  const handleSend = useCallback(async (message) => {
+    const isCommand = await processSlashCommand(message, currentAgentId)
+    if (isCommand) return
 
-      const content = match[2].trim()
-      
-      try {
-        await addAgentMemory(currentAgentId, category, content)
-        toast.success(`Saved to Agent ${category}`)
-      } catch (err) {
-        console.error('Failed to save memory:', err)
-        toast.error(`Failed to save ${category}`)
-      }
-      return
+    send(message, hotTopics)
+  }, [currentAgentId, send, hotTopics])
+
+  const handleExport = useCallback(async () => {
+    try {
+      const data = await exportSession(sessionId)
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `knoggin_session_${sessionId.slice(0, 8)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      toast.success('Chat exported')
+    } catch (err) {
+      console.error('Export failed:', err)
+      toast.error('Failed to export chat')
     }
-
-    send(message)
-  }
+  }, [sessionId])
 
   return (
     <div className="flex flex-col h-full">
@@ -229,14 +257,15 @@ export default function ChatPage() {
         onAgentChange={handleAgentChange}
         disabled={streaming}
         totalTokens={totalTokens}
-        memoryCount={memoryCount}
         fileCount={fileCount}
         onOpenTopics={() => setTopicsOpen(true)}
         onOpenTools={() => setToolsOpen(true)}
-        onOpenMemory={() => setMemoryOpen(true)}
         onOpenFiles={() => setFilesOpen(true)}
         onOpenInbox={() => setInboxOpen(true)}
+        onOpenNotes={() => setNotesOpen(true)}
+        onExport={handleExport}
         inboxCount={inboxCount}
+        notesCount={notesCount}
         isChatEmpty={messages.length === 0}
       />
 
@@ -278,12 +307,6 @@ export default function ChatPage() {
       {sessionId && (
         <>
           <TopicsDrawer sessionId={sessionId} open={topicsOpen} onOpenChange={setTopicsOpen} />
-          <MemoryDrawer
-            sessionId={sessionId}
-            open={memoryOpen}
-            onOpenChange={setMemoryOpen}
-            onCountChange={setMemoryCount}
-          />
           <FilesDrawer
             sessionId={sessionId}
             open={filesOpen}
@@ -295,6 +318,12 @@ export default function ChatPage() {
             open={inboxOpen}
             onOpenChange={setInboxOpen}
             onCountChange={setInboxCount}
+          />
+          <AgentNotesDrawer
+            sessionId={sessionId}
+            open={notesOpen}
+            onOpenChange={setNotesOpen}
+            onCountChange={setNotesCount}
           />
         </>
       )}

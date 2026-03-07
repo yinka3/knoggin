@@ -4,7 +4,6 @@ import SessionInfoTooltip from './SessionInfoTooltip'
 import TokenCounter from './TokenCounter'
 import MCPBadge from './MCPBadge'
 import SessionSettingsPopover from './SessionSettingsPopover'
-import SessionTitle from './SessionTitle'
 
 export default function ChatHeader({
   sessionId,
@@ -12,15 +11,15 @@ export default function ChatHeader({
   onAgentChange,
   disabled,
   totalTokens,
-  memoryCount,
   fileCount,
   onOpenTopics,
   onOpenTools,
-  onOpenMemory,
   onOpenFiles,
   onOpenInbox,
+  onOpenNotes,
+  onExport,
   inboxCount,
-  isChatEmpty,
+  notesCount,
 }) {
   if (!sessionId) return null
 
@@ -34,7 +33,6 @@ export default function ChatHeader({
           disabled={disabled}
         />
         <div className="w-px h-4 bg-border/50" />
-        <SessionTitle sessionId={sessionId} isChatEmpty={isChatEmpty} />
         <SessionInfoTooltip sessionId={sessionId} />
         <div className="w-px h-4 bg-border/50" />
         <TokenCounter value={totalTokens} />
@@ -45,12 +43,13 @@ export default function ChatHeader({
       <SessionSettingsPopover
         onOpenTopics={onOpenTopics}
         onOpenTools={onOpenTools}
-        onOpenMemory={onOpenMemory}
         onOpenFiles={onOpenFiles}
         onOpenInbox={onOpenInbox}
-        memoryCount={memoryCount}
+        onOpenNotes={onOpenNotes}
+        onExport={onExport}
         fileCount={fileCount}
         inboxCount={inboxCount}
+        notesCount={notesCount}
       />
     </div>
   )

@@ -13,7 +13,7 @@ const MODE_ICONS = {
   deep: Brain
 }
 
-export default function DeveloperModesSection({ settings, setSettings }) {
+export default function DeveloperModesSection({ setSettings }) {
   const [modes, setModes] = useState([])
   const [loading, setLoading] = useState(true)
   const [activeModeId, setActiveModeId] = useState(null)

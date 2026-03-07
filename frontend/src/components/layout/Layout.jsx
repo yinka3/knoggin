@@ -17,7 +17,7 @@ export default function Layout({ children }) {
   const handleToggle = useCallback(() => {
     setSidebarOpen(prev => {
       const next = !prev
-      try { localStorage.setItem('sidebar-open', String(next)) } catch {}
+      try { localStorage.setItem('sidebar-open', String(next)) } catch (e) { console.error(e) }
       return next
     })
   }, [])

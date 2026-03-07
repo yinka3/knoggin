@@ -68,7 +68,7 @@ export default function OnboardingPage() {
 
   function canProceed() {
     if (step === 1) return userName.trim().length > 0
-    if (step === 2) return apiKey.trim().startsWith('sk-or-')
+    if (step === 2) return apiKey.trim().length > 0
     return true
   }
 
@@ -228,13 +228,13 @@ export default function OnboardingPage() {
               <div className="text-center">
                 <h1 className="text-2xl font-semibold text-foreground mb-2">Connect your brain</h1>
                 <p className="text-muted-foreground">
-                  I use OpenRouter to think. Paste your API key below.
+                  Paste your LLM API key below. We recommend OpenRouter for the widest model selection.
                 </p>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="apiKey" className="text-muted-foreground">
-                  OpenRouter API Key
+                  API Key
                 </Label>
                 <div className="relative">
                   <Input
@@ -243,7 +243,7 @@ export default function OnboardingPage() {
                     value={apiKey}
                     onChange={e => setApiKey(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="sk-or-..."
+                    placeholder="sk-or-... or your provider's key"
                     autoFocus
                     className="bg-muted border-border rounded-xl h-12 text-base pr-12 font-mono"
                   />
@@ -256,9 +256,7 @@ export default function OnboardingPage() {
                     {showKey ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
                 </div>
-                {apiKey.trim().length > 0 && !apiKey.trim().startsWith('sk-or-') && (
-                  <p className="text-xs text-destructive">OpenRouter keys start with sk-or-</p>
-                )}
+
                 <div className="flex items-center justify-between text-xs">
                   <a
                     href="https://openrouter.ai/keys"
@@ -266,7 +264,7 @@ export default function OnboardingPage() {
                     rel="noopener noreferrer"
                     className="text-primary hover:underline flex items-center gap-1"
                   >
-                    Get your key <ExternalLink size={12} />
+                    Get an OpenRouter key <ExternalLink size={12} />
                   </a>
                   <span className="text-muted-foreground">Your key stays local</span>
                 </div>

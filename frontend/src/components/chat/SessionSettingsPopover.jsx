@@ -1,9 +1,9 @@
+/* eslint-disable no-unused-vars */
 import { useState } from 'react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
-import { Settings, Tags, Wrench, BrainCircuit, Paperclip, GitMerge } from 'lucide-react'
+import { Settings, Tags, Wrench, BrainCircuit, Paperclip, GitMerge, StickyNote, Download } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 function MenuRow({ icon: Icon, label, badge, onClick }) {
@@ -28,12 +28,13 @@ function MenuRow({ icon: Icon, label, badge, onClick }) {
 export default function SessionSettingsPopover({
   onOpenTopics,
   onOpenTools,
-  onOpenMemory,
   onOpenFiles,
   onOpenInbox,
-  memoryCount = 0,
+  onOpenNotes,
+  onExport,
   fileCount = 0,
   inboxCount = 0,
+  notesCount = 0,
 }) {
   const [open, setOpen] = useState(false)
 
@@ -74,12 +75,6 @@ export default function SessionSettingsPopover({
         <div className="p-1.5">
           <MenuRow icon={Wrench} label="Tools" onClick={() => handleAction(onOpenTools)} />
           <MenuRow
-            icon={BrainCircuit}
-            label="Memory"
-            badge={memoryCount > 0 ? memoryCount : null}
-            onClick={() => handleAction(onOpenMemory)}
-          />
-          <MenuRow
             icon={Paperclip}
             label="Files"
             badge={fileCount > 0 ? fileCount : null}
@@ -92,6 +87,16 @@ export default function SessionSettingsPopover({
             onClick={() => handleAction(onOpenInbox)}
           />
           <MenuRow icon={Tags} label="Topics" onClick={() => handleAction(onOpenTopics)} />
+          <MenuRow
+            icon={StickyNote}
+            label="Agent Notes"
+            badge={notesCount > 0 ? notesCount : null}
+            onClick={() => handleAction(onOpenNotes)}
+          />
+        </div>
+
+        <div className="border-t border-border p-1.5">
+          <MenuRow icon={Download} label="Export Chat" onClick={() => handleAction(onExport)} />
         </div>
       </PopoverContent>
     </Popover>

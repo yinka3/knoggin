@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/static-components */
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Badge } from '@/components/ui/badge'

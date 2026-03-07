@@ -5,16 +5,6 @@ import { Separator } from '@/components/ui/separator'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown, ChevronRight, ArrowRight } from 'lucide-react'
 
-function BouncingDots() {
-  return (
-    <span className="inline-flex gap-1 ml-2">
-      <span className="w-1.5 h-1.5 bg-accent rounded-full animate-bounce [animation-delay:-0.3s]" />
-      <span className="w-1.5 h-1.5 bg-accent rounded-full animate-bounce [animation-delay:-0.15s]" />
-      <span className="w-1.5 h-1.5 bg-accent rounded-full animate-bounce" />
-    </span>
-  )
-}
-
 function ArgsDisplay({ args }) {
   if (!args || Object.keys(args).length === 0) return null
 
@@ -43,9 +33,7 @@ function ArgsDisplay({ args }) {
   )
 }
 
-function ToolCallItem({ tc, isLast, streaming }) {
-  const isRunning = streaming && isLast && tc.status === 'running'
-
+function ToolCallItem({ tc }) {
   return (
     <div className="py-3 animate-in fade-in slide-in-from-left-2 duration-300">
       {tc.thinking && (
@@ -58,8 +46,6 @@ function ToolCallItem({ tc, isLast, streaming }) {
         <Badge variant="outline" className="text-accent border-accent font-mono">
           {tc.tool}
         </Badge>
-
-        {isRunning && <BouncingDots />}
 
         <ArgsDisplay args={tc.args} />
       </div>
@@ -124,8 +110,6 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
 
   if (toolCalls.length === 0 && !currentThinking) return null
 
-  const hasRunningTool = toolCalls.some(tc => tc.status === 'running')
-
   // Use total_duration from backend metadata (wall-clock), fall back to sum of per-tool durations
   const storedDuration = !streaming
     ? (totalDurationProp || toolCalls.reduce((sum, tc) => sum + (tc.duration || 0), 0))
@@ -142,8 +126,6 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
             {toolCalls.length}
           </Badge>
         )}
-
-        {streaming && hasRunningTool && <BouncingDots />}
 
         {!streaming && toolCalls.length > 0 && (
           <span className="text-primary/60 text-[10px]">✓</span>

@@ -189,7 +189,7 @@ export default function CommunityPage() {
       await toggleCommunity(true)
       setEnabled(true)
       toast.success('Community enabled')
-    } catch (err) {
+    } catch {
       toast.error('Failed to enable community')
     } finally {
       setEnabling(false)

@@ -54,10 +54,7 @@ export default function ConfigGate({ children }) {
   const location = useLocation()
 
   const checkConfig = useCallback(async () => {
-    setTimeout(() => {
-      setFailed(false)
-      setChecked(false)
-    }, 0)
+    setFailed(false)
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {

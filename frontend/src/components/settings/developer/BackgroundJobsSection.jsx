@@ -79,6 +79,14 @@ export default function BackgroundJobsSection({ settings, update }) {
             max={20}
           />
         </SettingRow>
+        <SettingRow label="Max Facts Context" description="Maximum number of recent facts given to the AI during profile creation">
+          <NumberInput
+            value={settings?.jobs?.profile?.max_facts_context}
+            onChange={v => update('jobs.profile.max_facts_context', v)}
+            min={10}
+            max={200}
+          />
+        </SettingRow>
         <SettingRow label="Minimum Conflict Similarity" description="Lowest semantic similarity needed to suspect two facts contradict">
           <NumberInput
             value={settings?.jobs?.profile?.contradiction_sim_low}

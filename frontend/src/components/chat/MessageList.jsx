@@ -3,7 +3,6 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 import { ArrowDown, Network, Loader2, Check, Info } from 'lucide-react'
 import ThinkingBox from './ThinkingBox'
-import ThinkingFace from './ThinkingFace'
 import MarkdownRenderer from './MarkdownRenderer'
 import SourcesArtifact from './SourcesArtifact'
 import { extractMessageFacts } from '@/api/chat'
@@ -76,8 +75,6 @@ export default function MessageList({
   const scrollAreaRef = useRef(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
   const [userScrolled, setUserScrolled] = useState(false)
-  const [showOrb, setShowOrb] = useState(false)
-  const orbTimerRef = useRef(null)
 
   const scrollToBottom = (instant = false) => {
     bottomRef.current?.scrollIntoView({
@@ -120,22 +117,6 @@ export default function MessageList({
     }
   }, [streaming])
 
-  useEffect(() => {
-    const shouldShowOrb =
-      streaming && !currentThinking && currentToolCalls?.length === 0 && !streamingContent
-
-    if (shouldShowOrb) {
-      orbTimerRef.current = setTimeout(() => setShowOrb(true), 350)
-    } else {
-      if (orbTimerRef.current) clearTimeout(orbTimerRef.current)
-      setTimeout(() => setShowOrb(false), 0)
-    }
-
-    return () => {
-      if (orbTimerRef.current) clearTimeout(orbTimerRef.current)
-    }
-  }, [streaming, currentThinking, currentToolCalls, streamingContent])
-
   return (
     <div className="relative h-full">
       <ScrollArea ref={scrollAreaRef} className="h-full pr-4">
@@ -149,25 +130,21 @@ export default function MessageList({
               ))}
             </AnimatePresence>
 
-            {/* Show orb when streaming but nothing else yet — delayed to avoid flash */}
-            {showOrb && (
-              <motion.div 
-                initial={{ opacity: 0, y: 5 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex flex-col gap-1 items-start"
-              >
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span className="font-medium">{agentName}</span>
-                 </div>
-                 <div className="flex items-center gap-3 py-3">
-                   <ThinkingFace size={22} state="searching" />
-                   <span className="text-muted-foreground text-sm">Thinking...</span>
-                 </div>
-              </motion.div>
-            )}
+              {/* Show simple loader when streaming but nothing else yet */}
+              {streaming && !currentThinking && currentToolCalls?.length === 0 && !streamingContent && (
+                <div className="flex flex-col gap-1 items-start">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className="font-medium">{agentName}</span>
+                  </div>
+                  <div className="flex items-center gap-2 py-3">
+                    <Loader2 size={16} className="animate-spin text-muted-foreground" />
+                    <span className="text-muted-foreground text-sm">Thinking...</span>
+                  </div>
+                </div>
+              )}
 
-            {/* Live streaming section */}
-            <AnimatePresence>
+              {/* Live streaming section */}
+              <AnimatePresence>
               {streaming && (currentToolCalls?.length > 0 || currentThinking || streamingContent) && (
                 <motion.div 
                   initial={{ opacity: 0, y: 10 }}
