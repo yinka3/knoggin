@@ -9,7 +9,7 @@ import redis.asyncio as aioredis
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
 from shared.rag.processor import FileRAGService
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.infra.redis import RedisKeys
 
 

@@ -1,7 +1,7 @@
 import asyncio
 from main.prompts import ner_reasoning_prompt
 from shared.services.llm import LLMService
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from main.utils import PRONOUNS, format_vp01_input, is_covered, is_generic_phrase, parse_entities, validate_entity
 from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
@@ -199,7 +199,7 @@ class NLPPipeline:
             if is_covered(span_text, covered_texts[msg_id]):
                 continue
 
-            if not validate_entity(span_text, "General", self.topic_config):
+            if not validate_entity(span_text, "General", self.topic_config, label=label):
                 logger.debug(f"Filtered invalid GLiNER entity: '{span_text}'")
                 gliner_filtered.add(span_text.lower())
                 continue
@@ -239,7 +239,7 @@ class NLPPipeline:
             response = parse_entities(reasoning, min_confidence=self.vp01_min_confidence, topic_config=self.topic_config)
             if response:
                 for entity in response:
-                    if validate_entity(entity.name, entity.topic, self.topic_config):
+                    if validate_entity(entity.name, entity.topic, self.topic_config, label=entity.label):
                         if entity.name.lower() in gliner_filtered:
                             logger.info(f"VP-01 recovered GLiNER-filtered entity: '{entity.name}'")
                         output.append((entity.msg_id, entity.name, entity.label, entity.topic))

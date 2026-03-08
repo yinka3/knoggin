@@ -8,10 +8,10 @@ from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from jobs.jobs_utils import cosine_similarity, enrich_facts_with_sources, find_duplicate_facts, format_vp05_input, has_sufficient_facts, parse_merge_score
 from main.prompts import get_merge_judgment_prompt
-from shared.services.llm import MERGE_MODEL, LLMService
+from shared.services.llm import LLMService
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.utils.events import emit
 from shared.infra.redis import RedisKeys
 

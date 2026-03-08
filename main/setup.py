@@ -12,7 +12,7 @@ from main.utils import format_vp03_input, parse_connection_response
 from jobs.jobs_utils import format_vp04_input, parse_new_facts
 from shared.config.base import get_config_value
 from shared.infra.resources import ResourceManager
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.infra.redis import RedisKeys
 from shared.models.schema.dtypes import Fact
 

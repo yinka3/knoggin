@@ -148,7 +148,7 @@ class BatchResult:
             alias_updated_ids=set(data.get("alias_updated_ids", [])),
             alias_updates={int(k): v for k, v in data.get("alias_updates", {}).items()},
             extraction_result=extraction_result,
-            message_embeddings=data.get("message_embeddings", {}),
+            message_embeddings={int(k): v for k, v in data.get("message_embeddings", {}).items()},
             success=data.get("success", True),
             error=data.get("error")
         )
@@ -172,6 +172,7 @@ class DLQEntry:
     @classmethod
     def from_json(cls, raw: str) -> "DLQEntry":
         data = json.loads(raw)
+        data.pop("batch_size", None)
         return cls(**data)
     
     def is_transient(self, transient_errors: List[str]) -> bool:

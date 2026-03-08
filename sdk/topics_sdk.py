@@ -3,7 +3,7 @@ import re
 from typing import Dict, List, Optional
 from loguru import logger
 
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.services.topic_gen import generate_topics, DEFAULT_TOPICS
 
 

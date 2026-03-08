@@ -6,7 +6,7 @@ import uuid
 from loguru import logger
 import asyncio
 from main.context import Context
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.models.schema.dtypes import AgentConfig
 from shared.infra.redis import RedisKeys
 from shared.infra.resources import ResourceManager

@@ -254,13 +254,13 @@ class EntityResolver:
                 candidate_scores[self._name_to_id[mention_lower]] = 1.0
             
             choices = list(self._name_to_id.keys())
-
+            scorer = fuzz.ratio if len(mention_lower) < 4 else fuzz.WRatio
             results = process.extract(
                 mention_lower,
                 choices,
                 limit=50,
                 score_cutoff=self.candidate_fuzzy_threshold,
-                scorer=fuzz.WRatio
+                scorer=scorer
             )
 
             for alias, fuzz_score, _ in results:
@@ -625,8 +625,8 @@ class EntityResolver:
             "secondary_session": profile_b.get("session_id"),
             "topic_a": topic_a,
             "topic_b": topic_b,
-            "facts_a": facts_by_entity.get(id_a, []),
-            "facts_b": facts_by_entity.get(id_b, []),
+            "facts_a": facts_by_entity[id_a],
+            "facts_b": facts_by_entity[id_b],
             "fuzz_score": fuzz_score,
             "shared_neighbor_count": len(shared_neighbors)
         }

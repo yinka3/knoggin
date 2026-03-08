@@ -13,7 +13,7 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from shared.infra.redis import RedisKeys
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.models.memory import (
     MemoryEntry,
     MemorySaveResult,

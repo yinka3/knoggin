@@ -15,7 +15,7 @@ from main.entity_resolve import EntityResolver
 from main.prompts import (
     get_connection_reasoning_prompt
 )
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from main.utils import ( 
     format_vp03_input, 
     parse_connection_response

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from api.deps import get_app_state
 from api.state import AppState
 from shared.infra.redis import RedisKeys
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.models.schema.tool_schema import ALL_TOOL_NAMES
 router = APIRouter()
 
