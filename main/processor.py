@@ -15,7 +15,7 @@ from main.entity_resolve import EntityResolver
 from main.prompts import (
     get_connection_reasoning_prompt
 )
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from main.utils import ( 
     format_vp03_input, 
     parse_connection_response
@@ -302,14 +302,19 @@ class BatchProcessor:
                         self.ent_resolver.commit_new_aliases(existing_id, new_aliases)
                         alias_ids.add(existing_id)
                         alias_updates[existing_id] = new_aliases
-                else:
-                    verified = await loop.run_in_executor(
-                        self.executor,
-                        self.store.validate_existing_ids, [top_id]
-                    )
-                    if not verified:
-                        logger.warning(f"Zombie candidate {top_id} for '{name}', evicting")
-                        self.ent_resolver.remove_entities([top_id])
+                # NOTE: Zombie eviction — currently unreachable because _boost_candidates
+                # only adds to scores (never reduces below threshold). Keep for future
+                # negative signals (e.g. fact contradiction penalty). See test_processor.py
+                # TestResolveMentions.test_zombie_candidate_evicted for coverage.
+                #
+                # else:
+                #     verified = await loop.run_in_executor(
+                #         self.executor,
+                #         self.store.validate_existing_ids, [top_id]
+                #     )
+                #     if not verified:
+                #         logger.warning(f"Zombie candidate {top_id} for '{name}', evicting")
+                #         self.ent_resolver.remove_entities([top_id])
 
             # New entity — re-check batch dedup before creating
             if ent_id is None:

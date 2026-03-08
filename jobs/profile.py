@@ -10,7 +10,7 @@ from loguru import logger
 import numpy as np
 from db.store import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobResult
-from shared.services.embeddings import EmbeddingService
+from shared.rag.embedding import EmbeddingService
 from shared.services.llm import LLMService
 from main.entity_resolve import EntityResolver
 from main.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt

@@ -65,6 +65,18 @@ class Fact:
             source_msg_id=record.get("source_msg_id"),
             source=record.get("source", "user")
         )
+    
+    def to_dict(self, exclude: set = None) -> dict:
+        exclude = exclude or {"embedding"}
+        result = {}
+        for k in self.__dataclass_fields__:
+            if k in exclude:
+                continue
+            val = getattr(self, k)
+            if isinstance(val, datetime):
+                val = val.isoformat()
+            result[k] = val
+        return result
 
     @staticmethod
     def _parse_dt(val) -> datetime:
@@ -148,7 +160,7 @@ class BatchResult:
             alias_updated_ids=set(data.get("alias_updated_ids", [])),
             alias_updates={int(k): v for k, v in data.get("alias_updates", {}).items()},
             extraction_result=extraction_result,
-            message_embeddings=data.get("message_embeddings", {}),
+            message_embeddings={int(k): v for k, v in data.get("message_embeddings", {}).items()},
             success=data.get("success", True),
             error=data.get("error")
         )
@@ -172,6 +184,7 @@ class DLQEntry:
     @classmethod
     def from_json(cls, raw: str) -> "DLQEntry":
         data = json.loads(raw)
+        data.pop("batch_size", None)
         return cls(**data)
     
     def is_transient(self, transient_errors: List[str]) -> bool:

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from api.deps import get_app_state
 from api.state import AppState
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.services.topics import generate_topics
 
 router = APIRouter()

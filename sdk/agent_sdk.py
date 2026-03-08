@@ -47,7 +47,7 @@ from agent.formatters import (
 )
 from agent.streaming import call_agent_streaming, execute_pending_tools, generate_fallback_summary
 from main.entity_resolve import EntityResolver
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.mcp.bridge import mcp_tools_to_schemas
 from shared.services.rag import FileRAGService
 from shared.models.schema.dtypes import (

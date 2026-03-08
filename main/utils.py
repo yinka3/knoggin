@@ -6,7 +6,7 @@ from loguru import logger
 from typing import Dict
 
 from wordfreq import word_frequency
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
 
@@ -99,7 +99,7 @@ def extract_xml_content(text: str, tag: str) -> Optional[str]:
         return remaining_text.strip()
 
 
-def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
+def validate_entity(name: str, topic: str, topic_config: TopicConfig, label: str = None) -> bool:
     """Filter invalid mentions before resolution."""
     
     if not name or len(name) < 2:
@@ -114,7 +114,8 @@ def validate_entity(name: str, topic: str, topic_config: TopicConfig) -> bool:
     if name.lower() in PRONOUNS:
         return False
     
-    if is_generic_phrase(name):
+    has_specific_label = label and label.lower() not in ("", "general")
+    if not has_specific_label and is_generic_phrase(name):
         return False
     
     if not any(c.isalpha() for c in name):

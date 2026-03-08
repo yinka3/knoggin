@@ -301,3 +301,40 @@ def format_files_context(files: list) -> str:
         lines.append(f"- {f['original_name']} ({size_kb:.0f}KB, {f['chunk_count']} chunks)")
     
     return "\n".join(lines)
+
+
+def format_fact_results(results: List[Dict]) -> str:
+    """Format fact_check results for the agent prompt."""
+    if not results:
+        return "No facts found."
+
+    output = []
+    for entry in results:
+        res_type = entry.get("resolution", "unknown")
+        items = entry.get("results", [])
+
+        if res_type == "fallback":
+            header = (
+                "--- Fact Check Fallback: Entity match not found ---\n"
+                "The system could not resolve a specific entity in the knowledge graph. "
+                "Below is a semantic search over conversation context for related clues:\n"
+            )
+            output.append(f"{header}{format_retrieved_messages(items)}")
+        else:
+            block = f"--- Fact Check ({res_type} match) ---\n"
+            for item in items:
+                name = item.get("entity_name", "Unknown")
+                sim = item.get("similarity", 1.0)
+                facts = item.get("facts", [])
+                
+                block += f"Entity: {name} (Match confidence: {sim:.2f})\n"
+                if facts:
+                    for fact in facts:
+                        # Handle fact dicts if returned as such
+                        f_text = fact.get("content") if isinstance(fact, dict) else str(fact)
+                        block += f"  - {f_text}\n"
+                else:
+                    block += "  - No specific facts recorded\n"
+            output.append(block)
+
+    return "\n\n".join(output)

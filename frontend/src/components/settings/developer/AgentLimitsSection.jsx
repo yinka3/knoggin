@@ -10,6 +10,7 @@ const TOOL_NAMES = [
   { id: 'get_hierarchy', label: 'Get Hierarchy' },
   { id: 'save_memory', label: 'Save Memory' },
   { id: 'forget_memory', label: 'Forget Memory' },
+  { id: 'fact_check', label: 'Fact Check' },
   { id: 'search_files', label: 'Search Files' },
 ]
 

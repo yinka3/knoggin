@@ -25,7 +25,7 @@ from shared.services.graph import write_batch_callback, write_batch_to_graph
 from shared.services.llm import LLMService
 from typing import Dict, List, Optional
 from functools import partial
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore

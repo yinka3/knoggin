@@ -12,6 +12,7 @@ from agent.formatters import (
     format_graph_results,
     format_path_results,
     format_hot_topic_context,
+    format_fact_results,
 )
 from agent.tools import Tools
 from shared.models.memory import PromptContext
@@ -31,6 +32,7 @@ class AgentRunConfig:
         ("search_messages", 6),
         ("get_connections", 8),
         ("search_entity", 8),
+        ("fact_check", 6),
         ("get_recent_activity", 8),
         ("find_path", 8),
         ("get_hierarchy", 8),
@@ -89,10 +91,11 @@ class RetrievedEvidence:
     graph: List[Dict] = field(default_factory=list)
     paths: List[Dict] = field(default_factory=list)
     hierarchy: List[Dict] = field(default_factory=list)
+    facts: List[Dict] = field(default_factory=list)
     sources: List[Dict] = field(default_factory=list)
     
     def has_any(self) -> bool:
-        return bool(self.profiles or self.messages or self.graph or self.paths or self.hierarchy or self.sources)
+        return bool(self.profiles or self.messages or self.graph or self.paths or self.hierarchy or self.facts or self.sources)
 
 
 @dataclass
@@ -148,7 +151,7 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
             data = r.get("result", {}).get("data")
 
             if tool in ("search_messages", "search_entity", "get_connections", 
-                        "get_recent_activity", "find_path"):
+                        "get_recent_activity", "find_path", "fact_check", "get_hierarchy", "search_files", "web_search", "news_search"):
                 count = len(data) if isinstance(data, list) else 0
                 if count > 0:
                     msg += f"- `{tool}`: Found {count} items. (See 'Retrieved Context' below)\n"
@@ -199,6 +202,9 @@ def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
                     (d.get("source"), d.get("target")) for d in data
                     if d.get("source") and d.get("target")
                 }
+            elif tool == "fact_check":
+                # For fact_check, we'll treat all results in the latest call as 'new'
+                pass
 
     if evidence.profiles:
         new_profiles = [p for p in evidence.profiles if p.get("id") in new_profile_ids]
@@ -235,6 +241,9 @@ def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
 
     if evidence.hierarchy:
         msg += f"\n**Hierarchy results:**\n{format_hierarchy_results(evidence.hierarchy)}\n"
+
+    if evidence.facts:
+        msg += f"\n**Fact check results:**\n{format_fact_results(evidence.facts)}\n"
 
     return msg
 
@@ -278,6 +287,11 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             ctx.evidence.hierarchy.append(data)
         elif isinstance(data, list):
             ctx.evidence.hierarchy.extend(data)
+    elif tool_name == "fact_check":
+        if isinstance(data, dict):
+            ctx.evidence.facts.append(data)
+        elif isinstance(data, list):
+            ctx.evidence.facts.extend(data)
     elif tool_name == "search_files":
         if isinstance(data, list) and data and "error" not in data[0]:
             normalized = []
@@ -331,6 +345,14 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Path found: {len(data)} hops", len(data)
         return "No path", 0
     
+    if tool_name == "fact_check":
+        if isinstance(data, dict):
+            res_type = data.get("resolution", "unknown")
+            results = data.get("results", [])
+            count = len(results)
+            return f"Resolved via {res_type} ({count} matches)", count
+        return "No results", 0
+    
     if tool_name in ("save_memory", "forget_memory"):
         if "error" in result:
             return f"Error: {result['error']}", 0
@@ -369,6 +391,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         "search_entity": lambda: tools.search_entity(args.get("query", ""), min(args.get("limit", 5), 5)),
         "get_connections": lambda: tools.get_connections(args.get("entity_name", "")),
         "get_recent_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
+        "fact_check": lambda: tools.fact_check(args.get("entity_name", ""), args.get("query", "")),
         "find_path": lambda: tools.find_path(args.get("entity_a", ""), args.get("entity_b", "")),
         "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both")),
         "save_memory": lambda: tools.save_memory(args.get("content", ""), args.get("topic", "General")),

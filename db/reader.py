@@ -142,7 +142,7 @@ class GraphReader:
                 return [self._hydrate_fact(record) for record in result]
         except Exception as e:
             logger.error(f"Failed to get facts for entity {entity_id}: {e}")
-            return None
+            return []
 
     def get_facts_for_entities(self, entity_ids: List[int], active_only: bool = True) -> Dict[int, List[Fact]]:
         """Batch fetch facts for multiple entities. Returns {entity_id: [Fact, ...]}."""
@@ -178,7 +178,7 @@ class GraphReader:
                 
         except Exception as e:
             logger.error(f"Failed to batch fetch facts: {e}")
-            return None
+            return {eid: [] for eid in entity_ids}
 
     def get_facts_from_message(self, msg_id: int) -> List[Fact]:
         """Fetch all facts extracted from a message."""

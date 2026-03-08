@@ -6,6 +6,7 @@ AAC_READ_TOOLS = [
     "find_path",
     "get_hierarchy",
     "search_messages",
+    "fact_check",
     "get_recent_activity",
     "web_search",
     "news_search"

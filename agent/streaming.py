@@ -31,7 +31,7 @@ from agent.formatters import (
 from shared.mcp.bridge import mcp_tools_to_schemas
 from shared.services.memory import MemoryManager
 from shared.services.llm import LLMService
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.models.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
 from shared.models.schema.tool_schema import get_filtered_schemas, TOOL_SCHEMAS
 from shared.config.base import get_config_value

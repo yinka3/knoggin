@@ -2,41 +2,44 @@
 
 Self-hosted knowledge graph memory for AI agents.
 
-Knoggin extracts entities and relationships from conversations, maintains evolving profiles, and provides grounded context for LLM-powered agents. Privacy-first, self-hosted, explainable.
+> Solo project, actively maintained. The core system works but it hasn't been battle-tested by a community yet. Expect rough edges. Bug reports and feedback are welcome.
+
+Knoggin extracts entities and relationships from conversations, maintains evolving profiles, and gives LLM-powered agents grounded context. Everything traces back to its source message. You can see what the system knows and why.
 
 ## Why Knoggin?
 
-Most AI memory systems are black boxes. You feed in conversations and hope the right context comes back. Knoggin takes a different approach.
+I wanted a memory system where I could see exactly what my agent knows and why it knows it.
 
-Instead of summarizing chunks of text, Knoggin **classifies** conversational data against a user-defined schema. You define the structure — entity types, hierarchies, aliases — through topic configuration, and the system categorizes every entity, relationship, and fact it encounters against that schema. Think spaCy-style NER, but powered by LLMs and shaped by your own domain model.
-
-Every entity, relationship, and fact is traceable back to its source message. You can see what the system knows and why it knows it.
-
-Built for developers who want to own their data and understand their agent's memory.
+Most memory layers summarize chunks of text and hope the right context resurfaces. Knoggin classifies conversational data against a schema you define instead. You set up entity types, hierarchies, and aliases through topic configuration, and the system categorizes every entity, relationship, and fact against that structure. Think spaCy-style NER, but shaped by your own domain model and enhanced by LLMs.
 
 ## Features
 
-### Core
-
-- **Schema-driven extraction**: define your own structure through topic configuration. The system classifies entities against your labels, hierarchies, and aliases rather than guessing what matters.
-- **Entity extraction & resolution**: identifies people, places, and concepts from text. Deterministic resolution handles typos, nicknames, and inconsistent references using fuzzy matching, vector similarity, and graph signals.
-- **Relationship tracking**: builds a graph of connections with message-level evidence and timestamps.
-- **Evolving profiles**: entity summaries update as new information arrives. Contradictions are resolved temporally — new facts supersede old ones with full audit trail.
-- **Merge proposals**: when the system detects duplicate entities, it generates a merge proposal for human review — like a pull request for your knowledge graph.
-- **Topic evolution**: the system periodically re-evaluates your topic configuration based on recent conversations, suggesting new topics or deactivating stale ones.
-- **Session memory blocks**: the agent can save and forget persistent notes scoped to your session, injected directly into its context.
-- **Agent-ready retrieval**: hybrid search combining semantic similarity, keyword matching, and graph traversal.
-- **Developer mode presets**: switch between Speed, Balanced, and Deep Research modes that adjust batch sizes, thresholds, tool limits, and job intervals.
-
-### Integrations
-
-- **Web & news search**: tiered web search (Brave, Tavily, DuckDuckGo) and news search built into the agent's tool set.
-- **File uploads & RAG**: upload documents to a session. The agent indexes and searches them alongside your knowledge graph.
-- **MCP integration**: connect external tools via the Model Context Protocol. Preset support for Google Workspace, Google Maps, GitHub, Slack, and filesystem access.
+- Schema-driven extraction with user-defined entity types, hierarchies, and aliases
+- Entity extraction and resolution using fuzzy matching, vector similarity, and graph signals. Handles typos, nicknames, and inconsistent references deterministically.
+- Relationship tracking with message-level evidence and timestamps
+- Evolving profiles where new facts supersede old ones through temporal contradiction detection, with full audit trail
+- Merge proposals for duplicate entities, surfaced for human review
+- Topic evolution that periodically re-evaluates your schema based on recent conversations
+- Session memory blocks the agent can save/forget, injected into its context
+- Hybrid retrieval combining semantic similarity, keyword matching, and graph traversal
+- Developer mode presets (Speed, Balanced, Deep Research) that adjust batch sizes, thresholds, and job intervals
+- Web and news search (Brave, Tavily, DuckDuckGo) built into the agent's tool set
+- File uploads with RAG, indexed and searchable alongside the knowledge graph
+- MCP integration for external tools. Presets for Google Workspace, Maps, GitHub, Slack, and filesystem access.
 
 ### Experimental
 
-- **Autonomous Agent Community (AAC)**: multiple AI agents autonomously discuss your knowledge graph in the background. They can spawn specialist sub-agents, save insights, and build on each other's findings. Think of it as a mini [OpenClaw](https://openclaw.ai) running inside your knowledge graph — agents taking turns making tool calls and LLM requests without your input. **⚠️ AAC consumes API credits in the background.** At default intervals (every 15–30 minutes), each discussion round generates multiple LLM calls across participating agents. Monitor your usage if you enable this, especially in Deep Research mode.
+Autonomous Agent Community (AAC): multiple agents discuss your knowledge graph in the background, spawning sub-agents and saving insights autonomously. Inspired by [OpenClaw](https://openclaw.ai), but scoped to your knowledge graph rather than general-purpose task execution. Warning: this consumes HEAVY amounts of API credits if not careful. Monitor usage if you enable it.
+
+## Limitations
+
+Extraction is powered by LLMs, which are non-deterministic. In practice this means:
+
+- Extraction quality varies by model. Weaker models miss entities or create more duplicates.
+- Results aren't guaranteed identical across runs with the same input. The merge system exists partly to catch these inconsistencies.
+- The system is as good as the schema you give it. Clear labels and hierarchies produce dramatically better results than vague ones.
+
+Knoggin makes LLM memory structured, inspectable, and correctable. Not infallible.
 
 ## Quick Start
 
@@ -44,23 +47,23 @@ Built for developers who want to own their data and understand their agent's mem
 
 - Python 3.12+
 - Node.js 18+
-- Docker (for Memgraph + Redis)
+- Docker (for Memgraph and Redis)
 - LLM API key (OpenAI, Anthropic, Google, or any OpenAI-compatible provider via [OpenRouter](https://openrouter.ai))
 
 ### Setup
 
 ```bash
-git clone https://github.com/yourusername/knoggin.git
+git clone https://github.com/yinka3/knoggin.git
 cd knoggin
 ```
 
-1. **Start infrastructure:**
+Start infrastructure:
 
 ```bash
 docker-compose up -d
 ```
 
-2. **Start backend:**
+Start backend:
 
 ```bash
 pip install uv  # if not installed
@@ -68,15 +71,15 @@ uv sync
 uv run uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-> **GPU acceleration (optional):** If you have a compatible GPU (NVIDIA CUDA, AMD ROCm, or Apple Silicon), enable it for faster embeddings and NER:
->
-> ```bash
-> KNOGGIN_GPU=true uv run uvicorn api:app --host 0.0.0.0 --port 8000
-> ```
->
-> You can also adjust the thread pool size with `KNOGGIN_WORKERS=8` (default is 4).
+If you have a compatible GPU (NVIDIA CUDA, AMD ROCm, or Apple Silicon), you can enable it for faster embeddings and NER:
 
-3. **Start frontend:**
+```bash
+KNOGGIN_GPU=true uv run uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Thread pool size is configurable with `KNOGGIN_WORKERS=8` (default 4).
+
+Start frontend:
 
 ```bash
 cd frontend
@@ -84,89 +87,49 @@ npm install
 npm run dev
 ```
 
-4. Open `http://localhost:5173` and complete the onboarding flow.
-
-### Configuration
-
-Defaults work out of the box. LLM API keys, model selection, and your display name are configured through the onboarding UI.
+Open `http://localhost:5173` and complete the onboarding flow. LLM API keys, model selection, and your display name are all configured there.
 
 For custom infrastructure hosts, set `REDIS_HOST`, `REDIS_PORT`, `MEMGRAPH_HOST`, or `MEMGRAPH_PORT` in a `.env` file.
 
 ## Architecture
 
-Knoggin separates **write** (extraction) from **read** (retrieval), with background jobs handling maintenance and evolution.
+Knoggin separates write (extraction) from read (retrieval), with background jobs handling maintenance and evolution.
 
 ### Write Path: VEGAPUNK
 
-In _One Piece_, Dr. Vegapunk splits his consciousness into satellites, each handling a specialized aspect of his genius. Knoggin borrows this idea — rather than one monolithic prompt, the write path splits cognitive labor across specialized stages. Each does one thing well, and reasoning stays separate from formatting.
+In One Piece, Dr. Vegapunk splits his consciousness into satellites, each handling a specialized aspect of his genius. Knoggin borrows this idea. Rather than one monolithic prompt, the write path splits cognitive labor across specialized stages. Each does one thing well, and reasoning stays separate from formatting.
 
-_Naming inspired by Dr. Vegapunk from [One Piece](https://en.wikipedia.org/wiki/One_Piece) by Eiichiro Oda._
+Naming inspired by Dr. Vegapunk from [One Piece](https://en.wikipedia.org/wiki/One_Piece) by Eiichiro Oda.
 
-- **VP-01 (NER)**: Named entity recognition. GLiNER zero-shot detection + LLM reasoning to identify entities and classify them against the active topic schema.
-- **Entity Resolution**: Deterministic disambiguation using fuzzy matching, vector similarity, graph co-occurrence, and fact relevance. No LLM call — designed to be fast and predictable.
-- **VP-02 (Connections)**: Relationship extraction. Identifies connections between entities with message-level evidence.
-- **VP-03 (Profiles)**: Fact extraction. Extracts new facts about entities, handles supersedes and invalidations via temporal contradiction detection.
-- **VP-04 (Merge Judgment)**: Evaluates whether two similar entities should be merged. Used by the merge detection job.
+- VP-01 (NER): GLiNER zero-shot detection + LLM reasoning to identify and classify entities against the active topic schema.
+- Entity Resolution: deterministic disambiguation using fuzzy matching, vector similarity, graph co-occurrence, and fact relevance. No LLM call.
+- VP-02 (Connections): relationship extraction with message-level evidence.
+- VP-03 (Profiles): fact extraction with temporal contradiction detection for supersedes and invalidations.
+- VP-04 (Merge Judgment): evaluates whether two similar entities should be merged. Used by the merge detection job.
 
 ### Read Path
 
-The conversational agent uses bounded tool calls to query the graph and synthesize responses with grounded context.
+The agent uses bounded tool calls to query the graph and synthesize responses.
 
-**Graph tools**: `search_entity`, `get_connections`, `get_recent_activity`, `find_path`, `get_hierarchy`
-
-**Message tools**: `search_messages`
-
-**Memory tools**: `save_memory`, `forget_memory`
-
-**File tools**: `search_files`
-
-**Web tools**: `web_search`, `news_search`
-
-**MCP tools**: Dynamically loaded from connected MCP servers
+Graph: `search_entity`, `get_connections`, `get_recent_activity`, `find_path`, `get_hierarchy` · Messages: `search_messages` · Memory: `save_memory`, `forget_memory` · Files: `search_files` · Web: `web_search`, `news_search` · MCP: dynamically loaded from connected servers
 
 ### Background Jobs
 
-An inactivity-based scheduler triggers jobs when the user goes idle, avoiding interference with active conversations.
+A lightweight scheduler polls on a fixed interval, but each job defines its own trigger condition: queue depth, dirty entity volume, message count thresholds, elapsed time, or user idle time. Jobs only run when their specific conditions are met.
 
-**Session jobs** (run at extraction checkpoints):
+Session-scoped jobs run at extraction checkpoints: profile refinement (entity summaries evolve with new information), merge detection (catches duplicates that slip through initial resolution), and topic evolution (re-evaluates schema every N messages).
 
-- **Profile Refinement**: entity summaries evolve with new information
-- **Merge Detection**: catches duplicates that slip through initial resolution, generates merge proposals for user review
-- **Topic Evolution**: re-evaluates topic configuration every N messages based on recent conversation patterns
-
-**Scheduled jobs** (run periodically):
-
-- **Entity Cleanup**: removes orphan entities with no relationships or facts
-- **Fact Archival**: deletes invalidated facts past retention period
-- **DLQ Replay**: retries failed extraction batches on transient errors
-- **AAC Discussion**: triggers autonomous agent community discussions at configurable intervals
+Scheduled jobs run periodically: entity cleanup (orphan removal), fact archival (deletes invalidated facts past retention), DLQ replay (retries failed batches on transient errors), and AAC discussion (triggers autonomous agent rounds at configurable intervals).
 
 ### Stack
 
-- **Frontend**: React, Tailwind CSS, shadcn/ui
-- **Backend**: Python (FastAPI), Memgraph, Redis, OpenRouter
+Frontend: React, Tailwind CSS, shadcn/ui · Backend: Python (FastAPI), Memgraph, Redis, OpenRouter
 
 ## Topic Configuration
 
-Topics are central to how Knoggin organizes and retrieves knowledge. Each topic defines:
+Topics are central to how Knoggin organizes knowledge. Each topic defines labels (valid entity types), hierarchy (parent/child relationships between types), aliases (alternative names for vocabulary variation), an active state (toggle scope without deleting data), and hot topic status (priority context loading).
 
-- **Labels**: entity types valid within the topic (e.g., "person", "company", "project")
-- **Hierarchy**: parent/child relationships between entity types (e.g., a "course" contains "exams")
-- **Aliases**: alternative names for labels to handle vocabulary variation
-- **Active state**: toggle topics on/off to control retrieval scope without deleting data
-- **Hot topics**: mark topics for priority context loading into the agent's prompt
-
-Users define their schema through the settings UI. The Topic Evolution job can also suggest schema changes based on recent conversation patterns.
-
-## Limitations
-
-Knoggin's extraction pipeline is powered by LLMs, which are non-deterministic by nature. This means:
-
-- **Extraction quality varies by model.** Stronger models produce more accurate entity recognition. Weaker models will miss entities or create duplicates more frequently.
-- **Results are not guaranteed to be identical** across runs, even with the same input. The merge proposal system exists partly to catch inconsistencies the extraction pipeline introduces.
-- **The system is as good as the schema you give it.** A well-defined topic configuration with clear labels and hierarchies yields dramatically better results than a vague one.
-
-Knoggin does not claim to be a perfect knowledge base. It makes LLM memory structured, inspectable, and correctable — not infallible.
+You define your schema through the settings UI. The topic evolution job can also suggest changes based on recent conversation patterns.
 
 ## License
 

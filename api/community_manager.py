@@ -26,7 +26,7 @@ from agent.internals import (
     build_user_message,
     update_accumulators
 )
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 
 class CommunityManager:
     """Orchestrates autonomous agent discussions."""

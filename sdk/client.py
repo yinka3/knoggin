@@ -23,7 +23,7 @@ from main.entity_resolve import EntityResolver
 from agent.tools import Tools
 from shared.services.memory import MemoryManager
 from shared.services.rag import FileRAGService
-from shared.config.topics import TopicConfig
+from shared.config.topics_config import TopicConfig
 from shared.infra.redis import RedisKeys
 
 

@@ -97,7 +97,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "A fallback tool for raw keyword recall. "
                 "It searches exact words in the chat logs. "
-                "Use this ONLY when: 1) The user asks for a direct quote ('What exactly did I say?'), 2) You need to find a specific date/time, or 3) The graph tools failed to find the concept."
+                "Use this ONLY when: 1) The user asks for a direct quote ('What exactly did I say?'), "
+                "2) You need to find a specific date/time, or "
+                "3) Both search_entity and fact_check failed to find the concept."
             ),
             "parameters": {
                 "type": "object",
@@ -147,6 +149,36 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["question"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fact_check",
+            "description": (
+                "Retrieve and verify stored facts about a specific entity from the knowledge graph. "
+                "Use this when you need to confirm what the system knows, check if something is true, "
+                "or recall detailed history about an entity. This returns the full fact record including "
+                "timestamps and invalidated facts — use it over search_entity when you need comprehensive "
+                "or historical fact data, not just a profile overview. The system handles name resolution "
+                "automatically. If no matching entity is found in the knowledge graph, "
+                "the system will fallback to a semantic search over conversation history "
+                "to find relevant clues."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_name": {
+                        "type": "string",
+                        "description": "The entity to look up facts for. Does not need to be exact — the system resolves aliases, partial names, and similar matches."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "A natural language hint describing what you're looking for. Does not need to match any stored fact exactly — used to narrow results when the entity has many facts."
+                    }
+                },
+                "required": ["entity_name", "query"]
             }
         }
     },
@@ -278,7 +310,7 @@ TOOL_SCHEMAS = [
                 "required": ["query"]
             }
         }
-    }
+    },
 ]
 
 ALL_TOOL_NAMES = [
@@ -287,6 +319,7 @@ ALL_TOOL_NAMES = [
     "find_path",
     "get_hierarchy",
     "search_messages",
+    "fact_check",
     "get_recent_activity",
     "save_memory",
     "forget_memory",
