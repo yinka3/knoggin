@@ -99,8 +99,21 @@ class NLPPipeline:
                 logger.debug(f"  -> Filtered (pronoun)")
                 continue
             
-            # for frequent names like chris
-            if e["label"] == "person":
+            # Trust specific labels from our schema even if they are common dictionary words.
+            # (e.g. "Notion" is a common word but a valid company entity)
+            if e["label"] and e["label"].lower() != "general":
+                filtered.append(e)
+                continue
+            
+            # If capitalized at all, it's a strong signal of a proper noun in middle of text
+            if any(c.isupper() for c in span):
+                filtered.append(e)
+                continue
+            
+            # Using spacy POS tagging as a tie-breaker for lower-case mentions
+            # Note: GLiNER span might not align perfectly with spacy tokens, so we tag the span itself
+            temp_doc = self._nlp(span)
+            if any(t.pos_ == "PROPN" for t in temp_doc):
                 filtered.append(e)
                 continue
 

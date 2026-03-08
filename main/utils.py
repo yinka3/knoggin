@@ -114,7 +114,11 @@ def validate_entity(name: str, topic: str, topic_config: TopicConfig, label: str
     if name.lower() in PRONOUNS:
         return False
     
-    if label != "person" and is_generic_phrase(name):
+    # Only apply generic phrase filtering if we don't have a high-signal label or capitalization.
+    is_general = not label or label.lower() == "general"
+    is_capitalized = any(c.isupper() for c in name)
+    
+    if is_general and not is_capitalized and is_generic_phrase(name):
         return False
     
     if not any(c.isalpha() for c in name):
