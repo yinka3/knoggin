@@ -142,7 +142,10 @@ class EntityResolver:
             return eid
         return None
     
-
+    def get_profile(self, entity_id: int) -> Optional[dict]:
+        with self._lock:
+            return self.entity_profiles.get(entity_id)
+    
     def get_profiles(self) -> Dict[int, Dict]:
         with self._lock:
             return dict(list(self.entity_profiles.items()))

@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 
 from loguru import logger
 import redis.asyncio as aioredis
+from jobs.jobs_utils import cosine_similarity
 from main.entity_resolve import EntityResolver
 from db.store import MemGraphStore
 from shared.rag.processor import FileRAGService
@@ -647,6 +648,97 @@ class Tools:
             result["children"] = children
         
         return [result]
+    
+    async def fact_check(self, entity_name: str, query: str) -> Dict:
+        """
+        Retrieve and verify stored facts about a specific entity from the knowledge graph.
+        Uses a resolution cascade: exact lookup → vector search → message search fallback.
+
+        Args:
+            entity_name: The entity to look up facts for.
+            query: A natural language hint describing what you're looking for.
+
+        Returns:
+            Dict with resolution method and matching facts or search results.
+        """
+        loop = asyncio.get_running_loop()
+
+        entity_id = await loop.run_in_executor(None, self.resolver.get_id, entity_name)
+
+        if entity_id is not None:
+            facts = await loop.run_in_executor(
+                None,
+                lambda: self.store.get_facts_for_entity(entity_id, active_only=False)
+            )
+
+            profile = self.resolver.get_profile(entity_id)
+            canonical = profile["canonical_name"] if profile else entity_name
+
+            return {
+                "resolution": "exact",
+                "results": [
+                    {
+                        "entity_name": canonical,
+                        "similarity": 1.0,
+                        "facts": [f.to_dict() for f in (facts or [])]
+                    }
+                ]
+            }
+
+        embedding = await self.embedding_service.encode_single(entity_name)
+
+        candidates = await loop.run_in_executor(
+            None,
+            lambda: self.store.search_entities_by_embedding(embedding, limit=5, score_threshold=0.69)
+        )
+
+        if candidates:
+            candidate_ids = [eid for eid, _ in candidates]
+            similarity_map = {eid: sim for eid, sim in candidates}
+
+            facts_by_entity = await loop.run_in_executor(
+                None,
+                lambda: self.store.get_facts_for_entities(candidate_ids, active_only=False)
+            )
+
+            total_facts = sum(len(facts) for facts in facts_by_entity.values())
+
+            if total_facts > 1000:
+                query_embedding = await self.embedding_service.encode_single(query)
+
+                for eid, facts in facts_by_entity.items():
+                    scored = []
+                    for fact in facts:
+                        if fact.embedding:
+                            sim = cosine_similarity(query_embedding, fact.embedding)
+                            scored.append((fact, sim))
+                        else:
+                            scored.append((fact, 0.0))
+
+                    scored.sort(key=lambda x: x[1], reverse=True)
+                    facts_by_entity[eid] = [f for f, _ in scored[:500]]
+
+            results = []
+            for eid in candidate_ids:
+                profile = self.resolver.get_profile(eid)
+                canonical = profile["canonical_name"] if profile else str(eid)
+
+                results.append({
+                    "entity_name": canonical,
+                    "similarity": similarity_map[eid],
+                    "facts": [f.to_dict() for f in facts_by_entity.get(eid, [])]
+                })
+
+            return {
+                "resolution": "vector",
+                "results": results
+            }
+
+        fallback = await self.search_messages(query)
+        return {
+            "resolution": "fallback",
+            "results": fallback
+        }
 
     async def save_memory(self, content: str, topic: str = "General") -> Dict:
         """Save a note to persistent session memory."""

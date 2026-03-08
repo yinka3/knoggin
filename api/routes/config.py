@@ -56,12 +56,12 @@ async def get_tools(request: Request):
 
     standard_tools = []
     for tool_id in ["search_entity", "save_memory", "forget_memory", "get_connections", 
-                    "find_path", "get_hierarchy", "search_messages", "get_recent_activity", "search_files", "web_search", "news_search"]:
+                    "find_path", "get_hierarchy", "search_messages", "get_recent_activity", "fact_check", "search_files", "web_search", "news_search"]:
         schema = schema_map.get(tool_id, {})
         group_map = {
             "search_entity": "Memory", "save_memory": "Memory", "forget_memory": "Memory",
             "get_connections": "Graph", "find_path": "Graph", "get_hierarchy": "Graph",
-            "search_messages": "History", "get_recent_activity": "History",
+            "search_messages": "History", "get_recent_activity": "History", "fact_check": "History",
             "search_files": "RAG",
             "web_search": "Search",
             "news_search": "Search",

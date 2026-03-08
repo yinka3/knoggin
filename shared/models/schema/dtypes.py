@@ -65,6 +65,18 @@ class Fact:
             source_msg_id=record.get("source_msg_id"),
             source=record.get("source", "user")
         )
+    
+    def to_dict(self, exclude: set = None) -> dict:
+        exclude = exclude or {"embedding"}
+        result = {}
+        for k in self.__dataclass_fields__:
+            if k in exclude:
+                continue
+            val = getattr(self, k)
+            if isinstance(val, datetime):
+                val = val.isoformat()
+            result[k] = val
+        return result
 
     @staticmethod
     def _parse_dt(val) -> datetime:

@@ -91,6 +91,12 @@ const CORE_TOOLS = [
     category: 'Web',
     description: 'Find recent articles and current events to stay up to date.',
   },
+  {
+    id: 'fact_check',
+    label: 'Verify Facts',
+    category: 'Memory',
+    description: 'Resolve and verify specific facts about a person or project from the graph.',
+  },
 ]
 
 export default function AgentEditorModal({
