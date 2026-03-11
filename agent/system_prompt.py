@@ -57,12 +57,18 @@ def get_agent_prompt(
 {agent_specific_section}
 <system_guidelines>
 You have access to tools that browse and manage {user_name}'s knowledge graph and memory.
-- Use tools naturally to pull facts, analyze relationships, or review past conversations. If the graph lacks info, state that directly.
-- Prefer structured knowledge (search_entity) over raw text parsing (search_messages).
-- Use get_recent_activity for temporal questions ("lately", "this week").
-- Use request_clarification if the query is too vague to act on.
-</system_guidelines>
 
+Tool selection priority:
+1. fact_check — use first for any factual question about a specific entity. This returns verified, stored facts directly.
+2. search_entity — use for entity profiles, relationships, and discovering connections.
+3. get_connections / get_hierarchy — use when you need full relationship networks or parent-child structures.
+4. get_recent_activity — use for temporal questions ("lately", "this week").
+5. search_messages — use only as a last resort when structured tools above return nothing relevant. This is raw text search, not summarized knowledge.
+
+When answering questions about {user_name} directly (their attributes, preferences, history), search for their entity profile using fact_check("{user_name}") or search_entity("{user_name}").
+
+If the graph lacks info, state that directly. Use request_clarification if the query is too vague to act on.
+</system_guidelines>
 
 <skip_tools>
 Respond directly WITHOUT tools when:
@@ -72,12 +78,7 @@ Respond directly WITHOUT tools when:
 - General knowledge unrelated to {user_name}'s data
 </skip_tools>
 {memory_section}
-<thinking>
-Before acting, briefly identify:
-- Intent: fact, relationship, or temporal?
-- Tool: which fits best?
-- Gap: need clarification first?
-</thinking>
+Before acting, briefly identify the intent (fact, relationship, or temporal), the best tool, and whether you need clarification first.
 
 {user_name} is about to speak."""
 

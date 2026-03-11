@@ -167,19 +167,14 @@ class EntityResolver:
         return self.store.get_entity_embedding(entity_id)
         
 
-    def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
+    async def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
         Compute embeddings for a batch of texts (used by Processor).
         """
         if not texts:
             return []
             
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            return asyncio.run_coroutine_threadsafe(self.embedding_service.encode(texts), loop).result()
-        except RuntimeError:
-            return asyncio.run(self.embedding_service.encode(texts))
+        return await self.embedding_service.encode(texts)
         
     
     def validate_existing(self, canonical_name: str, mentions: List[str]) -> Tuple[Optional[int], bool, List[str]]:
@@ -240,7 +235,7 @@ class EntityResolver:
         return {token for token, ent_ids in token_to_entities.items() 
                 if len(ent_ids) >= self.generic_token_freq}
     
-    def get_candidate_ids(
+    async def get_candidate_ids(
         self, 
         mention: str,
         precomputed_embedding: List[float] = None
@@ -275,31 +270,29 @@ class EntityResolver:
         vector = precomputed_embedding
         if vector is None:
             try:
-                import asyncio
-                try:
-                    loop = asyncio.get_running_loop()
-                    vector = asyncio.run_coroutine_threadsafe(self.embedding_service.encode_single(mention), loop).result()
-                except RuntimeError:
-                    vector = asyncio.run(self.embedding_service.encode_single(mention))
+                vector = await self.embedding_service.encode_single(mention)
             except Exception as e:
                 logger.warning(f"Encoding failed: {e}")
                 vector = None
         
         vector_results = []
         if vector:
-            vector_results = self.store.search_entities_by_embedding(
-                vector, 
-                limit=5, 
-                score_threshold=self.candidate_vector_threshold
-            )
-        
+            try:
+                vector_results = self.store.search_entities_by_embedding(
+                        vector, 
+                        limit=5, 
+                        score_threshold=self.candidate_vector_threshold
+                    )
+            except Exception as e:
+                logger.warning(f"Vector search failed, using fuzzy only: {e}")
+                vector_results = []
         for eid, vec_score in vector_results:
             if eid:
                 candidate_scores[eid] = max(candidate_scores.get(eid, 0), vec_score)
 
         return sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
     
-    def register_entity(
+    async def register_entity(
         self, 
         entity_id: int, 
         canonical_name: str, 
@@ -320,12 +313,7 @@ class EntityResolver:
         else:
             text_to_embed = f"{canonical_name} ({entity_type})"
 
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            embedding = asyncio.run_coroutine_threadsafe(self.embedding_service.encode_single(text_to_embed), loop).result()
-        except RuntimeError:
-            embedding = asyncio.run(self.embedding_service.encode_single(text_to_embed))
+        embedding = await self.embedding_service.encode_single(text_to_embed)
         
         with self._lock:
             logger.info(f"Adding entity {entity_id}-{canonical_name} to resolver indexes.")
@@ -355,7 +343,7 @@ class EntityResolver:
         return embedding
     
 
-    def compute_embedding(self, entity_id: int, resolution_text: str) -> List[float]:
+    async def compute_embedding(self, entity_id: int, resolution_text: str) -> List[float]:
         with self._lock:
             profile = self.entity_profiles.get(entity_id)
             if not profile:
@@ -364,12 +352,7 @@ class EntityResolver:
             
             logger.info(f"Updating embedding for entity {entity_id}-{profile['canonical_name']}")
         
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            embedding = asyncio.run_coroutine_threadsafe(self.embedding_service.encode_single(resolution_text), loop).result()
-        except RuntimeError:
-            embedding = asyncio.run(self.embedding_service.encode_single(resolution_text))
+        embedding = await self.embedding_service.encode_single(resolution_text)
         
         with self._lock:
             if entity_id in self.entity_profiles:

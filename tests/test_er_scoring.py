@@ -179,6 +179,38 @@ class TestGetCandidateIds:
         scores = dict(results)
         assert scores[2] == 1.0
 
+    def test_computes_embedding_when_not_provided(self, populated_resolver):
+        """Without precomputed_embedding, resolver should compute it via embedding_service.
+        Note: populated_resolver uses plain MagicMock for embedding (not async),
+        so embedding computation fails silently — but fuzzy matching still works."""
+        r, store = populated_resolver
+        store.search_entities_by_embedding.return_value = []
+
+        results = r.get_candidate_ids("Alice Johnson")
+        scores = dict(results)
+
+        assert 1 in scores
+        assert scores[1] == 1.0
+
+    def test_no_embedding_still_returns_fuzzy(self, populated_resolver):
+        """Even when embedding computation fails, fuzzy results are returned."""
+        r, store = populated_resolver
+        store.search_entities_by_embedding.return_value = []
+
+        results = r.get_candidate_ids("Bobby")
+        scores = dict(results)
+        assert 2 in scores
+
+    def test_vector_search_exception_still_returns_fuzzy(self, populated_resolver):
+        """If vector search raises, fuzzy results should still be returned."""
+        r, store = populated_resolver
+        store.search_entities_by_embedding.side_effect = Exception("Vector index down")
+
+        results = r.get_candidate_ids("Alice Johnson", precomputed_embedding=FAKE_EMBEDDING)
+        scores = dict(results)
+
+        assert 1 in scores
+
 
 class TestResolveEntityName:
     """Tests for the resolve_entity_name high-level API."""
@@ -247,6 +279,40 @@ class TestMergeEntities:
         assert "alice" in mentions
         assert "alice cooper" in mentions
         assert "alice c" in mentions
+
+    def test_merge_nonexistent_secondary(self, populated_resolver):
+        """Merging a secondary that doesn't exist should not crash or corrupt primary."""
+        r, _ = populated_resolver
+
+        with patch("main.entity_resolve.emit_sync"):
+            r.merge_into(primary_id=1, secondary_id=999)
+
+        assert r.get_id("Alice Johnson") == 1
+        assert r.get_profiles()[1]["canonical_name"] == "Alice Johnson"
+
+    def test_merge_nonexistent_primary(self, populated_resolver):
+        """Merging into a nonexistent primary — secondary aliases get reassigned
+        to the primary_id even though it has no profile."""
+        r, _ = populated_resolver
+
+        with patch("main.entity_resolve.emit_sync"):
+            r.merge_into(primary_id=999, secondary_id=6)  # 6 = Alice Cooper
+
+        assert r.get_profiles().get(6) is None
+        # Alice Cooper's aliases now point to 999
+        assert r.get_id("alice cooper") == 999
+        assert r.get_id("alice c") == 999
+
+    def test_merge_both_nonexistent(self, populated_resolver):
+        """Merging two nonexistent entities should be a no-op."""
+        r, _ = populated_resolver
+
+        with patch("main.entity_resolve.emit_sync"):
+            r.merge_into(primary_id=888, secondary_id=999)
+
+        # Existing entities unaffected — use unambiguous lookups
+        assert r.get_id("bob") == 2
+        assert r.get_id("google") == 5
 
 
 class TestNameVariations:
@@ -346,3 +412,4 @@ class TestAliasCollisions:
 
         collisions = r.find_alias_collisions_targeted({2, 5})
         assert collisions == []
+

@@ -59,9 +59,7 @@ def create_mcp_app(get_resources) -> FastMCP:
                 if name.lower() in aliases:
                     return r["id"]
 
-        name_embedding = await loop.run_in_executor(
-            _executor(), embedding.encode_single, name
-        )
+        name_embedding = await embedding.encode_single(name)
         vec_results = await loop.run_in_executor(
             _executor(),
             lambda: store.search_entities_by_embedding(name_embedding, limit=3, score_threshold=0.88)
@@ -205,7 +203,7 @@ def create_mcp_app(get_resources) -> FastMCP:
         loop = asyncio.get_running_loop()
 
         try:
-            vector = await loop.run_in_executor(_executor(), embedding.encode_single, entity_name)
+            vector = await embedding.encode_single(entity_name)
             matches = await loop.run_in_executor(
                 _executor(),
                 lambda: store.search_entities_by_embedding(vector, limit=1, score_threshold=0.7)
@@ -250,7 +248,7 @@ def create_mcp_app(get_resources) -> FastMCP:
         loop = asyncio.get_running_loop()
 
         try:
-            vector = await loop.run_in_executor(_executor(), embedding.encode_single, query)
+            vector = await embedding.encode_single(query)
 
             vec_results = await loop.run_in_executor(
                 _executor(),
@@ -352,7 +350,7 @@ def create_mcp_app(get_resources) -> FastMCP:
             if entity_id is None:
                 return json.dumps({"error": f"Failed to resolve or create entity '{entity_name}'"})
 
-            fact_embedding = await loop.run_in_executor(_executor(), embedding.encode_single, fact)
+            fact_embedding = await embedding.encode_single(fact)
 
             
 
@@ -373,9 +371,7 @@ def create_mcp_app(get_resources) -> FastMCP:
                 _executor(), store.get_facts_for_entity, entity_id, True
             )
             resolution_text = f"{entity_name}. " + " ".join([f.content for f in all_facts])
-            new_embedding = await loop.run_in_executor(
-                _executor(), embedding.encode_single, resolution_text
-            )
+            new_embedding = await embedding.encode_single(resolution_text)
             await loop.run_in_executor(
                 _executor(),
                 lambda: store.update_entity_embedding(entity_id, new_embedding)

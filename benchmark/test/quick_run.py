@@ -1,67 +1,116 @@
 import asyncio
-import json
 import sys
+import json
+import os
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from agent.orchestrator import run
-from db.store import MemGraphStore
+from shared.infra.resources import ResourceManager
 from main.context import Context
+from main.setup import _create_user_entity
+from benchmark.test.run_eval import (
+    DATASET_FILES, 
+    USER_NAME, 
+    ask_agent,
+    logger
+)
 
-USER_NAME = "TestUser"
-
-async def answer_question_only(instance_idx: int):
-    dataset_file = "benchmark/test/test_multi_session.json" 
+async def quick_run_agent(dataset: str, idx: int, session_id: str = None):
+    dataset_file = Path(__file__).parent / DATASET_FILES[dataset]
     with open(dataset_file, "r") as f:
         questions = json.load(f)
-    
-    q = questions[instance_idx]
-    
-    print(f"\nAnswering instance {instance_idx}: {q['question']}")
-    
-    executor = ThreadPoolExecutor(max_workers=5)
-    store = MemGraphStore()
-    
-    context = await Context.create(
-        user_name=USER_NAME,
-        store=store,
-        cpu_executor=executor,
-        topics=[]
-    )
-    
-    try:
-        topics = context.store.get_topics_by_status()
-        active = topics.get("active", []) + topics.get("hot", [])
         
-        result = await run(
-            user_query=q['question'],
-            user_name=USER_NAME,
-            conversation_history=[],
-            hot_topics=[],
-            active_topics=active,
-            llm=context.llm,
-            store=context.store,
-            ent_resolver=context.ent_resolver,
-            redis_client=context.redis_client,
-            slim_hot_context=True
+    if idx >= len(questions):
+        print(f"Index {idx} out of range. Max: {len(questions) - 1}")
+        sys.exit(1)
+        
+    q = questions[idx]
+
+    # Resolve session_id: CLI arg > eval result file > fail
+    if not session_id:
+        result_file = Path(__file__).parent / f"eval_result_{dataset}_{idx}.json"
+        if result_file.exists():
+            with open(result_file, "r") as f:
+                prev = json.load(f)
+                session_id = prev.get("session_id")
+                if session_id:
+                    logger.info(f"Reusing session_id from previous eval: {session_id}")
+
+    if not session_id:
+        logger.error(
+            "No session_id available. Run run_eval.py first to ingest data, "
+            "or pass a session_id as the third argument."
         )
-        
-        response = result.get("response") or result.get("question", "No response")
-        
-        print(f"Expected: {q['answer']}")
-        print(f"Got: {response}")
-        
-    finally:
-        await context.redis_client.aclose()
-        store.close()
-        executor.shutdown(wait=False)
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python manual_answer.py <instance_index>")
         sys.exit(1)
     
-    asyncio.run(answer_question_only(int(sys.argv[1])))
+    logger.info(f"\n{'='*60}")
+    logger.info(f"QUICK RUN - SKIPPING INGESTION")
+    logger.info(f"Dataset: {dataset} | Instance {idx}: {q['question_type']}")
+    logger.info(f"Session: {session_id}")
+    logger.info(f"Question: {q['question']}")
+    logger.info(f"Expected: {q['answer']}")
+    logger.info(f"Question Date: {q['question_date']}")
+    logger.info(f"{'='*60}")
+
+    load_dotenv()
+    resource = await ResourceManager.initialize()
+    
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if api_key:
+        resource.llm_service.update_settings(api_key=api_key)
+        
+    await _create_user_entity(resource, USER_NAME)
+    
+    topics = {
+        "General": {"active": True, "labels": [], "hierarchy": {}, "aliases": []},
+        "Identity": {"active": True, "labels": ["person"], "hierarchy": {}, "aliases": []}
+    }
+
+    context = await Context.create(
+        user_name=USER_NAME,
+        resources=resource,
+        topics_config=topics,
+        session_id=session_id
+    )
+
+    try:
+        logger.info("Asking AGENT directly (bypassing ingest)...")
+        response, tools_used = await ask_agent(context, q["question"], q["question_date"])
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"RESULTS")
+        logger.info(f"{'='*60}")
+        logger.info(f"Question: {q['question']}")
+        logger.info(f"Expected: {q['answer']}")
+        logger.info(f"AGENT: {response}")
+        logger.info(f"Tools Used: {tools_used}")
+        logger.info(f"{'='*60}")
+    finally:
+        await context.shutdown()
+        await resource.shutdown()
+
+async def main():
+    if len(sys.argv) < 3:
+        print("Usage: python quick_run.py <dataset> <index> [session_id]")
+        print(f"  dataset: {list(DATASET_FILES.keys())}")
+        print("  index: question index (0-49)")
+        print("  session_id: (optional) reuse a specific session, auto-detected from eval results")
+        print("Example: python quick_run.py multi 0")
+        sys.exit(1)
+        
+    dataset = sys.argv[1]
+    
+    if dataset not in DATASET_FILES:
+        print(f"Unknown dataset: {dataset}")
+        print(f"Valid options: {list(DATASET_FILES.keys())}")
+        sys.exit(1)
+        
+    idx = int(sys.argv[2])
+    session_id = sys.argv[3] if len(sys.argv) > 3 else None
+    
+    await quick_run_agent(dataset, idx, session_id)
+
+if __name__ == "__main__":
+    asyncio.run(main())

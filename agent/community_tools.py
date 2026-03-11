@@ -47,8 +47,8 @@ class CommunityTools:
         """
         redis = self.base.redis
         key = RedisKeys.community_agent_memory(self.user_name, self.agent_id)
-        existing = await redis.hgetall(key)
-        if len(existing) >= 10:
+        count = await redis.hlen(key)
+        if count >= 10:
             return {"error": "Memory full (10/10). No new memories can be saved."}
         mem_id = f"comm_mem_{uuid.uuid4().hex[:8]}"
         payload = json.dumps({
@@ -118,8 +118,6 @@ class CommunityTools:
             None, 
             partial(self.community_store.register_agent_spawn, self.agent_id, new_id, persona)
         )
-
-        discussion_participants.append(new_id)
 
         await emit_community(self.user_name, "community", "agent_spawned", {
             "discussion_id": self.discussion_id,

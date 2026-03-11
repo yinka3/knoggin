@@ -140,7 +140,6 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
 
     if ctx.state.last_error:
         msg += f"\n**Last action rejected:** {ctx.state.last_error}\n"
-        ctx.state.last_error = None
 
     # Latest tool results — full detail
     if last_result:

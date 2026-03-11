@@ -4,7 +4,8 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from shared.config.topics_config import TopicConfig
-from shared.services.topic_gen import generate_topics, DEFAULT_TOPICS
+from shared.services.topics import DEFAULT_TOPICS, generate_topics
+
 
 
 # Label validation — same regex as TopicConfigJob.sanitize_topic_evolution

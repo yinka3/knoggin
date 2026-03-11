@@ -67,7 +67,8 @@ class Fact:
         )
     
     def to_dict(self, exclude: set = None) -> dict:
-        exclude = exclude or {"embedding"}
+        if exclude is None:
+            exclude = {"embedding"}
         result = {}
         for k in self.__dataclass_fields__:
             if k in exclude:

@@ -594,11 +594,7 @@ class ProfileRefinementJob(BaseJob):
                 )
                 msg_id = None
             
-            embedding = await loop.run_in_executor(
-                self.executor,
-                self.embedding_service.encode_single,
-                content
-            )
+            embedding = await self.embedding_service.encode_single(content)
             
             contradicted_ids = await self._detect_contradictions(content, embedding, active_existing, msg_id, session_id)
             
@@ -839,12 +835,9 @@ class ProfileRefinementJob(BaseJob):
         
         resolution_text = f"{canonical_name}. " + " ".join([f.content for f in active_facts])
         
-        embedding = await loop.run_in_executor(
-            self.executor,
-            partial(self.resolver.compute_embedding, entity_id, resolution_text)
-        )
+        new_emb = await self.resolver.compute_embedding(entity_id, resolution_text)
 
-        return embedding
+        return new_emb
 
     async def _write_updates(self, updates: List[Dict]):
         """Write profile updates to Memgraph sequentially."""

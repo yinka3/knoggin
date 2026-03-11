@@ -36,6 +36,7 @@ class BatchConsumer:
         self._wake_event = asyncio.Event()
         self._shutdown_requested = False
         self._task: Optional[asyncio.Task] = None
+        self._flush_future = None
     
 
     @property
@@ -88,6 +89,39 @@ class BatchConsumer:
         
         if exc := task.exception():
             logger.error(f"BatchConsumer task failed: {exc}")
+    
+    async def flush(self):
+        """Force a partial drain of the buffer. Blocks until complete."""
+        future = asyncio.get_running_loop().create_future()
+        self._flush_future = future
+        self._wake_event.set()
+        await future
+    
+    def _format_session_text(self, conversation: List[Dict]) -> str:
+        lines = []
+        for turn in conversation:
+            content = turn["content"]
+            lines.append(f"[{turn['role_label']}]: {content}")
+        return "\n".join(lines)
+    
+    def update_ingestion_settings(
+        self,
+        batch_size: Optional[int] = None,
+        batch_timeout: Optional[float] = None,
+        checkpoint_interval: Optional[int] = None,
+        session_window: Optional[int] = None
+    ):
+        """Update settings dynamically while running."""
+        if batch_size is not None:
+            self.batch_size = batch_size
+        if batch_timeout is not None:
+            self.batch_timeout = batch_timeout
+        if checkpoint_interval is not None:
+            self.checkpoint_interval = checkpoint_interval
+        if session_window is not None:
+            self.session_window = session_window
+        
+        logger.info(f"Consumer ingestion settings updated: batch={self.batch_size}, timeout={self.batch_timeout}")
 
     async def _run(self):
         logger.info(f"BatchConsumer started for {self.user_name}")
@@ -104,16 +138,20 @@ class BatchConsumer:
             
             self._wake_event.clear()
             try:
-                await self._drain_buffer(flush_partial=timed_out)
+                await self._drain_buffer(flush_partial=timed_out or self._flush_future is not None)
             except Exception as e:
                 logger.error(f"BatchConsumer: Unexpected error during _drain_buffer: {e}")
-                # Brief backoff to prevent tight loop on persistent transient errors
                 await asyncio.sleep(5)
+            finally:
+                if self._flush_future and not self._flush_future.done():
+                    self._flush_future.set_result(None)
+                self._flush_future = None
 
         logger.info("BatchConsumer shutting down, final drain...")
         await self._drain_buffer(flush_partial=True)
         await self.run_session_jobs()
         logger.info("BatchConsumer shutdown complete")
+
     
 
     async def _drain_buffer(self, flush_partial: bool):
@@ -158,6 +196,8 @@ class BatchConsumer:
                     break
                 dlq_count += len(messages)
             else:
+                error_msg = None
+                graph_success = True
                 loop = asyncio.get_running_loop()
                 batch = [
                     {
@@ -176,30 +216,44 @@ class BatchConsumer:
                     )
                 except Exception as e:
                     logger.error(f"Failed to save message logs: {e}")
-                
-                graph_success = True
+                    dlq_success = await self.processor.move_to_dead_letter(
+                        messages,
+                        f"MESSAGE_LOG_SAVE_FAILED: {e}",
+                        stage="message_log",
+                        session_text=None
+                    )
+                    if not dlq_success:
+                        logger.critical(f"DLQ write failed after message log failure. Leaving messages in buffer.")
+                        break
+                    dlq_count += len(messages)
+                    batches_count += 1
+                    total_processed += len(messages)
+                    all_msg_ids.extend([m["id"] for m in messages])
+                    await self.redis.ltrim(self._buffer_key, len(messages), -1)
+                    continue
+
                 if result.extraction_result:
-                        try:
-                            success, error_msg = await asyncio.wait_for(
-                                self.write_to_graph(result),
-                                timeout=self.batch_timeout
-                            )
-                        except asyncio.TimeoutError:
-                            success, error_msg = False, "GRAPH_WRITE_TIMEOUT"
-                        except Exception as e:
-                            success, error_msg = False, str(e)
-                            
-                        if success:
-                            # If graph write is successful, we continue processing the batch,
-                            # not break out of the drain loop.
-                            pass 
-                    
-                        if not success:
-                            logger.error(f"Graph write failed. Error: {error_msg}")
-                            await emit(self.session_id, "pipeline", "graph_write_failed", {
-                                "error": error_msg
-                            })
-                            graph_success = False
+                    try:
+                        success, error_msg = await asyncio.wait_for(
+                            self.write_to_graph(result),
+                            timeout=self.batch_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        success, error_msg = False, "GRAPH_WRITE_TIMEOUT"
+                    except Exception as e:
+                        success, error_msg = False, str(e)
+                        
+                    if success:
+                        # If graph write is successful, we continue processing the batch,
+                        # not break out of the drain loop.
+                        pass 
+                
+                    if not success:
+                        logger.error(f"Graph write failed. Error: {error_msg}")
+                        await emit(self.session_id, "pipeline", "graph_write_failed", {
+                            "error": error_msg
+                        })
+                        graph_success = False
 
                 if not graph_success:
                     dlq_success = await self.processor.move_to_dead_letter(
@@ -243,28 +297,4 @@ class BatchConsumer:
         })
            
     
-    def _format_session_text(self, conversation: List[Dict]) -> str:
-        lines = []
-        for turn in conversation:
-            content = turn["content"]
-            lines.append(f"[{turn['role_label']}]: {content}")
-        return "\n".join(lines)
-    
-    def update_ingestion_settings(
-        self,
-        batch_size: Optional[int] = None,
-        batch_timeout: Optional[float] = None,
-        checkpoint_interval: Optional[int] = None,
-        session_window: Optional[int] = None
-    ):
-        """Update settings dynamically while running."""
-        if batch_size is not None:
-            self.batch_size = batch_size
-        if batch_timeout is not None:
-            self.batch_timeout = batch_timeout
-        if checkpoint_interval is not None:
-            self.checkpoint_interval = checkpoint_interval
-        if session_window is not None:
-            self.session_window = session_window
-        
-        logger.info(f"Consumer ingestion settings updated: batch={self.batch_size}, timeout={self.batch_timeout}")
+

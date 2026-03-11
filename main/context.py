@@ -55,6 +55,7 @@ class Context:
         self.ent_resolver: EntityResolver = None
         self.session_id: str = None
         self.topic_config: TopicConfig = None
+        self._max_conversation_history: int = 10000
 
         self.executor: ThreadPoolExecutor = None
         self.batch_processor: BatchProcessor = None
@@ -84,7 +85,7 @@ class Context:
         
         instance = cls(user_name, list(topics_config.keys()), resources.redis)
     
-        instance.session_id = session_id
+        instance.session_id = session_id or str(uuid.uuid4())
         instance.store = resources.store
         instance.executor = resources.executor
         instance.llm = resources.llm_service
@@ -261,6 +262,9 @@ class Context:
             conversation_window=topic_cfg.get("conversation_window", 50)
         ))
 
+        limits_cfg = dev_settings.get("limits", {})
+        instance._max_conversation_history = limits_cfg.get("max_conversation_history", 10000)
+
         await instance.scheduler.start()
         await emit(instance.session_id, "system", "session_created", {
             "user_name": user_name,
@@ -320,12 +324,8 @@ class Context:
         
         logger.warning(f"User entity exists in graph but missing from resolver, backfilling")
         all_aliases = entity.get("aliases") or [user_name]
-        await loop.run_in_executor(
-            self.executor,
-            partial(
-                self.ent_resolver.register_entity,
-                user_id, user_name, all_aliases, "person", "Identity"
-            )
+        await self.ent_resolver.register_entity(
+            user_id, user_name, all_aliases, "person", "Identity"
         )
         await emit(self.session_id, "system", "user_entity_recovered", {
             "user_name": user_name
@@ -395,9 +395,7 @@ class Context:
         await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
         await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
         
-        from shared.config.base import load_config
-        config = load_config() or {}
-        limit = config.get("developer_settings", {}).get("limits", {}).get("max_conversation_history", 10000)
+        limit = self._max_conversation_history
         
         count = await self.redis_client.zcard(sorted_key)
         if count > limit:
@@ -532,14 +530,11 @@ class Context:
                     continue
                 
                 # Compute subject embedding (async wrap)
-                emb_list = await loop.run_in_executor(
-                    self.executor,
-                    partial(self.embedding_service.encode, [subject])
-                )
+                emb_list = await self.embedding_service.encode([subject])
                 subject_emb = emb_list[0]
                 
                 # Check candidates
-                candidates = self.ent_resolver.get_candidate_ids(subject, precomputed_embedding=subject_emb)
+                candidates = await self.ent_resolver.get_candidate_ids(subject, precomputed_embedding=subject_emb)
                 
                 # Default to User if no candidate found
                 user_id = self.ent_resolver.get_id(self.user_name)
@@ -557,10 +552,7 @@ class Context:
                 fact_id = f"fact_{uuid.uuid4().hex[:16]}"
                 
                 # Compute content embedding (async wrap)
-                content_emb_list = await loop.run_in_executor(
-                    self.executor,
-                    partial(self.embedding_service.encode, [clean_content])
-                )
+                content_emb_list = await self.embedding_service.encode([clean_content])
                 content_emb = content_emb_list[0]
 
                 new_fact = Fact(
@@ -605,10 +597,7 @@ class Context:
             try:
                 loop = asyncio.get_running_loop()
                 
-                embedding_list = await loop.run_in_executor(
-                    self.executor,
-                    partial(self.ent_resolver.compute_batch_embeddings, [content])
-                )
+                embedding_list = await self.ent_resolver.compute_batch_embeddings([content])
                 embedding_vector = embedding_list[0]
 
                 graph_id = turn_id + 1_000_000_000

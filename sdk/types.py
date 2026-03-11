@@ -18,7 +18,7 @@ from shared.models.schema.dtypes import BatchResult
 #  RE-EXPORTS from shared (used by both core + SDK)
 # ════════════════════════════════════════════════════════
 
-from shared.models.schema.mem_types import (  # noqa: F401
+from shared.models.memory import (  # noqa: F401
     MemoryEntry,
     MemorySaveResult,
     MemoryForgetResult,

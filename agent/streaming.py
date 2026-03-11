@@ -44,15 +44,15 @@ async def call_agent_streaming(
     user_name: str,
     last_result: Optional[Dict] = None,
     date: str = "",
-    model: str = None,
-    tools: List[Dict] = None,
+    model: Optional[str] = None,
+    tools: Optional[List[Dict]] = None,
     memory_context: str = "",
     files_context: str = "",
-    agent_rules: str = "",
-    agent_preferences: str = "",
-    agent_icks: str = "",
+    agent_rules: Optional[str] = "",
+    agent_preferences: Optional[str] = "",
+    agent_icks: Optional[str] = "",
     agent_temperature: float = 0.7,
-    agent_instructions: str = None
+    agent_instructions: Optional[str] = ""
 ) -> AsyncGenerator[Union[Dict, AgentResponse], None]:
     """
     Core LLM interaction loop for the streaming agent.
@@ -292,7 +292,11 @@ async def run_stream(
     user_timezone: str = None,
     mcp_manager=None,
     agent_temperature: float = 0.7,
-    agent_instructions: str = None
+    agent_instructions: Optional[str] = None,
+    agent_rules: Optional[str] = None,
+    agent_preferences: Optional[str] = None,
+    agent_icks: Optional[str] = None,
+    simulated_date: Optional[str] = None
 ) -> AsyncGenerator[Dict, None]:
     """
     Top-level streaming orchestrator loop.
@@ -383,7 +387,11 @@ async def run_stream(
             tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
         except Exception:
             tz = ZoneInfo("UTC")
-        current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
+            
+        if simulated_date:
+            current_time = simulated_date
+        else:
+            current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
         usage_accumulator = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         
         while ctx.state.attempt_count < ctx.config.max_attempts:
@@ -393,26 +401,34 @@ async def run_stream(
                 ctx.state.attempt_count >= ctx.config.max_attempts - 1
                 and ctx.evidence.has_any()
             )
+            should_abandon = (
+                ctx.state.call_count >= ctx.config.max_calls // 2
+                and not ctx.evidence.has_any()
+                and ctx.state.call_count > 0
+            )
+
             if should_force:
                 ctx.state.last_error = "Final attempt. Respond now with accumulated evidence."
-
+            elif should_abandon:
+                ctx.state.last_error = "No relevant data found after extensive searching. Respond stating you could not find the requested information. Do not call more tools."
+            
             # Collect tool calls while streaming tokens
             pending_tool_calls = []
             active_schemas = get_filtered_schemas(enabled_tools)
             if mcp_manager:
                 active_schemas = active_schemas + mcp_tools_to_schemas(mcp_manager.get_all_tools())
-            a_rules = rules_str
-            a_prefs = prefs_str
-            a_icks = icks_str
+            a_rules = agent_rules if agent_rules is not None else rules_str
+            a_prefs = agent_preferences if agent_preferences is not None else prefs_str
+            a_icks = agent_icks if agent_icks is not None else icks_str
             
             async for chunk in call_agent_streaming(
                 llm, ctx, user_name, last_result, current_time, model, active_schemas,
                 memory_context=memory_context,
-                agent_rules=a_rules,
-                agent_preferences=a_prefs,
-                agent_icks=a_icks,
+                agent_rules=a_rules or "",
+                agent_preferences=a_prefs or "",
+                agent_icks=a_icks or "",
                 agent_temperature=agent_temperature,
-                agent_instructions=agent_instructions
+                agent_instructions=agent_instructions or ""
             ):
                 
                 # Token - pass through to frontend
@@ -464,17 +480,17 @@ async def run_stream(
 
             # Process tool calls if any
             if not pending_tool_calls:
+                ctx.state.last_error = None
                 continue
-                
-            # Emit thinking if present
-            if pending_tool_calls[0].thinking:
-                yield {"event": "thinking", "data": {"content": pending_tool_calls[0].thinking}}
+            ctx.state.last_error = None
 
             all_results = []
             async for event in execute_pending_tools(ctx, tools, pending_tool_calls, all_results):
                 yield event
 
             last_result = all_results
+            if ctx.state.consecutive_errors > 0:
+                await asyncio.sleep(0.5 * ctx.state.consecutive_errors)
 
         # Max attempts - fallback
         if ctx.evidence.has_any():

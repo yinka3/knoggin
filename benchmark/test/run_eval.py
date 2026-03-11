@@ -2,28 +2,28 @@ import asyncio
 import sys
 import json
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Tuple
-import uuid
 from loguru import logger
 import os
 from dotenv import load_dotenv
 
+
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from main.setup import _create_user_entity
 from shared.services.llm import LLMService
-from main.prompts import get_topic_seed_prompt
 from shared.infra.resources import ResourceManager
 from shared.infra.redis import RedisKeys
 from agent.streaming import run_stream
 from main.context import Context
-from shared.schema.dtypes import MessageData
+from shared.models.schema.dtypes import MessageData
+from shared.services.topics import generate_topics
 from log.logging_setup import setup_logging
 
 setup_logging(log_level="DEBUG", log_file="benchmark.log", colorize=True)
 
 USER_NAME = "TestUser"
-SESSION_ID = str(uuid.uuid4())
 
 DATASET_FILES = {
     "multi": "test_multi_session.json",
@@ -45,83 +45,38 @@ async def generate_instance_topics(llm: LLMService, haystack_sessions: list) -> 
 
     text_block = "\n\n".join(user_msgs)
 
-    system = get_topic_seed_prompt()
-    raw = await llm.call_llm(system, text_block)
-
-    if not raw:
-        logger.warning("Topic generation failed, using defaults")
-        return None
-
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[-1]
-    if cleaned.endswith("```"):
-        cleaned = cleaned.rsplit("```", 1)[0]
-    cleaned = cleaned.strip()
-
-    try:
-        generated = json.loads(cleaned)
-    except json.JSONDecodeError:
-        logger.warning(f"Topic generation returned invalid JSON")
-        return None
-
-    generated.pop("General", None)
-    generated.pop("Identity", None)
-
-    for name, cfg in generated.items():
-        cfg.setdefault("labels", [])
-        cfg.setdefault("aliases", [])
-        cfg.setdefault("hierarchy", {})
-        cfg.setdefault("active", True)
-
-    defaults = {
-        "General": {"active": True, "labels": [], "hierarchy": {}, "aliases": []},
-        "Identity": {"active": True, "labels": ["person"], "hierarchy": {}, "aliases": []}
-    }
-
-    return {**defaults, **generated}
+    result = await generate_topics(llm, text_block, 4)
+    return result
 
 async def ingest_haystack(context: Context, haystack_sessions: list, haystack_dates: list):
     total_sessions = len(haystack_sessions)
-
     for session_idx, session in enumerate(haystack_sessions):
         parts = haystack_dates[session_idx]
         date_str = parts.split(" (")[0]
         time_str = parts.split(") ")[1]
         session_date = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M")
         session_date = session_date.replace(tzinfo=timezone.utc)
-
-        logger.info(f"Session {session_idx + 1}/{total_sessions} - {len(session)} turns")
-
+        user_count = sum(1 for t in session if t["role"] == "user")
+        asst_count = len(session) - user_count
+        logger.info(f"Session {session_idx + 1}/{total_sessions} - {len(session)} turns ({user_count} user, {asst_count} assistant) -> {user_count} buffered")
         for i, turn in enumerate(session):
+            msg_date = session_date + timedelta(seconds=i)
             if turn["role"] == "user":
-                msg = MessageData(message=turn["content"], timestamp=session_date)
+                msg = MessageData(message=turn["content"], timestamp=msg_date)
                 await context.add(msg)
             else:
-                await context.add_assistant_turn(turn["content"], session_date)
+                await context.add_assistant_turn(turn["content"], msg_date)
 
-            if (i + 1) % 8 == 0:
-                await wait_for_batch_drain(context)
-
-        await wait_for_batch_drain(context)
-        await wait_for_processing(context)
-        logger.info(f"Session {session_idx + 1}/{total_sessions} complete")
-
+        is_last = (session_idx + 1) == total_sessions
+        is_every_2 = (session_idx + 1) % 2 == 0
+        
+        if is_every_2 or is_last:
+            await context.consumer.flush()
+            await wait_for_processing(context)
+            logger.info(f"Session {session_idx + 1}/{total_sessions} block complete")
+        else:
+            logger.info(f"Session {session_idx + 1}/{total_sessions} added to buffer, skipping full wait")
     logger.info("Haystack ingestion complete")
-
-
-async def wait_for_batch_drain(context: Context, timeout: int = 120):
-    start = asyncio.get_event_loop().time()
-
-    while asyncio.get_event_loop().time() - start < timeout:
-        buffer_len = await context.redis_client.llen(
-            RedisKeys.buffer(context.user_name, context.session_id)
-        )
-        if buffer_len == 0:
-            return
-        await asyncio.sleep(2)
-
-    logger.warning(f"Batch drain timeout after {timeout}s")
 
 
 async def wait_for_processing(context: Context, drain_timeout: int = 180, max_retries: int = 10):
@@ -162,13 +117,33 @@ async def ask_agent(context: Context, question: str, question_date: str) -> Tupl
     tools_used = []
     response = None
 
+    benchmark_persona = "Analytical Evaluation Agent. Highly logical, precise, and objective. No conversational filler."
+    benchmark_instructions = (
+        "You are operating in an objective evaluation environment.\n"
+        "1. Always start by checking the user's entity profile with fact_check or search_entity.\n"
+        "2. Use fact_check as your primary tool for any question about a specific person, place, or thing.\n"
+        "3. Fall back to search_messages only after structured tools return nothing.\n"
+        "4. Synthesize findings completely but succinctly.\n"
+        "5. Do not engage in small talk."
+    )
+    benchmark_rules = (
+        "1. Tool Priority: fact_check first, then search_entity, then get_connections. "
+        "search_messages is a last resort only.\n"
+        "2. User Profile: Always check the user's own entity profile when questions are about them.\n"
+        "3. Multi-session Reasoning: Connect information scattered across multiple past conversations. "
+        "Use multiple search queries if necessary.\n"
+        "4. Temporal Reasoning: Pay strict attention to timestamps and chronological order.\n"
+        "5. Knowledge Updates: Newer information always supersedes older information.\n"
+        "6. Abstention: If evidence is insufficient, explicitly state that. Do not hallucinate."
+    )
+
     async for event in run_stream(
         user_query=question,
         user_name=context.user_name,
-        session_id=SESSION_ID,
+        session_id=context.session_id,
         agent_id="benchmark",
         agent_name="STELLA",
-        agent_persona="",
+        agent_persona=benchmark_persona,
         conversation_history=[],
         hot_topics=[],
         topic_config=context.topic_config,
@@ -179,7 +154,10 @@ async def ask_agent(context: Context, question: str, question_date: str) -> Tupl
         model=context.model,
         file_rag=context.file_rag,
         user_timezone="UTC",
-        mcp_manager=context.mcp_manager
+        mcp_manager=context.mcp_manager,
+        agent_instructions=benchmark_instructions,
+        agent_rules=benchmark_rules,
+        simulated_date=question_date
     ):
         evt = event.get("event")
 
@@ -259,27 +237,25 @@ async def main():
 
     await _create_user_entity(resource, USER_NAME)
 
-    topics = await generate_instance_topics(resource.llm_service, q["haystack_sessions"])
-    if not topics:
-        topics = {
-            "General": {"active": True, "labels": [], "hierarchy": {}, "aliases": []},
-            "Identity": {"active": True, "labels": ["person"], "hierarchy": {}, "aliases": []}
-        }
+    try:
+        topics = await generate_instance_topics(resource.llm_service, q["haystack_sessions"])
+    except Exception as e:
+        logger.critical(f"Failed to generate topics for this instance. Aborting. Error: {e}")
+        return
 
     context = await Context.create(
         user_name=USER_NAME,
         resources=resource,
-        topics_config=topics,
-        session_id=SESSION_ID
+        topics_config=topics
     )
 
-    context.consumer.update_ingestion_settings(batch_timeout=30.0)
+    context.consumer.update_ingestion_settings(batch_size=10, batch_timeout=60.0)
 
     try:
         await ingest_haystack(context, q["haystack_sessions"], q["haystack_dates"])
 
         logger.info("Waiting for processing...")
-        await asyncio.sleep(30)
+        await asyncio.sleep(5)
         await wait_for_processing(context)
         logger.info("Asking AGENT...")
         response, tools_used = await ask_agent(context, q["question"], q["question_date"])
@@ -295,6 +271,7 @@ async def main():
         result = {
             "index": idx,
             "dataset": dataset,
+            "session_id": context.session_id,
             "type": q["question_type"],
             "question": q["question"],
             "question_date": q["question_date"],
@@ -311,7 +288,7 @@ async def main():
 
     finally:
         await context.shutdown()
-        resource.store.close()
+        await resource.shutdown()
 
 
 if __name__ == "__main__":

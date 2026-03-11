@@ -16,6 +16,7 @@ from shared.config.topics_config import TopicConfig
 from shared.models.schema.dtypes import (
     BatchResult,
     EntityPair,
+    Fact,
     MessageConnections,
 )
 from datetime import datetime, timezone
@@ -503,6 +504,68 @@ class TestMoveToDLQ:
         entry = json.loads(call_args[1])
         assert entry["messages"][0]["embedding"] == [0.1, 0.2]
 
+    @pytest.mark.asyncio
+    async def test_attempt_greater_than_one_serialized(self):
+        """DLQ entry with attempt=3 should have that value in the payload."""
+        proc, _, _, _, _, redis = make_processor()
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            success = await proc.move_to_dead_letter(
+                messages=[{"id": 1, "message": "test"}],
+                error="RETRY_EXHAUSTED",
+                stage="processing",
+                session_text="context",
+                attempt=3,
+            )
+
+        assert success is True
+        call_args = redis.rpush.call_args[0]
+        entry = json.loads(call_args[1])
+        assert entry["attempt"] == 3
+        assert entry["error"] == "RETRY_EXHAUSTED"
+
+    @pytest.mark.asyncio
+    async def test_dlq_no_session_text_for_graph_stage(self):
+        """graph_write stage should NOT include session_text even if passed."""
+        proc, _, _, _, _, redis = make_processor()
+
+        batch = BatchResult(entity_ids=[1])
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            await proc.move_to_dead_letter(
+                messages=[{"id": 1, "message": "test"}],
+                error="GRAPH_DOWN",
+                stage="graph_write",
+                session_text="this should be excluded",
+                batch_result=batch,
+            )
+
+        call_args = redis.rpush.call_args[0]
+        entry = json.loads(call_args[1])
+        assert "session_text" not in entry
+        assert "batch_result" in entry
+
+    @pytest.mark.asyncio
+    async def test_dlq_no_batch_result_for_processing_stage(self):
+        """processing stage should NOT include batch_result even if passed."""
+        proc, _, _, _, _, redis = make_processor()
+
+        batch = BatchResult(entity_ids=[1])
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            await proc.move_to_dead_letter(
+                messages=[{"id": 1, "message": "test"}],
+                error="NLP_CRASH",
+                stage="processing",
+                session_text="context",
+                batch_result=batch,
+            )
+
+        call_args = redis.rpush.call_args[0]
+        entry = json.loads(call_args[1])
+        assert "session_text" in entry
+        assert "batch_result" not in entry
+
 
 # --- JSON Serialization Helpers ---
 
@@ -521,3 +584,401 @@ class TestSafeJson:
     def test_unsupported_type_raises(self):
         with pytest.raises(TypeError):
             _safe_json({"nested": "dict"})
+
+    def test_nested_numpy_in_json_dumps(self):
+        """json.dumps with default=_safe_json should handle numpy inside dicts."""
+        payload = {
+            "embedding": np.array([0.1, 0.2]),
+            "score": np.float64(0.95),
+            "count": np.int64(42),
+        }
+        serialized = json.dumps(payload, default=_safe_json)
+        parsed = json.loads(serialized)
+        assert parsed["embedding"] == pytest.approx([0.1, 0.2])
+        assert parsed["score"] == pytest.approx(0.95)
+        assert parsed["count"] == 42
+
+    def test_regular_types_dont_hit_safe_json(self):
+        """Standard Python types bypass _safe_json entirely — json.dumps handles them."""
+        payload = {"name": "Alice", "ids": [1, 2], "score": 0.9}
+        serialized = json.dumps(payload, default=_safe_json)
+        assert json.loads(serialized) == payload
+
+
+
+# ════════════════════════════════════════════════════════
+#  _extract_connections
+# ════════════════════════════════════════════════════════
+
+class TestExtractConnections:
+
+    @pytest.mark.asyncio
+    async def test_empty_entity_ids_returns_empty(self):
+        proc, _, llm, resolver, _, _ = make_processor()
+        resolver.entity_profiles = {}
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            result = await proc._extract_connections([], {}, MESSAGES, "context")
+
+        assert result == []
+        llm.call_llm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_custom_connection_prompt_used(self):
+        """When connection_prompt is set, it should be used instead of the default."""
+        custom_prompt = "Custom prompt for {user_name}. Find connections."
+        proc, _, llm, resolver, _, _ = make_processor(connection_prompt=custom_prompt)
+
+        resolver.entity_profiles = {
+            100: {"canonical_name": "Palantir", "type": "company"},
+        }
+        resolver.get_mentions_for_id.return_value = []
+        llm.call_llm = AsyncMock(return_value="<connections>\nMSG 1 | NO CONNECTIONS\n</connections>")
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            await proc._extract_connections([100], {100: [1]}, MESSAGES, "context")
+
+        # Verify the custom prompt was passed as system arg
+        call_args = llm.call_llm.call_args
+        system_arg = call_args[0][0] if call_args[0] else call_args[1].get("system", "")
+        assert "Custom prompt for Yinka" in system_arg
+
+    @pytest.mark.asyncio
+    async def test_default_prompt_when_no_custom(self):
+        """Without connection_prompt, the default from get_connection_reasoning_prompt is used."""
+        proc, _, llm, resolver, _, _ = make_processor(connection_prompt=None)
+
+        resolver.entity_profiles = {
+            100: {"canonical_name": "Palantir", "type": "company"},
+        }
+        resolver.get_mentions_for_id.return_value = []
+        llm.call_llm = AsyncMock(return_value="<connections>\nMSG 1 | NO CONNECTIONS\n</connections>")
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            await proc._extract_connections([100], {100: [1]}, MESSAGES, "context")
+
+        call_args = llm.call_llm.call_args
+        system_arg = call_args[0][0] if call_args[0] else call_args[1].get("system", "")
+        # Default prompt contains VEGAPUNK or connection-related instructions
+        assert "connection" in system_arg.lower() or "VEGAPUNK" in system_arg
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_valid_connections(self):
+        proc, _, llm, resolver, _, _ = make_processor()
+
+        resolver.entity_profiles = {
+            100: {"canonical_name": "Palantir", "type": "company"},
+            101: {"canonical_name": "Priya Sharma", "type": "person"},
+        }
+        resolver.get_mentions_for_id.return_value = []
+
+        llm.call_llm = AsyncMock(return_value="""
+        <connections>
+        MSG 1 | Palantir; Priya Sharma | 0.85 | colleagues
+        </connections>
+        """)
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            result = await proc._extract_connections(
+                [100, 101], {100: [1], 101: [2]}, MESSAGES, "context"
+            )
+
+        assert len(result) == 1
+        assert result[0].entity_pairs[0].entity_a == "Palantir"
+
+
+# ════════════════════════════════════════════════════════
+#  run() edge cases
+# ════════════════════════════════════════════════════════
+
+class TestRunEdgeCases:
+
+    @pytest.mark.asyncio
+    async def test_empty_session_text(self):
+        """Empty session_text should not cause errors in connection extraction."""
+        proc, _, llm, resolver, nlp, _ = make_processor()
+
+        nlp.extract_mentions = AsyncMock(return_value=[
+            (1, "Palantir", "company", "Work"),
+        ])
+        resolver.compute_batch_embeddings.return_value = [FAKE_EMBEDDING, FAKE_EMBEDDING]
+        resolver.get_candidate_ids.return_value = []
+        resolver.register_entity.return_value = FAKE_EMBEDDING
+        resolver.entity_profiles = {
+            100: {"canonical_name": "Palantir", "type": "company"},
+        }
+        resolver.get_mentions_for_id.return_value = []
+        llm.call_llm = AsyncMock(return_value="<connections>\nMSG 1 | NO CONNECTIONS\n</connections>")
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            result = await proc.run(MESSAGES, "")
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_embeddings_failure_caught(self):
+        """compute_batch_embeddings raising should be caught, result.success=False."""
+        proc, _, _, resolver, nlp, _ = make_processor()
+        nlp.extract_mentions = AsyncMock(return_value=[])
+        resolver.compute_batch_embeddings.side_effect = RuntimeError("CUDA OOM")
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            result = await proc.run(MESSAGES, "context")
+
+        assert result.success is False
+        assert "CUDA OOM" in result.error
+
+    @pytest.mark.asyncio
+    async def test_missing_message_key_caught(self):
+        """Messages without 'message' key should raise KeyError, caught by outer try."""
+        proc, _, _, resolver, nlp, _ = make_processor()
+        nlp.extract_mentions = AsyncMock(return_value=[])
+        resolver.compute_batch_embeddings.return_value = [FAKE_EMBEDDING]
+
+        bad_messages = [{"id": 1, "role": "user"}]  # no 'message' key
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            result = await proc.run(bad_messages, "context")
+
+        assert result.success is False
+        assert "message" in result.error.lower() or "key" in result.error.lower()
+
+
+# ════════════════════════════════════════════════════════
+#  _resolve_mentions — mixed scenarios
+# ════════════════════════════════════════════════════════
+
+class TestResolveMentionsMixed:
+
+    @pytest.mark.asyncio
+    async def test_mixed_new_and_existing(self):
+        """Batch with one existing entity match and one new entity."""
+        proc, _, _, resolver, _, _ = make_processor()
+
+        # First mention: matches existing entity 5
+        # Second mention: no candidates, creates new
+        call_count = [0]
+        def mock_candidates(name, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return [(5, 0.95)]  # existing match
+            return []  # new entity
+
+        resolver.get_candidate_ids.side_effect = mock_candidates
+        resolver.validate_existing.return_value = (5, False, [])
+        resolver.register_entity.return_value = FAKE_EMBEDDING
+        resolver.embedding_service.encode.return_value = [FAKE_EMBEDDING, FAKE_EMBEDDING]
+
+        mentions = [
+            (1, "Palantir", "company", "Work"),
+            (2, "Priya Sharma", "person", "Identity"),
+        ]
+        messages = [
+            {"id": 1, "message": "Working at Palantir"},
+            {"id": 2, "message": "My manager Priya Sharma"},
+        ]
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            result = await proc._resolve_mentions(mentions, messages)
+
+        assert 5 in result.entity_ids  # existing
+        assert len(result.new_ids) == 1  # one new
+        assert len(result.entity_ids) == 2  # total
+
+    @pytest.mark.asyncio
+    async def test_separate_entities_get_separate_msg_maps(self):
+        """Two different entities from different messages should have distinct msg_id lists."""
+        proc, _, _, resolver, _, _ = make_processor()
+
+        resolver.get_candidate_ids.return_value = []
+        resolver.register_entity.return_value = FAKE_EMBEDDING
+        resolver.embedding_service.encode.return_value = [FAKE_EMBEDDING, FAKE_EMBEDDING]
+
+        mentions = [
+            (1, "Palantir", "company", "Work"),
+            (2, "Priya Sharma", "person", "Identity"),
+        ]
+        messages = [
+            {"id": 1, "message": "Working at Palantir"},
+            {"id": 2, "message": "My manager Priya Sharma"},
+        ]
+
+        with patch("main.processor.emit", new_callable=AsyncMock):
+            result = await proc._resolve_mentions(mentions, messages)
+
+        # Two new entities with separate IDs
+        ids = list(result.new_ids)
+        assert len(ids) == 2
+        # Each should map to its own message
+        for eid in ids:
+            assert len(result.entity_msg_map[eid]) == 1
+        # The msg_ids should be different
+        mapped_msgs = [result.entity_msg_map[eid][0] for eid in ids]
+        assert set(mapped_msgs) == {1, 2}
+
+class TestBoostCandidates:
+
+    @pytest.mark.asyncio
+    async def test_numbered_yes_no(self):
+        """Standard numbered format: '1. YES\\n2. NO'"""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.return_value = "1. YES\n2. NO"
+        now = datetime.now(timezone.utc)
+        store.get_facts_for_entity.return_value = [
+            Fact(id="f1", source_entity_id=1, content="Works at Anthropic", valid_at=now)
+        ]
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100), (2, 0.75, 101)],
+            {100: "I work at Anthropic", 101: "Going to the store"},
+            set(),
+        )
+        assert result[1] == pytest.approx(0.85)  # 0.80 + 0.05
+        assert result[2] == pytest.approx(0.75)  # NO, stays at base
+
+    @pytest.mark.asyncio
+    async def test_bare_yes_no_lines(self):
+        """LLM returns just 'YES\\nNO' without numbering."""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.return_value = "YES\nNO"
+
+        now = datetime.now(timezone.utc)
+        store.get_facts_for_entity.return_value = [
+            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
+        ]
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100), (2, 0.75, 101)],
+            {100: "msg A", 101: "msg B"},
+            set(),
+        )
+        assert result[1] == pytest.approx(0.85)
+        assert result[2] == pytest.approx(0.75)
+
+    @pytest.mark.asyncio
+    async def test_colon_format(self):
+        """LLM uses colon format: '1: YES\\n2: NO'"""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.return_value = "1: YES\n2: NO\n3: YES"
+
+        now = datetime.now(timezone.utc)
+        store.get_facts_for_entity.return_value = [
+            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
+        ]
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100), (2, 0.75, 101), (3, 0.70, 102)],
+            {100: "msg A", 101: "msg B", 102: "msg C"},
+            set(),
+        )
+        assert result[1] == pytest.approx(0.85)
+        assert result[2] == pytest.approx(0.75)
+        assert result[3] == pytest.approx(0.75)
+
+    @pytest.mark.asyncio
+    async def test_garbled_response_falls_back(self):
+        """LLM returns nonsense — all candidates keep base scores."""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.return_value = "I think the answer depends on the context and nuance of the situation."
+
+        now = datetime.now(timezone.utc)
+        store.get_facts_for_entity.return_value = [
+            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
+        ]
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100), (2, 0.75, 101)],
+            {100: "msg A", 101: "msg B"},
+            set(),
+        )
+        assert result[1] == pytest.approx(0.80)
+        assert result[2] == pytest.approx(0.75)
+
+    @pytest.mark.asyncio
+    async def test_none_response_falls_back(self):
+        """LLM returns None (timeout) — base scores preserved."""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.return_value = None
+
+        now = datetime.now(timezone.utc)
+        store.get_facts_for_entity.return_value = [
+            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
+        ]
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100)],
+            {100: "msg A"},
+            set(),
+        )
+        assert result[1] == pytest.approx(0.80)
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_falls_back(self):
+        """LLM raises exception — base scores preserved, no crash."""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.side_effect = Exception("LLM is down")
+        proc.llm.call_llm = AsyncMock(side_effect=Exception("API timeout"))
+
+        now = datetime.now(timezone.utc)
+        store.get_facts_for_entity.return_value = [
+            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
+        ]
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100)],
+            {100: "msg A"},
+            set(),
+        )
+        assert result[1] == pytest.approx(0.80)
+
+    @pytest.mark.asyncio
+    async def test_fewer_lines_than_candidates(self):
+        """LLM returns fewer YES/NO lines than candidates — extras keep base score."""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.return_value = "1. YES"
+
+        now = datetime.now(timezone.utc)
+        store.get_facts_for_entity.return_value = [
+            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
+        ]
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100), (2, 0.75, 101), (3, 0.70, 102)],
+            {100: "msg A", 101: "msg B", 102: "msg C"},
+            set(),
+        )
+        assert result[1] == pytest.approx(0.85)
+        # Candidates 2 and 3 have no matching YES/NO line — keep base
+        assert result[2] == pytest.approx(0.75)
+        assert result[3] == pytest.approx(0.70)
+
+    @pytest.mark.asyncio
+    async def test_no_facts_skips_llm(self):
+        """Candidate with no facts should keep base score without LLM call."""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.return_value = "should not be called"
+        store.get_facts_for_entity.return_value = []
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100)],
+            {100: "msg A"},
+            set(),
+        )
+        assert result[1] == pytest.approx(0.80)
+        proc.llm.call_llm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_co_occurrence_boost(self):
+        """Signal 4: neighbor overlap with batch entities adds up to 0.05."""
+        proc, store, mock_llm, _, _, _ = make_processor()
+        mock_llm.call_llm.return_value = None
+        store.get_facts_for_entity.return_value = []
+        store.get_neighbor_ids.return_value = {5, 6}
+
+        result = await proc._boost_candidates(
+            [(1, 0.80, 100)],
+            {100: "msg A"},
+            {5, 7},  # entity 5 is both a neighbor and in batch
+        )
+        # base 0.80 + co-occurrence 0.03 (1 overlap * 0.03)
+        assert result[1] == pytest.approx(0.83)

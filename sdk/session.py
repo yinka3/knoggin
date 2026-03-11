@@ -3,12 +3,8 @@
 Created by client.session(). Consumed by KnogginExtractor and KnogginAgent.
 """
 
-import asyncio
-import os
-import uuid
 from dataclasses import dataclass, field
-from functools import partial
-from typing import Callable, Dict, List, Optional
+from typing import  Optional
 
 from loguru import logger
 
@@ -18,7 +14,7 @@ from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from agent.tools import Tools
 from shared.services.memory import MemoryManager
-from shared.services.rag import FileRAGService
+from shared.rag.processor import FileRAGService
 from shared.config.topics_config import TopicConfig
 from shared.infra.redis import RedisKeys
 

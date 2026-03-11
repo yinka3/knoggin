@@ -58,11 +58,7 @@ async def upload_file(
                     raise HTTPException(status_code=400, detail=f"File too large. Max: {MAX_FILE_SIZE // (1024*1024)}MB")
                 await loop.run_in_executor(None, f.write, chunk)
         
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            partial(context.file_rag.ingest_file, tmp_path, file.filename)
-        )
+        result = await context.file_rag.ingest_file(tmp_path, file.filename)
         
         return result
     

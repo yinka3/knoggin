@@ -354,10 +354,7 @@ class MergeDetectionJob(BaseJob):
                     else:
                         resolution_text = f"{item['primary_name']} (merged with {item['secondary_name']})"
                     
-                    new_embedding = await loop.run_in_executor(
-                        self.executor,
-                        partial(self.ent_resolver.compute_embedding, p_id, resolution_text)
-                    )
+                    new_embedding = await self.ent_resolver.compute_embedding(p_id, resolution_text)
                     
                     await loop.run_in_executor(
                         None,

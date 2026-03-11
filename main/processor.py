@@ -1,5 +1,6 @@
 
 import json
+import re
 import time
 import asyncio
 from functools import partial
@@ -17,7 +18,7 @@ from main.prompts import (
 )
 from shared.config.topics_config import TopicConfig
 from main.utils import ( 
-    format_vp03_input, 
+    format_vp02_input, 
     parse_connection_response
 )
 from shared.models.schema.dtypes import (
@@ -99,12 +100,7 @@ class BatchProcessor:
             
             msg_texts = [m['message'] for m in messages]
     
-            loop = asyncio.get_running_loop()
-            embeddings = await loop.run_in_executor(
-                self.executor, 
-                self.ent_resolver.compute_batch_embeddings, 
-                msg_texts
-            )
+            embeddings = await self.ent_resolver.embedding_service.encode(msg_texts)
 
             for i, msg in enumerate(messages):
                 msg['embedding'] = embeddings[i]
@@ -193,7 +189,7 @@ class BatchProcessor:
         Deterministic entity resolution using 4 scoring signals.
         Replaces VP-02 LLM disambiguation.
         """
-        loop = asyncio.get_running_loop()
+
         msg_text_map = {m["id"]: m["message"] for m in messages}
 
         entity_ids = []
@@ -208,11 +204,7 @@ class BatchProcessor:
         unique_names = list({name for _, name, _, _ in mentions if name})
         embedding_map = {}
         if unique_names:
-            embeddings_array = await loop.run_in_executor(
-                self.executor,
-                self.ent_resolver.embedding_service.encode,
-                unique_names
-            )
+            embeddings_array = await self.ent_resolver.embedding_service.encode(unique_names)
             embedding_map = {
                 name: emb
                 for name, emb in zip(unique_names, embeddings_array)
@@ -233,7 +225,7 @@ class BatchProcessor:
                 continue
 
             precomputed = embedding_map.get(name)
-            candidates = self.ent_resolver.get_candidate_ids(
+            candidates = await self.ent_resolver.get_candidate_ids(
                 name, precomputed_embedding=precomputed
             )
 
@@ -241,6 +233,7 @@ class BatchProcessor:
                 top_id, top_score = candidates[0]
                 if top_score >= self.resolution_threshold:
                     entry = ("candidate", top_id, top_score)
+                    batch_matched_ids.add(top_id)
                 else:
                     entry = ("new", None)
             else:
@@ -325,9 +318,7 @@ class BatchProcessor:
                         ent_id = await self._get_next_ent_id()
                         source_context = msg_text_map.get(msg_id)
 
-                        await loop.run_in_executor(
-                            self.executor,
-                            self.ent_resolver.register_entity,
+                        await self.ent_resolver.register_entity(
                             ent_id, name.strip(), [name.strip()],
                             typ, topic, self.session_id,
                             source_context
@@ -340,9 +331,9 @@ class BatchProcessor:
                         ent_id = None
 
             if ent_id is not None:
-                entity_ids.append(ent_id)
                 if ent_id not in entity_msg_map:
                     entity_msg_map[ent_id] = []
+                    entity_ids.append(ent_id)
                 entity_msg_map[ent_id].append(msg_id)
 
         return ResolutionResult(
@@ -408,7 +399,6 @@ class BatchProcessor:
                 )
 
                 if response:
-                    import re
                     # Match patterns like "1. YES", "2: NO", "3 YES"
                     matches = re.findall(r"^\s*\d+[\.\:\-]?\s*(YES|NO)", response, re.IGNORECASE | re.MULTILINE)
                     
@@ -490,7 +480,7 @@ class BatchProcessor:
         else:
             system_03 = get_connection_reasoning_prompt(self.user_name)
             
-        user_03 = format_vp03_input(
+        user_03 = format_vp02_input(
             candidates, 
             [{"id": m["id"], "text": m["message"]} for m in messages],
             session_text

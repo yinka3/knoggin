@@ -146,6 +146,30 @@ class TestRegisterEntity:
         assert "Charlie" in call_args
         assert "person" in call_args
 
+    def test_alias_collision_skips_conflicting_alias(self, resolver):
+        """If alias already belongs to another entity, it should be skipped silently."""
+        r, store, emb = resolver
+
+        r.register_entity(10, "Alice Johnson", ["Alice Johnson", "alice"], "person", "Identity", "s1")
+        r.register_entity(20, "Alice Cooper", ["Alice Cooper", "alice"], "person", "Identity", "s1")
+
+        # "alice" should still point to entity 10 (first registered)
+        assert r.get_id("alice") == 10
+        # "alice cooper" should point to entity 20
+        assert r.get_id("alice cooper") == 20
+        # Entity 20 should still be registered with its canonical name
+        assert 20 in r.get_profiles()
+
+    def test_canonical_name_collision(self, resolver):
+        """Two entities with the same canonical_name lowercase — second one overwrites."""
+        r, store, emb = resolver
+
+        r.register_entity(10, "Alice", ["Alice"], "person", "Identity", "s1")
+        r.register_entity(20, "ALICE", ["ALICE"], "person", "Identity", "s1")
+
+        # "alice" now points to 20 (last write wins for canonical)
+        assert r.get_id("alice") == 20
+
 
 class TestGetId:
     """Tests for the get_id method."""
@@ -200,6 +224,26 @@ class TestGetId:
         r, _, _ = resolver
         assert r.get_id("") is None
         assert r.get_id(None) is None
+
+    def test_store_fallback_profile_has_defaults(self, resolver):
+        """Profile created from store fallback should have topic='General' and session_id=None."""
+        r, store, _ = resolver
+
+        store.get_entities_by_names.return_value = [{
+            "id": 50,
+            "canonical_name": "New Entity",
+            "type": "company",
+            "aliases": [],
+        }]
+
+        r.get_id("New Entity")
+
+        profile = r.get_profile(50)
+        assert profile is not None
+        assert profile["topic"] == "General"
+        assert profile["session_id"] is None
+        assert profile["canonical_name"] == "New Entity"
+        assert profile["type"] == "company"
 
 
 class TestValidateAndCommit:
@@ -299,6 +343,17 @@ class TestRemoveEntities:
         with patch("main.entity_resolve.emit_sync"):
             assert r.remove_entities([999]) == 0
 
+    def test_mixed_known_and_unknown(self, hydrated_resolver):
+        """Remove list with one known entity and one unknown — should return 1."""
+        r, _, _ = hydrated_resolver
+
+        with patch("main.entity_resolve.emit_sync"):
+            removed = r.remove_entities([1, 999])
+
+        assert removed == 1
+        assert r.get_id("Alice Johnson") is None
+        assert r.get_id("Acme Corp") == 2
+
 
 class TestHydration:
     """Tests for the initial hydration process from the database store."""
@@ -353,3 +408,199 @@ class TestSnapshotIsolation:
 
         profiles_a[999] = {"canonical_name": "Injected"}
         assert 999 not in r.get_profiles()
+
+
+
+
+
+
+# ════════════════════════════════════════════════════════
+#  get_profile
+# ════════════════════════════════════════════════════════
+
+class TestGetProfile:
+
+    def test_get_profile_found(self, hydrated_resolver):
+        r, _, _ = hydrated_resolver
+        profile = r.get_profile(1)
+        assert profile["canonical_name"] == "Alice Johnson"
+        assert profile["type"] == "person"
+
+    def test_get_profile_not_found(self, resolver):
+        r, _, _ = resolver
+        assert r.get_profile(999) is None
+
+
+# ════════════════════════════════════════════════════════
+#  compute_embedding
+# ════════════════════════════════════════════════════════
+
+class TestComputeEmbedding:
+
+    def test_compute_embedding_updates_profile(self, hydrated_resolver):
+        r, _, emb = hydrated_resolver
+        new_emb = [0.5] * 1024
+        emb.encode_single = AsyncMock(return_value=new_emb)
+
+        result = r.compute_embedding(1, "Alice Johnson. Works at Anthropic.")
+        assert result == new_emb
+        assert r.get_profile(1)["embedding"] == new_emb
+
+    def test_compute_embedding_unknown_entity(self, resolver):
+        r, _, _ = resolver
+        result = r.compute_embedding(999, "Nobody")
+        assert result == []
+
+
+# ════════════════════════════════════════════════════════
+#  get_embedding_for_id
+# ════════════════════════════════════════════════════════
+
+class TestGetEmbeddingForId:
+
+    def test_returns_profile_embedding_if_available(self, hydrated_resolver):
+        r, store, _ = hydrated_resolver
+        # Hydrated entities get embedding set during register
+        # Force an embedding into the profile to test this path
+        with r._lock:
+            r.entity_profiles[1]["embedding"] = FAKE_EMBEDDING
+        result = r.get_embedding_for_id(1)
+        assert result == FAKE_EMBEDDING
+        store.get_entity_embedding.assert_not_called()
+
+    def test_falls_back_to_store(self, resolver):
+        """If profile has no embedding, should call store.get_entity_embedding."""
+        r, store, _ = resolver
+        with r._lock:
+            r.entity_profiles[50] = {
+                "canonical_name": "Test",
+                "type": "person",
+                "topic": "General",
+                "session_id": "s1",
+            }
+        store.get_entity_embedding.return_value = [0.9] * 1024
+
+        result = r.get_embedding_for_id(50)
+        assert result == [0.9] * 1024
+        store.get_entity_embedding.assert_called_once_with(50)
+
+    def test_no_profile_falls_back_to_store(self, resolver):
+        r, store, _ = resolver
+        store.get_entity_embedding.return_value = [0.8] * 1024
+
+        result = r.get_embedding_for_id(999)
+        assert result == [0.8] * 1024
+        store.get_entity_embedding.assert_called_once_with(999)
+
+
+# ════════════════════════════════════════════════════════
+#  update_settings
+# ════════════════════════════════════════════════════════
+
+class TestUpdateSettings:
+
+    def test_updates_all_fields(self, resolver):
+        r, _, _ = resolver
+        r.update_settings(
+            fuzzy_substring_threshold=80,
+            fuzzy_non_substring_threshold=95,
+            generic_token_freq=5,
+            candidate_fuzzy_threshold=90,
+            candidate_vector_threshold=0.90,
+        )
+        assert r.fuzzy_substring_threshold == 80
+        assert r.fuzzy_non_substring_threshold == 95
+        assert r.generic_token_freq == 5
+        assert r.candidate_fuzzy_threshold == 90
+        assert r.candidate_vector_threshold == 0.90
+
+    def test_partial_update(self, resolver):
+        r, _, _ = resolver
+        original_non_sub = r.fuzzy_non_substring_threshold
+
+        r.update_settings(fuzzy_substring_threshold=80)
+
+        assert r.fuzzy_substring_threshold == 80
+        assert r.fuzzy_non_substring_threshold == original_non_sub
+
+    def test_none_values_ignored(self, resolver):
+        r, _, _ = resolver
+        original = r.fuzzy_substring_threshold
+
+        r.update_settings(fuzzy_substring_threshold=None)
+        assert r.fuzzy_substring_threshold == original
+
+
+
+
+
+# ════════════════════════════════════════════════════════
+#  compute_batch_embeddings
+# ════════════════════════════════════════════════════════
+
+class TestComputeBatchEmbeddings:
+
+    def test_compute_batch_embeddings_empty(self, resolver):
+        """Empty list should return empty list."""
+        r, _, _ = resolver
+        result = r.compute_batch_embeddings([])
+        assert result == []
+
+    def test_compute_batch_embeddings_success(self, resolver):
+        """Valid list of texts should return list of embeddings."""
+        r, _, emb = resolver
+        expected = [[0.1] * 1024, [0.2] * 1024]
+        emb.encode = AsyncMock(return_value=expected)
+
+        result = r.compute_batch_embeddings(["text 1", "text 2"])
+        assert result == expected
+        emb.encode.assert_called_once_with(["text 1", "text 2"])
+
+
+# ════════════════════════════════════════════════════════
+#  detect_merge_entity_candidates
+# ════════════════════════════════════════════════════════
+
+class TestDetectMergeEntityCandidates:
+
+    @patch("main.entity_resolve.EntityResolver._collect_candidate_pairs")
+    @patch("main.entity_resolve.EntityResolver._classify_pair")
+    def test_detect_merge_entity_candidates_no_targets(self, mock_classify, mock_collect, resolver):
+        """Should return empty list if no valid targets."""
+        r, _, _ = resolver
+        # Resolver has no profiles by default
+        assert r.detect_merge_entity_candidates({99}) == []
+        mock_collect.assert_not_called()
+
+    @patch("main.entity_resolve.EntityResolver._collect_candidate_pairs")
+    @patch("main.entity_resolve.EntityResolver._classify_pair")
+    def test_detect_merge_entity_candidates_no_pairs(self, mock_classify, mock_collect, hydrated_resolver):
+        """Should return empty list if _collect_candidate_pairs returns empty."""
+        r, _, _ = hydrated_resolver
+        mock_collect.return_value = {}
+
+        result = r.detect_merge_entity_candidates()
+        assert result == []
+        mock_collect.assert_called_once()
+        mock_classify.assert_not_called()
+
+    @patch("main.entity_resolve.EntityResolver._collect_candidate_pairs")
+    @patch("main.entity_resolve.EntityResolver._classify_pair")
+    def test_detect_merge_entity_candidates_success(self, mock_classify, mock_collect, hydrated_resolver):
+        """Should query store for facts and return classified pairs."""
+        r, store, _ = hydrated_resolver
+        mock_collect.return_value = {(1, 2): 95}
+        
+        # Mock store facts and classification
+        store.get_facts_for_entities.return_value = {1: [], 2: []}
+        mock_classify.return_value = {"primary_id": 1, "secondary_id": 2, "fuzz_score": 95}
+
+        result = r.detect_merge_entity_candidates({1, 2})
+        
+        assert len(result) == 1
+        assert result[0] == {"primary_id": 1, "secondary_id": 2, "fuzz_score": 95}
+        store.get_facts_for_entities.assert_called_once()
+        # The exact order of list(set([1, 2])) might vary, but both elements are there.
+        called_args = store.get_facts_for_entities.call_args[0][0]
+        assert set(called_args) == {1, 2}
+        mock_classify.assert_called_once()

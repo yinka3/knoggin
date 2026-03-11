@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Optional
 from loguru import logger
 
@@ -30,10 +31,6 @@ def _strip_code_fences(text: str) -> str:
 
 
 async def generate_topics(llm_service, text: str, max_topics: int = 6) -> dict:
-    """
-    Generate topic configuration from a text description using an LLM.
-    Returns a merged dict with defaults (General, Identity) + generated topics.
-    """
     from main.prompts import get_topic_seed_prompt
 
     system = get_topic_seed_prompt()
@@ -50,7 +47,9 @@ async def generate_topics(llm_service, text: str, max_topics: int = 6) -> dict:
         logger.error(f"Failed to parse topic generation output: {cleaned[:500]}")
         raise ValueError("Failed to parse generated topics")
 
-    # Remove protected topics — they get re-added as defaults
+    if not isinstance(generated, dict):
+        raise ValueError(f"Expected dict from topic generation, got {type(generated).__name__}")
+
     generated.pop("General", None)
     generated.pop("Identity", None)
 
@@ -59,9 +58,30 @@ async def generate_topics(llm_service, text: str, max_topics: int = 6) -> dict:
         generated = {k: generated[k] for k in keys}
 
     for name, config in generated.items():
-        config.setdefault("labels", [])
-        config.setdefault("aliases", [])
-        config.setdefault("hierarchy", {})
+        if not isinstance(config, dict):
+            generated[name] = {"labels": [], "aliases": [], "hierarchy": {}, "active": True}
+            continue
+
         config.setdefault("active", True)
+        config.setdefault("hierarchy", {})
+
+        if not isinstance(config.get("labels"), list):
+            config["labels"] = []
+        if not isinstance(config.get("aliases"), list):
+            config["aliases"] = []
+        if not isinstance(config.get("hierarchy"), dict):
+            config["hierarchy"] = {}
+
+        clean_labels = []
+        for label in config["labels"]:
+            if not isinstance(label, str):
+                continue
+            label = label.strip().lower()
+            if not label or len(label) > 30:
+                continue
+            if not re.match(r'^[a-z][a-z0-9 _-]*$', label):
+                continue
+            clean_labels.append(label)
+        config["labels"] = clean_labels
 
     return {**DEFAULT_TOPICS, **generated}

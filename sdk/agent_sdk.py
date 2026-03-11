@@ -1,9 +1,5 @@
 """SDK agent interface — non-streaming agent loop with graph queries and memory."""
 
-import ast
-import asyncio
-import json
-import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -49,7 +45,7 @@ from agent.streaming import call_agent_streaming, execute_pending_tools, generat
 from main.entity_resolve import EntityResolver
 from shared.config.topics_config import TopicConfig
 from shared.mcp.bridge import mcp_tools_to_schemas
-from shared.services.rag import FileRAGService
+from shared.rag.processor import FileRAGService
 from shared.models.schema.dtypes import (
     FinalResponse,
     ClarificationRequest,

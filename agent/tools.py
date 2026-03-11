@@ -1,7 +1,9 @@
 import asyncio
+from datetime import datetime, timezone
 import json
 import re
 import httpx
+from functools import partial
 from typing import List, Dict, Optional
 
 from loguru import logger
@@ -38,9 +40,18 @@ class Tools:
         return self.resolver.resolve_entity_name(entity)
     
     @staticmethod
-    def _is_message_id(msg_id: int) -> bool:
+    def _is_message_id(msg_id) -> bool:
         """Check if numeric ID belongs to message collection or turn collection."""
+        if isinstance(msg_id, str):
+            return msg_id.startswith("msg_")
         return msg_id < 1_000_000_000
+
+    @staticmethod
+    def _format_message_id(msg_id) -> str:
+        """Format an ID as a string for message/turn reference."""
+        if isinstance(msg_id, str):
+            return msg_id
+        return f"msg_{msg_id}" if msg_id < 1_000_000_000 else f"turn_{msg_id - 1_000_000_000}"
 
     async def _hydrate_evidence(self, evidence_ids: list[str], timeout: float = 5.0) -> list[dict]:
         """
@@ -51,10 +62,18 @@ class Tools:
             return []
         
         content_key = RedisKeys.message_content(self.user_name, self.session_id)
-        raw_results = []
+        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
+        
+        pipe = self.redis.pipeline()
+        for msg_id in evidence_ids:
+            if msg_id.startswith("msg_"):
+                pipe.hget(content_key, msg_id)
+            else:
+                pipe.hget(conv_key, msg_id)
+                
         try:
             raw_results = await asyncio.wait_for(
-                self.redis.hmget(content_key, *evidence_ids),
+                pipe.execute(),
                 timeout=timeout
             )
         except asyncio.TimeoutError:
@@ -70,7 +89,7 @@ class Tools:
                     data = json.loads(raw)
                     results.append({
                         "id": msg_id,
-                        "message": data.get("message", ""),
+                        "message": data.get("message", data.get("content", "")),
                         "timestamp": data.get("timestamp", "")
                     })
                 except json.JSONDecodeError:
@@ -81,11 +100,15 @@ class Tools:
                         missing_ids_numerical.append(int(msg_id.split("_")[1]))
                     except (ValueError, IndexError):
                         pass
+                elif msg_id.startswith("turn_"):
+                    try:
+                        missing_ids_numerical.append(int(msg_id.split("_")[1]) + 1_000_000_000)
+                    except (ValueError, IndexError):
+                        pass
 
         if missing_ids_numerical:
             loop = asyncio.get_running_loop()
-            from functools import partial
-            from datetime import datetime, timezone
+
             fallback_msgs = await loop.run_in_executor(
                 None, 
                 partial(self.store.get_messages_by_ids, missing_ids_numerical)
@@ -95,8 +118,13 @@ class Tools:
                 if "timestamp" in m and isinstance(m["timestamp"], (int, float)):
                     ts_iso = datetime.fromtimestamp(m["timestamp"]/1000.0, timezone.utc).isoformat()
                 
+                if m['id'] >= 1_000_000_000:
+                    str_id = f"turn_{m['id'] - 1_000_000_000}"
+                else:
+                    str_id = f"msg_{m['id']}"
+
                 results.append({
-                    "id": f"msg_{m['id']}",
+                    "id": str_id,
                     "message": m["content"],
                     "timestamp": ts_iso
                 })
@@ -137,8 +165,6 @@ class Tools:
                 try:
                     numerical_msg_id = int(msg_id.split("_")[1])
                     loop = asyncio.get_running_loop()
-                    from functools import partial
-                    from datetime import datetime, timezone
                     fallback_msgs = await loop.run_in_executor(
                         None,
                         partial(self.store.get_surrounding_messages, numerical_msg_id, forward, target_total)
@@ -248,29 +274,38 @@ class Tools:
         return pre_context + [target_msg] + post_context
 
 
-    def _search_messages(self, query: str, k: int) -> list[tuple[str, float]]:
+    async def _search_messages(self, query: str, k: int) -> list[tuple[str, float]]:
         """
-        Synchronous internal method executing hybrid vector + FTS search over messages, 
+        Asynchronous internal method executing hybrid vector + FTS search over messages, 
         followed by an optional cross-encoder reranking step if candidates exceed 1.
         """
-
+        import asyncio
+        loop = asyncio.get_running_loop()
         vector_limit = self.search_cfg.get("vector_limit", 50)
         fts_limit = self.search_cfg.get("fts_limit", 50)
         rerank_candidates = self.search_cfg.get("rerank_candidates", 45)
 
         results = {}
-        query_embedding = self.embedding_service.encode_single(query)
-        sem_results = self.store.search_messages_vector(query_embedding, limit=vector_limit)
+        query_embedding = await self.embedding_service.encode_single(query)
+        
+        sem_results = await loop.run_in_executor(
+            None, 
+            partial(self.store.search_messages_vector, query_embedding, vector_limit)
+        )
 
         for msg_id, score in sem_results:
-            msg_key = f"msg_{msg_id}" if self._is_message_id(msg_id) else f"turn_{msg_id - 1_000_000_000}"
+            msg_key = self._format_message_id(msg_id)
             results[msg_key] = ("semantic", float(score))
         
-        fts_results = self.store.search_messages_fts(query, limit=fts_limit)
+        fts_results = await loop.run_in_executor(
+            None,
+            partial(self.store.search_messages_fts, query, fts_limit)
+        )
+        
         max_fts = max([s for _, s in fts_results]) if fts_results else 1.0
 
         for msg_id, raw_score in fts_results:
-            msg_key = f"msg_{msg_id}"
+            msg_key = self._format_message_id(msg_id)
             
             norm_score = raw_score / max_fts if max_fts > 0 else 0
             
@@ -288,15 +323,12 @@ class Tools:
         try:
             if len(results) > 1:
                 candidate_keys = list(results.keys())[:rerank_candidates]
-                texts = []
-                for msg_key in candidate_keys:
-                    try:
-                        numeric_id = int(msg_key.split("_")[1])
-                        texts.append(self.store.get_message_text(numeric_id))
-                    except (ValueError, IndexError):
-                        texts.append("")
-                
-                scores = self.embedding_service.rerank(query, texts)
+
+                hydrated = await self._hydrate_evidence(candidate_keys)
+                text_map = {h["id"]: h.get("message", "") for h in hydrated}
+                texts = [text_map.get(k, "") for k in candidate_keys]
+
+                scores = await self.embedding_service.rerank(query, texts)
                 reranked = sorted(zip(candidate_keys, scores), key=lambda x: x[1], reverse=True)
                 return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
         except Exception as e:
@@ -319,9 +351,8 @@ class Tools:
         Returns: List of turns with id, role, message, timestamp, score, 
                 and surrounding context (adjacent turns for continuity).
         """
-        loop = asyncio.get_running_loop()
         limit = limit or self.search_cfg.get("default_message_limit", 8)
-        results = await loop.run_in_executor(None, self._search_messages, query, limit)
+        results = await self._search_messages(query, limit)
         
         if not results:
             return []
@@ -383,9 +414,9 @@ class Tools:
                         "role": "user",
                         "message": data.get("message", ""),
                         "timestamp": data.get("timestamp", ""),
-                    "score": scores[msg_key],
-                    "context": context
-                })
+                        "score": scores[msg_key],
+                        "context": context
+                    })
             else:
                 raw = assistant_contents.get(msg_key)
                 if raw:
@@ -395,9 +426,9 @@ class Tools:
                         "role": data.get("role", "assistant"),
                         "message": data.get("content", ""),
                         "timestamp": data.get("timestamp", ""),
-                    "score": scores[msg_key],
-                    "context": context
-                })
+                        "score": scores[msg_key],
+                        "context": context
+                    })
         
         return output
         
@@ -415,8 +446,12 @@ class Tools:
         Returns: 
             List of matching entities with id, name, summary snippet, type, and top connections.
         """
+        loop = asyncio.get_running_loop()
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
-        results = self.store.search_entity(query, self.active_topics, limit)
+        results = await loop.run_in_executor(
+            None, 
+            partial(self.store.search_entity, query, self.active_topics, limit)
+        )
     
         if not results:
             return []
@@ -425,7 +460,8 @@ class Tools:
         for entity in results:
             for conn in entity.get("top_connections", []):
                 evidence_ids = conn.pop("evidence_ids", [])
-                conn["evidence"] = await self._hydrate_evidence(evidence_ids)
+                string_ids = [self._format_message_id(x) for x in evidence_ids]
+                conn["evidence"] = await self._hydrate_evidence(string_ids)
         
         return results
 
@@ -441,18 +477,27 @@ class Tools:
         Returns: 
             List of connections with target entity, connection strength, and hydrated evidence messages.
         """
-        canonical = self._resolve_entity_name(entity_name)
+        loop = asyncio.get_running_loop()
+        canonical = await loop.run_in_executor(None, self._resolve_entity_name, entity_name)
         if not canonical:
             return [{"error": f"Entity not found: '{entity_name}'"}]
         
-        results = self.store.get_related_entities([canonical], active_topics=self.active_topics)
+        results = await loop.run_in_executor(
+            None, 
+            partial(self.store.get_related_entities, [canonical], active_topics=self.active_topics)
+        )
         results = self._normalize_output(results)
         if results:
             for r in results:
-                r["evidence"] = await self._hydrate_evidence(r.pop("evidence_ids", []))
+                evidence_ids = r.pop("evidence_ids", [])
+                string_ids = [self._format_message_id(x) for x in evidence_ids]
+                r["evidence"] = await self._hydrate_evidence(string_ids)
             return results
         
-        hidden_results = self.store.get_related_entities([canonical], active_topics=None)
+        hidden_results = await loop.run_in_executor(
+            None, 
+            partial(self.store.get_related_entities, [canonical], active_topics=None)
+        )
         
         if hidden_results:
             return [{
@@ -475,15 +520,21 @@ class Tools:
         
         Returns: Recent interactions with timestamps and evidence message IDs.
         """
-        canonical = self._resolve_entity_name(entity_name)
+        loop = asyncio.get_running_loop()
+        canonical = await loop.run_in_executor(None, self._resolve_entity_name, entity_name)
         if not canonical:
             return [{"error": f"Entity not found: '{entity_name}'"}]
         
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
-        results = self.store.get_recent_activity(canonical, active_topics=self.active_topics, hours=hours)
+        results = await loop.run_in_executor(
+            None, 
+            partial(self.store.get_recent_activity, canonical, active_topics=self.active_topics, hours=hours)
+        )
         
         for r in results:
-            r["evidence"] = await self._hydrate_evidence(r.pop("evidence_ids", []))
+            evidence_ids = r.pop("evidence_ids", [])
+            string_ids = [self._format_message_id(x) for x in evidence_ids]
+            r["evidence"] = await self._hydrate_evidence(string_ids)
         
         return results
 
@@ -502,8 +553,9 @@ class Tools:
             If path exists only through inactive topics: [{"hidden": True, "message": "..."}]
             Empty list if no connection found.
         """
-        canonical_a = self._resolve_entity_name(entity_a)
-        canonical_b = self._resolve_entity_name(entity_b)
+        loop = asyncio.get_running_loop()
+        canonical_a = await loop.run_in_executor(None, self._resolve_entity_name, entity_a)
+        canonical_b = await loop.run_in_executor(None, self._resolve_entity_name, entity_b)
         if not canonical_a and not canonical_b:
             return [{"error": f"Neither entity found: '{entity_a}' and '{entity_b}'"}]
         if not canonical_a:
@@ -512,17 +564,25 @@ class Tools:
             return [{"error": f"Entity not found: '{entity_b}'"}]
             
 
-        path, has_inactive_shortcut = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=self.active_topics, max_depth=4)
+        path, has_inactive_shortcut = await loop.run_in_executor(
+            None, 
+            partial(self.store.find_path_filtered, canonical_a, canonical_b, active_topics=self.active_topics, max_depth=4)
+        )
         
         if path:
             for step in path:
-                step["evidence"] = await self._hydrate_evidence(step.pop("evidence_refs", []))
+                evidence_refs = step.pop("evidence_refs", [])
+                string_ids = [self._format_message_id(x) for x in evidence_refs]
+                step["evidence"] = await self._hydrate_evidence(string_ids)
             if has_inactive_shortcut:
                 path.append({"note": "A shorter connection exists through inactive topics"})
             return path
         
         if has_inactive_shortcut:
-            full_path, _ = self.store.find_path_filtered(canonical_a, canonical_b, active_topics=None, max_depth=4)
+            full_path, _ = await loop.run_in_executor(
+                None, 
+                partial(self.store.find_path_filtered, canonical_a, canonical_b, active_topics=None, max_depth=4)
+            )
 
             safe_path = []
             for step in full_path:
@@ -573,7 +633,11 @@ class Tools:
         if not hot_topics:
             return {}
         
-        raw = self.store.get_hot_topic_context_with_messages(hot_topics, msg_limit=10, slim=slim)
+        loop = asyncio.get_running_loop()
+        raw = await loop.run_in_executor(
+            None, 
+            partial(self.store.get_hot_topic_context_with_messages, hot_topics, msg_limit=10, slim=slim)
+        )
         content_key = RedisKeys.message_content(self.user_name, self.session_id)
         
         for _, data in raw.items():
@@ -608,11 +672,12 @@ class Tools:
         Returns:
             Dict with parent chain and/or children list
         """
-        canonical = self._resolve_entity_name(entity_name)
+        loop = asyncio.get_running_loop()
+        canonical = await loop.run_in_executor(None, self._resolve_entity_name, entity_name)
         if not canonical:
             return []
         
-        entity_id = self.resolver.get_id(canonical)
+        entity_id = await loop.run_in_executor(None, self.resolver.get_id, canonical)
         if not entity_id:
             return []
         
@@ -622,7 +687,7 @@ class Tools:
         }
         
         if direction in ("up", "both"):
-            parents = self.store.get_parent_entities(entity_id)
+            parents = await loop.run_in_executor(None, self.store.get_parent_entities, entity_id)
             result["parents"] = parents
             
             if parents:
@@ -631,7 +696,7 @@ class Tools:
                 visited = {current_id}
                 
                 while True:
-                    parent_list = self.store.get_parent_entities(current_id)
+                    parent_list = await loop.run_in_executor(None, self.store.get_parent_entities, current_id)
                     if not parent_list:
                         break
                     parent = parent_list[0]  # assume single parent for now
@@ -644,7 +709,7 @@ class Tools:
                 result["ancestry"] = ancestry
         
         if direction in ("down", "both"):
-            children = self.store.get_child_entities(entity_id)
+            children = await loop.run_in_executor(None, self.store.get_child_entities, entity_id)
             result["children"] = children
         
         return [result]
@@ -668,10 +733,10 @@ class Tools:
         if entity_id is not None:
             facts = await loop.run_in_executor(
                 None,
-                lambda: self.store.get_facts_for_entity(entity_id, active_only=False)
+                partial(self.store.get_facts_for_entity, entity_id, active_only=False)
             )
 
-            profile = self.resolver.get_profile(entity_id)
+            profile = await loop.run_in_executor(None, self.resolver.get_profile, entity_id)
             canonical = profile["canonical_name"] if profile else entity_name
 
             return {
@@ -689,7 +754,7 @@ class Tools:
 
         candidates = await loop.run_in_executor(
             None,
-            lambda: self.store.search_entities_by_embedding(embedding, limit=5, score_threshold=0.69)
+            partial(self.store.search_entities_by_embedding, embedding, limit=5, score_threshold=0.69)
         )
 
         if candidates:
@@ -698,7 +763,7 @@ class Tools:
 
             facts_by_entity = await loop.run_in_executor(
                 None,
-                lambda: self.store.get_facts_for_entities(candidate_ids, active_only=False)
+                partial(self.store.get_facts_for_entities, candidate_ids, active_only=False)
             )
 
             total_facts = sum(len(facts) for facts in facts_by_entity.values())
@@ -720,7 +785,7 @@ class Tools:
 
             results = []
             for eid in candidate_ids:
-                profile = self.resolver.get_profile(eid)
+                profile = await loop.run_in_executor(None, self.resolver.get_profile, eid)
                 canonical = profile["canonical_name"] if profile else str(eid)
 
                 results.append({
@@ -793,11 +858,7 @@ class Tools:
                 available = [f["original_name"] for f in files]
                 return [{"error": f"File '{file_name}' not found. Available: {', '.join(available)}"}]
         
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(
-            None,
-            lambda: self.file_rag.search(query, n_results=limit, file_filter=file_filter)
-        )
+        results = await self.file_rag.search(query, n_results=limit, file_filter=file_filter)
         
         if not results:
             return [{"info": "No relevant content found in uploaded files"}]
@@ -839,11 +900,16 @@ class Tools:
 
     async def _search_duckduckgo(self, query: str, limit: int, freshness: str = None) -> List[Dict]:
         """Free web search via DuckDuckGo — no API key required."""
+        loop = asyncio.get_running_loop()
         try:
             from duckduckgo_search import DDGS
             ddgs = DDGS()
             timelimit = {"pd": "d", "pw": "w", "pm": "m", "py": "y"}.get(freshness)
-            raw = ddgs.text(query, max_results=min(limit, 10), timelimit=timelimit)
+            
+            raw = await loop.run_in_executor(
+                None,
+                partial(ddgs.text, query, max_results=min(limit, 10), timelimit=timelimit)
+            )
 
             if not raw:
                 return [{"title": "No Results", "url": "", "snippet": f"No web results found for: {query}"}]

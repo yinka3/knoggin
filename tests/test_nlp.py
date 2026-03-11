@@ -300,6 +300,30 @@ class TestRunGliner:
         results = pipeline.run_gliner("Elon Musk just acquired Twitter for billions")
         assert results == []
 
+    def test_lower_threshold_extracts_more(self, spacy_model, gliner_model):
+        """Lower GLiNER threshold should surface more candidate entities."""
+        text = "I had coffee with Grace at the new place on Market Street"
+
+        pipeline_strict, _ = make_pipeline(spacy_model, gliner_model)
+        pipeline_loose, _ = make_pipeline(spacy_model, gliner_model)
+        pipeline_strict.gliner_threshold = 0.90
+        pipeline_loose.gliner_threshold = 0.50
+
+        strict_results = pipeline_strict.run_gliner(text)
+        loose_results = pipeline_loose.run_gliner(text)
+
+        assert len(loose_results) >= len(strict_results)
+
+    def test_very_high_threshold_extracts_fewer(self, spacy_model, gliner_model):
+        """Very high threshold should filter out low-confidence entities."""
+        text = "Working at Palantir on the Foundry platform with Priya Sharma"
+
+        pipeline, _ = make_pipeline(spacy_model, gliner_model)
+        pipeline.gliner_threshold = 0.99
+        results = pipeline.run_gliner(text)
+
+        assert len(results) <= 3
+
 
 # --- PhraseMatcher Integration (Real spaCy) ---
 
@@ -784,161 +808,47 @@ class TestExtractMentionsMocked:
         assert "recipe" in pipeline._label_to_topics
         assert pipeline._label_to_topics["recipe"] == ["Cooking"]
 
-class TestBoostCandidates:
-
     @pytest.mark.asyncio
-    async def test_numbered_yes_no(self):
-        """Standard numbered format: '1. YES\\n2. NO'"""
-        proc, store = make_processor("1. YES\n2. NO")
-        
-        now = datetime.now(timezone.utc)
-        store.get_facts_for_entity.return_value = [
-            Fact(id="f1", source_entity_id=1, content="Works at Anthropic", valid_at=now)
+    async def test_assistant_messages_processed(self, spacy_model, gliner_model):
+        """Assistant messages should also be scanned for entities."""
+        messages = [
+            {"id": 1, "message": "Do you know anything about Palantir?", "role": "user"},
+            {"id": 2, "message": "Palantir is a data analytics company founded by Peter Thiel.", "role": "assistant"},
         ]
+        llm_response = """
+        <entities>
+        2 | Peter Thiel | person | Identity | 0.92
+        </entities>
+        """
+        pipeline, _ = make_pipeline(spacy_model, gliner_model, llm_response=llm_response)
 
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100), (2, 0.75, 101)],
-            {100: "I work at Anthropic", 101: "Going to the store"},
-            set(),
-        )
-        assert result[1] == pytest.approx(0.85)  # 0.80 + 0.05
-        assert result[2] == pytest.approx(0.75)  # NO, stays at base
+        with patch("main.nlp_pipe.emit", new_callable=AsyncMock):
+            results = await pipeline.extract_mentions("Yinka", messages, "test-session")
+
+        names_lower = [name.lower() for _, name, _, _ in results]
+        # Should extract entities from both user and assistant messages
+        assert any("palantir" in n for n in names_lower)
 
     @pytest.mark.asyncio
-    async def test_bare_yes_no_lines(self):
-        """LLM returns just 'YES\\nNO' without numbering."""
-        proc, store = make_processor("YES\nNO")
-
-        now = datetime.now(timezone.utc)
-        store.get_facts_for_entity.return_value = [
-            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
+    async def test_mixed_roles_no_crash(self, spacy_model, gliner_model):
+        """Batch with alternating user/assistant roles should process without error."""
+        messages = [
+            {"id": 1, "message": "I started working at Anthropic last week", "role": "user"},
+            {"id": 2, "message": "That's great! Anthropic does important AI safety work.", "role": "assistant"},
+            {"id": 3, "message": "Yeah, my manager Dario has been really welcoming", "role": "user"},
+            {"id": 4, "message": "Dario Amodei is the CEO. What team are you on?", "role": "assistant"},
         ]
+        llm_response = """
+        <entities>
+        1 | Anthropic | company | Work | 0.95
+        3 | Dario | person | Identity | 0.9
+        </entities>
+        """
+        pipeline, _ = make_pipeline(spacy_model, gliner_model, llm_response=llm_response)
 
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100), (2, 0.75, 101)],
-            {100: "msg A", 101: "msg B"},
-            set(),
-        )
-        assert result[1] == pytest.approx(0.85)
-        assert result[2] == pytest.approx(0.75)
+        with patch("main.nlp_pipe.emit", new_callable=AsyncMock):
+            results = await pipeline.extract_mentions("Yinka", messages, "test-session")
 
-    @pytest.mark.asyncio
-    async def test_colon_format(self):
-        """LLM uses colon format: '1: YES\\n2: NO'"""
-        proc, store = make_processor("1: YES\n2: NO\n3: YES")
-
-        now = datetime.now(timezone.utc)
-        store.get_facts_for_entity.return_value = [
-            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
-        ]
-
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100), (2, 0.75, 101), (3, 0.70, 102)],
-            {100: "msg A", 101: "msg B", 102: "msg C"},
-            set(),
-        )
-        assert result[1] == pytest.approx(0.85)
-        assert result[2] == pytest.approx(0.75)
-        assert result[3] == pytest.approx(0.75)
-
-    @pytest.mark.asyncio
-    async def test_garbled_response_falls_back(self):
-        """LLM returns nonsense — all candidates keep base scores."""
-        proc, store = make_processor("I think the answer depends on the context and nuance of the situation.")
-
-        now = datetime.now(timezone.utc)
-        store.get_facts_for_entity.return_value = [
-            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
-        ]
-
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100), (2, 0.75, 101)],
-            {100: "msg A", 101: "msg B"},
-            set(),
-        )
-        assert result[1] == pytest.approx(0.80)
-        assert result[2] == pytest.approx(0.75)
-
-    @pytest.mark.asyncio
-    async def test_none_response_falls_back(self):
-        """LLM returns None (timeout) — base scores preserved."""
-        proc, store = make_processor(None)
-
-        now = datetime.now(timezone.utc)
-        store.get_facts_for_entity.return_value = [
-            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
-        ]
-
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100)],
-            {100: "msg A"},
-            set(),
-        )
-        assert result[1] == pytest.approx(0.80)
-
-    @pytest.mark.asyncio
-    async def test_llm_exception_falls_back(self):
-        """LLM raises exception — base scores preserved, no crash."""
-        proc, store = make_processor(None)
-        proc.llm.call_llm = AsyncMock(side_effect=Exception("API timeout"))
-
-        now = datetime.now(timezone.utc)
-        store.get_facts_for_entity.return_value = [
-            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
-        ]
-
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100)],
-            {100: "msg A"},
-            set(),
-        )
-        assert result[1] == pytest.approx(0.80)
-
-    @pytest.mark.asyncio
-    async def test_fewer_lines_than_candidates(self):
-        """LLM returns fewer YES/NO lines than candidates — extras keep base score."""
-        proc, store = make_processor("1. YES")
-
-        now = datetime.now(timezone.utc)
-        store.get_facts_for_entity.return_value = [
-            Fact(id="f1", source_entity_id=1, content="fact", valid_at=now)
-        ]
-
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100), (2, 0.75, 101), (3, 0.70, 102)],
-            {100: "msg A", 101: "msg B", 102: "msg C"},
-            set(),
-        )
-        assert result[1] == pytest.approx(0.85)
-        # Candidates 2 and 3 have no matching YES/NO line — keep base
-        assert result[2] == pytest.approx(0.75)
-        assert result[3] == pytest.approx(0.70)
-
-    @pytest.mark.asyncio
-    async def test_no_facts_skips_llm(self):
-        """Candidate with no facts should keep base score without LLM call."""
-        proc, store = make_processor("should not be called")
-        store.get_facts_for_entity.return_value = []
-
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100)],
-            {100: "msg A"},
-            set(),
-        )
-        assert result[1] == pytest.approx(0.80)
-        proc.llm.call_llm.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_co_occurrence_boost(self):
-        """Signal 4: neighbor overlap with batch entities adds up to 0.05."""
-        proc, store = make_processor(None)
-        store.get_facts_for_entity.return_value = []
-        store.get_neighbor_ids.return_value = {5, 6}
-
-        result = await proc._boost_candidates(
-            [(1, 0.80, 100)],
-            {100: "msg A"},
-            {5, 7},  # entity 5 is both a neighbor and in batch
-        )
-        # base 0.80 + co-occurrence 0.03 (1 overlap * 0.03)
-        assert result[1] == pytest.approx(0.83)
+        assert isinstance(results, list)
+        names_lower = [name.lower() for _, name, _, _ in results]
+        assert any("anthropic" in n for n in names_lower)

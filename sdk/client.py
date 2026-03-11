@@ -14,7 +14,7 @@ from loguru import logger
 from sdk.config import KnogginConfig
 from sdk.events import resolve_handler, EventEmitter
 from db.store import MemGraphStore
-from shared.services.embeddings import EmbeddingService
+from shared.rag.embedding import EmbeddingService
 from shared.services.llm import LLMService
 from sdk.session import KnogginSession
 from main.processor import BatchProcessor
@@ -22,10 +22,11 @@ from main.nlp_pipe import NLPPipeline
 from main.entity_resolve import EntityResolver
 from agent.tools import Tools
 from shared.services.memory import MemoryManager
-from shared.services.rag import FileRAGService
+from shared.rag.processor import FileRAGService
 from shared.config.topics_config import TopicConfig
 from shared.infra.redis import RedisKeys
-
+from main.consumer import BatchConsumer
+from shared.services.graph import write_batch_callback
 
 class KnogginClient:
     """SDK client holding all Knoggin resources.
@@ -349,9 +350,6 @@ class KnogginClient:
                 topic_config=topic_config,
                 get_next_ent_id=_get_next_ent_id,
             )
-
-            from main.consumer import BatchConsumer
-            from shared.infra.graph_write import write_batch_callback
 
             async def _get_session_context(window: int, msg_id: int):
                 return await self.get_conversation_context(user_name, session_id, window, msg_id)

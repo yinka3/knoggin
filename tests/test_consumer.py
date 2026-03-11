@@ -195,6 +195,71 @@ class TestDrainBufferSuccess:
 
         store.save_message_logs.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_drains_multiple_batches(self):
+        """Buffer with 8 msgs and batch_size=4 should drain twice."""
+        consumer, store, processor, redis, _, _ = make_consumer()
+
+        batch_1 = make_raw_msgs([1, 2, 3, 4])
+        batch_2 = make_raw_msgs([5, 6, 7, 8])
+
+        # llen: 8 first, then 4 after first trim, then 0
+        redis.llen = AsyncMock(side_effect=[8, 4, 0])
+        redis.lrange = AsyncMock(side_effect=[batch_1, batch_2, []])
+        redis.incrby = AsyncMock(return_value=4)
+
+        processor.run = AsyncMock(return_value=BatchResult(
+            message_embeddings={i: [0.1] for i in range(1, 9)},
+        ))
+
+        with patch("main.consumer.emit", new_callable=AsyncMock):
+            await consumer._drain_buffer(flush_partial=False)
+
+        assert processor.run.call_count == 2
+        assert redis.ltrim.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_extraction_result_skips_graph_write(self):
+        """When extraction_result is None/empty, write_to_graph should not be called."""
+        consumer, store, processor, redis, _, write_to_graph = make_consumer()
+        raw = make_raw_msgs([1, 2, 3, 4])
+
+        redis.llen = AsyncMock(return_value=4)
+        redis.lrange = AsyncMock(side_effect=[raw, []])
+        redis.incrby = AsyncMock(return_value=4)
+
+        processor.run = AsyncMock(return_value=BatchResult(
+            message_embeddings={i: [0.1] for i in [1, 2, 3, 4]},
+            extraction_result=None,
+        ))
+
+        with patch("main.consumer.emit", new_callable=AsyncMock):
+            await consumer._drain_buffer(flush_partial=False)
+
+        write_to_graph.assert_not_called()
+        store.save_message_logs.assert_called_once()
+        redis.ltrim.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_extraction_result_skips_graph_write(self):
+        """Empty list extraction_result is also falsy — graph write skipped."""
+        consumer, _, processor, redis, _, write_to_graph = make_consumer()
+        raw = make_raw_msgs([1, 2, 3, 4])
+
+        redis.llen = AsyncMock(return_value=4)
+        redis.lrange = AsyncMock(side_effect=[raw, []])
+        redis.incrby = AsyncMock(return_value=4)
+
+        processor.run = AsyncMock(return_value=BatchResult(
+            message_embeddings={i: [0.1] for i in [1, 2, 3, 4]},
+            extraction_result=[],
+        ))
+
+        with patch("main.consumer.emit", new_callable=AsyncMock):
+            await consumer._drain_buffer(flush_partial=False)
+
+        write_to_graph.assert_not_called()
+
 
 class TestDrainBufferFailure:
     """Tests for failure paths in _drain_buffer."""
@@ -300,6 +365,49 @@ class TestDrainBufferFailure:
         call_kwargs = processor.move_to_dead_letter.call_args
         assert "TIMEOUT" in call_kwargs[0][1] or "TIMEOUT" in str(call_kwargs[1].get("error", ""))
 
+    @pytest.mark.asyncio
+    async def test_save_failure_does_not_break_drain(self):
+        """save_message_logs exception is caught — drain continues to graph write."""
+        consumer, store, processor, redis, _, write_to_graph = make_consumer()
+        raw = make_raw_msgs([1, 2, 3, 4])
+
+        redis.llen = AsyncMock(return_value=4)
+        redis.lrange = AsyncMock(side_effect=[raw, []])
+        redis.incrby = AsyncMock(return_value=4)
+
+        result = BatchResult(
+            message_embeddings={i: [0.1] for i in [1, 2, 3, 4]},
+            extraction_result=[
+                MessageConnections(message_id=1, entity_pairs=[
+                    EntityPair(entity_a="A", entity_b="B", confidence=0.9)
+                ])
+            ],
+        )
+        processor.run = AsyncMock(return_value=result)
+        store.save_message_logs.side_effect = Exception("disk full")
+
+        with patch("main.consumer.emit", new_callable=AsyncMock):
+            await consumer._drain_buffer(flush_partial=False)
+
+        # Graph write should still be attempted despite save failure
+        write_to_graph.assert_called_once()
+        # Buffer should still be trimmed
+        redis.ltrim.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_raises(self):
+        """Corrupted Redis data causes json.loads to raise — currently unhandled."""
+        consumer, _, processor, redis, _, _ = make_consumer()
+
+        redis.llen = AsyncMock(return_value=1)
+        redis.lrange = AsyncMock(return_value=[b"not valid json{{{"])
+
+        with patch("main.consumer.emit", new_callable=AsyncMock):
+            with pytest.raises(json.JSONDecodeError):
+                await consumer._drain_buffer(flush_partial=True)
+
+        processor.run.assert_not_called()
+
 
 class TestCheckpoint:
     """Tests for checkpointing logic (triggering periodic session jobs)."""
@@ -344,6 +452,54 @@ class TestCheckpoint:
         # Counter should be reset to 0
         reset_calls = [c for c in redis.set.call_args_list if "checkpoint" in str(c[0][0])]
         assert len(reset_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_counter_reset_to_zero(self):
+        """After hitting the interval, checkpoint counter must be set to exactly 0."""
+        consumer, _, processor, redis, run_jobs, _ = make_consumer(checkpoint_interval=4)
+        raw = make_raw_msgs([1, 2, 3, 4])
+
+        redis.llen = AsyncMock(return_value=4)
+        redis.lrange = AsyncMock(side_effect=[raw, []])
+        redis.incrby = AsyncMock(return_value=4)
+
+        processor.run = AsyncMock(return_value=BatchResult(
+            message_embeddings={i: [0.1] for i in [1, 2, 3, 4]},
+        ))
+
+        with patch("main.consumer.emit", new_callable=AsyncMock):
+            await consumer._drain_buffer(flush_partial=False)
+
+        # Find the set call for the checkpoint key with value 0
+        checkpoint_reset_calls = [
+            c for c in redis.set.call_args_list
+            if "checkpoint" in str(c[0][0]) and c[0][1] == 0
+        ]
+        assert len(checkpoint_reset_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_below_checkpoint_no_reset(self):
+        """Counter below interval — no reset, no jobs."""
+        consumer, _, processor, redis, run_jobs, _ = make_consumer(checkpoint_interval=8)
+        raw = make_raw_msgs([1, 2, 3, 4])
+
+        redis.llen = AsyncMock(return_value=4)
+        redis.lrange = AsyncMock(side_effect=[raw, []])
+        redis.incrby = AsyncMock(return_value=4)  # 4 < 8
+
+        processor.run = AsyncMock(return_value=BatchResult(
+            message_embeddings={i: [0.1] for i in [1, 2, 3, 4]},
+        ))
+
+        with patch("main.consumer.emit", new_callable=AsyncMock):
+            await consumer._drain_buffer(flush_partial=False)
+
+        run_jobs.assert_not_called()
+        checkpoint_reset_calls = [
+            c for c in redis.set.call_args_list
+            if "checkpoint" in str(c[0][0]) and c[0][1] == 0
+        ]
+        assert len(checkpoint_reset_calls) == 0
 
 
 class TestLifecycle:
@@ -396,6 +552,39 @@ class TestLifecycle:
         assert consumer._shutdown_requested is True
         run_jobs.assert_called()
 
+    @pytest.mark.asyncio
+    async def test_start_twice_is_noop(self):
+        """Second start() call should not create a new task."""
+        consumer, *_ = make_consumer()
+
+        with patch("main.consumer.emit_sync"):
+            consumer.start()
+
+        first_task = consumer._task
+        assert first_task is not None
+
+        with patch("main.consumer.emit_sync"):
+            consumer.start()
+
+        assert consumer._task is first_task  # same task, not replaced
+
+        consumer._task.cancel()
+        try:
+            await consumer._task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_stop_when_not_running(self):
+        """stop() on a consumer that was never started should not raise."""
+        consumer, *_ = make_consumer()
+        assert consumer._task is None
+
+        with patch("main.consumer.emit", new_callable=AsyncMock):
+            await consumer.stop()
+
+        assert consumer._task is None
+
 
 class TestUpdateSettings:
     """Tests for runtime ingestion settings updates."""
@@ -430,3 +619,5 @@ class TestUpdateSettings:
 
         consumer.update_ingestion_settings(batch_size=None)
         assert consumer.batch_size == original
+
+

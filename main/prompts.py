@@ -210,7 +210,7 @@ Entity A & Entity B:
 <output>
 <score>X.XX</score>
 
-Single float 0.0–1.0.
+Single float 0.0-1.0.
 - **0.95-1.00**: Absolute certainty (Unique ID match, exact rare name + overlap).
 - **0.75-0.94**: High confidence (Alias match + fact consistency).
 - **0.00-0.74**: REJECT. (Any doubt means keep separate).
@@ -257,8 +257,6 @@ def get_topic_seed_prompt() -> str:
    return """You are a knowledge graph configuration assistant. Given the user's onboarding responses, generate a topic configuration.
 
 <schema>
-Each topic follows this structure:
-
 "TopicName": {
     "active": true,
     "labels": [],
@@ -266,27 +264,34 @@ Each topic follows this structure:
     "hierarchy": {}
 }
 
-- **labels**: Lowercase singular nouns for zero-shot NER detection (e.g., ["investor", "fund", "round"])
-- **aliases**: Alternative names for the topic (e.g., "Work" might have ["projects", "engineering"])
-- **hierarchy**: Leave empty — detected automatically later
+- **labels** (primary): Concrete singular nouns representing entity types that would become nodes in a knowledge graph. Max 5 per topic. 
+Labels are used downstream to classify messages into topics — they should be specific enough to distinguish this topic from others, 
+but common enough to appear naturally in conversation.
+- **aliases** (optional): A few alternative names for the topic itself. Keep brief — these are refined later.
+- **hierarchy**: Leave empty — detected automatically.
+
+Good labels (concrete, extractable as graph nodes):
+  "recipe", "investor", "language", "medication", "tool", "landmark"
+
+Bad labels (abstract, not entity types):
+  "routine", "culture", "management", "space", "strength", "journey"
 </schema>
 
 <rules>
-1. Generate 1-6 topics based on what the user described.
+1. Generate 1–5 topics based on what the user described. Fewer well-defined topics over many sparse ones.
 2. Do NOT generate "General" or "Identity" — system-managed.
-3. Only generate topics clearly described or implied by the user.
-4. Labels should be concrete nouns that appear naturally as entity types in conversation.
-5. Prefer fewer well-defined topics over many sparse ones.
+3. Labels must be concrete nouns you would extract as named entities from conversation. If it wouldn't be a node in a graph, don't include it.
+4. A label should appear under only one topic.
+5. Max 5 labels per topic.
 </rules>
 
 Respond with ONLY valid JSON. No markdown, no explanation."""
 
+
 def get_topic_evolution_prompt() -> str:
-   return """You are a knowledge graph configuration assistant. Review the conversation and update the topic configuration.
+   return """You are a knowledge graph configuration assistant. Given the current topic config and recent conversation, evolve the topic configuration.
 
 <schema>
-Each topic follows this structure:
-
 "TopicName": {
     "active": true/false,
     "labels": [],
@@ -294,19 +299,25 @@ Each topic follows this structure:
     "hierarchy": {}
 }
 
-- **labels**: Lowercase singular nouns for zero-shot NER detection
-- **aliases**: Alternative names for the topic
-- **hierarchy**: Leave unchanged from current config
+- **labels**: Concrete singular nouns representing entity types that would become nodes in a knowledge graph. Max 5 per topic. Labels are used downstream to classify messages into topics — they should be specific enough to distinguish this topic from others, but common enough to appear naturally in conversation.
+- **aliases**: Alternative names a user might say to refer to this topic.
+- **hierarchy**: Preserve exactly as-is from the current config.
+
+Good labels (concrete, extractable as graph nodes):
+  "recipe", "investor", "language", "medication", "tool", "landmark"
+
+Bad labels (abstract, not entity types — use as aliases instead):
+  "routine", "culture", "management", "space", "strength", "journey"
 </schema>
 
 <rules>
-1. Do NOT modify "General" or "Identity" — system-managed.
-2. Add new topics only if clearly evidenced in conversation.
-3. Set "active": false on existing topics with no conversation relevance. Do NOT remove them.
-4. Keep existing active topics unless clearly irrelevant to the user now.
-5. You may add or adjust labels on existing topics if conversation shows new entity types.
-6. Labels should be concrete singular nouns that appear naturally as entity types.
-7. Preserve hierarchy from current config — do not modify.
+1. Do NOT modify "General" or "Identity" — return them unchanged.
+2. Keep existing active topics unless the conversation shows a clear, sustained shift away from them. A topic being absent from one conversation window is not enough to deactivate.
+3. Add at most 3 new topics, only if multiple distinct references appear across different turns.
+4. You may add, adjust, or remove labels on existing topics if the conversation reveals better entity types or currently noisy ones.
+5. Labels must be concrete nouns you would extract as named entities. If it wouldn't be a node in a graph, it belongs in aliases instead.
+6. A label should appear under only one topic across the entire config.
+7. Max 5 labels per topic.
 </rules>
 
-Respond with ONLY valid JSON. No markdown, no explanation."""
+Respond with the FULL updated config as valid JSON. No markdown, no explanation."""

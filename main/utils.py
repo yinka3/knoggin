@@ -48,9 +48,8 @@ def is_generic_phrase(text: str, threshold: float = 5e-6) -> bool:
     if any(f < threshold for f in freqs):
         return False
     
-    # Single common word → filter
-    if len(words) == 1:
-        return True
+    if len(words) <= 1:
+        return False
     
     # Multi-word, all common: sum frequencies
     total = sum(freqs)
@@ -251,7 +250,7 @@ def parse_entities(reasoning: str, min_confidence: float = 0.8, topic_config: To
     
     return entities
 
-def format_vp03_input(
+def format_vp02_input(
     candidates: List[Dict],
     messages: List[Dict],
     session_context: str
@@ -333,7 +332,7 @@ def parse_connection_response(text: str) -> List[MessageConnections]:
         except ValueError:
             confidence = 0.8
         
-        reason = parts[3].strip()
+        reason = " | ".join(parts[3:]).strip()
             
         if ";" in mid_part:
             ents = [e.strip() for e in mid_part.split(';')]

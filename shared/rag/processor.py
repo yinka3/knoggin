@@ -177,7 +177,7 @@ class FileRAGService:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             return f.read()
 
-    def ingest_file(self, file_path: str, original_name: str) -> Dict:
+    async def ingest_file(self, file_path: str, original_name: str) -> Dict:
         """
         Process and index a file for RAG retrieval using Parent Document Retrieval.
         """
@@ -236,8 +236,7 @@ class FileRAGService:
                     "total_chunks": len(parent_chunks), # Total parents
                 })
 
-        # Embed and store child chunks
-        embeddings = self.embedding.encode(all_child_chunks)
+        embeddings = await self.embedding.encode(all_child_chunks)
         collection = self._get_collection()
 
         batch_size = 500
@@ -274,24 +273,24 @@ class FileRAGService:
     # Search / Retrieval
     # ==================
 
-    def search(
+    async def search(
         self,
         query: str,
         n_results: int = 5,
+        fetch_k: int = 35,
         file_filter: str = None,
     ) -> List[Dict]:
         """
         Search indexed files using Hybrid Search (Vector + BM25) and Reranking.
         Returns the Parent chunks associated with the best matching Child chunks.
         """
+        
         collection = self._get_collection()
 
         if collection.count() == 0:
             return []
 
-        # 1. Vector Search (ask for more candidates for reranking)
-        fetch_k = max(20, n_results * 4) 
-        query_embedding = self.embedding.encode_single(query)
+        query_embedding = await self.embedding.encode_single(query)
 
         where_filter = None
         if file_filter:
@@ -307,7 +306,7 @@ class FileRAGService:
         candidate_parents = {} # parent_id -> metadata dict
         
         if vector_results and vector_results["ids"] and vector_results["ids"][0]:
-            for i, doc_id in enumerate(vector_results["ids"][0]):
+            for i, _ in enumerate(vector_results["ids"][0]):
                 meta = vector_results["metadatas"][0][i]
                 parent_id = meta.get("parent_id")
                 if parent_id and parent_id not in candidate_parents:
@@ -352,9 +351,8 @@ class FileRAGService:
         if not parent_texts:
             return []
 
-        # 4. Rerank Parent Documents
         try:
-            rerank_scores = self.embedding.rerank(query, parent_texts)
+            rerank_scores = await self.embedding.rerank(query, parent_texts)
         except Exception as e:
             logger.error(f"Reranking failed: {e}. Falling back to default ordering.")
             rerank_scores = [0.0] * len(parent_texts)

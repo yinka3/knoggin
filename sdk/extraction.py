@@ -23,7 +23,7 @@ from sdk.types import (
 from main.prompts import get_profile_extraction_prompt
 from jobs.jobs_utils import format_vp04_input, parse_new_facts
 from shared.models.schema.dtypes import Fact, BatchResult
-from shared.infra.graph_write import write_batch_to_graph, write_batch_callback
+from shared.services.graph import write_batch_to_graph, write_batch_callback
 
 
 class KnogginExtractor:
@@ -361,7 +361,7 @@ class KnogginExtractor:
 
             for eid, entity_facts in by_entity.items():
                 fact_contents = [f.content for f in entity_facts]
-                fact_embeddings = await loop.run_in_executor(client.executor, client.embedding.encode, fact_contents)
+                fact_embeddings = await client.embedding.encode(fact_contents)
 
                 now = datetime.now(timezone.utc)
                 fact_objects = [
@@ -372,7 +372,7 @@ class KnogginExtractor:
 
                 name = next((f.entity_name for f in entity_facts), "")
                 resolution_text = f"{name}. " + " ".join(fact_contents)
-                new_emb = await loop.run_in_executor(client.executor, client.embedding.encode_single, resolution_text)
+                new_emb = await client.embedding.encode_single(resolution_text)
                 await loop.run_in_executor(client.executor, partial(client.store.update_entity_embedding, eid, new_emb))
 
         # Message logs

@@ -8,7 +8,7 @@ from loguru import logger
 
 from main.nlp_pipe import NLPPipeline
 from main.prompts import get_connection_reasoning_prompt, get_profile_extraction_prompt
-from main.utils import format_vp03_input, parse_connection_response
+from main.utils import format_vp02_input, parse_connection_response
 from jobs.jobs_utils import format_vp04_input, parse_new_facts
 from shared.config.base import get_config_value
 from shared.infra.resources import ResourceManager
@@ -57,11 +57,7 @@ async def _create_user_entity(resources, user_name: str) -> int:
     all_aliases = [user_name] + [a.strip() for a in user_aliases if a.strip()]
     all_aliases = list(dict.fromkeys(all_aliases))
     
-    embedding = await loop.run_in_executor(
-        resources.executor,
-        resources.embedding.encode_single,
-        user_name
-    )
+    embedding = await resources.embedding.encode_single(user_name)
     
     user_entity = {
         "id": ent_id,
@@ -81,11 +77,7 @@ async def _create_user_entity(resources, user_name: str) -> int:
         else [f"The primary user named {user_name}"]
     )
     
-    fact_embeddings = await loop.run_in_executor(
-        resources.executor,
-        resources.embedding.encode,
-        fact_contents
-    )
+    fact_embeddings = await resources.embedding.encode(fact_contents)
     
     now = datetime.now(timezone.utc)
     facts = [
@@ -203,11 +195,7 @@ async def run_setup(
                 seen[key]["msg_ids"].append(msg_id)
 
     names_list = [e["name"] for e in seen.values()]
-    embeddings = await loop.run_in_executor(
-        resources.executor,
-        resources.embedding.encode,
-        names_list
-    )
+    embeddings = await resources.embedding.encode(names_list)
 
     entities = []
 
@@ -240,7 +228,7 @@ async def run_setup(
     ]
 
     system_03 = get_connection_reasoning_prompt(user_name)
-    user_03 = format_vp03_input(candidates, messages, "")
+    user_03 = format_vp02_input(candidates, messages, "")
 
     logger.info(f"[SETUP] Running connection extraction on {len(candidates)} entities")
     reasoning_03 = await resources.llm_service.call_llm(system_03, user_03)
@@ -320,11 +308,7 @@ async def run_setup(
                     fact_mapping.append((p_idx, f_idx))
                     
             if all_fact_contents:
-                all_fact_embeddings = await loop.run_in_executor(
-                    resources.executor,
-                    resources.embedding.encode,
-                    all_fact_contents
-                )
+                all_fact_embeddings = await resources.embedding.encode(all_fact_contents)
                 
                 # Map embeddings back to profiles
                 fact_embeddings_map = {}
@@ -374,11 +358,7 @@ async def run_setup(
                     facts_created += sum(counts)
                     
                 if resolution_texts:
-                    res_embeddings = await loop.run_in_executor(
-                        resources.executor,
-                        resources.embedding.encode,
-                        resolution_texts
-                    )
+                    res_embeddings = await resources.embedding.encode(resolution_texts)
                     
                     update_tasks = [
                         loop.run_in_executor(

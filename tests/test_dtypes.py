@@ -11,14 +11,27 @@ import numpy as np
 import pytest
 
 from shared.models.schema.dtypes import (
+    AgentConfig,
     BatchResult,
     DLQEntry,
+    EntityItem,
     EntityPair,
     Fact,
+    FactMergeResult,
     MessageConnections,
     MessageData,
+    ProfileUpdate,
+    ResolutionResult,
+    BaseResult,
+    CompleteResult,
+    ClarificationResult,
+    ToolCall,
+    FinalResponse,
+    ClarificationRequest,
 )
 
+
+# --- Fact ---
 
 class TestFact:
     """Tests for the Fact data type."""
@@ -77,6 +90,111 @@ class TestFact:
         dt = datetime(2025, 6, 1, tzinfo=timezone.utc)
         assert Fact._parse_dt(dt) is dt
 
+    def test_parse_dt_none_returns_none(self):
+        """Trap: _parse_dt(None) silently returns None."""
+        assert Fact._parse_dt(None) is None
+
+    def test_from_record_invalid_valid_at_raises(self):
+        """Trap: garbage datetime string propagates ValueError from fromisoformat."""
+        record = {
+            "id": "f_bad",
+            "source_entity_id": 1,
+            "content": "test",
+            "valid_at": "not-a-date",
+        }
+        with pytest.raises(ValueError):
+            Fact.from_record(record)
+
+    def test_from_record_embedding_none_becomes_empty_list(self):
+        """Production code does `record.get('embedding') or []` — None should become []."""
+        record = {
+            "id": "f_emb",
+            "source_entity_id": 1,
+            "content": "test",
+            "valid_at": "2025-01-01T00:00:00+00:00",
+            "embedding": None,
+        }
+        fact = Fact.from_record(record)
+        assert fact.embedding == []
+
+    def test_from_record_empty_list_embedding_stays_empty(self):
+        """Explicit empty list should pass through as-is (not be replaced by default)."""
+        record = {
+            "id": "f_emb2",
+            "source_entity_id": 1,
+            "content": "test",
+            "valid_at": "2025-01-01T00:00:00+00:00",
+            "embedding": [],
+        }
+        fact = Fact.from_record(record)
+        assert fact.embedding == []
+
+
+class TestFactToDict:
+    """Coverage: Fact.to_dict() serialization logic."""
+
+    @pytest.fixture
+    def sample_fact(self):
+        return Fact(
+            id="fact_td1",
+            source_entity_id=10,
+            content="Works at Anthropic",
+            valid_at=datetime(2025, 3, 1, tzinfo=timezone.utc),
+            invalid_at=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            confidence=0.95,
+            embedding=[0.1, 0.2, 0.3],
+            source_msg_id=7,
+            source="extraction",
+        )
+
+    def test_default_excludes_embedding(self, sample_fact):
+        """Default exclude={'embedding'} should omit the embedding key."""
+        d = sample_fact.to_dict()
+        assert "embedding" not in d
+        assert d["id"] == "fact_td1"
+        assert d["content"] == "Works at Anthropic"
+        assert d["confidence"] == 0.95
+        assert d["source_msg_id"] == 7
+        assert d["source"] == "extraction"
+
+    def test_datetimes_become_iso_strings(self, sample_fact):
+        """Datetime fields must serialize to ISO-8601 strings."""
+        d = sample_fact.to_dict()
+        assert isinstance(d["valid_at"], str)
+        assert isinstance(d["invalid_at"], str)
+        # Round-trip check: parse back without error
+        datetime.fromisoformat(d["valid_at"])
+        datetime.fromisoformat(d["invalid_at"])
+
+    def test_custom_exclude(self, sample_fact):
+        """Custom exclude set should drop exactly those keys."""
+        d = sample_fact.to_dict(exclude={"confidence", "source"})
+        assert "confidence" not in d
+        assert "source" not in d
+        # embedding should be present since it's not in the custom set
+        assert "embedding" in d
+        assert d["embedding"] == [0.1, 0.2, 0.3]
+
+    def test_empty_exclude_includes_everything(self, sample_fact):
+        """exclude=set() should include all fields, including embedding."""
+        d = sample_fact.to_dict(exclude=set())
+        assert "embedding" in d
+        assert d["embedding"] == [0.1, 0.2, 0.3]
+        # Every dataclass field should be present
+        for field_name in Fact.__dataclass_fields__:
+            assert field_name in d
+
+    def test_none_invalid_at_serializes_as_none(self):
+        """When invalid_at is None, to_dict should have None (not crash on .isoformat())."""
+        fact = Fact(
+            id="f_none", source_entity_id=1, content="test",
+            valid_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
+        d = fact.to_dict()
+        assert d["invalid_at"] is None
+
+
+# --- BatchResult ---
 
 class TestBatchResult:
     """Tests for the BatchResult data type."""
@@ -161,6 +279,48 @@ class TestBatchResult:
         # Must be JSON-serializable (numpy arrays aren't)
         json.dumps(d)
 
+    def test_from_dict_sparse_input(self):
+        """Coverage: from_dict with most keys absent should use .get() defaults."""
+        sparse = {"entity_ids": [1, 2], "success": False}
+        result = BatchResult.from_dict(sparse)
+
+        assert result.entity_ids == [1, 2]
+        assert result.success is False
+        assert result.new_entity_ids == set()
+        assert result.alias_updated_ids == set()
+        assert result.alias_updates == {}
+        assert result.extraction_result is None
+        assert result.message_embeddings == {}
+        assert result.error is None
+
+    def test_to_dict_none_extraction_result(self):
+        """Coverage: extraction_result=None should serialize to empty list."""
+        br = BatchResult(extraction_result=None)
+        d = br.to_dict()
+        assert d["extraction_result"] == []
+
+    def test_to_dict_keys_are_original_types(self):
+        """to_dict should preserve int keys on message_embeddings (pre-JSON)."""
+        br = BatchResult(message_embeddings={10: [0.1], 20: [0.2]})
+        d = br.to_dict()
+        # Before JSON serialization, keys should still be int
+        assert all(isinstance(k, int) for k in d["message_embeddings"])
+
+    def test_to_dict_alias_updates_keys_become_strings(self):
+        """to_dict converts alias_updates keys to str for JSON compat."""
+        br = BatchResult(alias_updates={1: ["Alice", "Al"], 2: ["Bob"]})
+        d = br.to_dict()
+        assert all(isinstance(k, str) for k in d["alias_updates"])
+
+    def test_from_dict_completely_empty(self):
+        """Edge: from_dict({}) should produce valid defaults without KeyError."""
+        result = BatchResult.from_dict({})
+        assert result.entity_ids == []
+        assert result.success is True
+        assert result.extraction_result is None
+
+
+# --- DLQEntry ---
 
 class TestDLQEntry:
     """Tests for the DLQEntry data type."""
@@ -191,6 +351,51 @@ class TestDLQEntry:
         assert entry.is_transient(["TIMEOUT", "rate_limit"]) is True
         assert entry.is_transient(["PERMANENT_FAIL"]) is False
 
+    def test_batch_size_computed_on_init(self):
+        """Coverage: batch_size should equal len(messages) immediately after construction."""
+        entry = DLQEntry(
+            messages=[{"id": 1}, {"id": 2}, {"id": 3}],
+            session_text="test",
+            error="ERR",
+        )
+        assert entry.batch_size == 3
+
+    def test_batch_size_zero_for_empty_messages(self):
+        entry = DLQEntry(messages=[], session_text="", error="ERR")
+        assert entry.batch_size == 0
+
+    def test_from_json_extra_keys_raises(self):
+        """Trap: from_json with unknown keys raises TypeError."""
+        payload = json.dumps({
+            "messages": [],
+            "session_text": "",
+            "error": "ERR",
+            "attempt": 1,
+            "timestamp": 1000.0,
+            "batch_size": 0,
+            "version": 2,  # future field
+        })
+        with pytest.raises(TypeError):
+            DLQEntry.from_json(payload)
+
+    def test_is_transient_empty_error_string(self):
+        """Trap: empty error string should not match any transient pattern."""
+        entry = DLQEntry(messages=[], session_text="", error="")
+        assert entry.is_transient(["TIMEOUT", "rate_limit"]) is False
+
+    def test_is_transient_empty_transient_list(self):
+        """Trap: empty transient list means nothing can match."""
+        entry = DLQEntry(messages=[], session_text="", error="TIMEOUT occurred")
+        assert entry.is_transient([]) is False
+
+    def test_is_transient_case_sensitive(self):
+        """Verify that matching is case-sensitive (Python `in` on strings)."""
+        entry = DLQEntry(messages=[], session_text="", error="timeout after 30s")
+        assert entry.is_transient(["TIMEOUT"]) is False
+        assert entry.is_transient(["timeout"]) is True
+
+
+# --- MessageData ---
 
 class TestMessageData:
     """Tests for the MessageData data type."""
@@ -202,3 +407,167 @@ class TestMessageData:
         assert md.id == -1
         assert isinstance(md.timestamp, datetime)
         assert md.timestamp.tzinfo is not None
+
+
+# --- AgentConfig ---
+
+class TestAgentConfig:
+    """Tests AgentConfig formatting and roundtripping."""
+
+    def test_defaults(self):
+        cfg = AgentConfig(id="a1", name="Test", persona="helpful")
+        assert cfg.temperature == 0.7
+        assert cfg.is_default is False
+        assert cfg.is_spawned is False
+        assert cfg.spawned_by is None
+        assert cfg.instructions is None
+        assert cfg.model is None
+        assert cfg.enabled_tools is None
+        assert isinstance(cfg.created_at, datetime)
+        assert cfg.created_at.tzinfo is not None
+
+    def test_round_trip(self):
+        """Full to_dict -> from_dict round-trip."""
+        original = AgentConfig(
+            id="agent_1",
+            name="Research Bot",
+            persona="You are a research assistant.",
+            instructions="Focus on accuracy.",
+            model="gemini-2.5-flash",
+            temperature=0.3,
+            enabled_tools=["search", "graph_query"],
+            is_default=True,
+            is_spawned=True,
+            spawned_by="agent_0",
+        )
+        restored = AgentConfig.from_dict(original.to_dict())
+
+        assert restored.id == original.id
+        assert restored.name == original.name
+        assert restored.persona == original.persona
+        assert restored.instructions == original.instructions
+        assert restored.model == original.model
+        assert restored.temperature == 0.3
+        assert restored.enabled_tools == ["search", "graph_query"]
+        assert restored.is_default is True
+        assert restored.is_spawned is True
+        assert restored.spawned_by == "agent_0"
+        # created_at survives as equivalent datetime
+        assert restored.created_at.year == original.created_at.year
+
+    def test_from_dict_created_at_as_string(self):
+        """Branch: created_at is an ISO string in the dict."""
+        data = {
+            "id": "a2", "name": "Bot", "persona": "test",
+            "created_at": "2025-06-15T12:00:00+00:00",
+        }
+        cfg = AgentConfig.from_dict(data)
+        assert isinstance(cfg.created_at, datetime)
+        assert cfg.created_at.year == 2025
+        assert cfg.created_at.month == 6
+
+    def test_from_dict_created_at_none_uses_now(self):
+        """Branch: created_at missing/None should fall back to datetime.now(utc)."""
+        data = {"id": "a3", "name": "Bot", "persona": "test"}
+        cfg = AgentConfig.from_dict(data)
+        assert isinstance(cfg.created_at, datetime)
+        # Should be very recent (within last second)
+        delta = (datetime.now(timezone.utc) - cfg.created_at).total_seconds()
+        assert delta < 2
+
+    def test_from_dict_created_at_as_datetime(self):
+        """Branch: created_at is already a datetime object (not a string)."""
+        dt = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        data = {"id": "a4", "name": "Bot", "persona": "test", "created_at": dt}
+        cfg = AgentConfig.from_dict(data)
+        # isinstance(dt, str) is False, so it skips fromisoformat
+        # `created or datetime.now()` → dt is truthy, so it passes through
+        assert cfg.created_at is dt
+
+    def test_to_dict_created_at_is_iso_string(self):
+        cfg = AgentConfig(id="a5", name="Bot", persona="test")
+        d = cfg.to_dict()
+        assert isinstance(d["created_at"], str)
+        datetime.fromisoformat(d["created_at"])  # should not raise
+
+
+# --- Simple Dataclasses ---
+
+class TestSimpleDataclasses:
+    """Quick instantiation + field access tests for parser-output types.
+    Prevents silent breakage if field order or names change."""
+
+    def test_entity_item(self):
+        ei = EntityItem(msg_id=3, name="Alice", label="person", topic="Identity", confidence=0.9)
+        assert ei.msg_id == 3
+        assert ei.name == "Alice"
+        assert ei.label == "person"
+        assert ei.topic == "Identity"
+        assert ei.confidence == 0.9
+
+    def test_profile_update(self):
+        pu = ProfileUpdate(canonical_name="Alice", facts=["Works at Anthropic", "Lives in SF"])
+        assert pu.canonical_name == "Alice"
+        assert len(pu.facts) == 2
+
+    def test_fact_merge_result(self):
+        fmr = FactMergeResult(to_invalidate=["f1", "f2"], new_contents=["merged fact"])
+        assert len(fmr.to_invalidate) == 2
+        assert fmr.new_contents == ["merged fact"]
+
+
+# --- Resolution Result ---
+
+class TestResolutionResult:
+    """Tests the container for batch resolution responses."""
+
+    def test_instantiation(self):
+        rr = ResolutionResult(
+            entity_ids=[1, 2],
+            new_ids={2},
+            alias_ids={1},
+            entity_msg_map={1: [10], 2: [11]},
+            alias_updates={1: ["Bob"]}
+        )
+        assert rr.entity_ids == [1, 2]
+        assert rr.new_ids == {2}
+        assert rr.alias_updates[1] == ["Bob"]
+        assert rr.entity_msg_map[1] == [10]
+
+
+# --- Agent Response Types ---
+
+class TestAgentResponseTypes:
+    """Tests output structures returned by autonomous agents."""
+
+    def test_base_result(self):
+        br = BaseResult(status="success", state="done", tools_used=["search"])
+        assert br.status == "success"
+        assert br.tools_used == ["search"]
+
+    def test_complete_result(self):
+        cr = CompleteResult(
+            status="success", state="done", tools_used=[],
+            response="All good", messages=[], profiles=[], graph=[]
+        )
+        assert cr.response == "All good"
+
+    def test_clarification_result(self):
+        clr = ClarificationResult(
+            status="pending", state="waiting", tools_used=[],
+            question="What is your name?"
+        )
+        assert clr.question == "What is your name?"
+
+    def test_tool_call(self):
+        tc = ToolCall(name="get_weather", args={"loc": "NY"}, thinking="Need weather")
+        assert tc.name == "get_weather"
+        assert tc.args == {"loc": "NY"}
+
+    def test_final_response(self):
+        fr = FinalResponse(content="It's sunny.", usage={"tokens": 10}, sources=[])
+        assert fr.content == "It's sunny."
+
+    def test_clarification_request(self):
+        cr = ClarificationRequest(question="Are you sure?", usage=None)
+        assert cr.question == "Are you sure?"
