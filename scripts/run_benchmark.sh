@@ -33,7 +33,7 @@ for i in $(seq $start $end); do
     
     start_time=$(date +%s)
     
-    cd "$SCRIPT_DIR/../benchmark"
+    cd "$SCRIPT_DIR/../knoggin-server/benchmark"
     uv run test/run_eval.py $dataset $i
     
     end_time=$(date +%s)
@@ -65,7 +65,7 @@ with open(timings_file) as f:
 
 results = []
 for i in range(start, end + 1):
-    path = Path(f"benchmark/test/eval_result_{dataset}_{i}.json")
+    path = Path(f"test/eval_result_{dataset}_{i}.json")
     if path.exists():
         with open(path) as f:
             data = json.load(f)
@@ -79,7 +79,7 @@ output = {
     "instances": results
 }
 
-output_file = Path(f"benchmark/test/benchmark_{dataset}_{start}_{end}.json")
+output_file = Path(f"test/benchmark_{dataset}_{start}_{end}.json")
 with open(output_file, "w") as f:
     json.dump(output, f, indent=2)
 
