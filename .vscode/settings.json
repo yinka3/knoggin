@@ -1,7 +1,5 @@
 {
   "python.defaultInterpreterPath": "./.venv/bin/python",
-
-  "python-envs.pythonProjects": [],
   "python-envs.defaultEnvManager": "ms-python.python:venv",
 
   "editor.formatOnSave": true,

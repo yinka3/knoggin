@@ -33,7 +33,7 @@ for i in $(seq $start $end); do
     
     start_time=$(date +%s)
     
-    cd "$SCRIPT_DIR/../benchmark"
+    cd "$SCRIPT_DIR/../knoggin-server/benchmark"
     uv run test/run_eval.py $dataset $i
     
     end_time=$(date +%s)
