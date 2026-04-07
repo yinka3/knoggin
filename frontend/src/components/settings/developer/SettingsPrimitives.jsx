@@ -2,6 +2,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import { Timer, Zap, Target, Coins, Info } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
 // eslint-disable-next-line no-unused-vars
 export function Section({ title, description, icon: Icon, children, badge }) {
@@ -42,7 +44,7 @@ export function SubSection({ title, icon: Icon, children }) {
   )
 }
 
-export function SettingRow({ label, description, children }) {
+export function SettingRow({ label, description, children, impacts = [] }) {
   return (
     <div
       className={cn(
@@ -51,19 +53,26 @@ export function SettingRow({ label, description, children }) {
       )}
     >
       <div className="flex-1 min-w-0">
-        <Label className="text-sm text-foreground font-normal">{label}</Label>
+        <div className="flex items-center gap-2">
+          <Label className="text-sm text-foreground font-normal">{label}</Label>
+          <div className="flex gap-1">
+            {impacts.map(impact => (
+              <ImpactBadge key={impact} type={impact} />
+            ))}
+          </div>
+        </div>
         {description && (
           <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{description}</p>
         )}
       </div>
-      <div className="w-28 shrink-0">{children}</div>
+      <div className="shrink-0">{children}</div>
     </div>
   )
 }
 
 export function NumberInput({ value, onChange, min, max, step = 1, unit, placeholder }) {
   return (
-    <div className="relative">
+    <div className="relative w-28">
       <Input
         type="number"
         value={value ?? ''}
@@ -85,6 +94,63 @@ export function NumberInput({ value, onChange, min, max, step = 1, unit, placeho
           {unit}
         </span>
       )}
+    </div>
+  )
+}
+
+export function ImpactBadge({ type }) {
+  const configs = {
+    latency: { icon: Timer, color: 'text-amber-500', label: 'Affects Latency' },
+    accuracy: { icon: Target, color: 'text-emerald-500', label: 'Affects Accuracy' },
+    tokens: { icon: Coins, color: 'text-blue-500', label: 'Affects Token Usage' },
+    quality: { icon: Zap, color: 'text-purple-500', label: 'Affects Output Quality' },
+  }
+
+  const config = configs[type]
+  if (!config) return null
+  const Icon = config.icon
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className={cn("flex items-center justify-center p-1 rounded-md bg-white/5 border border-white/5", config.color)}>
+            <Icon size={10} />
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="text-[10px] px-2 py-1">
+          {config.label}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+export function TradeoffSlider({ value, onChange, min = 0, max = 1, step = 0.05, leftLabel, rightLabel }) {
+  return (
+    <div className="w-64 space-y-2">
+      <div className="flex justify-between text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+        <span>{leftLabel}</span>
+        <span>{rightLabel}</span>
+      </div>
+      <div className="relative h-6 flex items-center group">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value ?? (min + max) / 2}
+          onChange={e => onChange(Number(e.target.value))}
+          className={cn(
+            "w-full h-1.5 bg-muted/50 rounded-full appearance-none cursor-pointer outline-none transition-all",
+            "accent-primary hover:accent-emerald-400"
+          )}
+        />
+        <div 
+          className="absolute h-3 w-1 bg-primary rounded-full pointer-events-none transition-all group-hover:h-4"
+          style={{ left: `${((value - min) / (max - min)) * 100}%` }}
+        />
+      </div>
     </div>
   )
 }

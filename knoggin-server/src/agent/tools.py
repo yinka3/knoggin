@@ -15,7 +15,21 @@ from common.rag.file_rag import FileRAGService
 from common.config.topics_config import TopicConfig
 from common.infra.redis import RedisKeys
 
-
+TOOL_DISPATCH = {
+    "search_messages": ("search_messages", ["query", "limit"]),
+    "search_entity": ("search_entity", ["query", "limit"]),
+    "get_connections": ("get_connections", ["entity_name"]),
+    "get_recent_activity": ("get_recent_activity", ["entity_name", "hours"]),
+    "fact_check": ("fact_check", ["entity_name", "query"]),
+    "find_path": ("find_path", ["entity_a", "entity_b"]),
+    "get_hierarchy": ("get_hierarchy", ["entity_name", "direction"]),
+    "save_memory": ("save_memory", ["content", "topic"]),
+    "forget_memory": ("forget_memory", ["memory_id"]),
+    "search_files": ("search_files", ["query", "file_name", "limit"]),
+    "web_search": ("web_search", ["query", "limit", "freshness"]),
+    "news_search": ("news_search", ["query", "limit", "freshness"]),
+    "request_clarification": None,  # handled specially
+}
 
 class Tools:
     
@@ -34,6 +48,8 @@ class Tools:
         self.search_cfg = search_config or {}
         self.mcp_manager = mcp_manager
         self.memory = memory
+
+        self._http_client = httpx.AsyncClient(timeout=10.0)
     
     async def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
@@ -107,13 +123,7 @@ class Tools:
                         pass
 
         if missing_ids_numerical:
-            loop = asyncio.get_running_loop()
-
-            # TODO: Update to async (Refactor Task)
-            fallback_msgs = await loop.run_in_executor(
-                None, 
-                partial(self.store.get_messages_by_ids, missing_ids_numerical)
-            )
+            fallback_msgs = await self.store.get_messages_by_ids(missing_ids_numerical)
             for m in fallback_msgs:
                 ts_iso = ""
                 if "timestamp" in m and isinstance(m["timestamp"], (int, float)):
@@ -165,12 +175,7 @@ class Tools:
             if is_msg_id:
                 try:
                     numerical_msg_id = int(msg_id.split("_")[1])
-                    loop = asyncio.get_running_loop()
-                    # TODO: Update to async (Refactor Task)
-                    fallback_msgs = await loop.run_in_executor(
-                        None,
-                        partial(self.store.get_surrounding_messages, numerical_msg_id, forward, target_total)
-                    )
+                    fallback_msgs = await self.store.get_surrounding_messages(numerical_msg_id, forward, target_total)
                     
                     formatted_fallback = []
                     for m in fallback_msgs:
@@ -281,8 +286,6 @@ class Tools:
         Asynchronous internal method executing hybrid vector + FTS search over messages, 
         followed by an optional cross-encoder reranking step if candidates exceed 1.
         """
-        import asyncio
-        loop = asyncio.get_running_loop()
         vector_limit = self.search_cfg.get("vector_limit", 50)
         fts_limit = self.search_cfg.get("fts_limit", 50)
         rerank_candidates = self.search_cfg.get("rerank_candidates", 45)
@@ -290,21 +293,13 @@ class Tools:
         results = {}
         query_embedding = await self.embedding_service.encode_single(query)
         
-        # TODO: Update to async (Refactor Task)
-        sem_results = await loop.run_in_executor(
-            None, 
-            partial(self.store.search_messages_vector, query_embedding, vector_limit)
-        )
+        sem_results = await self.store.search_messages_vector(query_embedding, vector_limit)
 
         for msg_id, score in sem_results:
             msg_key = self._format_message_id(msg_id)
             results[msg_key] = ("semantic", float(score))
         
-        # TODO: Update to async (Refactor Task)
-        fts_results = await loop.run_in_executor(
-            None,
-            partial(self.store.search_messages_fts, query, fts_limit)
-        )
+        fts_results = await self.store.search_messages_fts(query, fts_limit)
         
         max_fts = max([s for _, s in fts_results]) if fts_results else 1.0
 
@@ -450,13 +445,8 @@ class Tools:
         Returns: 
             List of matching entities with id, name, summary snippet, type, and top connections.
         """
-        loop = asyncio.get_running_loop()
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
-        # TODO: Update to async (Refactor Task)
-        results = await loop.run_in_executor(
-            None, 
-            partial(self.store.search_entity, query, self.active_topics, limit)
-        )
+        results = await self.store.search_entity(query, self.active_topics, limit)
     
         if not results:
             return []
@@ -482,16 +472,11 @@ class Tools:
         Returns: 
             List of connections with target entity, connection strength, and hydrated evidence messages.
         """
-        loop = asyncio.get_running_loop()
         canonical = await self._resolve_entity_name(entity_name)
         if not canonical:
             return [{"error": f"Entity not found: '{entity_name}'"}]
         
-        # TODO: Update to async (Refactor Task)
-        results = await loop.run_in_executor(
-            None, 
-            partial(self.store.get_related_entities, [canonical], active_topics=self.active_topics)
-        )
+        results = await self.store.get_related_entities([canonical], active_topics=self.active_topics)
         results = self._normalize_output(results)
         if results:
             for r in results:
@@ -500,11 +485,8 @@ class Tools:
                 r["evidence"] = await self._hydrate_evidence(string_ids)
             return results
         
-        # TODO: Update to async (Refactor Task)
-        hidden_results = await loop.run_in_executor(
-            None, 
-            partial(self.store.get_related_entities, [canonical], active_topics=None)
-        )
+        # Try looking without topic filtering to see if it's "hidden"
+        hidden_results = await self.store.get_related_entities([canonical], active_topics=None)
         
         if hidden_results:
             return [{
@@ -527,17 +509,12 @@ class Tools:
         
         Returns: Recent interactions with timestamps and evidence message IDs.
         """
-        loop = asyncio.get_running_loop()
         canonical = await self._resolve_entity_name(entity_name)
         if not canonical:
             return [{"error": f"Entity not found: '{entity_name}'"}]
         
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
-        # TODO: Update to async (Refactor Task)
-        results = await loop.run_in_executor(
-            None, 
-            partial(self.store.get_recent_activity, canonical, active_topics=self.active_topics, hours=hours)
-        )
+        results = await self.store.get_recent_activity(canonical, active_topics=self.active_topics, hours=hours)
         
         for r in results:
             evidence_ids = r.pop("evidence_ids", [])
@@ -561,7 +538,6 @@ class Tools:
             If path exists only through inactive topics: [{"hidden": True, "message": "..."}]
             Empty list if no connection found.
         """
-        loop = asyncio.get_running_loop()
         canonical_a = await self._resolve_entity_name(entity_a)
         canonical_b = await self._resolve_entity_name(entity_b)
         if not canonical_a and not canonical_b:
@@ -572,11 +548,8 @@ class Tools:
             return [{"error": f"Entity not found: '{entity_b}'"}]
             
 
-        # TODO: Update to async (Refactor Task)
-        path, has_inactive_shortcut = await loop.run_in_executor(
-            None, 
-            partial(self.store.find_path_filtered, canonical_a, canonical_b, active_topics=self.active_topics, max_depth=4)
-        )
+        # Trace path
+        path, has_inactive_shortcut = await self.store.find_path_filtered(canonical_a, canonical_b, active_topics=self.active_topics, max_depth=4)
         
         if path:
             for step in path:
@@ -588,11 +561,7 @@ class Tools:
             return path
         
         if has_inactive_shortcut:
-            # TODO: Update to async (Refactor Task)
-            full_path, _ = await loop.run_in_executor(
-                None, 
-                partial(self.store.find_path_filtered, canonical_a, canonical_b, active_topics=None, max_depth=4)
-            )
+            full_path, _ = await self.store.find_path_filtered(canonical_a, canonical_b, active_topics=None, max_depth=4)
 
             safe_path = []
             for step in full_path:
@@ -643,12 +612,8 @@ class Tools:
         if not hot_topics:
             return {}
         
-        loop = asyncio.get_running_loop()
-        # TODO: Update to async (Refactor Task)
-        raw = await loop.run_in_executor(
-            None, 
-            partial(self.store.get_hot_topic_context_with_messages, hot_topics, msg_limit=10, slim=slim)
-        )
+        # Fetch context
+        raw = await self.store.get_hot_topic_context_with_messages(hot_topics, msg_limit=10, slim=slim)
         content_key = RedisKeys.message_content(self.user_name, self.session_id)
         
         for _, data in raw.items():
@@ -683,12 +648,11 @@ class Tools:
         Returns:
             Dict with parent chain and/or children list
         """
-        loop = asyncio.get_running_loop()
         canonical = await self._resolve_entity_name(entity_name)
         if not canonical:
             return []
         
-        entity_id = await loop.run_in_executor(None, self.resolver.get_id, canonical)
+        entity_id = await self.resolver.get_id(canonical)
         if not entity_id:
             return []
         
@@ -698,8 +662,7 @@ class Tools:
         }
         
         if direction in ("up", "both"):
-            # TODO: Update to async (Refactor Task)
-            parents = await loop.run_in_executor(None, self.store.get_parent_entities, entity_id)
+            parents = await self.store.get_parent_entities(entity_id)
             result["parents"] = parents
             
             if parents:
@@ -708,8 +671,7 @@ class Tools:
                 visited = {current_id}
                 
                 while True:
-                    # TODO: Update to async (Refactor Task)
-                    parent_list = await loop.run_in_executor(None, self.store.get_parent_entities, current_id)
+                    parent_list = await self.store.get_parent_entities(current_id)
                     if not parent_list:
                         break
                     parent = parent_list[0]  # assume single parent for now
@@ -722,8 +684,7 @@ class Tools:
                 result["ancestry"] = ancestry
         
         if direction in ("down", "both"):
-            # TODO: Update to async (Refactor Task)
-            children = await loop.run_in_executor(None, self.store.get_child_entities, entity_id)
+            children = await self.store.get_child_entities(entity_id)
             result["children"] = children
         
         return [result]
@@ -740,18 +701,12 @@ class Tools:
         Returns:
             Dict with resolution method and matching facts or search results.
         """
-        loop = asyncio.get_running_loop()
-
-        entity_id = await loop.run_in_executor(None, self.resolver.get_id, entity_name)
+        entity_id = await self.resolver.get_id(entity_name)
 
         if entity_id is not None:
-            # TODO: Update to async (Refactor Task)
-            facts = await loop.run_in_executor(
-                None,
-                partial(self.store.get_facts_for_entity, entity_id, active_only=False)
-            )
+            facts = await self.store.get_facts_for_entity(entity_id, active_only=False)
 
-            profile = await loop.run_in_executor(None, self.resolver.get_profile, entity_id)
+            profile = await self.resolver.get_profile(entity_id)
             canonical = profile["canonical_name"] if profile else entity_name
 
             return {
@@ -767,20 +722,13 @@ class Tools:
 
         embedding = await self.embedding_service.encode_single(entity_name)
 
-        candidates = await loop.run_in_executor(
-            None,
-            partial(self.store.search_entities_by_embedding, embedding, limit=5, score_threshold=0.69)
-        )
+        candidates = await self.store.search_entities_by_embedding(embedding, limit=5, score_threshold=0.69)
 
         if candidates:
             candidate_ids = [eid for eid, _ in candidates]
             similarity_map = {eid: sim for eid, sim in candidates}
             
-            # TODO: Update to async (Refactor Task)
-            facts_by_entity = await loop.run_in_executor(
-                None,
-                partial(self.store.get_facts_for_entities, candidate_ids, active_only=False)
-            )
+            facts_by_entity = await self.store.get_facts_for_entities(candidate_ids, active_only=False)
 
             total_facts = sum(len(facts) for facts in facts_by_entity.values())
 
@@ -801,8 +749,7 @@ class Tools:
 
             results = []
             for eid in candidate_ids:
-                # TODO: Update to async (Refactor Task)
-                profile = await loop.run_in_executor(None, self.resolver.get_profile, eid)
+                profile = await self.resolver.get_profile(eid)
                 canonical = profile["canonical_name"] if profile else str(eid)
 
                 results.append({
@@ -945,7 +892,7 @@ class Tools:
 
 
     async def _search_tavily(self, query: str, limit: int, api_key: str) -> List[Dict]:
-        """Web search via Tavily API — optimized for AI agents."""
+        """Web search via Tavily API"""
         url = "https://api.tavily.com/search"
         payload = {
             "api_key": api_key,
@@ -956,30 +903,29 @@ class Tools:
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, timeout=10.0)
+            response = await self._http_client.get(url, json=payload, timeout=10.0)
 
-                if response.status_code == 401:
-                    logger.warning("Tavily API key invalid, falling back to DuckDuckGo")
-                    return await self._search_duckduckgo(query, limit)
-                if response.status_code == 429:
-                    logger.warning("Tavily rate limit hit, falling back to DuckDuckGo")
-                    return await self._search_duckduckgo(query, limit)
+            if response.status_code == 401:
+                logger.warning("Tavily API key invalid, falling back to DuckDuckGo")
+                return await self._search_duckduckgo(query, limit)
+            if response.status_code == 429:
+                logger.warning("Tavily rate limit hit, falling back to DuckDuckGo")
+                return await self._search_duckduckgo(query, limit)
 
-                response.raise_for_status()
-                data = response.json()
+            response.raise_for_status()
+            data = response.json()
 
-                results = []
-                for r in data.get("results", []):
-                    results.append({
-                        "title": r.get("title", "Untitled"),
-                        "url": r.get("url", ""),
-                        "snippet": r.get("content", "")
-                    })
+            results = []
+            for r in data.get("results", []):
+                results.append({
+                    "title": r.get("title", "Untitled"),
+                    "url": r.get("url", ""),
+                    "snippet": r.get("content", "")
+                })
 
-                if not results:
-                    return [{"title": "No Results", "url": "", "snippet": f"No web results found for: {query}"}]
-                return results
+            if not results:
+                return [{"title": "No Results", "url": "", "snippet": f"No web results found for: {query}"}]
+            return results
         except httpx.TimeoutException:
             logger.warning("Tavily timed out, falling back to DuckDuckGo")
             return await self._search_duckduckgo(query, limit)
@@ -1005,38 +951,38 @@ class Tools:
             params["freshness"] = freshness
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, headers=headers, params=params, timeout=10.0)
 
-                if response.status_code == 401:
-                    logger.warning("Brave API key invalid, falling back")
-                    return await self._search_tavily(query, limit, self.search_cfg.get("tavily_api_key", "")) \
-                        if self.search_cfg.get("tavily_api_key") else await self._search_duckduckgo(query, limit)
-                if response.status_code == 429:
-                    logger.warning("Brave rate limit hit, falling back")
-                    return await self._search_tavily(query, limit, self.search_cfg.get("tavily_api_key", "")) \
-                        if self.search_cfg.get("tavily_api_key") else await self._search_duckduckgo(query, limit)
+            response = await self._http_client.get(url, headers=headers, params=params)
 
-                response.raise_for_status()
-                data = response.json()
+            if response.status_code == 401:
+                logger.warning("Brave API key invalid, falling back")
+                return await self._search_tavily(query, limit, self.search_cfg.get("tavily_api_key", "")) \
+                    if self.search_cfg.get("tavily_api_key") else await self._search_duckduckgo(query, limit)
+            if response.status_code == 429:
+                logger.warning("Brave rate limit hit, falling back")
+                return await self._search_tavily(query, limit, self.search_cfg.get("tavily_api_key", "")) \
+                    if self.search_cfg.get("tavily_api_key") else await self._search_duckduckgo(query, limit)
 
-                results = []
-                for result in data.get("web", {}).get("results", []):
-                    snippet = result.get("description", result.get("snippet", ""))
-                    snippet = re.sub(r"<[^>]+>", "", snippet)
-                    # Append extra snippets for richer context
-                    extra = result.get("extra_snippets", [])
-                    if extra:
-                        snippet += " ... " + " ... ".join(re.sub(r"<[^>]+>", "", s) for s in extra[:2])
-                    results.append({
-                        "title": result.get("title", "Untitled"),
-                        "url": result.get("url", ""),
-                        "snippet": snippet
-                    })
+            response.raise_for_status()
+            data = response.json()
 
-                if not results:
-                    return [{"title": "No Results", "url": "", "snippet": f"No web results found for: {query}"}]
-                return results
+            results = []
+            for result in data.get("web", {}).get("results", []):
+                snippet = result.get("description", result.get("snippet", ""))
+                snippet = re.sub(r"<[^>]+>", "", snippet)
+                # Append extra snippets for richer context
+                extra = result.get("extra_snippets", [])
+                if extra:
+                    snippet += " ... " + " ... ".join(re.sub(r"<[^>]+>", "", s) for s in extra[:2])
+                results.append({
+                    "title": result.get("title", "Untitled"),
+                    "url": result.get("url", ""),
+                    "snippet": snippet
+                })
+
+            if not results:
+                return [{"title": "No Results", "url": "", "snippet": f"No web results found for: {query}"}]
+            return results
         except httpx.TimeoutException:
             logger.warning("Brave timed out, falling back to DuckDuckGo")
             return await self._search_duckduckgo(query, limit)
@@ -1060,31 +1006,30 @@ class Tools:
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, headers=headers, params=params, timeout=10.0)
+            response = await self._http_client.get(url, headers=headers, params=params)
 
-                if response.status_code in (401, 429):
-                    logger.warning(f"Brave news API returned {response.status_code}")
-                    return [{"title": "Error", "url": "", "snippet": f"Brave News API error ({response.status_code}). Check your API key in Settings."}]
+            if response.status_code in (401, 429):
+                logger.warning(f"Brave news API returned {response.status_code}")
+                return [{"title": "Error", "url": "", "snippet": f"Brave News API error ({response.status_code}). Check your API key in Settings."}]
 
-                response.raise_for_status()
-                data = response.json()
+            response.raise_for_status()
+            data = response.json()
 
-                results = []
-                for article in data.get("results", []):
-                    snippet = article.get("description", "")
-                    snippet = re.sub(r"<[^>]+>", "", snippet)
-                    results.append({
-                        "title": article.get("title", "Untitled"),
-                        "url": article.get("url", ""),
-                        "snippet": snippet,
-                        "source": article.get("meta_url", {}).get("hostname", ""),
-                        "date": article.get("age", ""),
-                    })
+            results = []
+            for article in data.get("results", []):
+                snippet = article.get("description", "")
+                snippet = re.sub(r"<[^>]+>", "", snippet)
+                results.append({
+                    "title": article.get("title", "Untitled"),
+                    "url": article.get("url", ""),
+                    "snippet": snippet,
+                    "source": article.get("meta_url", {}).get("hostname", ""),
+                    "date": article.get("age", ""),
+                })
 
-                if not results:
-                    return [{"title": "No Results", "url": "", "snippet": f"No news found for: {query}"}]
-                return results
+            if not results:
+                return [{"title": "No Results", "url": "", "snippet": f"No news found for: {query}"}]
+            return results
         except httpx.TimeoutException:
             logger.warning("Brave news timed out")
             return [{"title": "Timeout", "url": "", "snippet": "News search timed out. Try a simpler query."}]
@@ -1093,10 +1038,11 @@ class Tools:
             return [{"title": "Search Error", "url": "", "snippet": f"News search failed: {e}"}]
 
 
-
-
     def get_file_manifest(self) -> List[Dict]:
         """Get list of uploaded files for prompt context."""
         if not self.file_rag:
             return []
         return self.file_rag.list_files()
+    
+    async def close(self):
+        await self._http_client.aclose()

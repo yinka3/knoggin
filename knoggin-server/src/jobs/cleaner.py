@@ -52,50 +52,48 @@ class EntityCleanupJob(BaseJob):
     
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        loop = asyncio.get_running_loop()
-        
-        # TODO: Update to async (Refactor Task)
-        await loop.run_in_executor(None, self.store.cleanup_null_entities)
+        with logger.contextualize(user=ctx.user_name, job=self.name, session=ctx.session_id):
+            await self.store.cleanup_null_entities()
 
-        now_ms = int(time.time() * 1000)
-        orphan_cutoff = now_ms - self.orphan_cutoff_ms
-        junk_cutoff = now_ms - self.stale_cutoff_ms
-        
-        user_id = self.ent_resolver.get_id(self.user_name)
-        if not user_id:
+            now_ms = int(time.time() * 1000)
+            orphan_cutoff = now_ms - self.orphan_cutoff_ms
+            junk_cutoff = now_ms - self.stale_cutoff_ms
+            
+            user_id = await self.ent_resolver.get_id(self.user_name)
+            if not user_id:
+                await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
+                return JobResult(success=True, summary="User entity not initialized")
+
+            orphan_ids = await self.store.get_orphan_entities(
+                user_id,
+                orphan_cutoff,
+                junk_cutoff
+            )
+            
+            if not orphan_ids:
+                await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
+                return JobResult(success=True, summary="No orphans found")
+            
+            logger.info(f"Cleanup trigger: Found {len(orphan_ids)} entities (Orphans >24h or Junk >30d)")
+            for eid in orphan_ids:
+                # We don't fetch names to avoid slow DB calls, but we log the IDs
+                logger.debug(f"Cleaning entity ID: {eid}")
+                
+            batch_size = 100
+            deleted_count = 0
+            for i in range(0, len(orphan_ids), batch_size):
+                batch = orphan_ids[i:i + batch_size]
+                deleted_count += await self.store.bulk_delete_entities(batch)
+                self.ent_resolver.remove_entities(batch)
+                await asyncio.sleep(0.1) # Yield to other tasks
+
             await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
-            return JobResult(success=True, summary="User entity not initialized")
 
-        # TODO: Update to async (Refactor Task)
-        orphan_ids = await loop.run_in_executor(
-            None,
-            self.store.get_orphan_entities,
-            user_id,
-            orphan_cutoff,
-            junk_cutoff
-        )
-        
-        if not orphan_ids:
-            await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
-            return JobResult(success=True, summary="No orphans found")
-        
-        logger.info(f"Found {len(orphan_ids)} entities to clean (Orphans >24h or Junk >30d)")
-        
-        # TODO: Update to async (Refactor Task)
-        deleted_count = await loop.run_in_executor(
-            None,
-            self.store.bulk_delete_entities,
-            orphan_ids
-        )
-        
-        self.ent_resolver.remove_entities(orphan_ids)
-        await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
-
-        await emit(ctx.session_id, "job", "entities_cleaned", {
-            "orphan_count": len(orphan_ids),
-            "deleted_count": deleted_count
-        })
-        return JobResult(success=True, summary=f"Cleaned {deleted_count} entities")
+            await emit(ctx.session_id, "job", "entities_cleaned", {
+                "orphan_count": len(orphan_ids),
+                "deleted_count": deleted_count
+            })
+            return JobResult(success=True, summary=f"Cleaned {deleted_count} entities")
     
     def update_settings(self, interval_hours: int = None, orphan_age_hours: int = None, stale_junk_days: int = None):
         """

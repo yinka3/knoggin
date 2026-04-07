@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { sendMessage, getHistory } from '../api/chat'
 import { executeCommand } from '../api/commands'
+import { useSession } from '../context/SessionContext'
 import { toast } from 'sonner'
 
 function formatCommandResult(command, result) {
@@ -19,6 +20,7 @@ function formatCommandResult(command, result) {
 }
 
 export function useChat(sessionId) {
+  const { updateSessionInList } = useSession()
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
   const [streaming, setStreaming] = useState(false)
@@ -31,8 +33,6 @@ export function useChat(sessionId) {
   const thinkingRef = useRef(null)
   const streamingContentRef = useRef('')
   const abortControllerRef = useRef(null)
-  const revealIndexRef = useRef(0)
-  const revealIntervalRef = useRef(null)
   const sessionIdRef = useRef(sessionId)
 
   // Keep sessionIdRef always up-to-date
@@ -40,37 +40,12 @@ export function useChat(sessionId) {
     sessionIdRef.current = sessionId
   }, [sessionId])
 
-  function startReveal() {
-    if (revealIntervalRef.current) return
-    revealIntervalRef.current = setInterval(() => {
-      const target = streamingContentRef.current
-      if (revealIndexRef.current < target.length) {
-        const step = Math.min(5, target.length - revealIndexRef.current)
-        revealIndexRef.current += step
-        setStreamingContent(target.slice(0, revealIndexRef.current))
-      }
-    }, 30)
-  }
-
-  function stopReveal() {
-    if (revealIntervalRef.current) {
-      clearInterval(revealIntervalRef.current)
-      revealIntervalRef.current = null
-    }
-    revealIndexRef.current = 0
-  }
-
-  useEffect(() => {
-    return () => stopReveal()
-  }, [])
-
   useEffect(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
       abortControllerRef.current = null
     }
 
-    stopReveal()
     setMessages([])
     setToolCalls([])
     setCurrentThinking(null)
@@ -80,7 +55,6 @@ export function useChat(sessionId) {
     toolCallsRef.current = []
     thinkingRef.current = null
     streamingContentRef.current = ''
-    revealIndexRef.current = 0
   }, [sessionId])
 
   const loadHistory = useCallback(async () => {
@@ -183,8 +157,6 @@ export function useChat(sessionId) {
       toolCallsRef.current = []
       thinkingRef.current = null
       streamingContentRef.current = ''
-      revealIndexRef.current = 0
-      startReveal()
 
       try {
         await sendMessage(
@@ -230,10 +202,10 @@ export function useChat(sessionId) {
 
               case 'token':
                 streamingContentRef.current += data.content
+                setStreamingContent(streamingContentRef.current)
                 break
 
               case 'response': {
-                stopReveal()
                 setStreaming(false)
                 setMessages(prev => [
                   ...prev,
@@ -256,7 +228,6 @@ export function useChat(sessionId) {
               }
 
               case 'clarification': {
-                stopReveal()
                 setStreaming(false)
                 setMessages(prev => [
                   ...prev,
@@ -292,16 +263,11 @@ export function useChat(sessionId) {
               }
 
               case 'session_title': {
-                 window.dispatchEvent(
-                   new CustomEvent('session_updated', {
-                     detail: { sessionId: currentSessionId, title: data.title },
-                   })
-                 )
-                 break
+                  updateSessionInList(currentSessionId, { title: data.title })
+                  break
               }
 
               case 'error':
-                stopReveal()
                 setStreaming(false)
                 console.error('Stream error:', data.message)
                 setMessages(prev => [
@@ -337,17 +303,15 @@ export function useChat(sessionId) {
           },
         ])
       } finally {
-        stopReveal()
         setStreaming(false)
         setToolCalls([])
         setCurrentThinking(null)
         setStreamingContent('')
         streamingContentRef.current = ''
-        revealIndexRef.current = 0
         abortControllerRef.current = null
       }
     },
-    []
+    [updateSessionInList]
   )
 
   return {

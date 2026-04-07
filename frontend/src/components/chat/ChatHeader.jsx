@@ -1,9 +1,8 @@
-import React from 'react'
-import AgentSelector from './AgentSelector'
-import SessionInfoTooltip from './SessionInfoTooltip'
-import TokenCounter from './TokenCounter'
-import MCPBadge from './MCPBadge'
-import SessionSettingsPopover from './SessionSettingsPopover'
+import MCPBadge from './elements/MCPBadge'
+import SessionSettingsPopover from './elements/SessionSettingsPopover'
+import { useSocket } from '@/context/SocketContext'
+import { cn } from '@/lib/utils'
+import Orb from '@/components/ui/Orb'
 
 export default function ChatHeader({
   sessionId,
@@ -21,12 +20,30 @@ export default function ChatHeader({
   inboxCount,
   notesCount,
 }) {
+  const { isConnected } = useSocket()
+  
   if (!sessionId) return null
 
   return (
     <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
       {/* Left Zone */}
       <div className="flex items-center gap-2">
+        <div className="relative flex items-center justify-center w-6 h-6">
+          <Orb 
+            size={16} 
+            isReady={isConnected} 
+            className={cn(
+              "transition-all duration-500",
+              !isConnected && "grayscale opacity-50"
+            )}
+          />
+          <div 
+            className={cn(
+              "absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-background transition-colors duration-500",
+              isConnected ? "bg-emerald-500" : "bg-red-500"
+            )} 
+          />
+        </div>
         <AgentSelector
           currentAgentId={currentAgentId}
           onAgentChange={onAgentChange}

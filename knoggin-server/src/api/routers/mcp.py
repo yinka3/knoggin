@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from api.state import AppState
-from common.config.base import load_config, get_default_config, save_config
+from common.config.base import load_config, get_default_config, save_config, get_config
 from common.schema.settings import MCPServerCreate
 
 router = APIRouter()
@@ -23,8 +23,8 @@ async def get_mcp_servers(request: Request):
         return {"servers": []}
     
     status = mcp.get_status()
-    config = load_config() or get_default_config()
-    server_configs = config.get("mcp", {}).get("servers", {})
+    config = get_config()
+    server_configs = config.mcp.get("servers", {})
     
     servers = []
     for name, live in status.items():

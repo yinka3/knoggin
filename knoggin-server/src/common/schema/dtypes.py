@@ -3,6 +3,89 @@ from datetime import datetime, timezone
 import json
 import time
 from typing import Dict, List, Literal, Optional, Set, Union
+from pydantic import BaseModel, Field
+
+
+class EntityExtraction(BaseModel):
+    """Model for a single entity mention extraction."""
+    msg_id: int = Field(..., description="The ID of the message this entity was extracted from")
+    name: str = Field(..., description="The name of the entity as mentioned in text")
+    type: str = Field(..., description="The semantic type (e.g., person, organization, location, concept)")
+    topic: str = Field(..., description="The high-level topic category")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score from 0 to 1")
+
+class NERResult(BaseModel):
+    """Collection model for NER batch extraction."""
+    mentions: List[EntityExtraction] = Field(default_factory=list)
+
+class ConnectionExtraction(BaseModel):
+    """Model for a relationship between two entities."""
+    msg_id: int = Field(..., description="The ID of the message where this connection was found")
+    entity_a: str = Field(..., description="Name of the first entity")
+    entity_b: str = Field(..., description="Name of the second entity")
+    relationship: str = Field(..., description="Brief description of the connection")
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    context: Optional[str] = Field(None, description="Short snippet proving the connection")
+
+class ConnectionsResult(BaseModel):
+    """Collection model for extracted connections."""
+    connections: List[ConnectionExtraction] = Field(default_factory=list)
+
+class MergeJudgment(BaseModel):
+    """Model for deciding if two entities should be merged."""
+    should_merge: bool = Field(..., description="True if entities refer to the same real-world concept")
+    reasoning: str = Field(..., description="Justification for the decision")
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    new_canonical_name: Optional[str] = Field(None, description="Suggested better name if merging")
+
+
+class RelevanceResult(BaseModel):
+    """Structured response for a single relevance check."""
+    index: int = Field(..., description="The 1-based index from the input list")
+    is_relevant: bool = Field(..., description="Whether the message relates to the entity's facts")
+
+class BulkRelevanceResult(BaseModel):
+    """Collection of relevance results."""
+    judgments: List[RelevanceResult] = Field(default_factory=list)
+
+
+class FactUpdate(BaseModel):
+    """Model for a single fact update during profile extraction."""
+    content: str = Field(..., description="The atomic fact content")
+    msg_id: Optional[int] = Field(None, description="The ID of the source message")
+    supersedes: Optional[str] = Field(None, description="Exact text of an existing fact this replaces")
+    invalidates: Optional[str] = Field(None, description="Exact text of an existing fact this removes")
+
+class ProfileExtraction(BaseModel):
+    """Model for a single entity's profile facts extraction."""
+    canonical_name: str = Field(..., description="The name of the entity")
+    facts: List[FactUpdate] = Field(default_factory=list, description="List of structured fact updates")
+
+class EntityProfilesResult(BaseModel):
+    """Collection model for profile extraction results."""
+    profiles: List[ProfileExtraction] = Field(default_factory=list)
+
+
+class ContradictionJudgment(BaseModel):
+    """Result for a single contradiction check."""
+    index: int = Field(..., description="The 1-based index from the input list")
+    is_contradiction: bool = Field(..., description="Whether FACT_B contradicts FACT_A")
+
+class BulkContradictionResult(BaseModel):
+    """Collection of contradiction judgments."""
+    judgments: List[ContradictionJudgment] = Field(default_factory=list)
+
+
+class TopicDetail(BaseModel):
+    """Model for a single topic's configuration."""
+    active: bool = Field(default=True)
+    labels: List[str] = Field(default_factory=list)
+    aliases: List[str] = Field(default_factory=list)
+    hierarchy: Dict[str, List[str]] = Field(default_factory=dict)
+
+class TopicConfigResult(BaseModel):
+    """Model for the full topic configuration."""
+    topics: Dict[str, TopicDetail] = Field(..., description="Map of TopicName to its configuration")
 
 
 @dataclass
@@ -12,17 +95,15 @@ class MessageData:
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-@dataclass
-class EntityPair:
+class EntityPair(BaseModel):
     entity_a: str
     entity_b: str
     confidence: float
-    context: str = None
+    context: Optional[str] = None
 
-@dataclass
-class MessageConnections:
+class MessageConnections(BaseModel):
     message_id: int
-    entity_pairs: List[EntityPair] = field(default_factory=list)
+    entity_pairs: List[EntityPair] = Field(default_factory=list)
 
 
 @dataclass

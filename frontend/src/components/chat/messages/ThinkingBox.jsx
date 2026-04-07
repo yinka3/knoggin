@@ -4,6 +4,8 @@ import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown, ChevronRight, ArrowRight } from 'lucide-react'
+import Orb from '@/components/ui/Orb'
+import { cn } from '@/lib/utils'
 
 function ArgsDisplay({ args }) {
   if (!args || Object.keys(args).length === 0) return null
@@ -71,6 +73,8 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
   const startTimeRef = useRef(null)
   const timerDisplayRef = useRef(null)
 
+  const [elapsedTime, setElapsedTime] = useState(0)
+
   useEffect(() => {
     if (streaming && (toolCalls.length > 0 || currentThinking)) {
       setTimeout(() => setIsOpen(true), 0)
@@ -85,27 +89,18 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
     }
   }, [defaultOpen, streaming, isOpen, toolCalls.length])
 
-  // Timer using direct DOM updates instead of setState
+  // Standard React timer instead of direct DOM manipulation
   useEffect(() => {
+    let interval;
     if (streaming && toolCalls.length > 0) {
-      if (!startTimeRef.current) {
-        startTimeRef.current = Date.now()
-      }
-      timerRef.current = setInterval(() => {
-        if (timerDisplayRef.current) {
-          const elapsed = Date.now() - startTimeRef.current
-          timerDisplayRef.current.textContent = `${(elapsed / 1000).toFixed(1)}s`
-        }
+      const start = Date.now()
+      interval = setInterval(() => {
+        setElapsedTime(Date.now() - start)
       }, 100)
-      return () => clearInterval(timerRef.current)
-    } else if (!streaming && startTimeRef.current) {
-      // Final update on stop
-      if (timerDisplayRef.current) {
-        const elapsed = Date.now() - startTimeRef.current
-        timerDisplayRef.current.textContent = `${(elapsed / 1000).toFixed(1)}s`
-      }
-      startTimeRef.current = null
+    } else if (!streaming) {
+      setElapsedTime(0)
     }
+    return () => clearInterval(interval)
   }, [streaming, toolCalls.length])
 
   if (toolCalls.length === 0 && !currentThinking) return null
@@ -119,6 +114,15 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
     <Collapsible open={isOpen} onOpenChange={setIsOpen} className="glass-card rounded-xl my-3">
       <CollapsibleTrigger className="flex items-center gap-2 w-full px-4 py-2 text-xs text-muted-foreground hover:bg-muted/60 transition-colors">
         {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        
+        <div className="relative w-4 h-4 mr-0.5">
+          <Orb 
+            size={14} 
+            isReady={!streaming} 
+            className={cn(streaming && "animate-pulse")} 
+          />
+        </div>
+
         <span className="font-medium">Reasoning Process</span>
 
         {toolCalls.length > 0 && (
@@ -134,10 +138,11 @@ export default function ThinkingBox({ toolCalls, streaming, currentThinking, def
         {/* Timer — stays visible after completion */}
         {toolCalls.length > 0 && (
           <span
-            ref={timerDisplayRef}
             className="ml-auto text-[10px] text-muted-foreground/70 font-mono tabular-nums"
           >
-            {!streaming && storedDuration > 0
+            {streaming
+              ? `${(elapsedTime / 1000).toFixed(1)}s`
+              : storedDuration > 0
               ? `${(storedDuration / 1000).toFixed(1)}s`
               : '0.0s'}
           </span>

@@ -10,52 +10,66 @@ import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'motion/react'
 
 const MessageItem = memo(({ msg, agentName, sessionId }) => {
+  const isUser = msg.role === 'user'
+  
   return (
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: 'easeOut' }}
-      className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
+      transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+      className={cn(
+        "group relative flex flex-col gap-3 py-6 transition-colors hover:bg-white/[0.01]",
+        !isUser && "border-b border-border/10"
+      )}
     >
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span className="font-medium">{msg.role === 'user' ? 'You' : agentName}</span>
-        <span>{formatTimestamp(msg.timestamp)}</span>
+      <div className="flex items-center gap-3 px-1">
+        <div className={cn(
+          "w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-bold uppercase tracking-wider",
+          isUser ? "bg-primary/20 text-primary" : "bg-emerald-500/20 text-emerald-500"
+        )}>
+          {isUser ? 'U' : 'A'}
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="font-semibold text-foreground/90 tabular-nums">
+            {isUser ? 'You' : agentName}
+          </span>
+          <span className="text-muted-foreground/50 tabular-nums">
+            {formatTimestamp(msg.timestamp)}
+          </span>
+        </div>
       </div>
 
-      <div
-        className={
-          msg.role === 'user'
-            ? 'bg-primary/15 text-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[85%] leading-relaxed'
-            : 'text-foreground leading-relaxed max-w-full'
-        }
-      >
-        {msg.role === 'assistant' ? (
-          <>
-            {(msg.toolCalls || msg.tool_calls) && (
-              <ThinkingBox
-                toolCalls={msg.toolCalls || msg.tool_calls}
-                streaming={false}
-                currentThinking={null}
-                defaultOpen={false}
-                totalDuration={msg.total_duration}
-              />
-            )}
-            <MarkdownRenderer content={msg.content} />
-            {msg.sources && <SourcesArtifact sources={msg.sources} />}
-            
-            {sessionId && msg.msg_id && msg.content?.trim() && (
-              <div className="flex items-center gap-2 mt-2 border-t border-border/10 pt-2">
-                <ExtractFactsButton sessionId={sessionId} message={msg} />
-              </div>
-            )}
-          </>
-        ) : (
-          <span className="whitespace-pre-wrap">{msg.content}</span>
-        )}
+      <div className="px-1 pl-9">
+        <div className="text-foreground leading-[1.65] text-[15px] font-normal selection:bg-primary/30">
+          {msg.role === 'assistant' ? (
+            <div className="space-y-4">
+              {(msg.toolCalls || msg.tool_calls) && (
+                <ThinkingBox
+                  toolCalls={msg.toolCalls || msg.tool_calls}
+                  streaming={false}
+                  currentThinking={null}
+                  defaultOpen={false}
+                  totalDuration={msg.total_duration}
+                />
+              )}
+              <MarkdownRenderer content={msg.content} />
+              {msg.sources && <SourcesArtifact sources={msg.sources} />}
+              
+              {sessionId && msg.msg_id && msg.content?.trim() && (
+                <div className="flex items-center gap-2 mt-4 pt-4 border-t border-border/5">
+                  <ExtractFactsButton sessionId={sessionId} message={msg} />
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="whitespace-pre-wrap opacity-90">{msg.content}</div>
+          )}
+        </div>
       </div>
     </motion.div>
   )
-}, (prev, next) => {
+}
+, (prev, next) => {
   return prev.msg.content === next.msg.content &&
          prev.msg.timestamp === next.msg.timestamp &&
          prev.agentName === next.agentName &&
@@ -132,49 +146,61 @@ export default function MessageList({
 
               {/* Show simple loader when streaming but nothing else yet */}
               {streaming && !currentThinking && currentToolCalls?.length === 0 && !streamingContent && (
-                <div className="flex flex-col gap-1 items-start">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="font-medium">{agentName}</span>
-                  </div>
-                  <div className="flex items-center gap-2 py-3">
-                    <Loader2 size={16} className="animate-spin text-muted-foreground" />
-                    <span className="text-muted-foreground text-sm">Thinking...</span>
+                <div className="flex flex-col gap-3 py-6 animate-in fade-in duration-500">
+                  <div className="flex items-center gap-3 px-1">
+                    <div className="w-6 h-6 rounded-md flex items-center justify-center bg-emerald-500/10">
+                      <Loader2 size={12} className="animate-spin text-emerald-500/50" />
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="font-semibold text-foreground/40 italic">
+                        {agentName} is thinking...
+                      </span>
+                    </div>
                   </div>
                 </div>
               )}
 
-              {/* Live streaming section */}
-              <AnimatePresence>
-              {streaming && (currentToolCalls?.length > 0 || currentThinking || streamingContent) && (
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  className="flex flex-col gap-1 items-start"
-                >
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span className="font-medium">{agentName}</span>
-                </div>
-
-                {/* ThinkingBox — auto-collapses when streaming content arrives */}
-                {(currentToolCalls?.length > 0 || currentThinking) && (
-                  <ThinkingBox
-                    toolCalls={currentToolCalls}
-                    streaming={streaming}
-                    currentThinking={currentThinking}
-                    defaultOpen={!streamingContent}
-                  />
-                )}
-
-                {/* Streaming content bubble */}
-                {streamingContent && (
-                  <div className="text-foreground leading-relaxed max-w-full">
-                    <MarkdownRenderer content={streamingContent} />
+                {/* Live streaming section */}
+                <AnimatePresence>
+                {streaming && (currentToolCalls?.length > 0 || currentThinking || streamingContent) && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    className="flex flex-col gap-3 py-6 border-b border-border/10"
+                  >
+                  <div className="flex items-center gap-3 px-1">
+                    <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-500 animate-pulse">
+                      A
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="font-semibold text-foreground/90 tabular-nums">
+                        {agentName}
+                      </span>
+                    </div>
                   </div>
-                )}
-              </motion.div>
-            )}
-            </AnimatePresence>
+  
+                  <div className="px-1 pl-9 space-y-4">
+                    {/* ThinkingBox — auto-collapses when streaming content arrives */}
+                    {(currentToolCalls?.length > 0 || currentThinking) && (
+                      <ThinkingBox
+                        toolCalls={currentToolCalls}
+                        streaming={streaming}
+                        currentThinking={currentThinking}
+                        defaultOpen={!streamingContent}
+                      />
+                    )}
+  
+                    {/* Streaming content */}
+                    {streamingContent && (
+                      <div className="text-foreground leading-[1.65] text-[15px]">
+                        <MarkdownRenderer content={streamingContent} />
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+              </AnimatePresence>
 
             <div ref={bottomRef} />
           </div>

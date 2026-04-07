@@ -1,20 +1,19 @@
 import asyncio
 import uuid
 from datetime import datetime, timezone
-from functools import partial
 from typing import Dict, List
 
 from loguru import logger
 
 from core.nlp import NLPPipeline
 from core.prompts import get_connection_reasoning_prompt, get_profile_extraction_prompt
-from core.utils import format_vp02_input, parse_connection_response
-from jobs.utils import format_vp04_input, parse_new_facts
-from common.config.base import get_config_value
+from core.utils import format_vp02_input
+from jobs.utils import format_vp04_input
+from common.config.base import get_config
 from common.infra.resources import ResourceManager
 from common.config.topics_config import TopicConfig
 from common.infra.redis import RedisKeys
-from src.common.schema.dtypes import Fact
+from common.schema.dtypes import ConnectionsResult, EntityProfilesResult, Fact
 
 def _build_messages(responses: List[dict]) -> List[dict]:
     messages = []
@@ -28,39 +27,29 @@ def _build_messages(responses: List[dict]) -> List[dict]:
             })
     return messages
 
-async def _create_user_entity(resources, user_name: str) -> int:
-    loop = asyncio.get_running_loop()
-
-    existing = await loop.run_in_executor(
-        resources.executor,
-        resources.store.get_entity_by_id, 1
-    )
+async def _create_user_entity(resources: ResourceManager, user_name: str) -> int:
+    existing = await resources.store.get_entity_by_id(1)
 
     if existing and existing["canonical_name"] == user_name:
         logger.info(f"[SETUP] User entity already exists, reusing id=1")
         return 1
     
-    # If a different entity is at ID=1, we can't assume a clean database.
-    # We must use proper graph counter logic to determine the next ID
-    ent_id = 1
     if existing and existing["canonical_name"] != user_name:
-        logger.warning(f"[SETUP] User name changed but database not wiped. Generating new ID.")
-        max_id = await loop.run_in_executor(
-            resources.executor,
-            resources.store.get_max_entity_id
+        raise RuntimeError(
+            f"[SETUP] Entity at ID=1 is '{existing['canonical_name']}', "
+            f"expected '{user_name}'. Database may be corrupted or from a different user. "
+            f"Wipe the database or resolve manually."
         )
-        ent_id = max_id + 1
         
-    await resources.redis.set(RedisKeys.global_next_ent_id(), ent_id)
-    
-    user_aliases = get_config_value("user_aliases") or []
+    config = get_config()
+    user_aliases = config.user_aliases
     all_aliases = [user_name] + [a.strip() for a in user_aliases if a.strip()]
     all_aliases = list(dict.fromkeys(all_aliases))
     
     embedding = await resources.embedding.encode_single(user_name)
     
     user_entity = {
-        "id": ent_id,
+        "id": 1,
         "canonical_name": user_name,
         "type": "person",
         "confidence": 1.0,
@@ -70,7 +59,7 @@ async def _create_user_entity(resources, user_name: str) -> int:
         "session_id": "onboarding"
     }
     
-    user_facts_raw = get_config_value("user_facts") or []
+    user_facts_raw = config.user_facts
     fact_contents = (
         [f.strip() for f in user_facts_raw if f.strip()] 
         if user_facts_raw 
@@ -86,22 +75,20 @@ async def _create_user_entity(resources, user_name: str) -> int:
             content=content,
             valid_at=now,
             embedding=emb,
-            source_entity_id=ent_id
+            source_entity_id=1
         )
         for content, emb in zip(fact_contents, fact_embeddings)
     ]
     
-    await loop.run_in_executor(
-        resources.executor,
-        partial(resources.store.write_batch, [user_entity], [])
-    )
-    await loop.run_in_executor(
-        resources.executor,
-        partial(resources.store.create_facts_batch, ent_id, facts)
-    )
-    
-    logger.info(f"[SETUP] Created user entity '{user_name}' (id={ent_id})")
-    return ent_id
+    await resources.store.write_batch([user_entity], [])
+    await resources.store.create_facts_batch(1, facts)
+
+    current = await resources.redis.get(RedisKeys.global_next_ent_id())
+    if not current or int(current) < 1:
+        await resources.redis.set(RedisKeys.global_next_ent_id(), 1)
+
+    logger.info(f"[SETUP] Created user entity '{user_name}' (id=1)")
+    return 1
 
 async def run_setup(
     resources: ResourceManager,
@@ -132,11 +119,10 @@ async def run_setup(
             "entities": []
         }
 
-    loop = asyncio.get_running_loop()
-
     user_id = await _create_user_entity(resources, user_name)
 
-    user_aliases = get_config_value("user_aliases") or []
+    config = get_config()
+    user_aliases = config.user_aliases
 
     entity_lookup: Dict[str, dict] = {}
     entity_lookup[user_name.lower()] = {
@@ -154,15 +140,20 @@ async def run_setup(
         if alias.strip():
             known_aliases[alias.strip().lower()] = user_id
 
+    async def _get_profile(eid):
+        if eid == user_id:
+            return {
+                "canonical_name": user_name,
+                "type": "person",
+                "topic": "Identity"
+            }
+        return None
+
     nlp = NLPPipeline(
         llm=resources.llm_service,
         topic_config=topic_config,
         get_known_aliases=lambda: known_aliases,
-        get_profiles=lambda: {user_id: {
-            "canonical_name": user_name,
-            "type": "person",
-            "topic": "Identity"
-        }},
+        get_profile=_get_profile,
         gliner=resources.gliner,
         spacy=resources.spacy
     )
@@ -229,35 +220,33 @@ async def run_setup(
 
     system_03 = get_connection_reasoning_prompt(user_name)
     user_03 = format_vp02_input(candidates, messages, "")
-
     logger.info(f"[SETUP] Running connection extraction on {len(candidates)} entities")
-    reasoning_03 = await resources.llm_service.call_llm(system_03, user_03)
+    conn_result: ConnectionsResult = await resources.llm_service.call_llm(
+        response_model=ConnectionsResult,
+        system=system_03,
+        user=user_03
+    )
 
     relationships = []
-    if reasoning_03:
-        connections = parse_connection_response(reasoning_03)
-        for mc in connections:
-            for pair in mc.entity_pairs:
-                ent_a = entity_lookup.get(pair.entity_a.lower())
-                ent_b = entity_lookup.get(pair.entity_b.lower())
-                if ent_a and ent_b:
-                    relationships.append({
-                        "entity_a": ent_a["canonical_name"],
-                        "entity_b": ent_b["canonical_name"],
-                        "entity_a_id": ent_a["id"],
-                        "entity_b_id": ent_b["id"],
-                        "message_id": f"msg_{mc.message_id}",
-                        "confidence": pair.confidence,
-                        "context": pair.context
-                    })
+    if conn_result:
+        for pair in conn_result.connections:
+            ent_a = entity_lookup.get(pair.entity_a.lower())
+            ent_b = entity_lookup.get(pair.entity_b.lower())
+            if ent_a and ent_b:
+                relationships.append({
+                    "entity_a": ent_a["canonical_name"],
+                    "entity_b": ent_b["canonical_name"],
+                    "entity_a_id": ent_a["id"],
+                    "entity_b_id": ent_b["id"],
+                    "message_id": f"msg_{pair.msg_id}",
+                    "confidence": pair.confidence,
+                    "context": pair.context
+                })
 
     logger.info(f"[SETUP] Extracted {len(relationships)} connections")
 
     if entities or relationships:
-        await loop.run_in_executor(
-            resources.executor,
-            partial(resources.store.write_batch, entities, relationships)
-        )
+        await resources.store.write_batch(entities, relationships)
         logger.info(f"[SETUP] Wrote {len(entities)} entities and {len(relationships)} relationships to graph")
 
 
@@ -275,7 +264,8 @@ async def run_setup(
         for e in entities
     ]
 
-    user_aliases_list = get_config_value("user_aliases") or []
+    config = get_config()
+    user_aliases_list = config.user_aliases
     llm_input.append({
         "entity_name": user_name,
         "entity_type": "person",
@@ -287,12 +277,16 @@ async def run_setup(
     user_04 = format_vp04_input(llm_input, conversation_text)
 
     logger.info(f"[SETUP] Running profile extraction for {len(entities)} entities")
-    reasoning_04 = await resources.llm_service.call_llm(system_04, user_04)
+    profiles_result: EntityProfilesResult = await resources.llm_service.call_llm(
+        response_model=EntityProfilesResult,
+        system=system_04,
+        user=user_04
+    )
 
     facts_created = 0
 
-    if reasoning_04:
-        parsed_profiles = parse_new_facts(reasoning_04)
+    if profiles_result and profiles_result.profiles:
+        parsed_profiles = profiles_result.profiles
 
         if parsed_profiles:
             # Optimize: Batch all fact encodings together
@@ -303,8 +297,8 @@ async def run_setup(
                 entity = entity_lookup.get(profile.canonical_name.lower())
                 if not entity:
                     continue
-                for f_idx, fact_content in enumerate(profile.facts):
-                    all_fact_contents.append(fact_content)
+                for f_idx, fact_update in enumerate(profile.facts):
+                    all_fact_contents.append(fact_update.content)
                     fact_mapping.append((p_idx, f_idx))
                     
             if all_fact_contents:
@@ -329,22 +323,20 @@ async def run_setup(
                     ent_id = entity["id"]
                     new_facts = []
                     
-                    for f_idx, fact_content in enumerate(profile.facts):
+                    for f_idx, fact_update in enumerate(profile.facts):
                         fact_embedding = fact_embeddings_map[p_idx][f_idx]
                         new_facts.append(Fact(
                             id=str(uuid.uuid4()),
-                            content=fact_content,
+                            content=fact_update.content,
                             valid_at=datetime.now(timezone.utc),
                             embedding=fact_embedding,
-                            source_entity_id=ent_id
+                            source_entity_id=ent_id,
+                            source_msg_id=fact_update.msg_id
                         ))
 
                     if new_facts:
                         write_tasks.append(
-                            loop.run_in_executor(
-                                resources.executor,
-                                partial(resources.store.create_facts_batch, ent_id, new_facts)
-                            )
+                            resources.store.create_facts_batch(ent_id, new_facts)
                         )
                         
                         resolution_text = f"{entity['canonical_name']}. " + " ".join(
@@ -361,13 +353,9 @@ async def run_setup(
                     res_embeddings = await resources.embedding.encode(resolution_texts)
                     
                     update_tasks = [
-                        loop.run_in_executor(
-                            resources.executor,
-                            partial(
-                                resources.store.update_entity_embedding,
-                                ent_id,
-                                emb
-                            )
+                        resources.store.update_entity_embedding(
+                            ent_id,
+                            emb
                         )
                         for ent_id, emb in zip(resolution_entities, res_embeddings)
                     ]

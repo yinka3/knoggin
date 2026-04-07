@@ -6,23 +6,33 @@ from loguru import logger
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
 
+from common.errors.agent import DependencyError
+
 load_dotenv()
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = os.environ.get("REDIS_PORT", "6379")
 
-
-
 class AsyncRedisClient:
-    """Singleton async Redis client."""
+    """Singleton async Redis client with health checks and auto-reconnection."""
     _instance = None
     _lock = asyncio.Lock()
 
     @classmethod
     async def get_instance(cls) -> aioredis.Redis:
-        """Async-safe singleton accessor."""
+        """Async-safe singleton accessor with health check."""
         async with cls._lock:
-            if cls._instance is None:
+            # Check if instance exists and is responsive
+            is_healthy = False
+            if cls._instance is not None:
+                try:
+                    await asyncio.wait_for(cls._instance.ping(), timeout=2.0)
+                    is_healthy = True
+                except (aioredis.ConnectionError, asyncio.TimeoutError):
+                    logger.warning("Redis connection lost, attempting to reconnect...")
+                    await cls.close_redis()
+            
+            if not is_healthy:
                 try:
                     pool = aioredis.ConnectionPool.from_url(
                         url=f"redis://{REDIS_HOST}:{REDIS_PORT}",
@@ -32,14 +42,13 @@ class AsyncRedisClient:
                         health_check_interval=30
                     )
                     cls._instance = aioredis.Redis(connection_pool=pool)
-                    
                     await cls._instance.ping()
                     logger.info(f"Redis connected: {REDIS_HOST}:{REDIS_PORT}")
-                    
-                except aioredis.ConnectionError as e:
-                    raise ConnectionError(
-                        f"Failed to connect to Redis at {REDIS_HOST}:{REDIS_PORT}. "
-                        f"Ensure Redis is running and credentials are correct. Error: {e}"
+                except Exception as e:
+                    cls._instance = None
+                    raise DependencyError(
+                        f"Failed to connect to Redis at {REDIS_HOST}:{REDIS_PORT}",
+                        details={"error": str(e), "host": REDIS_HOST, "port": REDIS_PORT}
                     )
                     
             return cls._instance
@@ -95,6 +104,10 @@ class RedisKeys:
         return f"dirty_entities:{user}:{session}"
     
     @staticmethod
+    def last_profile_update(user: str, session: str, entity_id: int) -> str:
+        return f"last_profile_update:{user}:{session}:{entity_id}"
+
+    @staticmethod
     def profile_complete(user: str, session: str) -> str:
         return f"profile_complete:{user}:{session}"
 
@@ -141,6 +154,14 @@ class RedisKeys:
     @staticmethod
     def user_profile_ran(user: str, session: str) -> str:
         return f"user_profile_ran:{user}:{session}"
+
+    @staticmethod
+    def merge_intent(user: str, session: str, primary_id: int, secondary_id: int) -> str:
+        return f"merge_intent:{user}:{session}:{primary_id}:{secondary_id}"
+
+    @staticmethod
+    def merge_intents_index(user: str, session: str) -> str:
+        return f"merge_intents_index:{user}:{session}"
     
     @staticmethod
     def job_last_run(job_name: str, user: str, session: str) -> str:

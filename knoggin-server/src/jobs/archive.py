@@ -46,25 +46,22 @@ class FactArchivalJob(BaseJob):
         return elapsed >= self._fallback_interval_seconds
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        loop = asyncio.get_running_loop()
+        with logger.contextualize(user=ctx.user_name, job=self.name, session=ctx.session_id):
+            cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
         
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
-        
-        deleted_count = await loop.run_in_executor(
-            None, 
-            self.store.delete_old_invalidated_facts,
-            cutoff
-        )
+            deleted_count = await self.store.delete_old_invalidated_facts(
+                cutoff
+            )
 
-        summary = f"Archived {deleted_count} invalidated facts"
-        if deleted_count > 0:
-            logger.info(summary)
-            await emit(ctx.session_id, "job", "facts_archived", {
-                "deleted_count": deleted_count,
-                "retention_days": self.retention_days
-            })
-            
-        return JobResult(success=True, summary=summary)
+            summary = f"Archived {deleted_count} invalidated facts"
+            if deleted_count > 0:
+                logger.info(summary)
+                await emit(ctx.session_id, "job", "facts_archived", {
+                    "deleted_count": deleted_count,
+                    "retention_days": self.retention_days
+                })
+                
+            return JobResult(success=True, summary=summary)
     
     def update_settings(self, retention_days: int = None, fallback_interval_hours: float = None):
         if retention_days is not None:

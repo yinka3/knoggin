@@ -7,7 +7,7 @@ import {
   Archive,
   MessageSquare,
 } from 'lucide-react'
-import { Section, SubSection, SettingRow, NumberInput } from './SettingsPrimitives'
+import { Section, SubSection, SettingRow, NumberInput, TradeoffSlider } from './SettingsPrimitives'
 
 export default function BackgroundJobsSection({ settings, update }) {
   return (
@@ -54,7 +54,11 @@ export default function BackgroundJobsSection({ settings, update }) {
             max={100}
           />
         </SettingRow>
-        <SettingRow label="Activity Limit" description="Minimum messages required before a profile update is triggered">
+        <SettingRow 
+          label="Activity Limit" 
+          description="Minimum messages required before a profile update is triggered"
+          impacts={['latency', 'quality']}
+        >
           <NumberInput
             value={settings?.jobs?.profile?.volume_threshold}
             onChange={v => update('jobs.profile.volume_threshold', v)}
@@ -62,13 +66,18 @@ export default function BackgroundJobsSection({ settings, update }) {
             max={100}
           />
         </SettingRow>
-        <SettingRow label="Idle Time Requirement" description="Seconds of chat silence needed before profile processing begins">
-          <NumberInput
-            value={settings?.jobs?.profile?.idle_threshold}
+        <SettingRow 
+          label="Idle Time Requirement" 
+          description="Seconds of chat silence needed before profile processing begins"
+          impacts={['quality']}
+        >
+          <TradeoffSlider
+            value={settings?.jobs?.profile?.idle_threshold ?? 60}
             onChange={v => update('jobs.profile.idle_threshold', v)}
             min={10}
             max={600}
-            unit="s"
+            leftLabel="Aggressive"
+            rightLabel="Patient"
           />
         </SettingRow>
         <SettingRow label="Profile Batch Size" description="Facts processed per batch">
@@ -117,31 +126,46 @@ export default function BackgroundJobsSection({ settings, update }) {
 
       {/* Merger */}
       <SubSection title="Entity Merger" icon={Combine}>
-        <SettingRow label="Automatic Merge Certainty" description="Safely combine facts if the AI confidence is above this score">
-          <NumberInput
-            value={settings?.jobs?.merger?.auto_threshold}
+        <SettingRow 
+          label="Automatic Merge Certainty" 
+          description="Safely combine facts if the AI confidence is above this score"
+          impacts={['quality', 'accuracy']}
+        >
+          <TradeoffSlider
+            value={settings?.jobs?.merger?.auto_threshold ?? 0.8}
             onChange={v => update('jobs.merger.auto_threshold', v)}
             min={0.5}
             max={1}
-            step={0.01}
+            leftLabel="Experimental"
+            rightLabel="Conservative"
           />
         </SettingRow>
-        <SettingRow label="Human Review Certainty" description="Ask for your permission to merge if confidence is above this score">
-          <NumberInput
-            value={settings?.jobs?.merger?.hitl_threshold}
+        <SettingRow 
+          label="Human Review Certainty" 
+          description="Ask for your permission to merge if confidence is above this score"
+          impacts={['latency']}
+        >
+          <TradeoffSlider
+            value={settings?.jobs?.merger?.hitl_threshold ?? 0.6}
             onChange={v => update('jobs.merger.hitl_threshold', v)}
             min={0.4}
             max={1}
-            step={0.01}
+            leftLabel="Assisted"
+            rightLabel="Strict"
           />
         </SettingRow>
-        <SettingRow label="Initial Similarity Filter" description="Minimum semantic similarity required to even compare two facts">
-          <NumberInput
-            value={settings?.jobs?.merger?.cosine_threshold}
+        <SettingRow 
+          label="Initial Similarity Filter" 
+          description="Minimum semantic similarity required to even compare two facts"
+          impacts={['latency']}
+        >
+          <TradeoffSlider
+            value={settings?.jobs?.merger?.cosine_threshold ?? 0.3}
             onChange={v => update('jobs.merger.cosine_threshold', v)}
             min={0.1}
             max={1}
-            step={0.05}
+            leftLabel="Wide"
+            rightLabel="Narrow"
           />
         </SettingRow>
       </SubSection>

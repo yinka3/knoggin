@@ -1,4 +1,5 @@
 import { useState, memo } from 'react'
+import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -56,9 +57,12 @@ const markdownComponents = {
   },
 }
 
-export default memo(function MarkdownRenderer({ content }) {
+export default memo(function MarkdownRenderer({ content, className }) {
   return (
-    <ReactMarkdown components={markdownComponents}>
+    <ReactMarkdown 
+      components={markdownComponents}
+      className={cn("prose prose-invert max-w-none prose-p:leading-[1.65] prose-p:text-[15px] prose-headings:font-bold prose-code:text-emerald-400 prose-pre:bg-black/20 prose-pre:border prose-pre:border-white/5", className)}
+    >
       {content}
     </ReactMarkdown>
   )

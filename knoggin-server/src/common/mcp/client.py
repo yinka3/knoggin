@@ -340,18 +340,3 @@ class MCPClientManager:
             self._servers.clear()
             self._tool_registry.clear()
         logger.info("[MCP] Manager shutdown complete")
-
-
-def parse_mcp_tool_name(namespaced: str) -> Optional[Tuple[str, str]]:
-    """
-    Parse 'mcp__gmail__search_emails' -> ('gmail', 'search_emails').
-    Returns None if not a valid MCP tool name.
-    """
-    if not namespaced.startswith("mcp__"):
-        return None
-
-    parts = namespaced.split("__", 2)
-    if len(parts) != 3:
-        return None
-
-    return parts[1], parts[2]

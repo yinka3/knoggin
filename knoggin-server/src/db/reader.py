@@ -3,7 +3,7 @@ from loguru import logger
 from typing import Dict, List, Optional, Set, Tuple
 from neo4j import AsyncDriver
 
-from src.common.schema.dtypes import Fact
+from common.schema.dtypes import Fact
 
 
 class GraphReader:
@@ -126,7 +126,7 @@ class GraphReader:
         MATCH (e:Entity {id: $entity_id})-[:HAS_FACT]->(f:Fact)
         """
         
-        where = "WHERE f.invalid_at IS NULL" if active_only else ""
+        where = "\nWHERE f.invalid_at IS NULL" if active_only else ""
         
         tail = """
         OPTIONAL MATCH (f)-[:EXTRACTED_FROM]->(m:Message)
@@ -295,7 +295,7 @@ class GraphReader:
         query = """
         MATCH (e:Entity)
         WHERE e.id <> $protected_id
-        AND NOT (e)-[:HAS_FACT]->()
+        AND NOT EXISTS { MATCH (e)-[:HAS_FACT]->(f_active:Fact) WHERE f_active.invalid_at IS NULL }
         AND e.last_mentioned < $orphan_cutoff 
 
         OPTIONAL MATCH (e)-[r:RELATED_TO]-(neighbor)
@@ -636,6 +636,34 @@ class GraphReader:
         except Exception as e:
             logger.error(f"Failed to get entity {entity_id}: {e}")
             return None
+
+    async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:
+        """Batch fetch entities by their IDs."""
+        if not entity_ids:
+            return []
+            
+        query = """
+        MATCH (e:Entity)
+        WHERE e.id IN $entity_ids
+        OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
+        RETURN e.id AS id,
+            e.session_id AS session_id,
+            e.canonical_name AS canonical_name,
+            e.aliases AS aliases,
+            e.type AS type,
+            t.name AS topic,
+            e.last_mentioned / 1000 AS last_mentioned,
+            e.last_updated / 1000 AS last_updated,
+            e.last_profiled_msg_id AS last_profiled_msg_id,
+            e.embedding AS embedding
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, {"entity_ids": entity_ids})
+                return await result.data()
+        except Exception as e:
+            logger.error(f"Failed to fetch entities by ids: {e}")
+            return []
     
     async def list_preferences(self, session_id: str, kind: Optional[str] = None) -> List[Dict]:
         where_kind = "AND p.kind = $kind" if kind else ""
@@ -823,3 +851,24 @@ class GraphReader:
         except Exception as e:
             logger.error(f"Failed to get notable entities: {e}")
             return []
+    
+    async def get_neighbor_ids_batch(self, entity_ids: List[int]) -> Dict[int, Set[int]]:
+        """Batch fetch neighbor IDs for multiple entities."""
+        if not entity_ids:
+            return {}
+        query = """
+        MATCH (e:Entity)-[:RELATED_TO]-(neighbor:Entity)
+        WHERE e.id IN $ids
+        RETURN e.id as entity_id, collect(neighbor.id) as neighbor_ids
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, {"ids": entity_ids})
+                records = await result.data()
+                result_map = {eid: set() for eid in entity_ids}
+                for record in records:
+                    result_map[record["entity_id"]] = set(record["neighbor_ids"])
+                return result_map
+        except Exception as e:
+            logger.error(f"Failed to batch fetch neighbor IDs: {e}")
+            return {eid: set() for eid in entity_ids}

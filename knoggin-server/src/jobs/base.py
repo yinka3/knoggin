@@ -31,6 +31,8 @@ class JobResult:
 class BaseJob(ABC):
     """Base class for scheduled jobs."""
     
+    enabled: bool = True
+    
     @property
     @abstractmethod
     def name(self) -> str:

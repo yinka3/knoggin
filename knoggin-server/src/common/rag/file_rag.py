@@ -1,10 +1,11 @@
+import asyncio
 import json
 import os
 import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 import chromadb
 import math
 from loguru import logger
@@ -35,7 +36,7 @@ BINARY_EXTENSIONS = {".pdf", ".docx"}
 ALLOWED_EXTENSIONS = TEXT_EXTENSIONS | CODE_EXTENSIONS | BINARY_EXTENSIONS
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
-MAX_FILES_PER_SESSION = 20
+MAX_FILES_PER_SESSION = 100
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 50
 
@@ -61,6 +62,8 @@ class FileRAGService:
         self.child_chunk_overlap = child_chunk_overlap
         self.parent_chunk_size = parent_chunk_size
         self.parent_chunk_overlap = parent_chunk_overlap
+        self._parent_cache: Optional[Dict[str, str]] = None
+        self._manifest_cache: Optional[Dict[str, Dict]] = None
 
         self.upload_dir = Path(upload_dir) / session_id
         self.files_dir = self.upload_dir / "files"
@@ -80,6 +83,7 @@ class FileRAGService:
         )
 
         self._bm25 = None
+        self._bm25_dirty = True
         self._bm25_corpus = []  # List of child chunk texts for BM25
         self._bm25_metadata = [] # List of metadata dicts corresponding to _bm25_corpus
         self._load_bm25_from_chroma()
@@ -114,35 +118,39 @@ class FileRAGService:
             )
         return self._collection
 
-    # ==================
-    # Manifest & Parents
-    # ==================
 
     def _load_manifest(self) -> Dict[str, Dict]:
+        if self._manifest_cache is not None:
+            return self._manifest_cache
         if self.manifest_path.exists():
             with open(self.manifest_path, "r") as f:
-                return json.load(f)
-        return {}
+                self._manifest_cache = json.load(f)
+                return self._manifest_cache
+        self._manifest_cache = {}
+        return self._manifest_cache
 
     def _save_manifest(self, manifest: Dict[str, Dict]):
+        self._manifest_cache = manifest
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         with open(self.manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
 
     def _load_parents(self) -> Dict[str, str]:
+        if self._parent_cache is not None:
+            return self._parent_cache
         if self.parents_path.exists():
             with open(self.parents_path, "r") as f:
-                return json.load(f)
-        return {}
+                self._parent_cache = json.load(f)
+                return self._parent_cache
+        self._parent_cache = {}
+        return self._parent_cache
 
     def _save_parents(self, parents: Dict[str, str]):
+        self._parent_cache = parents
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         with open(self.parents_path, "w") as f:
             json.dump(parents, f, indent=2)
 
-    # ==================
-    # File Ingestion
-    # ==================
 
     def _get_splitters(self, ext: str) -> tuple[RecursiveCharacterTextSplitter, RecursiveCharacterTextSplitter]:
         lang = LANGUAGE_MAP.get(ext)
@@ -201,7 +209,6 @@ class FileRAGService:
 
         parent_splitter, child_splitter = self._get_splitters(ext)
         
-        # 1. Split into large Parent chunks
         parent_chunks = parent_splitter.split_text(content)
         if not parent_chunks:
             raise ValueError("File produced no chunks after splitting")
@@ -217,7 +224,6 @@ class FileRAGService:
         metadatas = []
         chunk_ids = []
 
-        # 2. Split each Parent into smaller Child chunks
         for p_idx, p_text in enumerate(parent_chunks):
             p_id = f"{file_id}_parent_{p_idx}"
             parent_store[p_id] = p_text
@@ -232,23 +238,29 @@ class FileRAGService:
                     "file_name": original_name,
                     "file_type": ext,
                     "parent_id": p_id,
-                    "chunk_index": p_idx, # Index of the parent
-                    "total_chunks": len(parent_chunks), # Total parents
+                    "chunk_index": p_idx,
+                    "total_chunks": len(parent_chunks),
                 })
 
-        embeddings = await self.embedding.encode(all_child_chunks)
         collection = self._get_collection()
 
-        batch_size = 500
-        for i in range(0, len(all_child_chunks), batch_size):
-            end = min(i + batch_size, len(all_child_chunks))
+        embed_batch_size = self.embedding.BATCH_SIZE
+        all_embeddings = []
+        for i in range(0, len(all_child_chunks), embed_batch_size):
+            chunk = all_child_chunks[i:i + embed_batch_size]
+            batch_embeddings = await self.embedding.encode(chunk)
+            all_embeddings.extend(batch_embeddings)
+            await asyncio.sleep(0)
+
+        chroma_batch_size = 500
+        for i in range(0, len(all_child_chunks), chroma_batch_size):
+            end = min(i + chroma_batch_size, len(all_child_chunks))
             collection.add(
                 ids=chunk_ids[i:end],
-                embeddings=embeddings[i:end],
+                embeddings=all_embeddings[i:end],
                 documents=all_child_chunks[i:end],
                 metadatas=metadatas[i:end],
             )
-
         self._save_parents(parent_store)
 
         file_meta = {
@@ -263,15 +275,11 @@ class FileRAGService:
         manifest[file_id] = file_meta
         self._save_manifest(manifest)
         
-        # Refresh BM25
-        self._load_bm25_from_chroma()
+        self._bm25_dirty = True
 
         logger.info(f"Ingested file '{original_name}' -> {len(parent_chunks)} parents, {len(all_child_chunks)} children (session: {self.session_id})")
         return file_meta
 
-    # ==================
-    # Search / Retrieval
-    # ==================
 
     async def search(
         self,
@@ -289,6 +297,10 @@ class FileRAGService:
 
         if collection.count() == 0:
             return []
+        
+        if self._bm25_dirty:
+            self._load_bm25_from_chroma()
+            self._bm25_dirty = False
 
         query_embedding = await self.embedding.encode_single(query)
 
@@ -303,7 +315,7 @@ class FileRAGService:
             include=["documents", "metadatas", "distances"],
         )
 
-        candidate_parents = {} # parent_id -> metadata dict
+        candidate_parents = {}
         
         if vector_results and vector_results["ids"] and vector_results["ids"][0]:
             for i, _ in enumerate(vector_results["ids"][0]):
@@ -312,19 +324,16 @@ class FileRAGService:
                 if parent_id and parent_id not in candidate_parents:
                     candidate_parents[parent_id] = meta
 
-        # 2. BM25 Keyword Search
         if self._bm25 and len(self._bm25_corpus) > 0:
             tokenized_query = query.lower().split(" ")
             bm25_scores = self._bm25.get_scores(tokenized_query)
             
-            # Get top BM25 results
             top_bm25_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:fetch_k]
             for idx in top_bm25_indices:
                 if bm25_scores[idx] <= 0:
                     continue
                 meta = self._bm25_metadata[idx]
                 
-                # Apply file filter if needed
                 if file_filter and meta.get("file_id") != file_filter:
                     continue
                     
@@ -335,7 +344,6 @@ class FileRAGService:
         if not candidate_parents:
             return []
 
-        # 3. Fetch Parent Documents
         parent_store = self._load_parents()
         parent_texts = []
         parent_metas = []
@@ -357,12 +365,10 @@ class FileRAGService:
             logger.error(f"Reranking failed: {e}. Falling back to default ordering.")
             rerank_scores = [0.0] * len(parent_texts)
 
-        # 5. Sort and Format Output
         scored_parents = sorted(zip(parent_texts, parent_metas, rerank_scores), key=lambda x: x[2], reverse=True)
 
         output = []
         for text, meta, score in scored_parents[:n_results]:
-            # Convert cross-encoder logit score roughly to a 0-1 scale for the UI if possible, or just pass it
             norm_score = 0.5
             if isinstance(score, (int, float)):
                 clamped_score = max(min(-score, 500.0), -500.0)
@@ -380,9 +386,6 @@ class FileRAGService:
 
         return output
 
-    # ==================
-    # File Management
-    # ==================
 
     def list_files(self) -> List[Dict]:
         manifest = self._load_manifest()
@@ -404,7 +407,6 @@ class FileRAGService:
         except Exception as e:
             logger.warning(f"Failed to delete chunks from ChromaDB: {e}")
             
-        # Clean up parent chunks
         parent_store = self._load_parents()
         parent_keys_to_delete = [p_id for p_id in parent_store.keys() if p_id.startswith(f"{file_id}_parent_")]
         for key in parent_keys_to_delete:
@@ -417,7 +419,7 @@ class FileRAGService:
         del manifest[file_id]
         self._save_manifest(manifest)
         
-        self._load_bm25_from_chroma()
+        self._bm25_dirty = True
 
         logger.info(f"Deleted file '{file_meta['original_name']}' from session {self.session_id}")
         return True
@@ -431,5 +433,13 @@ class FileRAGService:
 
         if self.upload_dir.exists():
             shutil.rmtree(str(self.upload_dir), ignore_errors=True)
+
+        self._parent_cache = None
+        self._manifest_cache = None
+        self._bm25 = None
+        self._bm25_corpus = []
+        self._bm25_metadata = []
+        self._bm25_dirty = False
+        self._collection = None
 
         logger.info(f"Cleaned up file RAG data for session {self.session_id}")

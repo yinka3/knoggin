@@ -96,16 +96,6 @@ class Scheduler:
             datetime.now(timezone.utc).isoformat()
         )
     
-    async def _build_context(self) -> JobContext:
-        """Build context for job execution."""
-        idle_seconds = await self._get_idle_seconds()
-        return JobContext(
-            user_name=self.user_name,
-            session_id=self.session_id,
-            redis=self.redis,
-            idle_seconds=idle_seconds,
-            resources=self.resources
-        )
     
     async def _get_idle_seconds(self) -> float:
         """Calculate seconds since last user activity."""

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, Suspense } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
 import { useChat } from '../hooks/useChat'
@@ -10,17 +10,17 @@ import { createSession as apiCreateSession } from '@/api/sessions'
 import { getTopics } from '@/api/topics'
 import { toast } from 'sonner'
 import InputBar from '../components/chat/InputBar'
-import MessageList from '../components/chat/MessageList'
-import TopicsDrawer from '../components/chat/TopicsDrawer'
+import MessageList from '../components/chat/messages/MessageList'
+import TopicsDrawer from '../components/chat/drawers/TopicsDrawer'
 import { useTools } from '@/context/ToolsContext'
 import WelcomeState from '../components/chat/WelcomeState'
-import FilesDrawer from '../components/chat/FilesDrawer'
-import AgentNotesDrawer from '../components/chat/AgentNotesDrawer'
+import FilesDrawer from '../components/chat/drawers/FilesDrawer'
+import AgentNotesDrawer from '../components/chat/drawers/AgentNotesDrawer'
 import ChatHeader from '../components/chat/ChatHeader'
 import { listAgents, addAgentMemory } from '@/api/agents'
-import useDelayedLoading from '@/hooks/useDelayedLoading'
 import ToolsDrawer from '../components/tools/ToolsDrawer'
-import MergeInboxDrawer from '../components/chat/MergeInboxDrawer'
+import MergeInboxDrawer from '../components/chat/drawers/MergeInboxDrawer'
+import { useDrawers } from '../hooks/useDrawers'
 
 async function processSlashCommand(command, currentAgentId) {
   const match = command.match(/^\/(rules?|prefs?|icks?)\s+(.+)$/i)
@@ -56,15 +56,10 @@ export default function ChatPage() {
   const [currentAgentName, setCurrentAgentName] = useState('Assistant')
   const [currentModel, setCurrentModel] = useState(null)
   const [userName, setUserName] = useState('')
-  const [topicsOpen, setTopicsOpen] = useState(false)
-  const [toolsOpen, setToolsOpen] = useState(false)
-  const [filesOpen, setFilesOpen] = useState(false)
-  const [inboxOpen, setInboxOpen] = useState(false)
-  const [notesOpen, setNotesOpen] = useState(false)
-  const [notesCount, setNotesCount] = useState(0)
-  const [fileCount, setFileCount] = useState(0)
-  const [inboxCount, setInboxCount] = useState(0)
   const [hotTopics, setHotTopics] = useState([])
+  
+  const { drawers } = useDrawers()
+
   const {
     messages,
     loading,
@@ -88,18 +83,6 @@ export default function ChatPage() {
       .catch(err => console.error('Failed to get config:', err))
   }, [])
 
-  // Pause gradient-bg animation during streaming to free GPU
-  useEffect(() => {
-    if (streaming) {
-      document.documentElement.classList.add('streaming')
-    } else {
-      document.documentElement.classList.remove('streaming')
-    }
-    return () => {
-      document.documentElement.classList.remove('streaming')
-    }
-  }, [streaming])
-
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -122,9 +105,9 @@ export default function ChatPage() {
       toast.info('New Merge Proposals', {
         description: `Found ${data.data.hitl_count} potential merges needing human review.`,
       })
-      setInboxCount(prev => prev + data.data.hitl_count)
+      drawers.inbox.setCount(prev => prev + data.data.hitl_count)
     }
-  }, [])
+  }, [drawers.inbox])
 
   useSocket('user_profile_refined', handleProfileRefined)
   useSocket('facts_changed', handleFactsChanged)
@@ -170,10 +153,7 @@ export default function ChatPage() {
         }
       })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, loadHistory, send])
-
-  // userName is already set by the getConfig() call above
+  }, [sessionId, loadHistory, send, setCurrentSessionId, setToolsSessionId, navigate, location.pathname, location.state, setEnabledTools])
 
   const handleAgentChange = useCallback(async (newAgentId) => {
     const prevAgent = currentAgentId
@@ -249,7 +229,7 @@ export default function ChatPage() {
   }, [sessionId])
 
   return (
-    <div className="flex flex-col h-full">
+    <div className={`flex flex-col h-full ${streaming ? 'streaming' : ''}`}>
       {/* Header with Agent selector and Session Settings */}
       <ChatHeader
         sessionId={sessionId}
@@ -257,38 +237,40 @@ export default function ChatPage() {
         onAgentChange={handleAgentChange}
         disabled={streaming}
         totalTokens={totalTokens}
-        fileCount={fileCount}
-        onOpenTopics={() => setTopicsOpen(true)}
-        onOpenTools={() => setToolsOpen(true)}
-        onOpenFiles={() => setFilesOpen(true)}
-        onOpenInbox={() => setInboxOpen(true)}
-        onOpenNotes={() => setNotesOpen(true)}
+        fileCount={drawers.files.count}
+        onOpenTopics={() => drawers.topics.setOpen(true)}
+        onOpenTools={() => drawers.tools.setOpen(true)}
+        onOpenFiles={() => drawers.files.setOpen(true)}
+        onOpenInbox={() => drawers.inbox.setOpen(true)}
+        onOpenNotes={() => drawers.notes.setOpen(true)}
         onExport={handleExport}
-        inboxCount={inboxCount}
-        notesCount={notesCount}
+        inboxCount={drawers.inbox.count}
+        notesCount={drawers.notes.count}
         isChatEmpty={messages.length === 0}
       />
 
       {/* Message area */}
       <div className="flex-1 overflow-y-auto p-4">
         {sessionId ? (
-          loading && showSkeleton ? (
+          <Suspense fallback={
             <div className="space-y-4">
               <Skeleton className="h-12 w-3/4" />
               <Skeleton className="h-12 w-1/2" />
               <Skeleton className="h-12 w-2/3" />
             </div>
-          ) : loading ? null : (
-            <MessageList
-              messages={messages}
-              streaming={streaming}
-              streamingContent={streamingContent}
-              currentToolCalls={toolCalls}
-              currentThinking={currentThinking}
-              agentName={currentAgentName}
-              sessionId={sessionId}
-            />
-          )
+          }>
+            {!loading && (
+              <MessageList
+                messages={messages}
+                streaming={streaming}
+                streamingContent={streamingContent}
+                currentToolCalls={toolCalls}
+                currentThinking={currentThinking}
+                agentName={currentAgentName}
+                sessionId={sessionId}
+              />
+            )}
+          </Suspense>
         ) : (
           <WelcomeState onFirstMessage={handleFirstMessage} userName={userName} />
         )}
@@ -306,28 +288,28 @@ export default function ChatPage() {
 
       {sessionId && (
         <>
-          <TopicsDrawer sessionId={sessionId} open={topicsOpen} onOpenChange={setTopicsOpen} />
+          <TopicsDrawer sessionId={sessionId} open={drawers.topics.open} onOpenChange={drawers.topics.setOpen} />
           <FilesDrawer
             sessionId={sessionId}
-            open={filesOpen}
-            onOpenChange={setFilesOpen}
-            onCountChange={setFileCount}
+            open={drawers.files.open}
+            onOpenChange={drawers.files.setOpen}
+            onCountChange={drawers.files.setCount}
           />
           <MergeInboxDrawer
             sessionId={sessionId}
-            open={inboxOpen}
-            onOpenChange={setInboxOpen}
-            onCountChange={setInboxCount}
+            open={drawers.inbox.open}
+            onOpenChange={drawers.inbox.setOpen}
+            onCountChange={drawers.inbox.setCount}
           />
           <AgentNotesDrawer
             sessionId={sessionId}
-            open={notesOpen}
-            onOpenChange={setNotesOpen}
-            onCountChange={setNotesCount}
+            open={drawers.notes.open}
+            onOpenChange={drawers.notes.setOpen}
+            onCountChange={drawers.notes.setCount}
           />
         </>
       )}
-      <ToolsDrawer open={toolsOpen} onOpenChange={setToolsOpen} />
+      <ToolsDrawer open={drawers.tools.open} onOpenChange={drawers.tools.setOpen} />
     </div>
   )
 }

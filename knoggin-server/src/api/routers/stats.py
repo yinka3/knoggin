@@ -20,11 +20,7 @@ async def get_stats(state: AppState = Depends(get_app_state)):
         return _stats_cache["data"]
     
     try:
-        loop = asyncio.get_running_loop()
-        graph_stats = await loop.run_in_executor(
-            None, 
-            state.resources.store.get_graph_stats
-        )
+        graph_stats = await state.resources.store.get_graph_stats()
     except Exception as e:
         logger.error(f"Failed to get graph stats: {e}")
         graph_stats = {"entities": 0, "facts": 0, "relationships": 0}
@@ -59,9 +55,9 @@ async def get_stats_breakdown(state: AppState = Depends(get_app_state)):
     
     try:
         by_type, by_topic, top_connected = await asyncio.gather(
-            loop.run_in_executor(None, state.resources.store.get_entity_count_by_type),
-            loop.run_in_executor(None, state.resources.store.get_entity_count_by_topic),
-            loop.run_in_executor(None, lambda: state.resources.store.get_top_connected_entities(10))
+            state.resources.store.get_entity_count_by_type(),
+            state.resources.store.get_entity_count_by_topic(),
+            state.resources.store.get_top_connected_entities(10)
         )
     except Exception as e:
         logger.error(f"Failed to get stats breakdown: {e}")

@@ -1,7 +1,7 @@
 """Lightweight SDK client — interacts via HTTP API."""
 
 import httpx
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from loguru import logger
 from .session import KnogginAsyncSession
 from .managers import (

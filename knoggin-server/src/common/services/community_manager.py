@@ -4,27 +4,28 @@ from functools import partial
 import json
 import uuid
 from typing import List, Dict, Optional
+from agent.tools import Tools
 from loguru import logger
 
 from core.entity_resolver import EntityResolver
 from common.services.memory_manager import MemoryManager
 from common.infra.redis import RedisKeys
 from common.utils.events import emit, emit_community
-from common.config.base import get_config_value
+from common.config.base import get_config_value, get_config
 from common.infra.resources import ResourceManager
 from common.schema.dtypes import AgentConfig
 from common.schema.aac_schema import COMMUNITY_TOOL_SCHEMAS
 
+from core.boot import SessionAssembler
+from core.context import Context
 from db.community_store import CommunityStore
+from agent.executor import AgentExecutor
 from agent.community_tools import CommunityTools
 from agent.internals import (
     AgentRunConfig,
     AgentState,
     AgentContext,
     RetrievedEvidence,
-    execute_tool,
-    build_user_message,
-    update_accumulators
 )
 from common.config.topics_config import TopicConfig
 
@@ -34,7 +35,6 @@ class CommunityManager:
     def __init__(self, resources: ResourceManager, user_name: str):
         self.resources = resources
         self.user_name = user_name
-        self.store = CommunityStore(resources.store.driver)
         self._active_discussion_id = None
     
     async def _is_discussion_active(self) -> bool:
@@ -56,12 +56,12 @@ class CommunityManager:
             return await self._get_agent_config(default_id)
         
         logger.warning(f"AAC: Agent '{agent_id}' not found, using ephemeral default")
-        llm_config = get_config_value("llm", {})
+        llm_config = get_config().llm
         return AgentConfig(
             id=agent_id,
             name="STELLA",
             persona="Default AAC Facilitator. Warm and observant.",
-            model=llm_config.get("agent_model")
+            model=llm_config.agent_model
         )
 
     async def trigger_discussion(self):
@@ -93,8 +93,7 @@ class CommunityManager:
         
         topic = seed_data["topic"]
         await self.resources.redis.set(RedisKeys.community_discussion_active(), discussion_id)
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self.resources.executor, self.store.create_discussion, discussion_id, topic, valid_agent_ids)
+        await self.resources.store.community.create_discussion(discussion_id, topic, valid_agent_ids)
         
         await emit_community(self.user_name, "community", "discussion_started", {
             "id": discussion_id,
@@ -110,32 +109,27 @@ class CommunityManager:
             finally:
                 await self.resources.redis.delete(RedisKeys.community_discussion_active())
                 self._active_discussion_id = None
-                await loop.run_in_executor(self.resources.executor, self.store.close_discussion, discussion_id)
+                await self.resources.store.community.close_discussion(discussion_id)
                 await emit_community(self.user_name, "community", "discussion_ended", {"id": discussion_id})
 
         asyncio.create_task(_run_and_cleanup())
 
 
     async def _run_loop(self, discussion_id: str, topic: str, initial_agent_ids: List[str]):
-        from core.entity_resolver import EntityResolver
+        assembler = SessionAssembler(self.user_name, self.resources)
+        # We use a system-level topic config for community discussions
+        ctx = await assembler.assemble(session_id=f"aac_{discussion_id}")
         
-        dev_settings = get_config_value("developer_settings") or {}
-        config = dev_settings.get("community", {})
-        max_turns = config.get("max_turns", 10)
-        
-        resolver = EntityResolver(
-            store=self.resources.store,
-            embedding_service=self.resources.embedding,
-            session_id=f"aac_{discussion_id}"
-        )
+        config = get_config()
+        comm_cfg = config.developer_settings.community
+        max_turns = comm_cfg.max_turns
         
         participants = list(initial_agent_ids)
         history = []
-        loop = asyncio.get_running_loop()
         
         for turn in range(max_turns):
             active_id = await self.resources.redis.get(RedisKeys.community_discussion_active())
-            if not active_id or active_id.decode("utf-8") != discussion_id:
+            if not active_id or active_id != discussion_id:
                 logger.info(f"AAC [{discussion_id}]: Discussion manually closed or superseded. Aborting loop.")
                 break
 
@@ -149,7 +143,7 @@ class CommunityManager:
             try:
                 message = await asyncio.wait_for(
                     self._agent_turn(
-                        discussion_id, agent_config, topic, history, participants, resolver
+                        discussion_id, agent_config, topic, history, participants, ctx
                     ),
                     timeout=1200.0
                 )
@@ -167,9 +161,7 @@ class CommunityManager:
                 "name": agent_config.name
             })
             
-            await loop.run_in_executor(
-                self.resources.executor, 
-                self.store.add_message, 
+            await self.resources.store.community.add_message(
                 discussion_id, agent_id, message, "assistant"
             )
             
@@ -184,160 +176,124 @@ class CommunityManager:
                 break
 
     async def _agent_turn(
-        self,
-        discussion_id: str,
-        agent: AgentConfig,
-        topic: str,
-        history: List[Dict],
+        self, 
+        discussion_id: str, 
+        agent: AgentConfig, 
+        topic: str, 
+        history: List[Dict], 
         participants: List[str],
-        resolver: 'EntityResolver'
+        ctx: Context
     ) -> Optional[str]:
-        from agent.system_prompt import get_agent_prompt
-        from agent.tools import Tools as BaseTools
-
-        categories = ["rules", "preferences", "icks"]
-        memory_blocks = {}
-        for category in categories:
+        """Runs a single agent turn using the core AgentExecutor."""
+        
+        agent_state = AgentState()
+        evidence = RetrievedEvidence()
+        
+        agent_rules = None
+        agent_preferences = None
+        agent_icks = None
+        
+        for category in ["rules", "preferences", "icks"]:
             key = RedisKeys.agent_working_memory(agent.id, category)
             raw = await self.resources.redis.hgetall(key)
             entries = [json.loads(v).get("content", "") for v in raw.values()] if raw else []
-            memory_blocks[category] = "\n".join(entries)
-
-        comm_mem_key = RedisKeys.community_agent_memory(self.user_name, agent.id)
-        raw_mem = await self.resources.redis.hgetall(comm_mem_key)
-        agent_memory_context = "\n".join(
-            json.loads(v).get("content", "") for v in raw_mem.values()
-        ) if raw_mem else ""
-
-        participant_names = []
-        for pid in participants:
-            if pid == agent.id:
-                continue
-            pcfg = await self._get_agent_config(pid)
-            if pcfg:
-                participant_names.append(pcfg.name)
-
-        base_prompt = get_agent_prompt(
-            user_name=self.user_name,
-            current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            persona=agent.persona,
-            agent_name=agent.name,
-            memory_context=agent_memory_context,
-            agent_rules=memory_blocks.get("rules", ""),
-            agent_preferences=memory_blocks.get("preferences", ""),
-            agent_icks=memory_blocks.get("icks", ""),
-            instructions=agent.instructions
-        )
-
-        aac_context = (
-            f"\n<community_context>\n"
-            f"You are participating in an autonomous community discussion.\n"
-            f"Topic: {topic}\n"
-            f"Other participants: {', '.join(participant_names) if participant_names else 'None yet'}\n"
-            f"Rules:\n"
-            f"1. Start your response with <REASONING>[Your internal plan]</REASONING>.\n"
-            f"2. Use tools to search both the internal knowledge graph AND the external web (web_search, news_search) to ground your insights. Be equally curious about finding external information to bring new perspectives.\n"
-            f"3. Build on what others have said — don't repeat points already made.\n"
-            f"4. Use [[END_DISCUSSION]] only when the topic is genuinely exhausted or resolved.\n"
-            f"5. Use save_insight to record any valuable findings worth persisting.\n"
-            f"6. Use save_memory to record anything useful for future discussions.\n"
-            f"7. Use spawn_specialist only if the topic requires expertise clearly outside your scope.\n"
-            f"</community_context>"
-        )
-
-        system_prompt = base_prompt + aac_context
-
-        memory_mgr = MemoryManager(
-            redis=self.resources.redis,
-            user_name=self.user_name,
-            session_id=f"aac_{discussion_id}",
-            agent_id=agent.id,
-            topic_config=TopicConfig(TopicConfig.DEFAULT_CONFIG),
-            on_event=lambda src, evt, data: asyncio.create_task(
-                emit(f"aac_{discussion_id}", src, evt, data)
-            ),
-        )
-
-        base_tools = BaseTools(
+            if entries:
+                if category == "rules":
+                    agent_rules = entries
+                elif category == "preferences":
+                    agent_preferences = entries
+                elif category == "icks":
+                    agent_icks = entries
+        
+        # Build restricted community tools
+        base_tools = Tools(
             user_name=self.user_name,
             store=self.resources.store,
-            ent_resolver=resolver,
+            ent_resolver=ctx.ent_resolver,
             redis_client=self.resources.redis,
-            session_id=f"aac_{discussion_id}",
-            topic_config=None,
-            memory=memory_mgr
+            session_id=ctx.session_id,
+            topic_config=ctx.topic_config,
+            search_config={},
+            file_rag=ctx.file_rag,
+            mcp_manager=self.resources.mcp_manager,
+            memory=None
         )
-        comm_tools = CommunityTools(self.user_name, base_tools, self.store, discussion_id, agent.id)
-
-        state = AgentState()
-        ctx = AgentContext(
+        
+        comm_tools = CommunityTools(
+            self.user_name, base_tools, self.resources.store.community, 
+            discussion_id, agent.id, None, participants
+        )
+        
+        agent_ctx = AgentContext(
             config=AgentRunConfig(),
-            state=state,
-            evidence=RetrievedEvidence(),
-            user_query=topic,
-            history=history,
+            state=agent_state,
+            evidence=evidence,
+            user_name=self.user_name,
+            user_query=f"Community Discussion Topic: {topic}",
+            session_id=ctx.session_id,
+            run_id=f"run_{uuid.uuid4().hex[:8]}",
             agent_id=agent.id,
             agent_name=agent.name,
-            agent_persona=agent.persona
+            agent_persona=agent.persona,
+            history=history,
+            is_community=True,
+            current_participants=participants
         )
-
-        last_results = None
-
-        for _ in range(ctx.config.max_attempts):
-            prompt = build_user_message(ctx, last_result=last_results)
+        
+        executor = AgentExecutor(
+            ctx=agent_ctx,
+            llm=self.resources.llm_service,
+            tools=comm_tools,
+            memory_mgr=None
+        )
+        
+        from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
+        
+        community_enabled_tools = [
+            "search_entity", "get_connections", "search_messages",
+            "get_recent_activity", "find_path", "get_hierarchy",
+            "fact_check", "web_search", "news_search"
+        ]
+        
+        full_response: str = ""
+        
+        async for event in executor.execute(
+            agent_rules=agent_rules,
+            agent_preferences=agent_preferences,
+            agent_icks=agent_icks,
+            enabled_tools=community_enabled_tools,
+            client_tools=AAC_SPECIFIC_SCHEMAS,
+        ):
+            e_type = event.get("event")
+            data = event.get("data", {})
             
-            content = ""
-            tool_calls = []
-            
-            async for chunk in self.resources.llm_service.call_llm_with_tools_streaming(
-                system=system_prompt,
-                user=prompt,
-                tools=COMMUNITY_TOOL_SCHEMAS,
-                model=agent.model,
-                temperature=agent.temperature
-            ):
-                if chunk.get("type") == "tool_calls":
-                    content = chunk.get("content", "")
-                    tool_calls = chunk.get("calls", [])
-                elif chunk.get("type") == "done" and not tool_calls:
-                    content = chunk.get("content", "")
-
-            if "<REASONING>" in content:
-                parts = content.split("</REASONING>", 1)
-                reasoning = parts[0].replace("<REASONING>", "").strip()
-                content = parts[1].strip() if len(parts) > 1 else content
-                await emit_community(self.user_name, "community", "agent_reasoning", {
-                    "discussion_id": discussion_id,
-                    "agent_id": agent.id,
-                    "reasoning": reasoning
-                })
-
-            if tool_calls:
-                last_results = []
-                for call in tool_calls:
-                    try:
-                        args = json.loads(call["arguments"]) if isinstance(call["arguments"], str) else call["arguments"]
-                    except json.JSONDecodeError:
-                        continue
-                    res = await self._dispatch_comm_tool(comm_tools, call["name"], args, participants)
-                    update_accumulators(ctx, call["name"], res)
-                    state.record_call(call["name"], args)
-                    last_results.append({
-                        "tool": call["name"],
-                        "result": res
+            if e_type == "token":
+                full_response += data.get("content", "")
+            elif e_type == "thinking":
+                reasoning = data.get("content", "")
+                if reasoning:
+                    await emit_community(self.user_name, "community", "agent_reasoning", {
+                        "discussion_id": discussion_id,
+                        "agent_id": agent.id,
+                        "reasoning": reasoning
                     })
-            else:
-                return content
+            elif e_type == "tool_end":
+                if data.get("tool") == "spawn_specialist":
+                    res = data.get("result", "")
+                    if "ID:" in res:
+                        new_id = res.split("ID:")[1].split()[0]
+                        if new_id not in participants:
+                            participants.append(new_id)
 
-        return "Reached maximum attempts."
+        return full_response.strip() if full_response else None
 
     async def _seed_discussion(self) -> Optional[Dict]:
         """Use seeding agent to analyze graph and initiate a discussion."""
         from agent.system_prompt import get_agent_prompt
         
-        dev_settings = get_config_value("developer_settings") or {}
-        config = dev_settings.get("community", {})
-        seeding_agent_id = config.get("seeding_agent_id")
+        config = get_config()
+        comm_cfg = config.developer_settings.community
+        seeding_agent_id = comm_cfg.seeding_agent_id
         
         seeding_agent = None
         if seeding_agent_id:
@@ -480,46 +436,18 @@ class CommunityManager:
             "agent_ids": [seeding_agent.id]
         }
 
-    async def _dispatch_comm_tool(
-        self, 
-        comm_tools: CommunityTools, 
-        name: str, 
-        args: Dict, 
-        discussion_participants: List[str]
-    ) -> Dict:
-        if name == "save_insight": 
-            return {"data": await comm_tools.save_insight(args.get("content", ""))}
-        if name == "save_memory": 
-            return {"data": await comm_tools.save_memory(args.get("content", ""))}
-        if name == "spawn_specialist":
-            result = await comm_tools.spawn_specialist(
-                name=args.get("name", "Specialist"),
-                persona=args.get("persona", "A specialist sub-agent."),
-                discussion_participants=discussion_participants,
-                initial_rules=args.get("initial_rules"),
-                initial_preferences=args.get("initial_preferences"),
-                initial_icks=args.get("initial_icks")
-            )
-            # Assuming 'result' contains the new agent's ID if successful
-            new_agent_id = result.get("id") if isinstance(result, dict) else None
-            if new_agent_id and new_agent_id not in discussion_participants:
-                discussion_participants.append(new_agent_id)
-            return {"data": result}
-            
-        return await execute_tool(comm_tools.base, name, args)
     
     async def _build_seeding_context(self) -> str:
         """Gather rich context for seeding agent decision-making."""
-        loop = asyncio.get_running_loop()
         lines = []
 
         try:
-            stats = await loop.run_in_executor(self.resources.executor, self.resources.store.get_graph_stats)
-            notable = await loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_notable_entities, 8))
-            recent_entities = await loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_recently_active_entities, 7, 5))
-            recent_facts = await loop.run_in_executor(self.resources.executor, partial(self.resources.store.get_recent_facts, 7, 10))
-            past_discussions = await loop.run_in_executor(self.resources.executor, partial(self.store.get_recent_discussions, 5))
-            insights = await loop.run_in_executor(self.resources.executor, partial(self.store.get_discussion_insights, 5))
+            stats = await self.resources.store.get_graph_stats()
+            notable = await self.resources.store.get_notable_entities(8)
+            recent_entities = await self.resources.store.get_recently_active_entities(7, 5)
+            recent_facts = await self.resources.store.get_recent_facts(7, 10)
+            past_discussions = await self.resources.store.community.get_recent_discussions(5)
+            insights = await self.resources.store.community.get_discussion_insights(5)
         except Exception as e:
             logger.warning(f"Failed to gather seeding context: {e}")
             return "Knowledge graph is available for exploration."

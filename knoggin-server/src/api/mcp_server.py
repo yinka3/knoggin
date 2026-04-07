@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, List
 from loguru import logger
-from src.common.schema.dtypes import Fact
+from common.schema.dtypes import Fact
 from common.infra.redis import RedisKeys
 from mcp.server.fastmcp import FastMCP
 
@@ -46,10 +46,7 @@ def create_mcp_app(get_resources) -> FastMCP:
         Find existing entity by name or create a new one.
         Always uses DB operations — no session resolver dependency.
         """
-        fts_results = await loop.run_in_executor(
-            _executor(),
-            lambda: store.search_entity(name, active_topics=None, limit=3)
-        )
+        fts_results = await store.search_entity(name, active_topics=None, limit=3)
 
         if fts_results:
             for r in fts_results:
@@ -61,16 +58,11 @@ def create_mcp_app(get_resources) -> FastMCP:
                     return r["id"]
 
         name_embedding = await embedding.encode_single(name)
-        vec_results = await loop.run_in_executor(
-            _executor(),
-            lambda: store.search_entities_by_embedding(name_embedding, limit=3, score_threshold=0.88)
-        )
+        vec_results = await store.search_entities_by_embedding(name_embedding, limit=3, score_threshold=0.88)
 
         if vec_results:
             entity_id = vec_results[0][0]
-            entity = await loop.run_in_executor(
-                _executor(), store.get_entity_by_id, entity_id
-            )
+            entity = await store.get_entity_by_id(entity_id)
             if entity:
                 return entity_id
 
@@ -88,10 +80,7 @@ def create_mcp_app(get_resources) -> FastMCP:
             "session_id": "mcp"
         }
 
-        await loop.run_in_executor(
-            _executor(),
-            lambda: store.write_batch([entity_data], [])
-        )
+        await store.write_batch([entity_data], [])
 
         logger.info(f"[MCP] Created entity '{name}' (id={new_id}) via direct graph")
         return new_id
@@ -108,10 +97,7 @@ def create_mcp_app(get_resources) -> FastMCP:
         loop = asyncio.get_running_loop()
 
         try:
-            results = await loop.run_in_executor(
-                _executor(),
-                lambda: store.search_entity(query, active_topics=None, limit=limit)
-            )
+            results = await store.search_entity(query, active_topics=None, limit=limit)
 
             if not results:
                 return json.dumps({"results": [], "message": f"No entities found for '{query}'"})
@@ -141,10 +127,7 @@ def create_mcp_app(get_resources) -> FastMCP:
         loop = asyncio.get_running_loop()
 
         try:
-            results = await loop.run_in_executor(
-                _executor(),
-                lambda: store.get_related_entities([entity_name], active_topics=None)
-            )
+            results = await store.get_related_entities([entity_name], active_topics=None)
 
             if not results:
                 return json.dumps({"connections": [], "message": f"No connections found for '{entity_name}'"})
@@ -172,10 +155,7 @@ def create_mcp_app(get_resources) -> FastMCP:
         loop = asyncio.get_running_loop()
 
         try:
-            path, has_hidden = await loop.run_in_executor(
-                _executor(),
-                lambda: store.find_path_filtered(entity_a, entity_b, active_topics=None)
-            )
+            path, has_hidden = await store.find_path_filtered(entity_a, entity_b, active_topics=None)
 
             if not path:
                 return json.dumps({"path": [], "message": f"No path found between '{entity_a}' and '{entity_b}'"})
@@ -205,10 +185,7 @@ def create_mcp_app(get_resources) -> FastMCP:
 
         try:
             vector = await embedding.encode_single(entity_name)
-            matches = await loop.run_in_executor(
-                _executor(),
-                lambda: store.search_entities_by_embedding(vector, limit=1, score_threshold=0.7)
-            )
+            matches = await store.search_entities_by_embedding(vector, limit=1, score_threshold=0.7)
 
             if not matches:
                 return json.dumps({"error": f"Entity '{entity_name}' not found"})
@@ -217,15 +194,11 @@ def create_mcp_app(get_resources) -> FastMCP:
             result = {"entity": entity_name}
 
             if direction in ("up", "both"):
-                parents = await loop.run_in_executor(
-                    _executor(), store.get_parent_entities, entity_id
-                )
+                parents = await store.get_parent_entities(entity_id)
                 result["parents"] = parents
 
             if direction in ("down", "both"):
-                children = await loop.run_in_executor(
-                    _executor(), store.get_child_entities, entity_id
-                )
+                children = await store.get_child_entities(entity_id)
                 result["children"] = children
 
             return json.dumps(result, default=str)
@@ -251,15 +224,9 @@ def create_mcp_app(get_resources) -> FastMCP:
         try:
             vector = await embedding.encode_single(query)
 
-            vec_results = await loop.run_in_executor(
-                _executor(),
-                lambda: store.search_messages_vector(vector, limit=limit * 3)
-            )
+            vec_results = await store.search_messages_vector(vector, limit=limit * 3)
 
-            fts_results = await loop.run_in_executor(
-                _executor(),
-                lambda: store.search_messages_fts(query, limit=limit * 3)
-            )
+            fts_results = await store.search_messages_fts(query, limit=limit * 3)
 
             scores = {}
             for msg_id, score in vec_results:
@@ -274,7 +241,7 @@ def create_mcp_app(get_resources) -> FastMCP:
 
             messages = []
             for msg_id in top_ids:
-                text = await loop.run_in_executor(_executor(), store.get_message_text, msg_id)
+                text = await store.get_message_text(msg_id)
                 if text:
                     messages.append({
                         "id": msg_id,
@@ -301,10 +268,7 @@ def create_mcp_app(get_resources) -> FastMCP:
         loop = asyncio.get_running_loop()
 
         try:
-            results = await loop.run_in_executor(
-                _executor(),
-                lambda: store.get_recent_activity(entity_name, active_topics=None, hours=hours)
-            )
+            results = await store.get_recent_activity(entity_name, active_topics=None, hours=hours)
 
             if not results:
                 return json.dumps({
@@ -363,20 +327,12 @@ def create_mcp_app(get_resources) -> FastMCP:
                 source_entity_id=entity_id
             )
 
-            count = await loop.run_in_executor(
-                _executor(),
-                lambda: store.create_facts_batch(entity_id, [new_fact])
-            )
+            count = await store.create_facts_batch(entity_id, [new_fact])
 
-            all_facts = await loop.run_in_executor(
-                _executor(), store.get_facts_for_entity, entity_id, True
-            )
+            all_facts = await store.get_facts_for_entity(entity_id, True)
             resolution_text = f"{entity_name}. " + " ".join([f.content for f in all_facts])
             new_embedding = await embedding.encode_single(resolution_text)
-            await loop.run_in_executor(
-                _executor(),
-                lambda: store.update_entity_embedding(entity_id, new_embedding)
-            )
+            await store.update_entity_embedding(entity_id, new_embedding)
 
             resolver = get_resources().active_resolver
             if resolver:
@@ -432,10 +388,7 @@ def create_mcp_app(get_resources) -> FastMCP:
                 "context": context
             }
             
-            await loop.run_in_executor(
-                _executor(),
-                lambda: store.write_batch([], [relationship])
-            )
+            await store.write_batch([], [relationship])
 
             logger.info(f"[MCP] Saved relationship: '{entity_a}' <-> '{entity_b}' ({context[:60]})")
             return json.dumps({
@@ -475,7 +428,7 @@ async def _hydrate_evidence_from_graph(store, evidence_ids: list, loop) -> list:
         return []
 
     results = []
-    for msg_ref in evidence_ids[:5]:
+    for msg_ref in evidence_ids[:10]:
         try:
             if isinstance(msg_ref, str) and msg_ref.startswith("msg_"):
                 msg_id = int(msg_ref.split("_")[1])
@@ -484,7 +437,7 @@ async def _hydrate_evidence_from_graph(store, evidence_ids: list, loop) -> list:
             else:
                 continue
 
-            text = await loop.run_in_executor(None, store.get_message_text, msg_id)
+            text = await store.get_message_text(msg_id)
             if text:
                 results.append({"id": msg_ref, "message": text})
         except (ValueError, IndexError):

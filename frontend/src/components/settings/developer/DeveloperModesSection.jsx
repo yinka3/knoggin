@@ -66,11 +66,10 @@ export default function DeveloperModesSection({ setSettings }) {
   return (
     <div className="space-y-6 max-w-4xl pb-12 overflow-y-auto pr-4 custom-scrollbar">
       <div>
-        <h2 className="text-xl font-semibold text-foreground tracking-tight">Curated Modes</h2>
+        <h2 className="text-xl font-semibold text-foreground tracking-tight">System Biospheres</h2>
         <p className="text-sm text-muted-foreground mt-1 text-balance">
-          Apply a pre-configured set of developer settings to optimize Knoggin for specific use cases.
-          Selecting a mode will overwrite your current unsaved settings. Note: changes are not applied
-          until you click "Save Changes" at the top.
+          Apply outcome-driven environmental presets to recalibrate Knoggin's intelligence profile.
+          Biospheres overwrite underlying technical thresholds to achieve specific behavioral goals.
         </p>
       </div>
 

@@ -3,8 +3,9 @@ import copy
 from fastapi import APIRouter, Depends, HTTPException, Request
 from api.deps import get_app_state
 from api.state import AppState
-from common.config.base import load_config, save_config, get_default_config, deep_merge, redact_config
-from common.schema.settings import ConfigUpdate
+from loguru import logger
+from common.config.base import load_config, async_save_config, get_default_config, deep_merge, redact_config
+from common.schema.settings import ConfigUpdate, RootConfig
 from common.schema.tool_schema import TOOL_SCHEMAS
 
 router = APIRouter()
@@ -119,43 +120,51 @@ def _strip_redacted_keys(d: dict):
     for k in keys_to_remove:
         del d[k]
 
-_config_lock = asyncio.Lock()
+
 @router.patch("/")
 async def update_config(
     body: ConfigUpdate,
     state: AppState = Depends(get_app_state)
 ):
-    async with _config_lock:
-        updates = body.model_dump(exclude_none=True)
-        if not updates:
-            raise HTTPException(status_code=400, detail="No fields to update")
+    # async_save_config handles its own global lock
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
 
-        # Strip redacted API keys — never overwrite real keys with "...xxxx"
-        _strip_redacted_keys(updates)
+    # Strip redacted API keys — never overwrite real keys with "...xxxx"
+    _strip_redacted_keys(updates)
 
-        current_config = load_config() or get_default_config()
-        merged_config = deep_merge(copy.deepcopy(current_config), updates)
+    current_config = load_config() or get_default_config()
+    merged_config = deep_merge(copy.deepcopy(current_config), updates)
 
-        success = save_config(merged_config)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to save config")
-        
-        if "user_name" in updates and updates["user_name"]:
-            state.user_name = merged_config["user_name"]
-        
-        llm_cfg = updates.get("llm")
-        if llm_cfg:
-            state.resources.llm_service.update_settings(
-                api_key=llm_cfg.get("api_key"),
-                base_url=llm_cfg.get("base_url"),
-                agent_model=llm_cfg.get("agent_model"),
-                extraction_model=llm_cfg.get("extraction_model"),
-                merge_model=llm_cfg.get("merge_model"),
-            )
-        
-        active_count = 0
-        for _, context in state.active_sessions.items():
-            await context.update_runtime_settings(merged_config)
-            active_count += 1
+    # Validate the entire config structure before saving
+    try:
+        RootConfig(**merged_config)
+    except Exception as e:
+        logger.error(f"Config validation failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid configuration: {e}")
+
+    success = await async_save_config(merged_config)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to save config")
+    
+    if "user_name" in updates and updates["user_name"]:
+        state.user_name = merged_config["user_name"]
+        await state.start_scheduler()
+    
+    llm_cfg = updates.get("llm")
+    if llm_cfg:
+        state.resources.llm_service.update_settings(
+            api_key=llm_cfg.get("api_key"),
+            base_url=llm_cfg.get("base_url"),
+            agent_model=llm_cfg.get("agent_model"),
+            extraction_model=llm_cfg.get("extraction_model"),
+            merge_model=llm_cfg.get("merge_model"),
+        )
+    
+    active_count = 0
+    for _, context in state.active_sessions.items():
+        await context.update_runtime_settings(merged_config)
+        active_count += 1
     
     return redact_config(merged_config)

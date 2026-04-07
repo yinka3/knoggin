@@ -21,7 +21,8 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["query"]
-            }
+            },
+            "tags": ["graph:read", "core"]
         }
     },
     {
@@ -42,7 +43,8 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["entity_name"]
-            }
+            },
+            "tags": ["graph:read", "core"]
         }
     },
     {
@@ -61,7 +63,8 @@ TOOL_SCHEMAS = [
                     "entity_b": {"type": "string", "description": "Second entity name"}
                 },
                 "required": ["entity_a", "entity_b"]
-            }
+            },
+            "tags": ["graph:read", "core"]
         }
     },
     {
@@ -87,7 +90,8 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["entity_name"]
-            }
+            },
+            "tags": ["graph:read", "core"]
         }
     },
     {
@@ -108,7 +112,8 @@ TOOL_SCHEMAS = [
                     "limit": {"type": "integer", "description": "Max results (default 8)"}
                 },
                 "required": ["query"]
-            }
+            },
+            "tags": ["graph:read", "core"]
         }
     },
     {
@@ -129,7 +134,8 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["entity_name"]
-            }
+            },
+            "tags": ["graph:read", "core"]
         }
     },
     {
@@ -149,7 +155,8 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["question"]
-            }
+            },
+            "tags": ["core"]
         }
     },
     {
@@ -162,24 +169,23 @@ TOOL_SCHEMAS = [
                 "or recall detailed history about an entity. This returns the full fact record including "
                 "timestamps and invalidated facts — use it over search_entity when you need comprehensive "
                 "or historical fact data, not just a profile overview. The system handles name resolution "
-                "automatically. If no matching entity is found in the knowledge graph, "
-                "the system will fallback to a semantic search over conversation history "
-                "to find relevant clues."
+                "automatically."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "entity_name": {
                         "type": "string",
-                        "description": "The entity to look up facts for. Does not need to be exact — the system resolves aliases, partial names, and similar matches."
+                        "description": "The entity to look up facts for."
                     },
                     "query": {
                         "type": "string",
-                        "description": "A natural language hint describing what you're looking for. Does not need to match any stored fact exactly — used to narrow results when the entity has many facts."
+                        "description": "A natural language hint describing what you're looking for."
                     }
                 },
                 "required": ["entity_name", "query"]
-            }
+            },
+            "tags": ["graph:read", "core"]
         }
     },
     {
@@ -188,25 +194,19 @@ TOOL_SCHEMAS = [
             "name": "save_memory",
             "description": (
                 "Save a piece of information to your persistent memory for this session. "
-                "Use sparingly — only for facts that will be valuable in future conversations. "
-                "Good: user preferences, key project decisions, important names/roles, stated goals. "
-                "Bad: transient details, things already in the knowledge graph, conversation-specific context. "
-                "Write memories as standalone facts, not references to 'this conversation'."
+                "Use sparingly — only for facts that will be valuable in future conversations."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The fact or note to remember. Keep concise — one clear statement."
-                    },
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic this memory belongs to. Use 'General' for cross-cutting notes. Must be an active topic in the session."
+                        "description": "The fact or note to remember."
                     }
                 },
                 "required": ["content"]
-            }
+            },
+            "tags": ["session:memory", "core"]
         }
     },
     {
@@ -214,19 +214,19 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "forget_memory",
             "description": (
-                "Remove a memory that is no longer accurate or relevant. "
-                "Use when the user corrects something you remembered, or when a fact becomes outdated."
+                "Remove a memory that is no longer accurate or relevant."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "memory_id": {
                         "type": "string",
-                        "description": "The ID of the memory to remove. Visible in your memory context block."
+                        "description": "The ID of the memory to remove."
                     }
                 },
                 "required": ["memory_id"]
-            }
+            },
+            "tags": ["session:memory", "core"]
         }
     },
     {
@@ -234,10 +234,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_files",
             "description": (
-                "Search through files the user has uploaded to this session. "
-                "Use when the user asks about content in their uploaded documents, code files, or PDFs. "
-                "Returns the most relevant chunks with file name and location. "
-                "Only works if files have been uploaded — check the file context in your prompt first."
+                "Search through files the user has uploaded to this session."
             ),
             "parameters": {
                 "type": "object",
@@ -249,14 +246,11 @@ TOOL_SCHEMAS = [
                     "file_name": {
                         "type": "string",
                         "description": "Optional: restrict search to a specific file by name."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max chunks to return (default 5)."
                     }
                 },
                 "required": ["query"]
-            }
+            },
+            "tags": ["files:read", "core"]
         }
     },
     {
@@ -264,26 +258,17 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "web_search",
             "description": (
-                "Search the live internet for information. "
-                "Use this for: 1) Current events or news, 2) Technical documentation or facts outside the graph, "
-                "3) Verifying information with external sources. "
-                "This tool tracks sources and displays them to the user."
+                "Search the live internet for information."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "The search query."},
-                    "limit": {"type": "integer", "description": "Max results (default 5)"},
-                    "freshness": {
-                        "type": "string",
-                        "description": (
-                            "Filter results by recency. Options: 'pd' (past day), 'pw' (past week), "
-                            "'pm' (past month), 'py' (past year). Only set this when the user asks about recent events."
-                        )
-                    }
+                    "limit": {"type": "integer", "description": "Max results (default 5)"}
                 },
                 "required": ["query"]
-            }
+            },
+            "tags": ["external:search", "core"]
         }
     },
     {
@@ -291,55 +276,48 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "news_search",
             "description": (
-                "Search for recent news articles. Use this instead of web_search when the user specifically "
-                "asks about news, current events, or breaking stories. Returns curated results from news outlets."
+                "Search for recent news articles."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The news search query."},
-                    "limit": {"type": "integer", "description": "Max results (default 5)"},
-                    "freshness": {
-                        "type": "string",
-                        "description": (
-                            "Filter by time: 'pd' (past day), 'pw' (past week), 'pm' (past month). "
-                            "Defaults to 'pw' for news."
-                        )
-                    }
+                    "query": {"type": "string", "description": "The news search query."}
                 },
                 "required": ["query"]
-            }
+            },
+            "tags": ["external:search", "core"]
         }
     },
 ]
 
-ALL_TOOL_NAMES = [
-    "search_entity",
-    "get_connections",
-    "find_path",
-    "get_hierarchy",
-    "search_messages",
-    "fact_check",
-    "get_recent_activity",
-    "save_memory",
-    "forget_memory",
-    "search_files",
-    "web_search",
-    "news_search",
-]
+ALL_TOOL_NAMES = [s["function"]["name"] for s in TOOL_SCHEMAS]
 
-def get_filtered_schemas(enabled_tools: list[str] | None = None) -> list[dict]:
+def get_filtered_schemas(enabled_tools: list[str] | None = None, tags: list[str] | None = None) -> list[dict]:
     """
-    Return tool schemas filtered to only enabled tools.
+    Return tool schemas filtered to only enabled tools OR tools matching specific tags.
     Always includes request_clarification (not user-toggleable).
-    If enabled_tools is None, returns all tools.
     """
-    if enabled_tools is None:
-        return TOOL_SCHEMAS
+    filtered = []
+    enabled_set = set(enabled_tools) if enabled_tools else None
+    tags_set = set(tags) if tags else None
     
-    enabled_set = set(enabled_tools)
-    return [
-        schema for schema in TOOL_SCHEMAS
-        if schema["function"]["name"] in enabled_set
-        or schema["function"]["name"] == "request_clarification"
-    ]
+    for schema in TOOL_SCHEMAS:
+        name = schema["function"]["name"]
+        if name == "request_clarification":
+            filtered.append(schema)
+            continue
+            
+        if enabled_set and name in enabled_set:
+            filtered.append(schema)
+            continue
+            
+        if tags_set:
+            tool_tags = set(schema["function"].get("tags", []))
+            if tool_tags & tags_set:
+                filtered.append(schema)
+                continue
+                
+    if not enabled_tools and not tags:
+        return TOOL_SCHEMAS
+        
+    return filtered

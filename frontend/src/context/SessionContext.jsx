@@ -16,12 +16,6 @@ export function SessionProvider({ children }) {
 
   useEffect(() => {
     loadSessions()
-
-    function handleSessionUpdated() {
-      loadSessions()
-    }
-    window.addEventListener('session_updated', handleSessionUpdated)
-    return () => window.removeEventListener('session_updated', handleSessionUpdated)
   }, [])
 
   async function loadSessions() {
@@ -34,6 +28,12 @@ export function SessionProvider({ children }) {
     } finally {
       setLoading(false)
     }
+  }
+
+  const updateSessionInList = (sessionId, updates) => {
+    setSessions(prev =>
+      prev.map(s => (s.id === sessionId ? { ...s, ...updates } : s))
+    )
   }
 
   function openCreateSession() {
@@ -67,7 +67,7 @@ export function SessionProvider({ children }) {
     setCurrentSessionId,
     loading,
     createSession: openCreateSession,
-    selectSession,
+    updateSessionInList,
     loadSessions,
   }
 

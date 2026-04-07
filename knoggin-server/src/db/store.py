@@ -9,7 +9,8 @@ import os
 from db.query_tools import GraphToolQueries
 from db.reader import GraphReader
 from db.writer import GraphWriter
-from src.common.schema.dtypes import Fact
+from db.community_store import CommunityStore
+from common.schema.dtypes import Fact
 load_dotenv()
 
 MEMGRAPH_HOST=os.environ.get("MEMGRAPH_HOST", "localhost")
@@ -23,7 +24,12 @@ class MemGraphStore:
         self._writer = GraphWriter(self.driver)
         self._reader = GraphReader(self.driver)
         self._tools = GraphToolQueries(self.driver)
+        self._community = CommunityStore(self.driver)
         logger.info("Graph store initialized (Async)")
+
+    @property
+    def community(self) -> CommunityStore:
+        return self._community
 
     async def initialize(self):
         """Async initialization for connectivity and schema."""
@@ -113,6 +119,9 @@ class MemGraphStore:
 
     async def update_entity_profile(self, entity_id: int, canonical_name: str, embedding: List[float], last_msg_id: int):
         return await self._writer.update_entity_profile(entity_id, canonical_name, embedding, last_msg_id)
+    
+    async def update_entity_canonical_name(self, entity_id: int, canonical_name: str) -> None:
+        return await self._writer.update_entity_canonical_name(entity_id, canonical_name)
 
     async def update_entity_embedding(self, entity_id: int, embedding: List[float]):
         return await self._writer.update_entity_embedding(entity_id, embedding)
@@ -227,6 +236,9 @@ class MemGraphStore:
     async def get_entity_by_id(self, entity_id: int):
         return await self._reader.get_entity_by_id(entity_id=entity_id)
     
+    async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:
+        return await self._reader.get_entities_by_ids(entity_ids)
+    
     async def list_preferences(self, session_id: str, kind: str = None) -> List[Dict]:
         return await self._reader.list_preferences(session_id, kind)
     
@@ -253,6 +265,9 @@ class MemGraphStore:
 
     async def get_notable_entities(self, limit: int = 10) -> List[Dict]:
         return await self._reader.get_notable_entities(limit)
+    
+    async def get_neighbor_ids_batch(self, entity_ids: List[int]) -> Dict[int, Set[int]]:
+        return await self._reader.get_neighbor_ids_batch(entity_ids)
 
     # ===== TOOL QUERY DELEGATIONS =====
 

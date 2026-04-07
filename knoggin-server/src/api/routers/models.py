@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import httpx
 from fastapi import APIRouter, HTTPException
 
-from common.config.base import load_config
+from common.config.base import load_config, get_config
 
 router = APIRouter()
 
@@ -15,8 +15,8 @@ _models_cache_expiry = None
 
 @router.get("/curated")
 async def get_curated_models():
-    config = load_config()
-    return {"models": config.get("curated_models", [])}
+    config = get_config()
+    return {"models": config.curated_models}
 
 
 @router.get("/")

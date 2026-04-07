@@ -11,7 +11,6 @@ from loguru import logger
 class EmbeddingService:
     """Embedding infrastructure for the knowledge graph."""
     
-    EMBEDDING_DIM = 1024
     BATCH_SIZE = 64  # Process in chunks to avoid OOM
     
     def __init__(
@@ -25,23 +24,53 @@ class EmbeddingService:
         self.batch_size = batch_size
         self._lock = threading.Lock()
         
-        config_kwargs = {}
+        self._embedder = None
+        self._reranker = None
+        self._embedding_dim = None
+        self._config_kwargs = {}
         if str(self.device) == "cpu":
-            # The stella_en_400M_v5 model requires these config overrides 
-            # to disable memory efficient attention (xformers) on CPU
-            config_kwargs["use_memory_efficient_attention"] = False
-            config_kwargs["unpad_inputs"] = False
-
-        self._embedder = SentenceTransformer(
-            embedding_model, 
-            trust_remote_code=True, 
-            device=self.device,
-            model_kwargs={"torch_dtype": torch.float16},
-            config_kwargs=config_kwargs
-        )
-        self._reranker = CrossEncoder(reranker_model, device=self.device)
+            self._config_kwargs["use_memory_efficient_attention"] = False
+            self._config_kwargs["unpad_inputs"] = False
+        
+        self._embedding_model = embedding_model
+        self._reranker_model = reranker_model
         
         logger.info(f"EmbeddingService initialized | device={self.device} | batch_size={batch_size}")
+
+    async def load_models(self):
+        """Async initialization for heavy ML models."""
+        if self._embedder and self._reranker:
+            return
+
+        loop = asyncio.get_running_loop()
+        
+        def _load_models():
+            embedder = SentenceTransformer(
+                self._embedding_model, 
+                trust_remote_code=True, 
+                device=self.device,
+                model_kwargs={"torch_dtype": torch.float16},
+                config_kwargs=self._config_kwargs
+            )
+            reranker = CrossEncoder(self._reranker_model, device=self.device)
+            return embedder, reranker
+
+        self._embedder, self._reranker = await loop.run_in_executor(None, _load_models)
+        
+        # Fix 4: Dynamically determine embedding dimension
+        if self._embedder:
+            self._embedding_dim = self._embedder.get_sentence_embedding_dimension()
+            logger.info(f"Loaded models on {self.device} | dims={self._embedding_dim}")
+        else:
+            logger.error("Failed to load embedder model")
+
+    @property
+    def embedding_dim(self) -> int:
+        """Dynamically determined dimension of the loaded embedding model."""
+        if self._embedding_dim is None:
+            # In case someone calls this before load_models()
+            return 1024
+        return self._embedding_dim
     
     async def encode(self, texts: List[str]) -> List[List[float]]:
         """Batch encode texts to vectors with chunking for large inputs (async)."""

@@ -19,11 +19,12 @@ async def list_profiles(
     state: AppState = Depends(get_app_state)
 ):
     store: MemGraphStore = state.resources.store
-    loop = asyncio.get_running_loop()
-    # TODO: Update to async (Refactor Task)
-    entities, total = await loop.run_in_executor(
-        None,
-        partial(store.list_entities, limit=limit, offset=offset, topic=topic, entity_type=entity_type, search=q)
+    entities, total = await store.list_entities(
+        limit=limit,
+        offset=offset,
+        topic=topic,
+        entity_type=entity_type,
+        search=q
     )
     
     return {
@@ -39,34 +40,24 @@ async def get_profile(
     state: AppState = Depends(get_app_state)
 ):
     store: MemGraphStore = state.resources.store
-    loop = asyncio.get_running_loop()
     
-    entity = await loop.run_in_executor(
-        None,
-        lambda: store.get_entity_by_id(entity_id)
-    )
+    entity = await store.get_entity_by_id(entity_id)
     
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     
-    facts = await loop.run_in_executor(
-        None,
-        partial(store.get_facts_for_entity, entity_id, active_only=True)
-    )
+    facts = await store.get_facts_for_entity(entity_id, active_only=True)
 
     entity["facts"] = [
         {"content": f.content, "valid_at": f.valid_at.isoformat() if f.valid_at else None}
         for f in (facts or [])
     ]
     
-    entity["connections"] = await loop.run_in_executor(
-        None,
-        partial(store.get_neighbor_entities, entity_id, limit=20)
-    )
+    entity["connections"] = await store.get_neighbor_entities(entity_id, limit=20)
     
     parents, children = await asyncio.gather(
-        loop.run_in_executor(None, partial(store.get_parent_entities, entity_id)),
-        loop.run_in_executor(None, partial(store.get_child_entities, entity_id))
+        store.get_parent_entities(entity_id),
+        store.get_child_entities(entity_id)
     )
     
     entity["hierarchy"] = {
@@ -83,12 +74,8 @@ async def delete_entity(
     state: AppState = Depends(get_app_state)
 ):
     store: MemGraphStore = state.resources.store
-    loop = asyncio.get_running_loop()
     
-    entity = await loop.run_in_executor(
-        None,
-        lambda: store.get_entity_by_id(entity_id)
-    )
+    entity = await store.get_entity_by_id(entity_id)
     
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
@@ -96,10 +83,7 @@ async def delete_entity(
     if entity_id == 1:
         raise HTTPException(status_code=400, detail="Cannot delete user entity")
     
-    deleted = await loop.run_in_executor(
-        None,
-        partial(store.delete_entity, entity_id)
-    )
+    deleted = await store.delete_entity(entity_id)
     
     if not deleted:
         raise HTTPException(status_code=500, detail="Failed to delete entity")

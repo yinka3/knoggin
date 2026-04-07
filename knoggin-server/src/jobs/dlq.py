@@ -101,6 +101,11 @@ class DLQReplayJob(BaseJob):
 
     async def _retry_graph_write(self, entry: dict, ctx: JobContext) -> bool:
         """Retry just the graph write — no LLM cost."""
+
+        if self.write_to_graph is None:
+            logger.error("DLQ: write_to_graph callback not configured, cannot retry")
+            return False
+    
         try:
             result = BatchResult.from_dict(entry["batch_result"])
             result = self._validate_batch_result(result)
@@ -125,6 +130,11 @@ class DLQReplayJob(BaseJob):
 
     async def _retry_processing(self, entry: dict, ctx: JobContext) -> bool:
         """Full reprocess with stored context — LLM cost."""
+
+        if self.write_to_graph is None:
+            logger.error("DLQ: write_to_graph callback not configured, cannot retry")
+            return False
+        
         try:
             messages = entry.get("messages", [])
             session_text = entry.get("session_text", "")

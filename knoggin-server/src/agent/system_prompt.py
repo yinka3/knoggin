@@ -1,4 +1,4 @@
-import html
+from typing import Optional
 
 def get_agent_prompt(
     user_name: str, 
@@ -10,10 +10,24 @@ def get_agent_prompt(
     agent_rules: str = "",
     agent_preferences: str = "",
     agent_icks: str = "",
-    instructions: str = ""
+    instructions: str = "",
+    is_community: bool = False,
+    participants: Optional[list[str]] = None,
+    current_mode: str = "Architect"
 ) -> str:
     date_context = f"Current time: {current_time}." if current_time else ""
     voice = persona if persona else "Warm and direct. Match their energy. No corporate filler."
+
+    community_section = ""
+    if is_community:
+        plist = ", ".join(participants) if participants else "None"
+        community_section = (
+            "\n<community_context>\n"
+            "You are participating in a group discussion with other autonomous agents.\n"
+            f"Current participants: {plist}\n"
+            "Acknowledge their contributions if relevant, and focus on achieving the discussion objective.\n"
+            "</community_context>\n"
+        )
 
     instructions_section = ""
     if instructions:
@@ -28,12 +42,12 @@ def get_agent_prompt(
                 f"<your_memory>\n"
                 f"Notes you saved from previous interactions. Use save_memory to add, forget_memory to remove by ID.\n"
                 f"Do not save things already here. Do not save transient conversation details.\n"
-                f"{html.escape(memory_context)}\n"
+                f"{memory_context}\n"
                 f"</your_memory>\n"
             )
         
         if files_context:
-            memory_section += f"<uploaded_files>\nFiles available in this session. Use search_files to query them.\n{html.escape(files_context)}\n</uploaded_files>\n"
+            memory_section += f"<uploaded_files>\nFiles available in this session. Use search_files to query them.\n{files_context}\n</uploaded_files>\n"
         
         memory_section += "</persistent_context>\n"
 
@@ -41,24 +55,17 @@ def get_agent_prompt(
     if agent_rules or agent_preferences or agent_icks:
         agent_specific_section = "\n<agent_instructions>\n"
         if agent_rules:
-            agent_specific_section += f"<agent_rules>\n{html.escape(agent_rules)}</agent_rules>\n"
+            agent_specific_section += f"<agent_rules>\n{agent_rules}</agent_rules>\n"
         if agent_preferences:
-            agent_specific_section += f"<agent_preferences>\n{html.escape(agent_preferences)}</agent_preferences>\n"
+            agent_specific_section += f"<agent_preferences>\n{agent_preferences}</agent_preferences>\n"
         if agent_icks:
-            agent_specific_section += f"<agent_icks>\n{html.escape(agent_icks)}</agent_icks>\n"
+            agent_specific_section += f"<agent_icks>\n{agent_icks}</agent_icks>\n"
         agent_specific_section += "</agent_instructions>\n"
 
     return f"""You are {agent_name}, operating within the Knoggin knowledge system for {user_name}.
 
-<thinking>
-Identify intent and select the best tool.
-</thinking>
-
-{date_context}
-
 <persona>{voice}</persona>
-{instructions_section}
-{agent_specific_section}
+
 <system_guidelines>
 You have access to tools that browse and manage {user_name}'s knowledge graph and memory.
 
@@ -81,11 +88,35 @@ Respond directly WITHOUT tools when:
 - Follow-up on something just retrieved
 - General knowledge unrelated to {user_name}'s data
 </skip_tools>
-{memory_section}
+
+{agent_specific_section}
+{community_section}
+{instructions_section}
+
+<thinking>
+Identify intent and select the best tool.
 Before acting, briefly identify the intent (fact, relationship, or temporal), the best tool, and whether you need clarification first.
+</thinking>
+
+{date_context}
+{memory_section}
+
+<strategy_directives>
+You operate in two modes depending on the context provided:
+1. **Architect**: High-reasoning turn where you design the strategy and select tools.
+2. **Librarian**: Medium-reasoning turns focused on executing the plan and processing evidence.
+
+YOUR CURRENT MODE: {current_mode} - Follow the responsibilities of this role strictly.
+
+If you are currently acting as the Librarian and find that the search results are dead-ended, irrelevant, or the initial strategy is failing, you MUST output the exact phrase "I need a new plan" as part of your thinking process.
+</strategy_directives>
 
 {user_name} is about to speak."""
 
 
-def get_fallback_summary_prompt(user_name: str, agent_name: str = "Agent") -> str:
-    return f"""Summarize the findings for {user_name}. Be direct. State facts found or explicitly state what is missing."""
+def get_fallback_summary_prompt(user_name: str, user_query: str, evidence_context: str) -> str:
+    return (
+        f"The user {user_name} asked: \"{user_query}\"\n\n"
+        f"Here is the evidence gathered:\n{evidence_context}\n\n"
+        f"Summarize the findings. Be direct. State facts found or explicitly state what is missing."
+    )

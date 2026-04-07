@@ -1,10 +1,11 @@
+import re
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, APIRouter
 from loguru import logger
 from fastapi.middleware.cors import CORSMiddleware
 from common.infra.resources import ResourceManager
 from api.state import AppState
-from common.config.base import get_config_value
+from common.config.base import get_config_value, get_config
 
 from api.routers.sessions import router as sessions_router
 from api.routers.chat import router as chat_router
@@ -31,25 +32,16 @@ from api.mcp_server import create_mcp_app
 async def lifespan(app: FastAPI):
     logger.info("Starting Knoggin...")
     resources = await ResourceManager.initialize()
-    user_name = get_config_value("user_name")
-    if not user_name:
-        raise RuntimeError("user_name not configured")
+    config = get_config()
+    user_name = config.user_name
     
     app.state.app_state = AppState(resources, {}, user_name)
-    
-    from jobs.scheduler import Scheduler
-    from jobs.aac_job import AACJob
-    global_scheduler = Scheduler(user_name, "global", resources.redis, resources)
-    global_scheduler.register(AACJob())
-    await global_scheduler.start()
-    app.state.global_scheduler = global_scheduler
+    await app.state.app_state.start_scheduler()
 
-    logger.info(f"Knoggin ready for user: {user_name}")
+    logger.info(f"Knoggin ready (User: {user_name or 'unconfigured'})")
     yield
     
     logger.info("Shutting down Knoggin...")
-    if hasattr(app.state, "global_scheduler"):
-        await app.state.global_scheduler.stop()
     await app.state.app_state.shutdown()
 
 
@@ -64,11 +56,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def add_logging_context(request: Request, call_next):
+    path = request.url.path
+    session_id = None
+    
+    # Try to extract session_id from common path patterns
+    # /v1/sessions/{id}, /v1/chat/{id}, etc.
+    match = re.search(r'/(?:sessions|chat|topics|profiles|files|memory|extract)/([^/]+)', path)
+    if match:
+        candidate = match.group(1)
+        if candidate not in ("active", "history", "stats", "search", "list", "all"):
+            session_id = candidate
+
+    user_name = get_config().user_name or "unknown"
+    
+    with logger.contextualize(user=user_name, session=session_id or "global"):
+        return await call_next(request)
+
+
 mcp_server = create_mcp_app(lambda: app.state.app_state.resources)
 app.mount("/mcp", mcp_server.streamable_http_app())
 
-
-from fastapi import APIRouter
 
 v1_router = APIRouter(prefix="/v1")
 

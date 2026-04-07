@@ -1,5 +1,14 @@
 import { API_BASE } from './config-base'
 
+export class ApiError extends Error {
+  constructor(message, status, detail) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.detail = detail
+  }
+}
+
 /**
  * Shared fetch wrapper for API calls.
  * Automatically prepends API_BASE, parses JSON, and throws with server error detail.
@@ -12,7 +21,7 @@ export async function apiFetch(path, options = {}) {
     if (typeof msg === 'object') {
       msg = JSON.stringify(msg)
     }
-    throw new Error(msg)
+    throw new ApiError(msg, res.status, err)
   }
   return res.json()
 }

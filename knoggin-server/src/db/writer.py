@@ -1,9 +1,9 @@
 from datetime import datetime
 from loguru import logger
-from typing import Dict, List, Optional
+from typing import Dict, List
 from neo4j import AsyncDriver, AsyncManagedTransaction
 
-from src.common.schema.dtypes import Fact
+from common.schema.dtypes import Fact
 
 
 class GraphWriter:
@@ -188,13 +188,6 @@ class GraphWriter:
                     SET e.aliases = unique_aliases
 
                     WITH e, data
-                    OPTIONAL MATCH (e)-[r:BELONGS_TO]->()
-                    
-                    FOREACH (_ IN CASE WHEN r IS NOT NULL AND data.topic IS NOT NULL AND data.topic <> "" THEN [1] ELSE [] END |
-                        DELETE r
-                    )
-
-                    WITH DISTINCT e, data
                     FOREACH (_ IN CASE WHEN data.topic IS NOT NULL AND data.topic <> "" THEN [1] ELSE [] END |
                         MERGE (t:Topic {name: data.topic})
                         MERGE (e)-[:BELONGS_TO]->(t)
@@ -219,7 +212,11 @@ class GraphWriter:
                         r.context = rel.context
                         
                     ON MATCH SET 
-                        r.weight = r.weight + 1,
+                        r.weight = CASE 
+                            WHEN rel.message_id IN coalesce(r.message_ids, []) 
+                            THEN r.weight 
+                            ELSE r.weight + 1 
+                        END,
                         r.confidence = CASE WHEN rel.confidence > r.confidence THEN rel.confidence ELSE r.confidence END,
                         r.last_seen = timestamp(),
                         r.context = CASE WHEN rel.context IS NOT NULL THEN rel.context ELSE r.context END
@@ -262,6 +259,20 @@ class GraphWriter:
         async with self.driver.session() as session:
             await session.execute_write(_update)
         logger.info(f"Updated entity {entity_id} (checkpoint: msg_{last_msg_id})")
+    
+    async def update_entity_canonical_name(self, entity_id: int, canonical_name: str) -> None:
+        """Update only the canonical name. Does not touch embedding or checkpoint."""
+        query = """
+        MATCH (e:Entity {id: $id})
+        SET e.canonical_name = $canonical_name,
+            e.last_updated = timestamp()
+        """
+        async def _update(tx: AsyncManagedTransaction):
+            result = await tx.run(query, {"id": entity_id, "canonical_name": canonical_name})
+            await result.consume()
+
+        async with self.driver.session() as session:
+            await session.execute_write(_update)
     
     async def update_entity_embedding(self, entity_id: int, embedding: List[float]) -> None:
         """
@@ -427,7 +438,13 @@ class GraphWriter:
                         THEN s.last_mentioned ELSE p.last_mentioned END
             """, primary_id=primary_id, secondary_id=secondary_id, aliases=combined_aliases)
             
-            # Step 3: Transfer RELATED_TO edges
+            # Step 2.5: Remove direct relationship between merge targets
+            await tx.run("""
+                MATCH (p:Entity {id: $primary_id})-[r:RELATED_TO]-(s:Entity {id: $secondary_id})
+                DELETE r
+            """, primary_id=primary_id, secondary_id=secondary_id)
+            
+            # Step 3: Transfer RELATED_TO edges + delete old edges
             await tx.run("""
                 MATCH (s:Entity {id: $secondary_id})-[r_old:RELATED_TO]-(target:Entity)
                 WHERE target.id <> $primary_id
@@ -453,41 +470,66 @@ class GraphWriter:
                 UNWIND coalesce(r_new.message_ids, []) + coalesce(r_old.message_ids, []) AS mid
                 WITH r_new, r_old, collect(DISTINCT mid) AS unique_ids
                 SET r_new.message_ids = unique_ids
+                DELETE r_old
             """, primary_id=primary_id, secondary_id=secondary_id)
             
-            # Step 4: Transfer HAS_FACT edges
+            # Step 4: Transfer HAS_FACT edges + fix source_entity_id
             await tx.run("""
                 MATCH (s:Entity {id: $secondary_id})-[r:HAS_FACT]->(f:Fact)
                 MATCH (p:Entity {id: $primary_id})
                 DELETE r
                 CREATE (p)-[:HAS_FACT]->(f)
+                SET f.source_entity_id = $primary_id
             """, primary_id=primary_id, secondary_id=secondary_id)
- 
-             # Step 4a: Transfer Topic memberships (BELONGS_TO)
+
+            # Step 4a: Transfer Topic memberships (BELONGS_TO)
             await tx.run("""
                 MATCH (s:Entity {id: $secondary_id})-[r:BELONGS_TO]->(t:Topic)
                 MATCH (p:Entity {id: $primary_id})
                 MERGE (p)-[:BELONGS_TO]->(t)
                 DELETE r
             """, primary_id=primary_id, secondary_id=secondary_id)
- 
-            # The children now become part of the primary
+
+            # Step 4b: Transfer Hierarchy Children (PART_OF)
             await tx.run("""
                 MATCH (child:Entity)-[r:PART_OF]->(s:Entity {id: $secondary_id})
                 MATCH (p:Entity {id: $primary_id})
                 MERGE (child)-[:PART_OF]->(p)
                 DELETE r
             """, primary_id=primary_id, secondary_id=secondary_id)
- 
-            # Step 4c: Transfer Hierarchy Parent (Who the secondary is PART_OF)
-            # Only transfer if Primary doesn't already have a parent to avoid conflicts
-            await tx.run("""
-                MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->(parent:Entity)
+
+            # Step 4c: Transfer Hierarchy Parent (with conflict detection)
+            result_4c = await tx.run("""
+                MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->(s_parent:Entity)
                 MATCH (p:Entity {id: $primary_id})
-                WHERE NOT (p)-[:PART_OF]->() 
-                MERGE (p)-[:PART_OF]->(parent)
-                DELETE r
+                OPTIONAL MATCH (p)-[:PART_OF]->(p_parent:Entity)
+                RETURN s_parent.id AS s_parent_id, 
+                    s_parent.canonical_name AS s_parent_name,
+                    p_parent.id AS p_parent_id,
+                    p_parent.canonical_name AS p_parent_name,
+                    r AS rel_to_delete
             """, primary_id=primary_id, secondary_id=secondary_id)
+            record_4c = await result_4c.single()
+
+            if record_4c and record_4c["s_parent_id"] is not None:
+                if record_4c["p_parent_id"] is not None:
+                    logger.warning(
+                        f"Hierarchy conflict during merge: "
+                        f"primary {primary_id} parent='{record_4c['p_parent_name']}', "
+                        f"secondary {secondary_id} parent='{record_4c['s_parent_name']}'. "
+                        f"Dropping secondary's parent edge."
+                    )
+                    await tx.run("""
+                        MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->()
+                        DELETE r
+                    """, secondary_id=secondary_id)
+                else:
+                    await tx.run("""
+                        MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->(parent:Entity)
+                        MATCH (p:Entity {id: $primary_id})
+                        MERGE (p)-[:PART_OF]->(parent)
+                        DELETE r
+                    """, primary_id=primary_id, secondary_id=secondary_id)
             
             # Step 5: Delete secondary entity
             del_result = await tx.run("""

@@ -11,13 +11,13 @@ from pydantic import BaseModel
 
 from api.deps import get_app_state
 from api.state import AppState
-from agent.orchestrator import run_stream
+from agent.orchestrator import Orchestrator
 from common.schema.dtypes import MessageData
-from common.config.base import get_config_value
+from common.config.base import get_config_value, get_config
 from common.infra.redis import RedisKeys
 
 router = APIRouter()
-
+orchestrator = Orchestrator(resources=None)  # Resources will be passed in at runtime via AppState
 
 
 class ChatRequest(BaseModel):
@@ -38,6 +38,10 @@ async def send_message(
     body: ChatRequest,
     state: AppState = Depends(get_app_state)
 ):
+    # Ensure orchestrator has access to resources
+    if orchestrator._resources is None:
+        orchestrator._resources = state.resources
+
     context = await state.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -74,9 +78,9 @@ async def send_message(
     )
     await context.add(msg)
 
-    dev_settings = get_config_value("developer_settings", {})
-    limits = dev_settings.get("limits", {})
-    context_turns = limits.get("conversation_context_turns", 10)
+    config = get_config()
+    limits = config.developer_settings.limits
+    context_turns = limits.conversation_context_turns or 10
     
     async def event_stream():
         final_response = None
@@ -93,31 +97,25 @@ async def send_message(
                 for turn in history
             ]
 
-            async for event in run_stream(
+            async for event in orchestrator.run_stream(
                 user_query=safe_message,
                 user_name=state.user_name,
                 session_id=session_id,
-                agent_id=agent_id,
-                agent_name=agent_name,
-                agent_persona=agent_persona,
-                conversation_history=formatted_history,
-                hot_topics=body.hot_topics or [],
-                topic_config=context.topic_config,
-                llm=context.llm,
-                store=context.store,
-                ent_resolver=context.ent_resolver,
-                redis_client=state.resources.redis,
+                redis=state.resources.redis,
                 model=effective_model,
+                agent_id=agent_id,
                 enabled_tools=enabled_tools if enabled_tools is not None else (agent.enabled_tools if agent else None),
-                file_rag=context.file_rag,
                 user_timezone=body.timezone,
-                mcp_manager=context.mcp_manager,
                 agent_temperature=agent.temperature if agent else 0.7,
                 agent_instructions=agent.instructions if agent else None,
                 agent_rules=body.working_memory.get("rules") if body.working_memory else None,
                 agent_preferences=body.working_memory.get("preferences") if body.working_memory else None,
                 agent_icks=body.working_memory.get("icks") if body.working_memory else None,
-                client_tools=body.client_tools
+                conversation_history=formatted_history,
+                client_tools=body.client_tools,
+                hot_topics=body.hot_topics,
+                agent_persona_override=agent_persona,
+                agent_name_override=agent_name
             ):
                 
                 if event["event"] == "tool_start":

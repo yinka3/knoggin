@@ -5,6 +5,7 @@ from jobs.base import BaseJob, JobContext, JobResult
 from common.services.llm_service import LLMService
 from common.config.topics_config import TopicConfig
 from core.prompts import get_topic_evolution_prompt
+from common.schema.dtypes import TopicConfigResult
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
 
@@ -82,27 +83,26 @@ class TopicConfigJob(BaseJob):
             f"## Recent Conversation\n{conversation_text}"
         )
         
-        system = get_topic_evolution_prompt()
+        system = get_topic_evolution_prompt(ctx.user_name)
         
         await emit(ctx.session_id, "job", "llm_call", {
             "stage": "topic_evolution",
             "prompt": user_content
         }, verbose_only=True)
         
-        response = await self.llm.call_llm(system, user_content, model=self.llm.merge_model)
+        result: TopicConfigResult = await self.llm.call_llm(
+            response_model=TopicConfigResult,
+            system=system,
+            user=user_content,
+            model=self.llm.merge_model,
+            temperature=0.0
+        )
         
-        if not response:
-            logger.warning("Topic evolution LLM returned None")
+        if not result:
+            logger.warning("Topic evolution returned empty or failed.")
             return JobResult(success=False, summary="LLM failed")
-        
-        try:
-            clean = response.strip()
-            if clean.startswith("```"):
-                clean = clean.split("\n", 1)[1].rsplit("```", 1)[0]
-            new_config = json.loads(clean)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Topic evolution returned invalid JSON: {e}")
-            return JobResult(success=False, summary=f"Invalid JSON: {e}")
+
+        new_config = {name: detail.model_dump() for name, detail in result.topics.items()}
         
         new_config = self.sanitize_topic_evolution(self.topic_config.raw, new_config)
 
