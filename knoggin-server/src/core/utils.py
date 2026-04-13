@@ -2,6 +2,7 @@ import asyncio
 import json
 import redis.asyncio as aioredis
 from typing import Any, List, Optional, Tuple
+import re
 
 from common.infra.redis import RedisKeys
 from loguru import logger
@@ -58,16 +59,20 @@ def is_generic_phrase(text: str, threshold: float = 5e-6) -> bool:
 def is_covered(candidate: str, covered_texts: set[str]) -> bool:
     """
     Check if candidate span is already covered by known entities.
-    Uses text comparison, not index comparison.
+    Uses word-boundary text comparison.
     """
     candidate_lower = candidate.lower().strip()
     
     for covered in covered_texts:
         if candidate_lower == covered:
             return True
-        if candidate_lower in covered:
+            
+        cov_esc = re.escape(covered)
+        cand_esc = re.escape(candidate_lower)
+        
+        if re.search(r'\b' + cov_esc + r'\b', candidate_lower):
             return True
-        if covered in candidate_lower:
+        if re.search(r'\b' + cand_esc + r'\b', covered):
             return True
     
     return False

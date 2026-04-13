@@ -413,6 +413,7 @@ class AppState:
             deleted += await redis.delete(*direct_keys)
         
         await redis.hdel(RedisKeys.session_config(user), session_id)
+        await redis.hdel(RedisKeys.sessions(user), session_id)
         
         logger.info(f"Cleaned up {deleted} Redis keys for session {session_id}")
         return deleted

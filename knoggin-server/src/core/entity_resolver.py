@@ -28,7 +28,7 @@ class EntityResolver:
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
         self._name_to_id = LRUCache(maxsize=3000000)
-        self._id_to_names: Dict[int, Set[str]] = {}
+        self._id_to_names = LRUCache(maxsize=1000000)
         self._lock = threading.RLock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold

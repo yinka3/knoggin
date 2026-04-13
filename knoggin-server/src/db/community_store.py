@@ -64,9 +64,13 @@ class CommunityStore:
                d.agent_ids as agent_ids
         ORDER BY d.created_at DESC
         """
-        async with self.driver.session() as session:
-            result = await session.run(query)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_discussions: {e}")
+            return []
 
     async def get_discussion_history(self, discussion_id: str) -> List[Dict]:
         query = """
@@ -74,18 +78,26 @@ class CommunityStore:
         RETURN m.agent_id as agent_id, m.content as content, m.role as role, m.timestamp as timestamp
         ORDER BY m.timestamp ASC
         """
-        async with self.driver.session() as session:
-            result = await session.run(query, discussion_id=discussion_id)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, discussion_id=discussion_id)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_discussion_history: {e}")
+            return []
 
     async def get_agent_hierarchy(self) -> List[Dict]:
         query = """
         MATCH (p:AAC_Agent)-[r:SPAWNED]->(c:AAC_Agent)
         RETURN p.id as parent, c.id as child, r.detail as detail, r.ts as timestamp
         """
-        async with self.driver.session() as session:
-            result = await session.run(query)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_agent_hierarchy: {e}")
+            return []
     
     async def get_recent_discussions(self, limit: int = 5) -> List[Dict]:
         """Get recent discussions with topic and outcome summary."""
@@ -102,9 +114,13 @@ class CommunityStore:
         ORDER BY d.created_at DESC
         LIMIT $limit
         """
-        async with self.driver.session() as session:
-            result = await session.run(query, limit=limit)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, limit=limit)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_recent_discussions: {e}")
+            return []
 
     async def get_discussion_insights(self, limit: int = 10) -> List[Dict]:
         """Get recent insights from past discussions."""
@@ -117,9 +133,13 @@ class CommunityStore:
         ORDER BY m.timestamp DESC
         LIMIT $limit
         """
-        async with self.driver.session() as session:
-            result = await session.run(query, limit=limit)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, limit=limit)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_discussion_insights: {e}")
+            return []
     
     async def delete_old_discussions(self, retention_days: int = 30) -> int:
         """Delete discussions and their messages older than retention period."""

@@ -132,6 +132,9 @@ class ResourceManager:
             self.embedding.cleanup()
         if self.mcp_manager:
             await self.mcp_manager.shutdown()
+        self.gliner = None
+        self.spacy = None
+        self.chroma = None
         logger.info("Cleaned up partial ResourceManager initialization")
     
     async def shutdown(self):
@@ -147,5 +150,8 @@ class ResourceManager:
             await self.mcp_manager.shutdown()
         if self.llm_service:
             await self.llm_service.close()
+        self.gliner = None
+        self.spacy = None
+        self.chroma = None
         logger.info("ResourceManager shutdown complete")
         self.__class__._instance = None

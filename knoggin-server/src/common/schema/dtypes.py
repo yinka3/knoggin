@@ -164,7 +164,11 @@ class Fact:
     def _parse_dt(val) -> datetime:
         if isinstance(val, str):
             return datetime.fromisoformat(val)
-        return val
+        if isinstance(val, (int, float)):
+            return datetime.fromtimestamp(val, tz=timezone.utc)
+        if isinstance(val, datetime):
+            return val
+        raise TypeError(f"Cannot parse datetime from {type(val)}: {val}")
 
 @dataclass
 class FactMergeResult:
@@ -240,9 +244,9 @@ class BatchResult:
             entity_ids=data.get("entity_ids", []),
             new_entity_ids=set(data.get("new_entity_ids", [])),
             alias_updated_ids=set(data.get("alias_updated_ids", [])),
-            alias_updates={int(k): v for k, v in data.get("alias_updates", {}).items()},
+            alias_updates={int(k): v for k, v in data.get("alias_updates", {}).items() if str(k).lstrip('-').isdigit()},
             extraction_result=extraction_result,
-            message_embeddings={int(k): v for k, v in data.get("message_embeddings", {}).items()},
+            message_embeddings={int(k): v for k, v in data.get("message_embeddings", {}).items() if str(k).lstrip('-').isdigit()},
             success=data.get("success", True),
             error=data.get("error")
         )

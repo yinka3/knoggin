@@ -203,6 +203,16 @@ class MemoryManager:
                 error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
             )
 
+        if not content or not content.strip():
+            return WorkingMemoryAddResult(success=False, error="Empty memory content")
+
+        content = content.strip()
+        if len(content) > MAX_CONTENT_LEN:
+            return WorkingMemoryAddResult(
+                success=False,
+                error=f"Working memory too long ({len(content)} chars). Max {MAX_CONTENT_LEN}."
+            )
+
         mem_id = f"mem_{uuid.uuid4().hex[:8]}"
         key = RedisKeys.agent_working_memory(self.agent_id, category)
         payload = json.dumps({

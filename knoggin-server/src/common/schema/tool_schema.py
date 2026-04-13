@@ -294,9 +294,12 @@ ALL_TOOL_NAMES = [s["function"]["name"] for s in TOOL_SCHEMAS]
 
 def get_filtered_schemas(enabled_tools: list[str] | None = None, tags: list[str] | None = None) -> list[dict]:
     """
-    Return tool schemas filtered to only enabled tools OR tools matching specific tags.
+    Return tool schemas filtered by enabled tools AND specific tags.
     Always includes request_clarification (not user-toggleable).
     """
+    if not enabled_tools and not tags:
+        return TOOL_SCHEMAS
+
     filtered = []
     enabled_set = set(enabled_tools) if enabled_tools else None
     tags_set = set(tags) if tags else None
@@ -307,17 +310,16 @@ def get_filtered_schemas(enabled_tools: list[str] | None = None, tags: list[str]
             filtered.append(schema)
             continue
             
-        if enabled_set and name in enabled_set:
-            filtered.append(schema)
-            continue
+        is_enabled = True
+        if enabled_set is not None:
+            is_enabled = name in enabled_set
             
-        if tags_set:
+        has_tag = True
+        if tags_set is not None:
             tool_tags = set(schema["function"].get("tags", []))
-            if tool_tags & tags_set:
-                filtered.append(schema)
-                continue
-                
-    if not enabled_tools and not tags:
-        return TOOL_SCHEMAS
-        
+            has_tag = bool(tool_tags & tags_set)
+            
+        if is_enabled and has_tag:
+            filtered.append(schema)
+            
     return filtered

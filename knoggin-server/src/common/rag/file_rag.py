@@ -86,7 +86,6 @@ class FileRAGService:
         self._bm25_dirty = True
         self._bm25_corpus = []  # List of child chunk texts for BM25
         self._bm25_metadata = [] # List of metadata dicts corresponding to _bm25_corpus
-        self._load_bm25_from_chroma()
         
     def _load_bm25_from_chroma(self):
         """Initialize the in-memory BM25 index from ChromaDB."""

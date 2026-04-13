@@ -593,6 +593,9 @@ class GraphReader:
                 THEN reduce(s = '', x IN fact_snippets | s + CASE WHEN s = '' THEN '' ELSE '. ' END + x)
                 ELSE null
             END AS summary
+        ORDER BY last_mentioned DESC
+        SKIP $offset
+        LIMIT $limit
         """
         
         try:
@@ -807,11 +810,12 @@ class GraphReader:
         MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
         WHERE f.valid_at > $cutoff
         AND f.invalid_at IS NULL
-        WITH e, count(f) as recent_facts, max(f.valid_at) as last_activity
+        OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
+        WITH e, t, count(f) as recent_facts, max(f.valid_at) as last_activity
         RETURN e.id as id,
             e.canonical_name as name,
             e.type as type,
-            e.topic as topic,
+            t.name as topic,
             recent_facts,
             last_activity
         ORDER BY recent_facts DESC, last_activity DESC

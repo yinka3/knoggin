@@ -43,6 +43,7 @@ class LLMService:
         self._merge_model = merge_model
         self._redis = redis_client
         self._client = None
+        self._raw_client = None
         self._http_client = httpx.AsyncClient(timeout=10.0)
         self._background_tasks: set = set()
         self._model_prices: Dict[str, Dict[str, float]] = FALLBACK_COSTS.copy()
@@ -56,6 +57,7 @@ class LLMService:
                 timeout=60.0
             )
 
+            self._raw_client = client
             self._client = instructor.from_openai(client)
             
             provider_label = "OpenRouter" if self._is_openrouter else self._base_url
@@ -113,6 +115,7 @@ class LLMService:
                 api_key=self._api_key,
                 timeout=60.0
             )
+            self._raw_client = client
             self._client = instructor.from_openai(client)
             logger.info("LLMService: API key updated")
         
@@ -443,5 +446,7 @@ class LLMService:
                 await asyncio.wait(shielded, timeout=5.0)
             except asyncio.TimeoutError:
                 logger.warning("Timeout waiting for LLM usage stats recording tasks")
-        if self._client:
+        if self._raw_client:
+            await self._raw_client.close()
+        elif self._client and hasattr(self._client, 'close'):
             await self._client.close()

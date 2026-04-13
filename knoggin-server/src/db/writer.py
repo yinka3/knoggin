@@ -143,10 +143,14 @@ class GraphWriter:
             result = await tx.run(query, {"batch": messages})
             await result.consume()
             
-        async with self.driver.session() as session:
-            await session.execute_write(_save)
-            logger.info(f"Saved {len(messages)} message logs to Memgraph.")
-            return True
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_save)
+                logger.info(f"Saved {len(messages)} message logs to Memgraph.")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to save message logs: {e}")
+            return False
         
 
     async def write_batch(self, entities: List[Dict], relationships: List[Dict]):
@@ -355,8 +359,9 @@ class GraphWriter:
         query = """
         MATCH (e:Entity)
         WHERE e.id IN $ids
-        DETACH DELETE e
-        RETURN count(e) as deleted
+        OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
+        DETACH DELETE e, f
+        RETURN count(DISTINCT e) as deleted
         """
         async def _delete(tx: AsyncManagedTransaction):
             result = await tx.run(query, {"ids": entity_ids})

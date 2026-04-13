@@ -36,6 +36,7 @@ class CommunityManager:
         self.resources = resources
         self.user_name = user_name
         self._active_discussion_id = None
+        self._discussion_task = None
     
     async def _is_discussion_active(self) -> bool:
         return await self.resources.redis.exists(RedisKeys.community_discussion_active())
@@ -112,7 +113,7 @@ class CommunityManager:
                 await self.resources.store.community.close_discussion(discussion_id)
                 await emit_community(self.user_name, "community", "discussion_ended", {"id": discussion_id})
 
-        asyncio.create_task(_run_and_cleanup())
+        self._discussion_task = asyncio.create_task(_run_and_cleanup())
 
 
     async def _run_loop(self, discussion_id: str, topic: str, initial_agent_ids: List[str]):

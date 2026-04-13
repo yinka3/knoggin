@@ -76,7 +76,12 @@ class DLQReplayJob(BaseJob):
             await ctx.redis.set(last_run_key, time.time())
             return False
         
-        elapsed = time.time() - float(last_run_ts)
+        try:
+            elapsed = time.time() - float(last_run_ts)
+        except ValueError:
+            await ctx.redis.set(last_run_key, time.time())
+            return False
+        
         return elapsed >= self.interval
 
     def _is_transient(self, error: str) -> bool:

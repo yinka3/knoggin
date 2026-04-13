@@ -301,7 +301,7 @@ class Tools:
         
         fts_results = await self.store.search_messages_fts(query, fts_limit)
         
-        max_fts = max([s for _, s in fts_results]) if fts_results else 1.0
+        max_fts = max([s for _, s in fts_results], default=1.0) or 1.0
 
         for msg_id, raw_score in fts_results:
             msg_key = self._format_message_id(msg_id)

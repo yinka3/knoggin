@@ -128,7 +128,7 @@ async def send_message(
                         "_start": time.time(),
                     })
                 
-                if event["event"] == "tool_result":
+                if event["event"] == "tool_end":
                     if tool_calls_log:
                         tc = tool_calls_log[-1]
                         tc["summary"] = event["data"].get("summary")

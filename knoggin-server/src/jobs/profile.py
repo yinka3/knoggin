@@ -596,7 +596,7 @@ class ProfileRefinementJob(BaseJob):
                 msg_type = type(msg_id).__name__
                 valid_type = type(list(valid_msg_ids)[0]).__name__ if valid_msg_ids else "empty"
                 logger.warning(
-                    f"[{self.session_id}] ProfileRefinementJob: "
+                    f"[{session_id}] ProfileRefinementJob: "
                     f"Invalid msg_id {msg_id} (type {msg_type}) not in conversation window "
                     f"{valid_msg_ids} (type {valid_type})"
                 )
@@ -661,6 +661,7 @@ class ProfileRefinementJob(BaseJob):
                     "fact_count": len(facts_to_create),
                     "error": str(e)
                 })
+                return [f for f in active_existing if f not in facts_to_create], list(to_invalidate)
         elif to_invalidate:
             failed_invalidations = []
             for fact_id in to_invalidate:
@@ -822,7 +823,6 @@ class ProfileRefinementJob(BaseJob):
 
     async def _write_updates(self, updates: List[Dict]):
         """Write profile updates to Memgraph sequentially."""
-        loop = asyncio.get_running_loop()
         
         for update in updates:
             await self.store.update_entity_profile(

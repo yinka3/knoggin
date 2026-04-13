@@ -30,7 +30,7 @@ class AsyncRedisClient:
                     is_healthy = True
                 except (aioredis.ConnectionError, asyncio.TimeoutError):
                     logger.warning("Redis connection lost, attempting to reconnect...")
-                    await cls.close_redis()
+                    await cls._close_unlocked()
             
             if not is_healthy:
                 try:
@@ -54,13 +54,18 @@ class AsyncRedisClient:
             return cls._instance
     
     @classmethod
+    async def _close_unlocked(cls):
+        """Internal teardown without acquiring the lock."""
+        if cls._instance is not None:
+            await cls._instance.close()
+            cls._instance = None
+            logger.info("Redis connection closed")
+
+    @classmethod
     async def close_redis(cls):
         """Close the Redis connection pool."""
         async with cls._lock:
-            if cls._instance is not None:
-                await cls._instance.close()
-                cls._instance = None
-                logger.info("Redis connection closed")
+            await cls._close_unlocked()
 
     @classmethod
     async def publish(cls, channel: str, message: Any):

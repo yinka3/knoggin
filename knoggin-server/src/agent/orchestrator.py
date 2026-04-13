@@ -41,11 +41,17 @@ class Orchestrator:
         agent_instructions: Optional[str] = None,
         agent_rules: Optional[List[str]] = None,
         agent_preferences: Optional[List[str]] = None,
-        agent_icks: Optional[List[str]] = None
+        agent_icks: Optional[List[str]] = None,
+        conversation_history: Optional[List[Dict]] = None,
+        hot_topics: Optional[List[str]] = None,
+        agent_persona_override: Optional[str] = None,
+        agent_name_override: Optional[str] = None,
+        client_tools: Optional[List[Dict]] = None
     ) -> AsyncGenerator[Dict, None]:
         """
         Main entry point for agent execution.
         """
+        tools = None
         try:
             # 1. Configuration & Initialization
             config = get_config()
@@ -107,7 +113,7 @@ class Orchestrator:
                 memory=memory_mgr
             )
             
-            hot_topics = topic_config.hot_topics
+            effective_hot_topics = hot_topics if hot_topics is not None else topic_config.hot_topics
             
             # 3. Context & State
             agent_cfg = None
@@ -116,8 +122,8 @@ class Orchestrator:
                 if agent_data:
                     agent_cfg = AgentConfig.from_dict(json.loads(agent_data))
             
-            p_name = agent_cfg.name if agent_cfg else "Knoggin"
-            p_persona = agent_cfg.persona if agent_cfg else "A helpful and thorough personal intelligence assistant."
+            p_name = agent_name_override or (agent_cfg.name if agent_cfg else "Knoggin")
+            p_persona = agent_persona_override or (agent_cfg.persona if agent_cfg else "A helpful and thorough personal intelligence assistant.")
 
             ctx = AgentContext(
                 config=run_config,
@@ -127,9 +133,10 @@ class Orchestrator:
                 session_id=session_id,
                 user_query=user_query,
                 run_id=str(uuid.uuid4()),
-                hot_topics=hot_topics,
+                hot_topics=effective_hot_topics,
                 agent_name=p_name,
-                agent_persona=p_persona
+                agent_persona=p_persona,
+                history=conversation_history or []
             )
 
             # 4. Execution via AgentExecutor
@@ -144,10 +151,14 @@ class Orchestrator:
                 agent_instructions=agent_instructions or (agent_cfg.instructions if agent_cfg else None),
                 agent_rules=agent_rules,
                 agent_preferences=agent_preferences,
-                agent_icks=agent_icks
+                agent_icks=agent_icks,
+                client_tools=client_tools
             ):
                 yield event
 
         except Exception as e:
             logger.error(f"Orchestrator error: {e}")
             yield {"event": "error", "data": {"message": str(e)}}
+        finally:
+            if tools:
+                await tools.close()
