@@ -449,6 +449,7 @@ class Context:
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append({
                 **turn,
+                "message": turn["content"],
                 "role_label": role_label,
                 "relative": f"[{date_str}]",
             })
@@ -636,8 +637,10 @@ class Context:
 
         
     async def shutdown(self):
-        await self.consumer.stop()
-        await self.scheduler.stop()
+        if self.consumer:
+            await self.consumer.stop()
+        if self.scheduler:
+            await self.scheduler.stop()
         if self.resources:
             self.resources.active_resolver = None
         

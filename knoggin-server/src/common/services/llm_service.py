@@ -11,8 +11,6 @@ from common.errors.agent import ConfigurationError, DependencyError
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_RETRIES = 3
-
-# Fallback costs if API fetch fails (USD per 1M tokens)
 FALLBACK_COSTS = {
     "google/gemini-3.1-pro": {"input": 2.00, "output": 12.00},
     "google/gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
@@ -440,12 +438,13 @@ class LLMService:
     
     async def close(self):
         if self._background_tasks:
-            # Wait with shield to protect crucial stats requests
-            shielded = [asyncio.shield(t) for t in self._background_tasks]
-            try:
-                await asyncio.wait(shielded, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for LLM usage stats recording tasks")
+            done, pending = await asyncio.wait(self._background_tasks, timeout=5.0)
+            if pending:
+                logger.warning(f"Timeout waiting for {len(pending)} LLM usage stats recording tasks")
+                
+        if self._http_client:
+            await self._http_client.aclose()
+            
         if self._raw_client:
             await self._raw_client.close()
         elif self._client and hasattr(self._client, 'close'):

@@ -81,6 +81,8 @@ class EmbeddingService:
         return await loop.run_in_executor(None, self._encode_sync, texts)
         
     def _encode_sync(self, texts: List[str]) -> List[List[float]]:
+        if not self._embedder:
+            raise RuntimeError("Embedder not loaded. Call load_models() first.")
         if len(texts) <= self.batch_size:
             with self._lock:
                 return self._embedder.encode(texts).astype(np.float32).tolist()
@@ -100,6 +102,8 @@ class EmbeddingService:
         return await loop.run_in_executor(None, self._encode_single_sync, text)
 
     def _encode_single_sync(self, text: str) -> List[float]:
+        if not self._embedder:
+            raise RuntimeError("Embedder not loaded. Call load_models() first.")
         with self._lock:
             embedding = self._embedder.encode([text])[0]
         return embedding.astype(np.float32).tolist()
@@ -112,6 +116,8 @@ class EmbeddingService:
         return await loop.run_in_executor(None, self._rerank_sync, query, candidates, batch_size)
         
     def _rerank_sync(self, query: str, candidates: List[str], batch_size: int = None) -> List[float]:
+        if not self._reranker:
+            raise RuntimeError("Reranker not loaded. Call load_models() first.")
         batch_size = batch_size or self.batch_size
         pairs = [(query, c) for c in candidates]
         

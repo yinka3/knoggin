@@ -120,7 +120,10 @@ class Orchestrator:
             if agent_id:
                 agent_data = await redis.hget(RedisKeys.agents(user_name), agent_id)
                 if agent_data:
-                    agent_cfg = AgentConfig.from_dict(json.loads(agent_data))
+                    try:
+                        agent_cfg = AgentConfig.from_dict(json.loads(agent_data))
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.warning(f"Failed to parse agent config for '{agent_id}': {e}")
             
             p_name = agent_name_override or (agent_cfg.name if agent_cfg else "Knoggin")
             p_persona = agent_persona_override or (agent_cfg.persona if agent_cfg else "A helpful and thorough personal intelligence assistant.")

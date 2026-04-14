@@ -131,7 +131,7 @@ class AgentExecutor:
                 last_result, 
                 client_tools
             ):
-                event_type = event.get("type")
+                event_type = event.get("event")
                 data = event.get("data")
                 
                 if event_type == "done":
@@ -239,9 +239,9 @@ class AgentExecutor:
             
             if chunk_type == "token":
                 content_accumulator += chunk["content"]
-                yield {"type": "token", "data": {"content": chunk["content"]}}
+                yield {"event": "token", "data": {"content": chunk["content"]}}
             elif chunk_type == "thinking":
-                yield {"type": "thinking", "data": {"content": chunk["content"]}}
+                yield {"event": "thinking", "data": {"content": chunk["content"]}}
             elif chunk_type == "tool_calls":
                 for call in chunk.get("calls", []):
                     args = self._safe_parse_args(call.get("arguments", "{}"))
@@ -257,9 +257,9 @@ class AgentExecutor:
                 self._accumulate_usage(u)
                 if not pending_tool_calls:
                     # Final Response
-                    yield {"type": "done", "data": FinalResponse(content=content_accumulator.strip())}
+                    yield {"event": "done", "data": FinalResponse(content=content_accumulator.strip())}
                 else:
-                    yield {"type": "done", "data": pending_tool_calls}
+                    yield {"event": "done", "data": pending_tool_calls}
             elif chunk_type == "error":
                 yield {"event": "error", "data": {"message": chunk["message"]}}
 

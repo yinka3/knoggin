@@ -261,7 +261,7 @@ class ProfileRefinementJob(BaseJob):
                 # Clear IDs from dirty queue to prevent infinite loop
                 # We clear both successfully updated entities AND entities that had no new context/facts
                 processed_ids = []
-                if 'clear_ids' in locals() and clear_ids:
+                if clear_ids:
                     processed_ids.extend([str(eid) for eid in clear_ids])
                     
                 if processed_ids:

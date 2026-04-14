@@ -76,7 +76,12 @@ class Scheduler:
                 try:
                     await asyncio.wait_for(task, timeout=30.0)
                 except asyncio.TimeoutError:
-                    logger.warning("Job timed out during shutdown")
+                    logger.warning("Job timed out during shutdown, cancelling task")
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
         
         ctx = await self._build_context()
         for job in self._jobs.values():
@@ -121,28 +126,31 @@ class Scheduler:
     async def _monitor_loop(self):
         """Main loop - check jobs periodically."""
         while self._is_running:
-            await asyncio.sleep(self.CHECK_INTERVAL)
-            
-            ctx = await self._build_context()
-            
-            for job_name, job in self._jobs.items():
-                ctx.last_run = self._last_runs.get(job_name)
+            try:
+                await asyncio.sleep(self.CHECK_INTERVAL)
                 
-                try:
-                    current_task = self._running_tasks.get(job_name)
-                    if current_task and not current_task.done():
-                        logger.debug(f"Skipping {job_name}: previous run still active.")
-                        continue
+                ctx = await self._build_context()
+                
+                for job_name, job in self._jobs.items():
+                    ctx.last_run = self._last_runs.get(job_name)
+                    
+                    try:
+                        current_task = self._running_tasks.get(job_name)
+                        if current_task and not current_task.done():
+                            logger.debug(f"Skipping {job_name}: previous run still active.")
+                            continue
 
-                    if not getattr(job, 'enabled', True):
-                        continue
-                    if await job.should_run(ctx):
-                        task = asyncio.create_task(self._execute_job(job, ctx))
-                        self._running_tasks[job_name] = task
-                        task.add_done_callback(lambda t, name=job_name: self._cleanup_task(name, t))
+                        if not getattr(job, 'enabled', True):
+                            continue
+                        if await job.should_run(ctx):
+                            task = asyncio.create_task(self._execute_job(job, ctx))
+                            self._running_tasks[job_name] = task
+                            task.add_done_callback(lambda t, name=job_name: self._cleanup_task(name, t))
 
-                except Exception as e:
-                    logger.error(f"Job {job_name} check failed: {e}")
+                    except Exception as e:
+                        logger.error(f"Job {job_name} check failed: {e}")
+            except Exception as e:
+                logger.error(f"Scheduler monitor loop error: {e}")
     
     async def _execute_job(self, job: BaseJob, ctx: JobContext):
         """Execute a single job with error handling."""

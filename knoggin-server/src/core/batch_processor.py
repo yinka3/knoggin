@@ -135,7 +135,7 @@ class BatchProcessor:
                 result.alias_updated_ids = res.alias_ids
                 result.alias_updates = res.alias_updates
                 user_id = await self.ent_resolver.get_id(self.user_name)
-                if user_id and user_id not in res.entity_ids:
+                if user_id is not None and user_id not in res.entity_ids:
                     res.entity_ids.append(user_id)
                 
                 connections = await self._extract_connections(res.entity_ids, res.entity_msg_map, messages, session_text)
@@ -300,13 +300,17 @@ class BatchProcessor:
                     ent_id = top_id
                     batch_matched_ids.add(ent_id)
 
-                    existing_id, aliases_added, new_aliases = self.ent_resolver.validate_existing(
-                        name.strip(), [name.strip()]
-                    )
-                    if existing_id and aliases_added:
-                        self.ent_resolver.commit_new_aliases(existing_id, new_aliases)
-                        alias_ids.add(existing_id)
-                        alias_updates[existing_id] = new_aliases
+                    profile = await self.ent_resolver.get_profile(ent_id)
+                    if profile:
+                        existing_id, aliases_added, new_aliases = self.ent_resolver.validate_existing(
+                            profile["canonical_name"], [name.strip()]
+                        )
+                        if existing_id and aliases_added:
+                            self.ent_resolver.commit_new_aliases(existing_id, new_aliases)
+                            alias_ids.add(existing_id)
+                            if existing_id not in alias_updates:
+                                alias_updates[existing_id] = []
+                            alias_updates[existing_id].extend(new_aliases)
 
             if ent_id is None:
                 if canonical_lower in created_in_batch:

@@ -89,7 +89,11 @@ async def create_session(
 
     if body and body.enabled_tools is not None:
         raw = await state.resources.redis.hget(RedisKeys.sessions(state.user_name), context.session_id)
-        metadata = json.loads(raw)
+        if raw:
+            try:
+                metadata = json.loads(raw)
+            except json.JSONDecodeError:
+                metadata = {}
         metadata["enabled_tools"] = body.enabled_tools
         await state.resources.redis.hset(
             RedisKeys.sessions(state.user_name),
@@ -98,7 +102,12 @@ async def create_session(
         )
     
     raw = await state.resources.redis.hget(RedisKeys.sessions(state.user_name), context.session_id)
-    metadata = json.loads(raw)
+    metadata = {}
+    if raw:
+        try:
+            metadata = json.loads(raw)
+        except json.JSONDecodeError:
+            pass
     
     return {
         "session_id": context.session_id,

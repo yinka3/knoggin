@@ -49,7 +49,13 @@ class MCPClientManager:
     def __init__(self):
         self._servers: Dict[str, MCPServerConnection] = {}
         self._tool_registry: Dict[str, Tuple[str, str]] = {}  # namespaced_name -> (server_name, original_tool_name)
-        self._lock = asyncio.Lock()
+        self.__lock = None
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        if self.__lock is None:
+            self.__lock = asyncio.Lock()
+        return self.__lock
 
     @classmethod
     async def create(cls, mcp_config: dict) -> "MCPClientManager":

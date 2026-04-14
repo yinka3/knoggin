@@ -121,7 +121,7 @@ class GraphWriter:
                 return deleted
         except Exception as e:
             logger.error(f"Failed to delete old facts: {e}")
-            return 0
+            raise
     
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         """
@@ -184,7 +184,8 @@ class GraphWriter:
                         e.canonical_name = data.canonical_name,
                         e.confidence = data.confidence,
                         e.last_updated = timestamp(),
-                        e.last_mentioned = timestamp()
+                        e.last_mentioned = timestamp(),
+                        e.embedding = case when data.embedding IS NOT NULL then data.embedding else e.embedding end
 
                     WITH e, data
                     UNWIND coalesce(e.aliases, []) + data.aliases AS alias
@@ -199,7 +200,7 @@ class GraphWriter:
                 """, batch=entity_params)
 
             if relationship_params:
-                await tx.run("""
+                result = await tx.run("""
                     UNWIND $batch AS rel
                     MATCH (a:Entity {id: rel.entity_a_id})
                     MATCH (b:Entity {id: rel.entity_b_id})
@@ -229,7 +230,12 @@ class GraphWriter:
                     UNWIND coalesce(r.message_ids, []) + [rel.message_id] AS mid
                     WITH r, collect(DISTINCT mid) AS unique_ids
                     SET r.message_ids = unique_ids
+                    RETURN count(DISTINCT r) AS created_count
                 """, batch=relationship_params)
+                record = await result.single()
+                created = record["created_count"] if record else 0
+                if created < len(relationship_params):
+                    logger.warning(f"write_batch created/updated {created} relationship edges for {len(relationship_params)} inputs. Some entities might be missing.")
 
         async with self.driver.session() as session:
             await session.execute_write(_write)
@@ -482,9 +488,9 @@ class GraphWriter:
             await tx.run("""
                 MATCH (s:Entity {id: $secondary_id})-[r:HAS_FACT]->(f:Fact)
                 MATCH (p:Entity {id: $primary_id})
-                DELETE r
-                CREATE (p)-[:HAS_FACT]->(f)
+                MERGE (p)-[:HAS_FACT]->(f)
                 SET f.source_entity_id = $primary_id
+                DELETE r
             """, primary_id=primary_id, secondary_id=secondary_id)
 
             # Step 4a: Transfer Topic memberships (BELONGS_TO)

@@ -385,7 +385,7 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         if isinstance(data, str):
             preview = data[:100] + "..." if len(data) > 100 else data
             return f"MCP result: {preview}", 1
-        return f"MCP result: {len(data)} items" if isinstance(data, list) else "MCP completed", 1
+        return (f"MCP result: {len(data)} items" if isinstance(data, list) else "MCP completed"), 1
 
     return "Completed", 1
 

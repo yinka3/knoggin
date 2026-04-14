@@ -95,6 +95,10 @@ class BatchConsumer:
         """Force a partial drain of the buffer. Blocks until complete."""
         if self._task is None or self._task.done():
             return
+        if self._flush_future is not None and not self._flush_future.done():
+            await self._flush_future
+            return
+            
         future = asyncio.get_running_loop().create_future()
         self._flush_future = future
         self._wake_event.set()
@@ -152,9 +156,12 @@ class BatchConsumer:
                     self._flush_future = None
 
         logger.info("BatchConsumer shutting down, final drain...")
-        await self._drain_buffer(flush_partial=True)
-        await self.run_session_jobs()
-        logger.info("BatchConsumer shutdown complete")
+        try:
+            await self._drain_buffer(flush_partial=True)
+            await self.run_session_jobs()
+            logger.info("BatchConsumer shutdown complete")
+        except Exception as e:
+            logger.error(f"BatchConsumer shutdown sequence failed: {e}")
 
     
 
@@ -236,7 +243,13 @@ class BatchConsumer:
                         await self.redis.ltrim(self._buffer_key, len(messages), -1)
                         continue
 
-                    if result.extraction_result:
+                    has_writes = bool(
+                        result.extraction_result or 
+                        result.new_entity_ids or 
+                        result.alias_updated_ids or
+                        result.alias_updates
+                    )
+                    if has_writes:
                         try:
                             graph_success, error_msg = await asyncio.wait_for(
                                 self.write_to_graph(result),

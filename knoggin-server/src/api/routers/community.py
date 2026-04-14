@@ -101,7 +101,10 @@ async def get_community_agent_memory(agent_id: str, request: Request):
     entries = []
     if raw:
         for mem_id, payload in raw.items():
-            data = json.loads(payload)
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
             entries.append({
                 "id": mem_id,
                 "content": data.get("content", ""),

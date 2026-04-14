@@ -22,7 +22,13 @@ from common.errors.agent import DependencyError, ConfigurationError
 
 class ResourceManager:
     _instance: Optional['ResourceManager'] = None
-    _lock = asyncio.Lock()
+    _lock = None
+    
+    @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
     
     def __init__(self):
         self.store = None
@@ -40,7 +46,7 @@ class ResourceManager:
     @classmethod
     async def initialize(cls, num_workers: int = 4) -> 'ResourceManager':
         """Initialize all resources concurrently."""
-        async with cls._lock:
+        async with cls._get_lock():
             if cls._instance is not None:
                 return cls._instance
 
@@ -107,7 +113,9 @@ class ResourceManager:
                 
                 mcp_config = config.mcp
                 instance.mcp_manager = await MCPClientManager.create(mcp_config.model_dump())
-                instance.community_store = CommunityStore(instance.store.driver)
+                
+                await instance.store.initialize()
+                instance.community_store = instance.store.community
 
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
@@ -139,19 +147,20 @@ class ResourceManager:
     
     async def shutdown(self):
         """Release all managed resources."""
-        if self.executor:
-            self.executor.shutdown(wait=True)
-        await AsyncRedisClient.close_redis()
-        if self.store:
-            await self.store.close()
-        if self.embedding:
-            self.embedding.cleanup()
-        if self.mcp_manager:
-            await self.mcp_manager.shutdown()
-        if self.llm_service:
-            await self.llm_service.close()
-        self.gliner = None
-        self.spacy = None
-        self.chroma = None
-        logger.info("ResourceManager shutdown complete")
-        self.__class__._instance = None
+        async with self.__class__._get_lock():
+            if self.executor:
+                self.executor.shutdown(wait=True)
+            await AsyncRedisClient.close_redis()
+            if self.store:
+                await self.store.close()
+            if self.embedding:
+                self.embedding.cleanup()
+            if self.mcp_manager:
+                await self.mcp_manager.shutdown()
+            if self.llm_service:
+                await self.llm_service.close()
+            self.gliner = None
+            self.spacy = None
+            self.chroma = None
+            logger.info("ResourceManager shutdown complete")
+            self.__class__._instance = None

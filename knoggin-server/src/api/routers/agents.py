@@ -164,10 +164,13 @@ async def get_session_memory(
         if raw:
             entries = []
             for mem_id, payload in raw.items():
-                data = json.loads(payload)
+                try:
+                    data = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
                 entries.append({
                     "id": mem_id,
-                    "content": data["content"],
+                    "content": data.get("content", ""),
                     "topic": data.get("topic", topic),
                     "created_at": data.get("created_at", ""),
                 })
@@ -196,7 +199,10 @@ async def get_agent_memory(
         entries = []
         if raw:
             for mem_id, payload in raw.items():
-                data = json.loads(payload)
+                try:
+                    data = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
                 data["id"] = mem_id
                 entries.append(data)
             

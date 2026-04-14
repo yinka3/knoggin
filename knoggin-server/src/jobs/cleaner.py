@@ -60,7 +60,7 @@ class EntityCleanupJob(BaseJob):
             junk_cutoff = now_ms - self.stale_cutoff_ms
             
             user_id = await self.ent_resolver.get_id(self.user_name)
-            if not user_id:
+            if user_id is None:
                 await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
                 return JobResult(success=True, summary="User entity not initialized")
 

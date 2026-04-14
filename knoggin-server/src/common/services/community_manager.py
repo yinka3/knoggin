@@ -197,7 +197,15 @@ class CommunityManager:
         for category in ["rules", "preferences", "icks"]:
             key = RedisKeys.agent_working_memory(agent.id, category)
             raw = await self.resources.redis.hgetall(key)
-            entries = [json.loads(v).get("content", "") for v in raw.values()] if raw else []
+            entries = []
+            if raw:
+                for v in raw.values():
+                    try:
+                        parsed = json.loads(v)
+                        if "content" in parsed:
+                            entries.append(parsed["content"])
+                    except json.JSONDecodeError:
+                        continue
             if entries:
                 if category == "rules":
                     agent_rules = entries
@@ -312,7 +320,15 @@ class CommunityManager:
         for category in ["rules", "preferences", "icks"]:
             key = RedisKeys.agent_working_memory(seeding_agent.id, category)
             raw = await self.resources.redis.hgetall(key)
-            entries = [json.loads(v).get("content", "") for v in raw.values()] if raw else []
+            entries = []
+            if raw:
+                for v in raw.values():
+                    try:
+                        parsed = json.loads(v)
+                        if "content" in parsed:
+                            entries.append(parsed["content"])
+                    except json.JSONDecodeError:
+                        continue
             memory_blocks[category] = "\n".join(entries)
 
         comm_mem_key = RedisKeys.community_agent_memory(self.user_name, seeding_agent.id)

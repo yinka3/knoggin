@@ -18,8 +18,12 @@ class CommunityStore:
         async def _create(tx: AsyncManagedTransaction):
             await tx.run(query, id=discussion_id, topic=topic, agent_ids=agent_ids, ts=datetime.now(timezone.utc).isoformat())
             
-        async with self.driver.session() as session:
-            await session.execute_write(_create)
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_create)
+        except Exception as e:
+            logger.error(f"Failed to create_discussion: {e}")
+            raise
 
     async def add_message(self, discussion_id: str, agent_id: str, content: str, role: str = "agent"):
         query = """
@@ -30,8 +34,12 @@ class CommunityStore:
         async def _add(tx: AsyncManagedTransaction):
             await tx.run(query, discussion_id=discussion_id, agent_id=agent_id, content=content, role=role, ts=datetime.now(timezone.utc).isoformat())
             
-        async with self.driver.session() as session:
-            await session.execute_write(_add)
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_add)
+        except Exception as e:
+            logger.error(f"Failed to add_message in discussion {discussion_id}: {e}")
+            raise
 
     async def close_discussion(self, discussion_id: str):
         query = """
@@ -41,8 +49,12 @@ class CommunityStore:
         async def _close(tx: AsyncManagedTransaction):
             await tx.run(query, id=discussion_id, ts=datetime.now(timezone.utc).isoformat())
             
-        async with self.driver.session() as session:
-            await session.execute_write(_close)
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_close)
+        except Exception as e:
+            logger.error(f"Failed to close_discussion: {e}")
+            raise
 
     async def register_agent_spawn(self, parent_id: str, child_id: str, detail: str = ""):
         query = """
@@ -53,8 +65,12 @@ class CommunityStore:
         async def _register(tx: AsyncManagedTransaction):
             await tx.run(query, parent_id=parent_id, child_id=child_id, detail=detail, ts=datetime.now(timezone.utc).isoformat())
             
-        async with self.driver.session() as session:
-            await session.execute_write(_register)
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_register)
+        except Exception as e:
+            logger.error(f"Failed to register_agent_spawn: {e}")
+            raise
 
     async def get_discussions(self) -> List[Dict]:
         query = """

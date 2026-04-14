@@ -194,7 +194,13 @@ async def write_batch_callback(
 
     Returns (success, error_message).
     """
-    if not batch.extraction_result:
+    has_writes = bool(
+        batch.extraction_result or
+        batch.new_entity_ids or
+        batch.alias_updated_ids or
+        batch.alias_updates
+    )
+    if not has_writes:
         return True, None
 
     try:

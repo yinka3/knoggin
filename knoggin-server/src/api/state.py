@@ -148,26 +148,26 @@ class AppState:
             if session_id not in self.active_sessions:
                 return False
             
-            context = self.active_sessions[session_id]
-            await context.shutdown()
-            del self.active_sessions[session_id]
+            context = self.active_sessions.pop(session_id)
             self._session_locks.pop(session_id, None)
-            
-            raw = await self.resources.redis.hget(RedisKeys.sessions(self.user_name), session_id)
-            if raw:
-                try:
-                    metadata = json.loads(raw)
-                    metadata["last_active"] = datetime.now(timezone.utc).isoformat()
-                    await self.resources.redis.hset(
-                        RedisKeys.sessions(self.user_name),
-                        session_id,
-                        json.dumps(metadata)
-                    )
-                except json.JSONDecodeError:
-                    pass
-            
-            logger.info(f"Closed session: {session_id}")
-            return True
+        
+        await context.shutdown()
+        
+        raw = await self.resources.redis.hget(RedisKeys.sessions(self.user_name), session_id)
+        if raw:
+            try:
+                metadata = json.loads(raw)
+                metadata["last_active"] = datetime.now(timezone.utc).isoformat()
+                await self.resources.redis.hset(
+                    RedisKeys.sessions(self.user_name),
+                    session_id,
+                    json.dumps(metadata)
+                )
+            except json.JSONDecodeError:
+                pass
+        
+        logger.info(f"Closed session: {session_id}")
+        return True
     
     async def list_agents(self) -> List[AgentConfig]:
         """List all agents."""
@@ -341,7 +341,11 @@ class AppState:
         for raw in turn_data:
             if not raw:
                 continue
-            parsed = json.loads(raw)
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Skipping corrupted turn in readonly history")
+                continue
             turns.append({
                 "role": parsed["role"],
                 "content": parsed["content"],
@@ -374,7 +378,9 @@ class AppState:
             RedisKeys.msg_to_turn_lookup(user, session_id),
             RedisKeys.last_activity(user, session_id),
             RedisKeys.merge_proposals(user, session_id),
+            RedisKeys.merge_intents_index(user, session_id),
             RedisKeys.user_profile_ran(user, session_id),
+            RedisKeys.heartbeat_counter(user, session_id),
         ]
 
         memory_pattern = f"memory:{user}:{session_id}:*"
@@ -424,7 +430,10 @@ class AppState:
             self.global_scheduler = None
 
         for session_id in list(self.active_sessions.keys()):
-            await self.close_session(session_id)
+            try:
+                await self.close_session(session_id)
+            except Exception as e:
+                logger.error(f"Failed to close session {session_id} during shutdown: {e}")
         
         await self.resources.shutdown()
         logger.info("AppState shutdown complete")

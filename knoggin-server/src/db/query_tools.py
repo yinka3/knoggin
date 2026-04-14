@@ -66,8 +66,8 @@ class GraphToolQueries:
     @staticmethod
     def _sanitize_fts_query(query: str) -> str:
         """Strip characters that can break Memgraph full-text search."""
-        # Remove FTS operators and special chars
-        sanitized = re.sub(r'[+\-"*~^\\:(){}[\]]', ' ', query)
+        # Remove FTS operators and special chars including ! & | ?
+        sanitized = re.sub(r'[+\-"*~^\\:(){}[\]!&|?]', ' ', query)
         # Collapse whitespace
         sanitized = re.sub(r'\s+', ' ', sanitized).strip()
         return sanitized
@@ -111,6 +111,8 @@ class GraphToolQueries:
         WITH e, t, score
         WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
         
+        WITH e, t, score LIMIT $limit
+        
         OPTIONAL MATCH (e)-[:PART_OF]->(parent:Entity)
         OPTIONAL MATCH (child:Entity)-[:PART_OF]->(e)
         OPTIONAL MATCH (e)-[r:RELATED_TO]-(conn:Entity)
@@ -134,7 +136,6 @@ class GraphToolQueries:
             [(conn)-[:HAS_FACT]->(cf) WHERE cf.invalid_at IS NULL | cf.content] AS conn_facts,
             parent.canonical_name AS parent_name,
             children_count
-        LIMIT $limit
         """
 
         params = {

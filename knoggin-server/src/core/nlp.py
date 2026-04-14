@@ -1,5 +1,4 @@
 import asyncio
-from email.mime import text
 import threading
 from core.prompts import ner_reasoning_prompt
 from common.services.llm_service import LLMService
@@ -39,6 +38,7 @@ class NLPPipeline:
         self.gliner_threshold = gliner_threshold
         self.vp01_min_confidence = vp01_min_confidence
         self.ner_prompt = ner_prompt
+        self.llm_ner = True
         self._spacy_lock = threading.Lock()
 
     def update_settings(self, gliner_threshold=None, vp01_min_confidence=None, ner_prompt=None, llm_ner=None):
@@ -267,6 +267,9 @@ class NLPPipeline:
                     continue
                     
                 if validate_entity(entity.name, entity.topic, self.topic_config, label=entity.type):
+                    if is_covered(entity.name, covered_texts.get(entity.msg_id, set())):
+                        logger.debug(f"VP-01 entity '{entity.name}' filtered (already covered)")
+                        continue
                     if entity.name.lower() in gliner_filtered:
                         logger.info(f"VP-01 recovered GLiNER-filtered entity: '{entity.name}'")
                     output.append((entity.msg_id, entity.name, entity.type, entity.topic))

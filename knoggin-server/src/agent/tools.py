@@ -407,7 +407,10 @@ class Tools:
             if msg_key.startswith("msg_"):
                 raw = user_contents.get(msg_key)
                 if raw:
-                    data = json.loads(raw)
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
                     output.append({
                         "id": msg_key,
                         "role": "user",
@@ -419,7 +422,10 @@ class Tools:
             else:
                 raw = assistant_contents.get(msg_key)
                 if raw:
-                    data = json.loads(raw)
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
                     output.append({
                         "id": msg_key,
                         "role": data.get("role", "assistant"),
@@ -624,11 +630,14 @@ class Tools:
                 messages = []
                 for msg_id, raw_msg in zip(msg_ids, raw_msgs):
                     if raw_msg:
-                        parsed = json.loads(raw_msg)
-                        messages.append({
-                            "id": msg_id,
-                            "message": parsed["message"]
-                        })
+                        try:
+                            parsed = json.loads(raw_msg)
+                            messages.append({
+                                "id": msg_id,
+                                "message": parsed.get("message", "")
+                            })
+                        except json.JSONDecodeError:
+                            continue
                 data["messages"] = messages
             else:
                 data["messages"] = []

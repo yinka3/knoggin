@@ -22,7 +22,7 @@ class AACJob(BaseJob):
             return False
             
         interval_min = comm_cfg.interval_minutes
-        last_run = await ctx.resources.redis.get(RedisKeys.job_last_run(self.name, ctx.user_name, "global"))
+        last_run = await ctx.redis.get(RedisKeys.job_last_run(self.name, ctx.user_name, "global"))
         
         if not last_run:
             return True
@@ -41,7 +41,7 @@ class AACJob(BaseJob):
             
             await manager.store.delete_old_discussions(30)
             
-            await ctx.resources.redis.set(
+            await ctx.redis.set(
                 RedisKeys.job_last_run(self.name, ctx.user_name, "global"),
                 datetime.now(timezone.utc).isoformat()
             )

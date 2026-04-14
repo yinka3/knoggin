@@ -67,7 +67,7 @@ class EntityResolver:
         
         with self._lock:
             stored_id = self._name_to_id.get(lower_name)
-            if stored_id:
+            if stored_id is not None:
                 return stored_id
         found = await self.store.get_entities_by_names([name])
         if found:
@@ -211,13 +211,14 @@ class EntityResolver:
     
         with self._lock:
             profiles_snapshot = dict(self.entity_profiles)
+            aliases_snapshot = {eid: list(self._id_to_names.get(eid, set())) for eid in profiles_snapshot}
         
         for ent_id, profile in profiles_snapshot.items():
             canonical = profile.get("canonical_name", "").lower()
             for token in canonical.split():
                 token_to_entities[token].add(ent_id)
             
-            for alias in self.get_mentions_for_id(ent_id):
+            for alias in aliases_snapshot.get(ent_id, []):
                 for token in alias.lower().split():
                     token_to_entities[token].add(ent_id)
         
@@ -392,7 +393,7 @@ class EntityResolver:
                 profiles[eid] = p
         
         for eid, profile in profiles.items():
-            names = self.get_mentions_for_id(eid)
+            names = list(self.get_mentions_for_id(eid))
             names.append(profile["canonical_name"].lower())
             
             for name in names:
@@ -458,26 +459,26 @@ class EntityResolver:
         if not entity_ids:
             return 0
         
-        removed: int = 0
+        removed = 0
         with self._lock:
             for eid in entity_ids:
                 if eid in self.entity_profiles:
                     del self.entity_profiles[eid]
-                    removed = int(removed) + 1
+                    removed += 1
                 
-                to_remove = [alias for alias, id_ in self._name_to_id.items() if id_ == eid]
+                to_remove = list(self._id_to_names.get(eid, set()))
                 for alias in to_remove:
-                    del self._name_to_id[alias]
+                    self._name_to_id.pop(alias, None)
                 
                 self._id_to_names.pop(eid, None)
         
-        if int(removed) > 0:
+        if removed > 0:
             logger.info(f"Removed {removed} entities from resolver")
             emit_sync(self.session_id, "resolver", "entities_removed", {
                 "requested": len(entity_ids),
-                "removed": int(removed)
+                "removed": removed
             })
-        return int(removed)
+        return removed
 
 
     async def _collect_candidate_pairs(
@@ -605,8 +606,8 @@ class EntityResolver:
             "secondary_session": profile_b.get("session_id"),
             "topic_a": topic_a,
             "topic_b": topic_b,
-            "facts_a": facts_by_entity[id_a],
-            "facts_b": facts_by_entity[id_b],
+            "facts_a": facts_by_entity.get(id_a, []),
+            "facts_b": facts_by_entity.get(id_b, []),
             "fuzz_score": fuzz_score,
             "shared_neighbor_count": len(shared_neighbors)
         }

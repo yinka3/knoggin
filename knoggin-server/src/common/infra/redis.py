@@ -16,12 +16,18 @@ REDIS_PORT = os.environ.get("REDIS_PORT", "6379")
 class AsyncRedisClient:
     """Singleton async Redis client with health checks and auto-reconnection."""
     _instance = None
-    _lock = asyncio.Lock()
+    _lock = None
+
+    @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
 
     @classmethod
     async def get_instance(cls) -> aioredis.Redis:
         """Async-safe singleton accessor with health check."""
-        async with cls._lock:
+        async with cls._get_lock():
             # Check if instance exists and is responsive
             is_healthy = False
             if cls._instance is not None:
@@ -64,7 +70,7 @@ class AsyncRedisClient:
     @classmethod
     async def close_redis(cls):
         """Close the Redis connection pool."""
-        async with cls._lock:
+        async with cls._get_lock():
             await cls._close_unlocked()
 
     @classmethod

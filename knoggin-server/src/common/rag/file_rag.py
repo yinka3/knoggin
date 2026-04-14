@@ -70,7 +70,7 @@ class FileRAGService:
         self.manifest_path = self.upload_dir / "manifest.json"
         self.parents_path = self.upload_dir / "parent_chunks.json"
 
-        self._collection_name = f"session-{session_id[:58]}"  # ChromaDB 63 char limit
+        self._collection_name = f"session-{session_id[:58]}"
         self._collection = None
 
         self._default_parent_splitter = RecursiveCharacterTextSplitter(
@@ -122,9 +122,12 @@ class FileRAGService:
         if self._manifest_cache is not None:
             return self._manifest_cache
         if self.manifest_path.exists():
-            with open(self.manifest_path, "r") as f:
-                self._manifest_cache = json.load(f)
-                return self._manifest_cache
+            try:
+                with open(self.manifest_path, "r") as f:
+                    self._manifest_cache = json.load(f)
+                    return self._manifest_cache
+            except json.JSONDecodeError as e:
+                logger.warning(f"Corrupt manifest file {self.manifest_path}: {e}")
         self._manifest_cache = {}
         return self._manifest_cache
 
@@ -138,9 +141,12 @@ class FileRAGService:
         if self._parent_cache is not None:
             return self._parent_cache
         if self.parents_path.exists():
-            with open(self.parents_path, "r") as f:
-                self._parent_cache = json.load(f)
-                return self._parent_cache
+            try:
+                with open(self.parents_path, "r") as f:
+                    self._parent_cache = json.load(f)
+                    return self._parent_cache
+            except json.JSONDecodeError as e:
+                logger.warning(f"Corrupt parent chunks file {self.parents_path}: {e}")
         self._parent_cache = {}
         return self._parent_cache
 

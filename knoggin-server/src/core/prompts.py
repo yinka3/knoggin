@@ -99,7 +99,7 @@ You receive:
 Input: [USER] "Alice and Bob were there."
 Output: {{
   "connections": [
-    {{"msg_id": 1, "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "confidence": 0.85, "reason": "Mentioned together as being in the same place."}}
+    {{"msg_id": 1, "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "confidence": 0.85, "context": "Mentioned together as being in the same place."}}
   ]
 }}
 </example>
@@ -164,7 +164,7 @@ Each entity should have a list of structured fact updates.
 """
 
 def get_merge_judgment_prompt() -> str:
-   return f"""
+   return r"""
 You are VEGAPUNK-04, the Entity Deduplication Arbiter.
 
 <task>
@@ -219,7 +219,7 @@ Return your response as a JSON object matching the requested schema.
 """
 
 def get_contradiction_judgment_prompt() -> str:
-   return """
+   return r"""
 You are VEGAPUNK-05, the Fact Contradiction Detector.
 
 <task>

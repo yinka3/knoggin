@@ -35,13 +35,16 @@ async def list_merge_proposals(session_id: str, state: AppState = Depends(get_ap
 
     proposals = []
     for idx, raw in enumerate(raw_proposals, start=1):
-        p = json.loads(raw)
+        try:
+            p = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
         proposals.append({
             "index": idx,
             "primary_id": p.get("primary_id"),
             "secondary_id": p.get("secondary_id"),
-            "primary_name": p["primary_name"],
-            "secondary_name": p["secondary_name"],
+            "primary_name": p.get("primary_name", "Unknown"),
+            "secondary_name": p.get("secondary_name", "Unknown"),
             "score": p.get("llm_score", 0),
             "created_at": p.get("created_at")
         })
@@ -92,7 +95,6 @@ async def approve_merge_proposal(
     undo_key = RedisKeys.merge_undo(session_id, primary_id, secondary_id)
     await redis.setex(undo_key, UNDO_TTL_SECONDS, json.dumps(snapshot))
 
-    loop = asyncio.get_running_loop()
     success = await store.merge_entities(primary_id, secondary_id)
 
     if not success:
@@ -233,8 +235,6 @@ async def _build_merge_snapshot(
     primary_name: str, secondary_name: str
 ) -> dict:
     """Capture full pre-merge state for undo capability."""
-    loop = asyncio.get_running_loop()
-
     entity_data = await store.get_entity_by_id(secondary_id)
     embedding = resolver.get_embedding_for_id(secondary_id)
 
@@ -299,8 +299,6 @@ async def _build_merge_snapshot(
 
 async def _execute_undo(store, resolver, redis, snapshot: dict, session_id: str) -> dict:
     """Restore secondary entity from snapshot."""
-    loop = asyncio.get_running_loop()
-
     primary_id = snapshot["primary_id"]
     ent_data = snapshot["entity"]
 

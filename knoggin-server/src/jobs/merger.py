@@ -195,7 +195,14 @@ class MergeDetectionJob(BaseJob):
                 await ctx.redis.srem(index_key, key)
                 continue
                 
-            item = json.loads(data_raw)
+            try:
+                item = json.loads(data_raw)
+            except json.JSONDecodeError:
+                logger.error(f"Recovery: Corrupt merge intent for key {key}, discarding")
+                await ctx.redis.delete(key)
+                await ctx.redis.srem(index_key, key)
+                continue
+                
             p_id = item["primary_id"]
             s_id = item["secondary_id"]
             

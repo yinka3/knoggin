@@ -132,7 +132,7 @@ class GraphReader:
         OPTIONAL MATCH (f)-[:EXTRACTED_FROM]->(m:Message)
         RETURN f.id as id, f.source_entity_id as source_entity_id, f.content as content, 
             f.valid_at as valid_at, f.invalid_at as invalid_at, f.confidence as confidence, 
-            f.embedding as embedding, m.id as source_msg_id
+            f.embedding as embedding, m.id as source_msg_id, f.source as source
         ORDER BY f.created_at DESC
         """
         
@@ -162,7 +162,7 @@ class GraphReader:
         RETURN e.id as entity_id, f.id as id, f.source_entity_id as source_entity_id,
             f.content as content, f.valid_at as valid_at, f.invalid_at as invalid_at, 
             f.confidence as confidence, f.embedding as embedding,
-            m.id as source_msg_id
+            m.id as source_msg_id, f.source as source
         ORDER BY e.id, f.created_at DESC
         """
         
@@ -195,7 +195,8 @@ class GraphReader:
             f.invalid_at as invalid_at, 
             f.confidence as confidence,
             f.embedding as embedding, 
-            $msg_id as source_msg_id
+            $msg_id as source_msg_id,
+            f.source as source
         """
         try:
             async with self.driver.session() as session:
@@ -219,7 +220,7 @@ class GraphReader:
                 return record["max_id"] if record and record["max_id"] is not None else 0
         except Exception as e:
             logger.error(f"Failed to get max entity ID: {e}")
-            return 0
+            raise
     
 
     async def get_entity_embedding(self, entity_id: int) -> List[float]:
@@ -249,7 +250,8 @@ class GraphReader:
             e.aliases AS aliases,
             e.type AS type,
             t.name AS topic,
-            e.session_id AS session_id
+            e.session_id AS session_id,
+            e.embedding AS embedding
         """
         try:
             async with self.driver.session() as session:
@@ -296,7 +298,6 @@ class GraphReader:
         MATCH (e:Entity)
         WHERE e.id <> $protected_id
         AND NOT EXISTS { MATCH (e)-[:HAS_FACT]->(f_active:Fact) WHERE f_active.invalid_at IS NULL }
-        AND e.last_mentioned < $orphan_cutoff 
 
         OPTIONAL MATCH (e)-[r:RELATED_TO]-(neighbor)
         WITH e, collect(neighbor.id) as neighbors, $stale_cutoff as stale_limit, $orphan_cutoff as orphan_limit
@@ -582,7 +583,7 @@ class GraphReader:
         {topic_match}
         {where_str}
         WITH e, t,
-            [(e)-[:HAS_FACT]->(f) | f.content][0..2] AS fact_snippets
+            [(e)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content][0..2] AS fact_snippets
         RETURN e.id AS id,
             e.session_id AS session_id,
             e.canonical_name AS canonical_name,
@@ -599,18 +600,20 @@ class GraphReader:
         """
         
         try:
-            async with self.driver.session() as session:
-                count_result = await session.run(count_query, params)
+            async def _read_tx(tx):
+                count_result = await tx.run(count_query, params)
                 count_record = await count_result.single()
                 total = count_record["total"] if count_record else 0
                 
                 if total == 0:
                     return [], 0
                 
-                result = await session.run(data_query, params)
+                result = await tx.run(data_query, params)
                 entities = await result.data()
-                
                 return entities, total
+
+            async with self.driver.session() as session:
+                return await session.execute_read(_read_tx)
         except Exception as e:
             logger.error(f"Failed to list entities: {e}")
             return [], 0
@@ -839,10 +842,11 @@ class GraphReader:
         OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
         WHERE f.invalid_at IS NULL
         WITH e, connection_count, count(f) as fact_count
+        OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         RETURN e.id as id,
             e.canonical_name as name,
             e.type as type,
-            e.topic as topic,
+            t.name as topic,
             connection_count,
             fact_count
         ORDER BY connection_count DESC

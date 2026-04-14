@@ -49,6 +49,7 @@ def is_generic_phrase(text: str, threshold: float = 5e-6) -> bool:
     if any(f < threshold for f in freqs):
         return False
     
+    # Single common word shouldn't be blocked here (handled by global Stop Word filters)
     if len(words) <= 1:
         return False
     
@@ -142,8 +143,9 @@ def format_vp01_input(
     
     lines.append("\n## GLiNER Extractions (can override if wrong)\n")
     gliner_resolved = []
+    known_spans = {k[0].lower() for k in known_ents}
     for msg_id, span, label in gliner_ents:
-        if span.lower() in covered_texts.get(msg_id, set()):
+        if span.lower() not in known_spans:
             if not any(span == a[1] for a in ambiguous):
                 gliner_resolved.append((msg_id, span, label))
     
@@ -159,7 +161,7 @@ def format_vp01_input(
             lines.append(f"- MSG {msg_id}: \"{span_text}\" ({label}) -> choose from: {topics}")
     
     lines.append("\n## Discovery (Task 2: find missed entities)")
-    lines.append("Scan messages above for proper nouns not listed in Already Resolved.")
+    lines.append("Scan messages above for proper nouns not listed in Known Entities or GLiNER extractions.")
     lines.append("Include the MSG id where you found each entity.")
     
     return "\n".join(lines)
@@ -248,6 +250,30 @@ async def fetch_conversation_turns(
             )
             turn_ids = list(reversed(turn_ids))
         else:
+            # DLQ Retry Guard: If up_to_msg_id isn't in DB, check if it's an old message by comparing to the latest.
+            latest_turn_ids = await redis_client.zrange(sorted_key, 0, 0, desc=True)
+            is_dlq_retry = False
+            latest_msg_id = None
+            
+            if latest_turn_ids:
+                latest_turn_data = await redis_client.hget(conv_key, latest_turn_ids[0])
+                if latest_turn_data:
+                    try:
+                        parsed = json.loads(latest_turn_data)
+                        latest_msg_id = parsed.get("user_msg_id")
+                        if latest_msg_id is not None and int(latest_msg_id) >= int(up_to_msg_id):
+                            is_dlq_retry = True
+                    except (ValueError, TypeError, Exception) as e:
+                        logger.warning(f"Failed to unpack latest turn for DLQ guard: {e}")
+            
+            if is_dlq_retry:
+                logger.warning(
+                    f"DLQ Guard: Msg {up_to_msg_id} missing from cache, but DB is already at msg {latest_msg_id}. "
+                    "Returning empty context to prevent leaking future messages."
+                )
+                return []
+
+            # If not a DLQ retry, it's a truly new message. Safe to grab the current state as context.
             turn_ids = await redis_client.zrange(
                 sorted_key, 0, num_turns - 1, desc=True
             )
@@ -269,17 +295,21 @@ async def fetch_conversation_turns(
     for turn_id, data in zip(turn_ids, turn_data):
         if not data:
             continue
-        parsed = json.loads(data)
-        results.append(
-            {
-                "turn_id": turn_id,
-                "role": parsed["role"],
-                "content": parsed["content"],
-                "timestamp": parsed["timestamp"],
-                "user_msg_id": parsed.get("user_msg_id"),
-                "metadata": parsed.get("metadata"),
-            }
-        )
+        try:
+            parsed = json.loads(data)
+            results.append(
+                {
+                    "turn_id": turn_id,
+                    "role": parsed["role"],
+                    "content": parsed["content"],
+                    "timestamp": parsed["timestamp"],
+                    "user_msg_id": parsed.get("user_msg_id"),
+                    "metadata": parsed.get("metadata"),
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Failed to parse turn data for {turn_id}: {e}")
+            continue
 
     return results
 

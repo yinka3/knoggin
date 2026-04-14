@@ -66,7 +66,11 @@ class TopicConfigJob(BaseJob):
         for turn_id, raw in zip(turn_ids, turn_data):
             if not raw:
                 continue
-            parsed = json.loads(raw)
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(f"Corrupt turn data for {turn_id}, skipping")
+                continue
             role = "USER" if parsed["role"] == "user" else "AGENT"
             lines.append(f"[{role}]: {parsed['content']}")
         
