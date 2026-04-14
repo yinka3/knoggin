@@ -20,8 +20,18 @@ from common.schema.memory import (
     WorkingMemoryClearResult,
 )
 
+from typing import NamedTuple
 
-MEMORY_CATEGORIES = ("rules", "preferences", "icks")
+class WorkingMemoryStrings(NamedTuple):
+    rules: str
+    preferences: str
+    icks: str
+
+assert len(WorkingMemoryStrings._fields) == 3, (
+    f"WorkingMemoryStrings changed to {len(WorkingMemoryStrings._fields)} items — "
+    f"update _load_working_memory_strings and all callers"
+)
+
 MAX_BLOCK_SIZE = 10
 MAX_CONTENT_LEN = 200
 
@@ -187,10 +197,20 @@ class MemoryManager:
         self, category: str, content: str,
     ) -> WorkingMemoryAddResult:
         """Add entry to a working memory category."""
-        if category not in MEMORY_CATEGORIES:
+        if category not in WorkingMemoryStrings._fields:
             return WorkingMemoryAddResult(
                 success=False,
-                error=f"Invalid category. Must be one of: {MEMORY_CATEGORIES}",
+                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
+            )
+
+        if not content or not content.strip():
+            return WorkingMemoryAddResult(success=False, error="Empty memory content")
+
+        content = content.strip()
+        if len(content) > MAX_CONTENT_LEN:
+            return WorkingMemoryAddResult(
+                success=False,
+                error=f"Working memory too long ({len(content)} chars). Max {MAX_CONTENT_LEN}."
             )
 
         mem_id = f"mem_{uuid.uuid4().hex[:8]}"
@@ -212,10 +232,10 @@ class MemoryManager:
         self, category: str, memory_id: str,
     ) -> WorkingMemoryRemoveResult:
         """Remove a working memory entry."""
-        if category not in MEMORY_CATEGORIES:
+        if category not in WorkingMemoryStrings._fields:
             return WorkingMemoryRemoveResult(
                 success=False,
-                error=f"Invalid category. Must be one of: {MEMORY_CATEGORIES}",
+                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
             )
 
         key = RedisKeys.agent_working_memory(self.agent_id, category)
@@ -237,11 +257,11 @@ class MemoryManager:
         self, category: str = None,
     ) -> WorkingMemoryListResult:
         """List working memory. Pass category or None for all."""
-        categories = [category] if category else list(MEMORY_CATEGORIES)
+        categories = [category] if category else list(WorkingMemoryStrings._fields)
         blocks: Dict[str, List[WorkingMemoryEntry]] = {}
 
         for cat in categories:
-            if cat not in MEMORY_CATEGORIES:
+            if cat not in WorkingMemoryStrings._fields:
                 continue
             key = RedisKeys.agent_working_memory(self.agent_id, cat)
             raw = await self.redis.hgetall(key)
@@ -265,10 +285,10 @@ class MemoryManager:
 
     async def clear_working_memory(self, category: str) -> WorkingMemoryClearResult:
         """Clear all entries in a working memory category."""
-        if category not in MEMORY_CATEGORIES:
+        if category not in WorkingMemoryStrings._fields:
             return WorkingMemoryClearResult(
                 success=False,
-                error=f"Invalid category. Must be one of: {MEMORY_CATEGORIES}",
+                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
             )
 
         key = RedisKeys.agent_working_memory(self.agent_id, category)
@@ -282,9 +302,6 @@ class MemoryManager:
             success=True, cleared=count, category=category,
         )
 
-    # ════════════════════════════════════════════════════════
-    #  PROMPT CONTEXT LOADING
-    # ════════════════════════════════════════════════════════
 
     async def load_prompt_strings(
         self, hot_topics: List[str] = None,
@@ -308,10 +325,9 @@ class MemoryManager:
 
         return memory_ctx, rules, prefs, icks
 
-    async def _load_working_memory_strings(self) -> Tuple[str, str, str]:
-        """Load working memory as formatted strings for prompt injection."""
-        result = []
-        for category in MEMORY_CATEGORIES:
+    async def _load_working_memory_strings(self) -> WorkingMemoryStrings:
+        result = {}
+        for category in WorkingMemoryStrings._fields:
             key = RedisKeys.agent_working_memory(self.agent_id, category)
             raw = await self.redis.hgetall(key)
             if raw:
@@ -321,14 +337,15 @@ class MemoryManager:
                         entries.append(f"- {json.loads(v)['content']}")
                     except json.JSONDecodeError:
                         continue
-                result.append("\n".join(entries))
+                result[category] = "\n".join(entries)
             else:
-                result.append("")
-        return tuple(result)
+                result[category] = ""
+        return WorkingMemoryStrings(
+            rules=result.get("rules", ""),
+            preferences=result.get("preferences", ""),
+            icks=result.get("icks", ""),
+        )
 
-    # ════════════════════════════════════════════════════════
-    #  DICT RETURNS (for tool dispatch compatibility)
-    # ════════════════════════════════════════════════════════
 
     async def save_memory_dict(self, content: str, topic: str = "General") -> dict:
         """save_memory returning a raw dict — used by the tool dispatch path."""

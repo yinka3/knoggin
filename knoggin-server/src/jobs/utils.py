@@ -1,14 +1,13 @@
-import asyncio
+
 from datetime import datetime
-import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 import numpy as np
 from rapidfuzz import fuzz
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 
 from db.store import MemGraphStore
-from src.common.schema.dtypes import Fact, FactMergeResult, ProfileUpdate
+from common.schema.dtypes import Fact, FactMergeResult, FactUpdate
 
 
 
@@ -64,80 +63,60 @@ def has_sufficient_facts(candidate: dict, min_facts: int = 1) -> bool:
 
 def process_extracted_facts(
     existing_facts: List[Fact],
-    new_facts: List[str]
+    new_facts: List[FactUpdate]
 ) -> FactMergeResult:
     """
-    Process LLM-extracted facts against existing Fact nodes.
-    Returns IDs to invalidate and new content strings to create.
+    Process structured LLM-extracted facts against existing Fact nodes.
+    Returns IDs to invalidate and new content strings (FactUpdate objects).
     """
     if not new_facts:
         return FactMergeResult(to_invalidate=[], new_contents=[])
 
     to_invalidate = []
-    new_contents = []
+    # We'll return the FactUpdate objects themselves as they now contain all metadata
+    updates_to_keep = []
 
     active_facts = [f for f in existing_facts if f.invalid_at is None]
 
-    for fact_str in new_facts:
-        fact_str = fact_str.strip()
-
-        sup_match = re.search(r"^\[SUPERSEDES:\s*(.+?)\]\s*(.+)$", fact_str, re.DOTALL)
-        if sup_match:
-            old_text = sup_match.group(1).strip()
-            new_text = sup_match.group(2).strip()
-            
-            new_text_clean = re.sub(r"\s*\[MSG_?\d+\]\s*$", "", new_text).strip()
-
-            if not old_text:
-                logger.warning(f"SUPERSEDES with empty target, treating as new fact: {new_text_clean}")
-                if not _is_duplicate(new_text_clean, active_facts):
-                    new_contents.append(new_text)
-                continue
-            
+    for fact_update in new_facts:
+        content = fact_update.content.strip()
+        
+        # Handle supersedes
+        if fact_update.supersedes:
+            old_text = fact_update.supersedes.strip()
             matched_fact = _find_matching_fact(old_text, active_facts)
             if matched_fact:
                 to_invalidate.append(matched_fact.id)
                 active_facts = [f for f in active_facts if f.id != matched_fact.id]
             else:
-                logger.warning(f"SUPERSEDES target not found: '{old_text}' — adding new fact anyway")
+                logger.warning(f"SUPERSEDES target not found: '{old_text}'")
             
-            content_clean = re.sub(r"\s*\[MSG_?\d+\]\s*$", "", fact_str).strip()
-            if not _is_duplicate(content_clean, active_facts):
-                new_contents.append(fact_str)
+            if not _is_duplicate(content, active_facts):
+                updates_to_keep.append(fact_update)
             continue
 
-        inv_match = re.search(r"^\[INVALIDATES:\s*(.+?)\](?:\s*\[MSG_?\d+\])?\s*$", fact_str, re.DOTALL)
-        if inv_match:
-            old_text = inv_match.group(1).strip()
-            if not old_text:
-                logger.warning(f"INVALIDATES with empty target, skipping")
-                continue
+        # Handle invalidates
+        if fact_update.invalidates:
+            old_text = fact_update.invalidates.strip()
             matched_fact = _find_matching_fact(old_text, active_facts)
             if matched_fact:
                 to_invalidate.append(matched_fact.id)
                 active_facts = [f for f in active_facts if f.id != matched_fact.id]
             continue
 
-        content_clean = re.sub(r"\s*\[MSG_?\d+\]\s*$", "", fact_str).strip()
-        if not _is_duplicate(content_clean, active_facts):
-            new_contents.append(fact_str)
-            logger.debug(f"Adding new content of fact: {fact_str}")
+        # Normal new fact
+        if not _is_duplicate(content, active_facts):
+            updates_to_keep.append(fact_update)
+            logger.debug(f"Adding new fact: {content}")
 
-    return FactMergeResult(to_invalidate=to_invalidate, new_contents=new_contents)
+    return FactMergeResult(to_invalidate=to_invalidate, new_contents=updates_to_keep)
 
-def extract_fact_with_source(raw_fact: str) -> Tuple[str, Optional[int]]:
+
+def extract_fact_with_source(fact_update: FactUpdate) -> Tuple[str, Optional[int]]:
     """
-    Parse fact string to extract content and source msg_id.
-    Returns: (content, msg_id as int or None)
+    Helper to extract content and source msg_id from a FactUpdate.
     """
-    cleaned = re.sub(r"^\[(?:SUPERSEDES|INVALIDATES):\s*[^\]]+\]\s*", "", raw_fact.strip())
-    
-    match = re.search(r"^(.*?)\[MSG_?(\d+)\]", cleaned)
-    if match:
-        content = match.group(1).strip()
-        msg_id = int(match.group(2))
-        return content, msg_id
-    return cleaned, None
+    return fact_update.content, fact_update.msg_id
 
 
 def _find_matching_fact(text: str, facts: List[Fact], threshold: int = 90) -> Fact | None:
@@ -155,92 +134,9 @@ def _is_duplicate(content: str, facts: List[Fact]) -> bool:
     content_lower = content.lower().strip()
     return any(f.content.lower().strip() == content_lower for f in facts)
 
-def parse_new_facts(reasoning: str) -> Optional[List[ProfileUpdate]]:
-    """
-    Parse <new_facts> block.
-    Lenient on closing tag, strict on opening tag.
-    """
-    if not reasoning:
-        return None
 
-    start_match = re.search(r"(?i)<new_facts>", reasoning)
-    if not start_match:
-        return None
-    
-    content_start = start_match.end()
-    remaining = reasoning[content_start:]
-    
-    end_match = re.search(r"(?i)</new_facts>", remaining)
-    if end_match:
-        content = remaining[:end_match.start()].strip()
-    else:
-        logger.warning("Missing </new_facts> closing tag. Using truncated content.")
-        content = remaining.strip()
-    
-    if not content:
-        return None
-    
-    profiles = []
-    for line in content.split("\n"):
-        line = line.strip()
-        
-        if ":" not in line:
-            continue
-        
-        try:
-            entity_name, facts_part = line.split(":", 1)
-            facts = [f.strip() for f in facts_part.split("|") if f.strip()]
-            
-            if facts:
-                profiles.append(ProfileUpdate(
-                    canonical_name=entity_name.strip(),
-                    facts=facts
-                ))
-        except ValueError:
-            continue
-    
-    if not profiles:
-        return None
-    
-    return profiles
 
-def parse_merge_score(reasoning: str) -> Optional[float]:
-    """
-    Parses <score>0.XX</score> from text. 
-    Falls back to bare float if no tags found.
-    Lenient on closing tag. Strict on numeric bounds.
-    """
-    if not reasoning:
-        return None
-        
-    match = re.search(r"(?i)<score>\s*(.*?)(?:</score>|$)", reasoning, re.DOTALL)
-    
-    if not match:
-        # Fallback: look for a bare float on its own line (e.g. "0.85")
-        bare = re.search(r"(?:^|\n)\s*(0\.\d{1,2}|1\.00?)\s*(?:\n|$)", reasoning)
-        if bare:
-            try:
-                return float(bare.group(1))
-            except ValueError:
-                pass
-        return None
-        
-    score_str = match.group(1).strip()
-    
-    try:
-        # sanity check: "0.9.5" is invalid
-        if score_str.count('.') > 1:
-            return None
-            
-        score = float(score_str)
-        
-        if 0.0 <= score <= 1.0:
-            return score
-            
-    except ValueError:
-        pass
-        
-    return None
+
 
 
 def format_recorded_date(recorded: str) -> str:
@@ -253,7 +149,7 @@ def format_recorded_date(recorded: str) -> str:
     except (ValueError, AttributeError):
         return str(recorded)[:10]
 
-def _format_entity_block(ent: Dict, label: str = None) -> List[str]:
+def _format_entity_block(ent: Dict[str, Any], label: Optional[str] = None) -> List[str]:
     name = ent.get("canonical_name", ent.get("entity_name", "Unknown"))
     etype = ent.get("type", ent.get("entity_type", "Unknown"))
     
@@ -321,9 +217,8 @@ async def enrich_facts_with_sources(
     store: MemGraphStore
 ) -> List[Dict]:
     """Enrich facts with timestamps and source message content."""
-    loop = asyncio.get_running_loop()
     enriched = []
-    msg_id_to_indices = {}
+    msg_id_to_indices: Dict[int, List[int]] = {}
     
     for i, fact in enumerate(facts):
         entry = {
@@ -339,23 +234,17 @@ async def enrich_facts_with_sources(
             msg_id_to_indices[fact.source_msg_id].append(i)
     
     if msg_id_to_indices:
-        sem = asyncio.Semaphore(2)
-        
-        async def fetch_one(msg_id):
-            async with sem:
-                try:
-                    return msg_id, await loop.run_in_executor(
-                        None, store.get_message_text, msg_id
-                    )
-                except Exception as e:
-                    logger.debug(f"Could not fetch source for msg {msg_id}: {e}")
-                    return msg_id, None
-        
-        results = await asyncio.gather(*[fetch_one(mid) for mid in msg_id_to_indices])
-        
-        for msg_id, text in results:
-            if text:
-                for idx in msg_id_to_indices[msg_id]:
-                    enriched[idx]["source_message"] = text
+        try:
+            messages = await store.get_messages_by_ids(list(msg_id_to_indices.keys()))
+            msg_text_map = {m["id"]: m.get("content", "") for m in messages}
+            
+            for msg_id, indices in msg_id_to_indices.items():
+                text = msg_text_map.get(msg_id)
+                if text:
+                    for idx in indices:
+                        enriched[idx]["source_message"] = text
+        except Exception as e:
+            logger.debug(f"Could not batch fetch source messages: {e}")
     
     return enriched
+

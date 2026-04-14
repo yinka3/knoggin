@@ -7,7 +7,7 @@ from loguru import logger
 from common.services.community_manager import CommunityManager
 from common.utils.events import CommunityEventEmitter
 from common.infra.redis import RedisKeys
-from common.config.base import update_config_value, get_config_value
+from common.config.base import update_config_value, get_config_value, get_config
 
 router = APIRouter()
 
@@ -31,7 +31,7 @@ async def toggle_community(request: Request, enabled: bool):
 async def list_discussions(request: Request):
     store = _get_community_store(request)
     loop = asyncio.get_running_loop()
-    discussions = await loop.run_in_executor(None, store.get_discussions)
+    discussions = await store.get_discussions()
     return {"discussions": discussions}
 
 
@@ -39,10 +39,7 @@ async def list_discussions(request: Request):
 async def get_discussion_history(discussion_id: str, request: Request):
     store = _get_community_store(request)
     loop = asyncio.get_running_loop()
-    messages = await loop.run_in_executor(
-        None, 
-        partial(store.get_discussion_history, discussion_id)
-    )
+    messages = await store.get_discussion_history(discussion_id)
     return {"discussion_id": discussion_id, "messages": messages}
 
 
@@ -50,7 +47,7 @@ async def get_discussion_history(discussion_id: str, request: Request):
 async def get_agent_hierarchy(request: Request):
     store = _get_community_store(request)
     loop = asyncio.get_running_loop()
-    hierarchy = await loop.run_in_executor(None, store.get_agent_hierarchy)
+    hierarchy = await store.get_agent_hierarchy()
     return {"hierarchy": hierarchy}
 
 
@@ -81,14 +78,14 @@ async def get_community_status(request: Request):
     active_id = await redis.get(RedisKeys.community_discussion_active())
     if active_id:
         active_id = active_id.decode("utf-8") if isinstance(active_id, bytes) else active_id
-    dev_settings = get_config_value("developer_settings") or {}
-    config = dev_settings.get("community", {})
+    config = get_config()
+    comm_cfg = config.developer_settings.community
     
     return {
         "active_discussion_id": active_id,
-        "enabled": config.get("enabled", False),
-        "interval_minutes": config.get("interval_minutes", 30),
-        "max_turns": config.get("max_turns", 10)
+        "enabled": comm_cfg.enabled,
+        "interval_minutes": comm_cfg.interval_minutes,
+        "max_turns": comm_cfg.max_turns
     }
 
 
@@ -104,7 +101,10 @@ async def get_community_agent_memory(agent_id: str, request: Request):
     entries = []
     if raw:
         for mem_id, payload in raw.items():
-            data = json.loads(payload)
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
             entries.append({
                 "id": mem_id,
                 "content": data.get("content", ""),
@@ -119,10 +119,7 @@ async def get_community_agent_memory(agent_id: str, request: Request):
 async def get_insights(request: Request, limit: int = 10):
     store = _get_community_store(request)
     loop = asyncio.get_running_loop()
-    insights = await loop.run_in_executor(
-        None,
-        partial(store.get_discussion_insights, limit)
-    )
+    insights = await store.get_discussion_insights(limit)
     return {"insights": insights}
 
 @router.post("/trigger")
@@ -130,9 +127,9 @@ async def trigger_discussion_manual(request: Request):
     """Manually trigger an AAC discussion for testing."""
     app_state = request.app.state.app_state
     
-    dev_settings = get_config_value("developer_settings") or {}
-    config = dev_settings.get("community", {})
-    if not config.get("enabled", False):
+    config = get_config()
+    comm_cfg = config.developer_settings.community
+    if not comm_cfg.enabled:
         raise HTTPException(status_code=400, detail="Community feature is disabled. Enable it first via POST /toggle.")
     
     manager = CommunityManager(app_state.resources, app_state.user_name)

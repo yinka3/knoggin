@@ -6,7 +6,17 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - knoggin_redis_data:/data
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+      ]
+    mem_limit: 512m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -16,7 +26,7 @@ services:
     restart: unless-stopped
 
   memgraph:
-    image: memgraph/memgraph-mage:latest
+    image: memgraph/memgraph-mage:3.2
     container_name: knoggin-memgraph
     ports:
       - "127.0.0.1:7687:7687"
@@ -24,9 +34,19 @@ services:
     volumes:
       - knoggin_mg_lib:/var/lib/memgraph
       - knoggin_mg_log:/var/log/memgraph
-    command: ["--log-level=WARNING", "--auth-module-mappings="]
+    command:
+      [
+        "--log-level=WARNING",
+        "--auth-module-mappings=",
+        "--storage-snapshot-on-exit=true",
+      ]
+    mem_limit: 3g
     healthcheck:
-      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole --host localhost --port 7687"]
+      test:
+        [
+          "CMD-SHELL",
+          "echo 'RETURN 1;' | mgconsole --host localhost --port 7687",
+        ]
       interval: 10s
       timeout: 10s
       retries: 3
@@ -34,7 +54,7 @@ services:
     restart: unless-stopped
 
   memgraph-lab:
-    image: memgraph/lab:latest
+    image: memgraph/lab:2.22.0
     container_name: knoggin-memgraph-lab
     ports:
       - "127.0.0.1:3001:3000"
@@ -68,7 +88,13 @@ services:
       memgraph:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health')",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -7,7 +7,7 @@ def get_trace_logger():
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
         
-        handler = logging.FileHandler("llm_trace.log", mode='w')
+        handler = logging.FileHandler("llm_trace.log", mode='a')
         
         formatter = logging.Formatter(
             '\n' + '='*80 + '\n%(asctime)s - %(levelname)s\n' + '='*80 + '\n%(message)s\n'

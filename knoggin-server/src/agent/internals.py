@@ -2,7 +2,6 @@ from datetime import datetime
 import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
-
 from loguru import logger
 
 from agent.formatters import (
@@ -14,9 +13,10 @@ from agent.formatters import (
     format_hot_topic_context,
     format_fact_results,
 )
-from agent.tools import Tools
+from agent.tools import Tools, TOOL_DISPATCH
 from common.schema.memory import PromptContext
-from common.mcp.client import parse_mcp_tool_name
+from common.mcp.bridge import parse_mcp_tool_name
+from common.errors.agent import ToolExecutionError
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,7 @@ class AgentState:
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     last_error: Optional[str] = None
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
+    usage: Dict[str, int] = field(default_factory=lambda: {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
     
     def is_duplicate(self, tool_name: str, args: Dict) -> bool:
         call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
@@ -93,9 +94,11 @@ class RetrievedEvidence:
     hierarchy: List[Dict] = field(default_factory=list)
     facts: List[Dict] = field(default_factory=list)
     sources: List[Dict] = field(default_factory=list)
+    summary: Optional[str] = None
+    token_count: int = 0
     
     def has_any(self) -> bool:
-        return bool(self.profiles or self.messages or self.graph or self.paths or self.hierarchy or self.facts or self.sources)
+        return bool(self.profiles or self.messages or self.graph or self.paths or self.hierarchy or self.facts or self.sources or self.summary)
 
 
 @dataclass
@@ -104,6 +107,7 @@ class AgentContext:
     config: AgentRunConfig
     state: AgentState
     evidence: RetrievedEvidence
+    user_name: str = ""
     user_query: str = ""
     session_id: str = ""
     run_id: str = ""
@@ -115,6 +119,8 @@ class AgentContext:
     active_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
     prompt: PromptContext = field(default_factory=PromptContext)
+    is_community: bool = False
+    current_participants: List[str] = field(default_factory=list)
 
 def build_user_message(ctx: AgentContext, last_result=None) -> str:
     msg = ""
@@ -135,6 +141,9 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
                 msg += f"{role}: {turn['content']}\n"
         msg += "\n"
 
+    if ctx.is_community and ctx.current_participants:
+        msg += f"**Participants:** {', '.join(ctx.current_participants)}\n\n"
+
     msg += f"**Query:** {ctx.user_query}\n"
     msg += f"**Calls remaining:** {ctx.config.max_calls - ctx.state.call_count}\n"
 
@@ -152,7 +161,8 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
 
             if tool in ("search_messages", "search_entity", "get_connections", 
                         "get_recent_activity", "find_path", "fact_check", "get_hierarchy", "search_files", "web_search", "news_search"):
-                count = len(data) if isinstance(data, list) else 0
+                data_val = data if isinstance(data, list) else []
+                count = len(data_val)
                 if count > 0:
                     msg += f"- `{tool}`: Found {count} items. (See 'Retrieved Context' below)\n"
                 else:
@@ -206,6 +216,9 @@ def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
                 # For fact_check, we'll treat all results in the latest call as 'new'
                 pass
 
+    if evidence.summary:
+        msg += f"**Core Evidence Summary:**\n{evidence.summary}\n\n"
+
     if evidence.profiles:
         new_profiles = [p for p in evidence.profiles if p.get("id") in new_profile_ids]
         old_profiles = [p for p in evidence.profiles if p.get("id") not in new_profile_ids]
@@ -246,6 +259,10 @@ def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
         msg += f"\n**Fact check results:**\n{format_fact_results(evidence.facts)}\n"
 
     return msg
+
+def build_evidence_context(evidence: RetrievedEvidence) -> str:
+    """Serialize all evidence to a string for token counting."""
+    return _format_evidence(evidence, last_result=None)
 
 def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
     """
@@ -368,46 +385,42 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         if isinstance(data, str):
             preview = data[:100] + "..." if len(data) > 100 else data
             return f"MCP result: {preview}", 1
-        return f"MCP result: {len(data)} items" if isinstance(data, list) else "MCP completed", 1
+        return (f"MCP result: {len(data)} items" if isinstance(data, list) else "MCP completed"), 1
 
     return "Completed", 1
 
+
+
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
-    """
-    Dispatch a native tool or MCP tool execution based on the requested name and arguments.
-    Returns the raw tool result payload or an error dictionary on failure.
-    """
     parsed = parse_mcp_tool_name(name)
     if parsed:
         server_name, tool_name = parsed
         if not tools.mcp_manager:
-            return {"error": "MCP not configured"}
+            raise ToolExecutionError(name, "MCP not configured")
         logger.info(f"[MCP TOOL CALL] {server_name}.{tool_name}: {json.dumps(args)}")
-        return await tools.mcp_manager.call_tool(server_name, tool_name, args)
-    
-    
-    dispatch = {
-        "search_messages": lambda: tools.search_messages(args.get("query", ""), min(args.get("limit", 8), 8)),
-        "search_entity": lambda: tools.search_entity(args.get("query", ""), min(args.get("limit", 5), 5)),
-        "get_connections": lambda: tools.get_connections(args.get("entity_name", "")),
-        "get_recent_activity": lambda: tools.get_recent_activity(args.get("entity_name", ""), args.get("hours", 24)),
-        "fact_check": lambda: tools.fact_check(args.get("entity_name", ""), args.get("query", "")),
-        "find_path": lambda: tools.find_path(args.get("entity_a", ""), args.get("entity_b", "")),
-        "get_hierarchy": lambda: tools.get_hierarchy(args.get("entity_name", ""), args.get("direction", "both")),
-        "save_memory": lambda: tools.save_memory(args.get("content", ""), args.get("topic", "General")),
-        "forget_memory": lambda: tools.forget_memory(args.get("memory_id", "")),
-        "search_files": lambda: tools.search_files(args.get("query", ""), args.get("file_name"), args.get("limit", 5)),
-        "web_search": lambda: tools.web_search(args.get("query", ""), args.get("limit", 5), args.get("freshness")),
-        "news_search": lambda: tools.news_search(args.get("query", ""), args.get("limit", 5), args.get("freshness")),
-    }
+        try:
+            return await tools.mcp_manager.call_tool(server_name, tool_name, args)
+        except Exception as e:
+            raise ToolExecutionError(name, str(e))
+
+    if name == "request_clarification":
+        return {"clarification": args.get("question", "Could you clarify?")}
+
+    dispatch_entry = TOOL_DISPATCH.get(name)
+    if dispatch_entry is None:
+        raise ToolExecutionError(name, f"Unknown tool: {name}")
+
+    method_name, param_keys = dispatch_entry
+    method = getattr(tools, method_name, None)
+    if method is None:
+        raise ToolExecutionError(name, f"Tool method not found: {method_name}")
 
     logger.info(f"[TOOL CALL] {name}: {json.dumps(args)}")
-    if name not in dispatch:
-        return {"error": f"Unknown tool: {name}"}
 
     try:
-        result = await dispatch[name]()
+        kwargs = {k: args.get(k) for k in param_keys if k in args}
+        result = await method(**kwargs)
         return {"data": result}
     except Exception as e:
         logger.error(f"Tool {name} failed: {e}")
-        return {"error": str(e)}
+        raise ToolExecutionError(name, str(e))

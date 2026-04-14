@@ -13,7 +13,7 @@ from common.config.topics_config import TopicConfig
 from common.schema.dtypes import AgentConfig
 from common.infra.redis import RedisKeys
 from common.infra.resources import ResourceManager
-from common.config.base import load_config
+from common.config.base import load_config, get_config
 
 from dotenv import load_dotenv
 
@@ -25,8 +25,22 @@ class AppState:
         self.resources = resources
         self.active_sessions = active_sessions
         self.user_name = user_name
+        self.global_scheduler = None
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
+
+    async def start_scheduler(self):
+        """Lazy-start the global scheduler if user_name is present."""
+        if not self.user_name or self.global_scheduler:
+            return
+
+        from jobs.scheduler import Scheduler
+        from jobs.aac_job import AACJob
+        
+        self.global_scheduler = Scheduler(self.user_name, "global", self.resources.redis, self.resources)
+        self.global_scheduler.register(AACJob(resources=self.resources))
+        await self.global_scheduler.start()
+        logger.info(f"Global scheduler started lazily for user: {self.user_name}")
     
     async def list_sessions(self) -> Dict[str, dict]:
         try:
@@ -39,59 +53,44 @@ class AppState:
                     logger.warning(f"Malformed session data for {sid}")
             return result
         except Exception as e:
-            logger.warning(f"Failed to list sessions: {e}")
-            return {}  # type: ignore
+            logger.error(f"Failed to list sessions (check Redis connection): {e}")
+            raise # Bubbling up instead of returning silent empty dict
 
     async def create_session(self, topics_config=None, model=None, agent_id=None, enabled_tools=None) -> Context:
         session_id = str(uuid.uuid4())
         
         if topics_config is None:
-            config = load_config()
-            topics_config = config.get("default_topics") if config else None
+            config = get_config()
+            topics_config = config.default_topics
+        
+        
+        async with self._lock:
+            context = await Context.create(
+                user_name=self.user_name,
+                resources=self.resources,
+                topics_config=topics_config,
+                session_id=session_id,
+                model=model
+            )
             
-            if not topics_config:
-                topics_config = {
-                    "General": {
-                        "active": True,
-                        "labels": [],
-                        "hierarchy": {},
-                        "aliases": []
-                    },
-                    "Identity": {
-                        "active": True,
-                        "labels": ["person"],
-                        "hierarchy": {},
-                        "aliases": []
-                    }
-                }
-        
-        
-        context = await Context.create(
-            user_name=self.user_name,
-            resources=self.resources,
-            topics_config=topics_config,
-            session_id=session_id,
-            model=model
-        )
-        
-        metadata = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "topics_config": topics_config,
-            "last_active": datetime.now(timezone.utc).isoformat(),
-            "model": model,
-            "agent_id": agent_id,
-            "enabled_tools": enabled_tools
-        }
-        
-        await self.resources.redis.hset(
-            RedisKeys.sessions(self.user_name),
-            session_id,
-            json.dumps(metadata)
-        )
-        
-        self.active_sessions[session_id] = context
-        logger.info(f"Created session: {session_id}")
-        return context
+            metadata = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "topics_config": topics_config,
+                "last_active": datetime.now(timezone.utc).isoformat(),
+                "model": model,
+                "agent_id": agent_id,
+                "enabled_tools": enabled_tools
+            }
+            
+            await self.resources.redis.hset(
+                RedisKeys.sessions(self.user_name),
+                session_id,
+                json.dumps(metadata)
+            )
+            
+            self.active_sessions[session_id] = context
+            logger.info(f"Created session: {session_id}")
+            return context
 
     async def get_or_resume_session(self, session_id: str) -> Optional[Context]:
         if session_id in self.active_sessions:
@@ -145,23 +144,27 @@ class AppState:
             return context
     
     async def close_session(self, session_id: str) -> bool:
-        if session_id not in self.active_sessions:
-            return False
+        async with self._lock:
+            if session_id not in self.active_sessions:
+                return False
+            
+            context = self.active_sessions.pop(session_id)
+            self._session_locks.pop(session_id, None)
         
-        context = self.active_sessions[session_id]
         await context.shutdown()
-        del self.active_sessions[session_id]
-        self._session_locks.pop(session_id, None)
         
         raw = await self.resources.redis.hget(RedisKeys.sessions(self.user_name), session_id)
         if raw:
-            metadata = json.loads(raw)
-            metadata["last_active"] = datetime.now(timezone.utc).isoformat()
-            await self.resources.redis.hset(
-                RedisKeys.sessions(self.user_name),
-                session_id,
-                json.dumps(metadata)
-            )
+            try:
+                metadata = json.loads(raw)
+                metadata["last_active"] = datetime.now(timezone.utc).isoformat()
+                await self.resources.redis.hset(
+                    RedisKeys.sessions(self.user_name),
+                    session_id,
+                    json.dumps(metadata)
+                )
+            except json.JSONDecodeError:
+                pass
         
         logger.info(f"Closed session: {session_id}")
         return True
@@ -338,7 +341,11 @@ class AppState:
         for raw in turn_data:
             if not raw:
                 continue
-            parsed = json.loads(raw)
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Skipping corrupted turn in readonly history")
+                continue
             turns.append({
                 "role": parsed["role"],
                 "content": parsed["content"],
@@ -371,7 +378,9 @@ class AppState:
             RedisKeys.msg_to_turn_lookup(user, session_id),
             RedisKeys.last_activity(user, session_id),
             RedisKeys.merge_proposals(user, session_id),
+            RedisKeys.merge_intents_index(user, session_id),
             RedisKeys.user_profile_ran(user, session_id),
+            RedisKeys.heartbeat_counter(user, session_id),
         ]
 
         memory_pattern = f"memory:{user}:{session_id}:*"
@@ -410,13 +419,21 @@ class AppState:
             deleted += await redis.delete(*direct_keys)
         
         await redis.hdel(RedisKeys.session_config(user), session_id)
+        await redis.hdel(RedisKeys.sessions(user), session_id)
         
         logger.info(f"Cleaned up {deleted} Redis keys for session {session_id}")
         return deleted
 
     async def shutdown(self):
+        if self.global_scheduler:
+            await self.global_scheduler.stop()
+            self.global_scheduler = None
+
         for session_id in list(self.active_sessions.keys()):
-            await self.close_session(session_id)
+            try:
+                await self.close_session(session_id)
+            except Exception as e:
+                logger.error(f"Failed to close session {session_id} during shutdown: {e}")
         
         await self.resources.shutdown()
         logger.info("AppState shutdown complete")

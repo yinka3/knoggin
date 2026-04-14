@@ -21,7 +21,7 @@ async def extract_message_facts(
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
         
-    background_tasks.add_task(context._maybe_extract_assistant, body.content, body.user_msg_id)
+    background_tasks.add_task(context._maybe_extract_llm, body.content, body.user_msg_id)
     
     return {
         "status": "success", 

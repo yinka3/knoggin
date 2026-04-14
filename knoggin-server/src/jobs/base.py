@@ -3,21 +3,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 from loguru import logger
-import redis.asyncio as aioredis
-
-from common.infra.resources import ResourceManager
-
-
+from typing import Optional
+from loguru import logger
 
 @dataclass
 class JobContext:
     """Context passed to every job method."""
     user_name: str
     session_id: str
-    redis: aioredis.Redis
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None
-    resources: Optional[ResourceManager] = None
 
 
 @dataclass 
@@ -30,6 +25,8 @@ class JobResult:
 
 class BaseJob(ABC):
     """Base class for scheduled jobs."""
+    
+    enabled: bool = True
     
     @property
     @abstractmethod

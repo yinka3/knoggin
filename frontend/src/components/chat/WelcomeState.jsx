@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import Orb from '@/components/ui/Orb'
 import { motion } from 'motion/react'
 import { ArrowUp, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -263,78 +263,16 @@ export default function WelcomeState({ onFirstMessage, userName }) {
           <PulseRing active={phase >= 4} />
 
           {/* Gradient orb */}
-          <motion.div
-            className="absolute rounded-full"
-            style={{
-              width: 80,
-              height: 80,
+          <Orb 
+            size={isReady ? 80 : 200} 
+            isReady={isReady} 
+            className="absolute"
+            variant={phase >= 3 ? 'default' : 'welcome'}
+            style={{ 
+              opacity: phase >= 3 ? 1 : 0,
+              scale: phase >= 3 ? 1 : 0
             }}
-            initial={{ scale: 0, opacity: 0 }}
-            animate={
-              phase >= 3
-                ? { scale: 1, opacity: 1 }
-                : { scale: 0, opacity: 0 }
-            }
-            transition={{
-              scale: { duration: 0.6, ease: [0.22, 1, 0.36, 1], delay: phase === 3 ? 0.15 : 0 },
-              opacity: { duration: 0.4, delay: phase === 3 ? 0.1 : 0 },
-            }}
-          >
-            {/* Core orb */}
-            <div
-              className={cn(
-                'w-full h-full relative overflow-hidden orb-breathe',
-                isReady ? 'opacity-100' : 'opacity-80'
-              )}
-              style={{
-                background: 'rgba(30, 120, 80, 1)',
-                boxShadow: `
-                  0 0 30px rgba(46, 170, 110, 0.5),
-                  inset 0 0 20px rgba(0, 0, 0, 0.3),
-                  inset 0 0 10px rgba(255, 255, 255, 0.1)
-                `,
-              }}
-            >
-              {/* Swirling energy layers */}
-              <div
-                className="absolute inset-0 orb-swirl-1"
-                style={{
-                  background: 'radial-gradient(circle at 30% 70%, rgba(52, 216, 130, 0.9), transparent 60%)',
-                  filter: 'blur(5px)',
-                }}
-              />
-              <div
-                className="absolute inset-0 orb-swirl-2"
-                style={{
-                  background: 'radial-gradient(circle at 80% 40%, rgba(132, 250, 180, 0.8), transparent 60%)',
-                  filter: 'blur(5px)',
-                }}
-              />
-              <div
-                className="absolute inset-0 orb-swirl-3"
-                style={{
-                  background: 'radial-gradient(circle at 40% 20%, rgba(16, 90, 50, 0.9), transparent 60%)',
-                  filter: 'blur(5px)',
-                }}
-              />
-
-              {/* Glassy reflection */}
-              <div className="absolute inset-0 orb-glass-reflection pointer-events-none" style={{ borderRadius: 'inherit' }} />
-            </div>
-
-            {/* Outer glow */}
-            <div
-              className={cn(
-                'absolute rounded-full orb-glow-ring transition-opacity duration-1000',
-                isReady ? 'opacity-100' : 'opacity-0'
-              )}
-              style={{
-                inset: -20,
-                background: 'radial-gradient(circle, rgba(46, 170, 110, 0.25), transparent 70%)',
-                filter: 'blur(15px)',
-              }}
-            />
-          </motion.div>
+          />
         </motion.div>
 
         {/* Greeting text — appears to the right of orb */}

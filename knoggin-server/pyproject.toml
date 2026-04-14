@@ -35,6 +35,7 @@ dependencies = [
     "markitdown>=0.1.5",
     "rank-bm25>=0.2.2",
     "ddgs>=9.11.3",
+    "instructor>=1.14.5",
 ]
 
 [project.optional-dependencies]

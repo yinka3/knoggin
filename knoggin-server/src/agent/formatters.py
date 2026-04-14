@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Dict, List
-
+from loguru import logger
 # Timestamp bounds (Unix seconds)
 TS_MIN = 946684800    # 2000-01-01 00:00:00 UTC
 TS_MAX = 4102444800   # 2100-01-01 00:00:00 UTC
@@ -18,7 +18,7 @@ def _normalize_timestamp(ts: float) -> float | None:
     return None
 
 
-from loguru import logger
+
 
 def _format_timestamp(ts) -> str:
     """Convert timestamp to readable datetime string. Handles s, ms, us, ns."""

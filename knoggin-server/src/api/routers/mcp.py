@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from api.state import AppState
-from common.config.base import load_config, get_default_config, save_config
+from common.config.base import load_config, get_default_config, async_save_config, get_config
 from common.schema.settings import MCPServerCreate
 
 router = APIRouter()
@@ -23,8 +23,8 @@ async def get_mcp_servers(request: Request):
         return {"servers": []}
     
     status = mcp.get_status()
-    config = load_config() or get_default_config()
-    server_configs = config.get("mcp", {}).get("servers", {})
+    config = get_config()
+    server_configs = config.mcp.get("servers", {})
     
     servers = []
     for name, live in status.items():
@@ -73,7 +73,7 @@ async def add_mcp_server(body: MCPServerCreate, request: Request):
     if "mcp" not in config:
         config["mcp"] = {"servers": {}}
     config["mcp"]["servers"][body.name] = server_config
-    save_config(config)
+    await async_save_config(config)
     
     return result
 
@@ -95,7 +95,7 @@ async def remove_mcp_server(name: str, request: Request):
     mcp_cfg = config.get("mcp", {})
     servers = mcp_cfg.get("servers", {})
     servers.pop(name, None)
-    save_config(config)
+    await async_save_config(config)
     
     return {"removed": name}
 
@@ -128,7 +128,7 @@ async def toggle_mcp_server(name: str, request: Request):
     mcp_cfg = config.get("mcp", {}).get("servers", {})
     if name in mcp_cfg:
         mcp_cfg[name]["enabled"] = not currently_enabled
-        save_config(config)
+        await async_save_config(config)
     
     new_status = mcp.get_status().get(name, {})
     return {

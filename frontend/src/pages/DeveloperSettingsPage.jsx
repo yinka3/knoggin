@@ -3,6 +3,12 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import {
+  FlaskCon,
+  FlaskRound,
+  Beaker,
+  LayoutGrid,
+  Activity,
+  TestTube2,
   Code2,
   Save,
   RotateCcw,
@@ -27,19 +33,21 @@ import BackgroundJobsSection from '@/components/settings/developer/BackgroundJob
 import CommunitySection from '@/components/settings/developer/CommunitySection'
 import PromptsSection from '@/components/settings/developer/PromptsSection'
 import DeveloperModesSection from '@/components/settings/developer/DeveloperModesSection'
+import LabOverview from '@/components/settings/developer/LabOverview'
+import ScenarioTester from '@/components/settings/developer/ScenarioTester'
 import { motion, AnimatePresence } from 'motion/react'
 import { LayoutGrid } from 'lucide-react'
 
 const TABS = [
-  { id: 'modes', label: 'Curated Modes', icon: LayoutGrid },
+  { id: 'overview', label: 'Lab Overview', icon: Activity },
+  { id: 'modes', label: 'Biospheres', icon: FlaskRound },
+  { id: 'analyzer', label: 'Scenario Tester', icon: TestTube2 },
   { id: 'limits', label: 'Agent Limits', icon: Zap },
-  { id: 'search', label: 'Search', icon: Search },
+  { id: 'search', label: 'Search engine', icon: Search },
   { id: 'entity', label: 'Entity Resolution', icon: Fingerprint },
   { id: 'pipeline', label: 'NLP Pipeline', icon: Workflow },
   { id: 'prompts', label: 'System Prompts', icon: Code2 },
-  { id: 'ingestion', label: 'Ingestion', icon: Database },
   { id: 'jobs', label: 'Background Jobs', icon: PlaySquare },
-  { id: 'community', label: 'Community', icon: Users },
 ]
 
 export default function DeveloperSettingsPage() {
@@ -47,7 +55,7 @@ export default function DeveloperSettingsPage() {
   const [saving, setSaving] = useState(false)
   const [settings, setSettings] = useState(null)
   const [original, setOriginal] = useState(null)
-  const [activeTab, setActiveTab] = useState('modes')
+  const [activeTab, setActiveTab] = useState('overview')
 
   useEffect(() => {
     loadSettings()
@@ -124,11 +132,12 @@ export default function DeveloperSettingsPage() {
               <Code2 size={24} />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-foreground tracking-tight">
-                Developer Settings
+              <h1 className="text-xl font-semibold text-foreground tracking-tight flex items-center gap-2">
+                Developer Lab
+                <Badge variant="outline" className="text-[10px] uppercase tracking-widest bg-primary/5 text-primary border-primary/20">Alpha</Badge>
               </h1>
               <p className="text-sm text-muted-foreground mt-0.5">
-                Advanced configuration and system tuning
+                Outcome-driven system tuning and biospheric control
               </p>
             </div>
           </div>
@@ -226,8 +235,14 @@ export default function DeveloperSettingsPage() {
                 transition={{ duration: 0.25, ease: 'easeOut' }}
                 className="w-full h-full overflow-y-auto"
               >
+                {activeTab === 'overview' && (
+                  <LabOverview settings={settings} />
+                )}
                 {activeTab === 'modes' && (
                   <DeveloperModesSection settings={settings} setSettings={setSettings} />
+                )}
+                {activeTab === 'analyzer' && (
+                  <ScenarioTester />
                 )}
                 {activeTab === 'limits' && (
                   <AgentLimitsSection settings={settings} update={update} />

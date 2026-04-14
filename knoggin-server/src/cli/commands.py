@@ -142,7 +142,7 @@ def init(
             show_default=False,
         )
         if api_key:
-            env_path.write_text(f"KNOGGIN_API_KEY={api_key}\\n")
+            env_path.write_text(f"KNOGGIN_API_KEY={api_key}\n")
             _file_status(env_path, True)
         else:
             write_env_example(cwd)

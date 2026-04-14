@@ -8,7 +8,7 @@ from loguru import logger
 from api.deps import get_app_state
 from api.state import AppState
 from core.setup import run_setup
-from common.config.base import load_config, save_config, get_default_config
+from common.config.base import load_config, async_save_config, get_default_config, get_config
 from common.config.topics_config import TopicConfig
 from common.services.topic_manager import generate_topics as generate_topics_from_text
 
@@ -90,8 +90,10 @@ async def generate_topics(
         raise HTTPException(status_code=400, detail="All answers are empty")
 
     try:
+        config = get_config()
+        user_name = config.user_name or "User"
         merged = await asyncio.wait_for(
-            generate_topics_from_text(state.resources.llm_service, text_block),
+            generate_topics_from_text(state.resources.llm_service, text_block, user_name),
             timeout=30.0
         )
     except asyncio.TimeoutError:
@@ -113,8 +115,7 @@ async def save_topics(
     config = load_config() or get_default_config()
     config["default_topics"] = body.topics
 
-    loop = asyncio.get_running_loop()
-    success = await loop.run_in_executor(None, save_config, config)
+    success = await async_save_config(config)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save config")
 
@@ -163,8 +164,7 @@ async def extract(
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
 
     config["configured_at"] = datetime.now(timezone.utc).isoformat()
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, save_config, config)
+    await async_save_config(config)
 
     return result
 

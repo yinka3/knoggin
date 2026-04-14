@@ -38,7 +38,7 @@ class BatchConsumer:
         self._shutdown_requested = False
         self._task: Optional[asyncio.Task] = None
         self._flush_future = None
-    
+
 
     @property
     def _buffer_key(self) -> str:
@@ -93,6 +93,12 @@ class BatchConsumer:
     
     async def flush(self):
         """Force a partial drain of the buffer. Blocks until complete."""
+        if self._task is None or self._task.done():
+            return
+        if self._flush_future is not None and not self._flush_future.done():
+            await self._flush_future
+            return
+            
         future = asyncio.get_running_loop().create_future()
         self._flush_future = future
         self._wake_event.set()
@@ -125,178 +131,181 @@ class BatchConsumer:
         logger.info(f"Consumer ingestion settings updated: batch={self.batch_size}, timeout={self.batch_timeout}")
 
     async def _run(self):
-        logger.info(f"BatchConsumer started for {self.user_name}")
+        with logger.contextualize(user=self.user_name, session=self.session_id, component="BatchConsumer"):
+            logger.info(f"BatchConsumer started for {self.user_name}")
 
-        while not self._shutdown_requested:
-            timed_out = False
-            try:
-                await asyncio.wait_for(
-                    self._wake_event.wait(), 
-                    timeout=self.batch_timeout
-                )
-            except asyncio.TimeoutError:
-                timed_out = True
-            
-            self._wake_event.clear()
-            try:
-                await self._drain_buffer(flush_partial=timed_out or self._flush_future is not None)
-            except Exception as e:
-                logger.error(f"BatchConsumer: Unexpected error during _drain_buffer: {e}")
-                await asyncio.sleep(5)
-            finally:
-                if self._flush_future and not self._flush_future.done():
-                    self._flush_future.set_result(None)
-                self._flush_future = None
+            while not self._shutdown_requested:
+                timed_out = False
+                try:
+                    await asyncio.wait_for(
+                        self._wake_event.wait(), 
+                        timeout=self.batch_timeout
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+                
+                self._wake_event.clear()
+                try:
+                    await self._drain_buffer(flush_partial=timed_out or self._flush_future is not None)
+                except Exception as e:
+                    logger.error(f"BatchConsumer: Unexpected error during _drain_buffer: {e}")
+                    await asyncio.sleep(5)
+                finally:
+                    if self._flush_future and not self._flush_future.done():
+                        self._flush_future.set_result(None)
+                    self._flush_future = None
 
         logger.info("BatchConsumer shutting down, final drain...")
-        await self._drain_buffer(flush_partial=True)
-        await self.run_session_jobs()
-        logger.info("BatchConsumer shutdown complete")
+        try:
+            await self._drain_buffer(flush_partial=True)
+            await self.run_session_jobs()
+            logger.info("BatchConsumer shutdown complete")
+        except Exception as e:
+            logger.error(f"BatchConsumer shutdown sequence failed: {e}")
 
     
 
     async def _drain_buffer(self, flush_partial: bool):
-        batches_count = 0
-        total_processed = 0
-        all_msg_ids = []
-        dlq_count = 0
+        with logger.contextualize(user=self.user_name, session=self.session_id, component="BatchConsumer"):
+            batches_count = 0
+            total_processed = 0
+            all_msg_ids = []
+            dlq_count = 0
 
-        while True:
-            buffer_len = await self.redis.llen(self._buffer_key)
-            if buffer_len < self.batch_size and not flush_partial:
-                break
-
-            raw = await self.redis.lrange(self._buffer_key, 0, self.batch_size - 1)
-            if not raw:
-                await emit(self.session_id, "pipeline", "buffer_empty", {})
-                break
-
-            await emit(self.session_id, "pipeline", "buffer_draining", {
-                "queued": len(raw)
-            })
-
-            messages = [json.loads(m) for m in raw]
-            
-            conversation = await self.get_session_ctx(self.session_window, messages[0]['id'])
-            session_text = self._format_session_text(conversation)
-
-            result = await self.processor.run(messages, session_text)
-
-            if not result.success:
-                dlq_success = await self.processor.move_to_dead_letter(
-                    messages, 
-                    result.error,
-                    stage="processing",
-                    session_text=session_text
-                )
-                if not dlq_success:
-                    logger.critical(f"DLQ write failed. Leaving {len(messages)} messages in buffer for retry.")
-                    await emit(self.session_id, "pipeline", "dlq_write_failed", {
-                        "msg_count": len(messages)
-                    })
+            while True:
+                buffer_len = await self.redis.llen(self._buffer_key)
+                if buffer_len < self.batch_size and not flush_partial:
                     break
-                dlq_count += len(messages)
-            else:
-                error_msg = None
-                graph_success = True
-                loop = asyncio.get_running_loop()
-                batch = [
-                    {
-                        "id": msg['id'],
-                        "content": msg['message'],
-                        "role": msg.get('role', 'user'),
-                        "timestamp": msg.get('timestamp', ''),
-                        "embedding": result.message_embeddings.get(msg['id'], [])
-                    }
-                    for msg in messages
-                ]
-                try:
-                    # TODO: Update to async (Refactor Task)
-                    await asyncio.wait_for(
-                        loop.run_in_executor(None, self.store.save_message_logs, batch),
-                        timeout=30.0
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to save message logs: {e}")
-                    dlq_success = await self.processor.move_to_dead_letter(
-                        messages,
-                        f"MESSAGE_LOG_SAVE_FAILED: {e}",
-                        stage="message_log",
-                        session_text=None
-                    )
-                    if not dlq_success:
-                        logger.critical(f"DLQ write failed after message log failure. Leaving messages in buffer.")
-                        break
-                    dlq_count += len(messages)
-                    batches_count += 1
-                    total_processed += len(messages)
-                    all_msg_ids.extend([m["id"] for m in messages])
-                    await self.redis.ltrim(self._buffer_key, len(messages), -1)
-                    continue
 
-                if result.extraction_result:
-                    try:
-                        success, error_msg = await asyncio.wait_for(
-                            self.write_to_graph(result),
-                            timeout=self.batch_timeout
-                        )
-                    except asyncio.TimeoutError:
-                        success, error_msg = False, "GRAPH_WRITE_TIMEOUT"
-                    except Exception as e:
-                        success, error_msg = False, str(e)
-                        
-                    if success:
-                        # If graph write is successful, we continue processing the batch,
-                        # not break out of the drain loop.
-                        pass 
+                raw = await self.redis.lrange(self._buffer_key, 0, self.batch_size - 1)
+                if not raw:
+                    await emit(self.session_id, "pipeline", "buffer_empty", {})
+                    break
+
+                await emit(self.session_id, "pipeline", "buffer_draining", {
+                    "queued": len(raw)
+                })
+
+                messages = [json.loads(m) for m in raw]
                 
-                    if not success:
-                        logger.error(f"Graph write failed. Error: {error_msg}")
-                        await emit(self.session_id, "pipeline", "graph_write_failed", {
-                            "error": error_msg
-                        })
-                        graph_success = False
+                conversation = await self.get_session_ctx(self.session_window, messages[0]['id'])
+                session_text = self._format_session_text(conversation)
 
-                if not graph_success:
+                result = await self.processor.run(messages, session_text)
+
+                if not result.success:
                     dlq_success = await self.processor.move_to_dead_letter(
                         messages, 
-                        error_msg or "GRAPH_WRITE_FAILED [unknown]",
-                        stage="graph_write",
-                        batch_result=result
+                        result.error,
+                        stage="processing",
+                        session_text=session_text
                     )
                     if not dlq_success:
-                        logger.critical(f"DLQ write failed after graph failure. Leaving {len(messages)} messages in buffer for retry.")
+                        logger.critical(f"DLQ write failed. Leaving {len(messages)} messages in buffer for retry.")
                         await emit(self.session_id, "pipeline", "dlq_write_failed", {
                             "msg_count": len(messages)
                         })
                         break
                     dlq_count += len(messages)
                 else:
-                    count = await self.redis.incrby(self._checkpoint_key, len(messages))
-                    if count >= self.checkpoint_interval:
-                        await emit(self.session_id, "pipeline", "checkpoint_reached", {
-                            "message_count": count
-                        })
-                        await self.run_session_jobs()
-                        await self.redis.set(self._checkpoint_key, 0)
-                    
-                    if messages:
-                        last_id = max(m["id"] for m in messages)
-                        await self.redis.set(RedisKeys.last_processed(self.user_name, self.session_id), last_id)
-                    
-            batches_count += 1
-            total_processed += len(messages)
-            all_msg_ids.extend([m["id"] for m in messages])
-            
-            await self.redis.ltrim(self._buffer_key, len(messages), -1)
+                    error_msg = None
+                    graph_success = True
+                    batch = [
+                        {
+                            "id": msg['id'],
+                            "content": msg['message'],
+                            "role": msg.get('role', 'user'),
+                            "timestamp": msg.get('timestamp', ''),
+                            "embedding": result.message_embeddings.get(msg['id'], [])
+                        }
+                        for msg in messages
+                    ]
+                    try:
+                        await asyncio.wait_for(
+                            self.store.save_message_logs(batch),
+                            timeout=30.0
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to save message logs: {e}")
+                        dlq_success = await self.processor.move_to_dead_letter(
+                            messages,
+                            f"MESSAGE_LOG_SAVE_FAILED: {e}",
+                            stage="message_log",
+                            session_text=None
+                        )
+                        if not dlq_success:
+                            logger.critical(f"DLQ write failed after message log failure. Leaving messages in buffer.")
+                            break
+                        dlq_count += len(messages)
+                        batches_count += 1
+                        total_processed += len(messages)
+                        all_msg_ids.extend([m["id"] for m in messages])
+                        await self.redis.ltrim(self._buffer_key, len(messages), -1)
+                        continue
 
-        await emit(self.session_id, "pipeline", "drain_complete", {
-            "batches_processed": batches_count,
-            "total_messages": total_processed,
-            "msg_ids": all_msg_ids,
-            "dlq_count": dlq_count,
-            "partial_flush": flush_partial
-        })
+                    has_writes = bool(
+                        result.extraction_result or 
+                        result.new_entity_ids or 
+                        result.alias_updated_ids or
+                        result.alias_updates
+                    )
+                    if has_writes:
+                        try:
+                            graph_success, error_msg = await asyncio.wait_for(
+                                self.write_to_graph(result),
+                                timeout=self.batch_timeout
+                            )
+                        except asyncio.TimeoutError:
+                            graph_success, error_msg = False, "GRAPH_WRITE_TIMEOUT"
+                        except Exception as e:
+                            graph_success, error_msg = False, str(e)
+                        
+                        if not graph_success:
+                            logger.error(f"Graph write failed. Error: {error_msg}")
+                            await emit(self.session_id, "pipeline", "graph_write_failed", {
+                                "error": error_msg
+                            })
+
+                    if not graph_success:
+                        dlq_success = await self.processor.move_to_dead_letter(
+                            messages, 
+                            error_msg or "GRAPH_WRITE_FAILED [unknown]",
+                            stage="graph_write",
+                            batch_result=result
+                        )
+                        if not dlq_success:
+                            logger.critical(f"DLQ write failed after graph failure. Leaving {len(messages)} messages in buffer for retry.")
+                            await emit(self.session_id, "pipeline", "dlq_write_failed", {
+                                "msg_count": len(messages)
+                            })
+                            break
+                        dlq_count += len(messages)
+                    else:
+                        count = await self.redis.incrby(self._checkpoint_key, len(messages))
+                        if count >= self.checkpoint_interval:
+                            await emit(self.session_id, "pipeline", "checkpoint_reached", {
+                                "message_count": count
+                            })
+                            await self.run_session_jobs()
+                            await self.redis.set(self._checkpoint_key, 0)
+                        
+                        if messages:
+                            last_id = max(m["id"] for m in messages)
+                            await self.redis.set(RedisKeys.last_processed(self.user_name, self.session_id), last_id)
+                        
+                batches_count += 1
+                total_processed += len(messages)
+                all_msg_ids.extend([m["id"] for m in messages])
+                
+                await self.redis.ltrim(self._buffer_key, len(messages), -1)
+
+            await emit(self.session_id, "pipeline", "drain_complete", {
+                "batches_processed": batches_count,
+                "total_messages": total_processed,
+                "msg_ids": all_msg_ids,
+                "dlq_count": dlq_count,
+                "partial_flush": flush_partial
+            })
            
     
 

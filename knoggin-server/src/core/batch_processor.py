@@ -1,8 +1,6 @@
 
 import json
-import re
 import time
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import redis.asyncio as aioredis
@@ -17,13 +15,15 @@ from core.prompts import (
 )
 from common.config.topics_config import TopicConfig
 from core.utils import ( 
-    format_vp02_input, 
-    parse_connection_response
+    format_vp02_input
 )
 from common.schema.dtypes import (
     BatchResult,
     MessageConnections,
-    ResolutionResult
+    EntityPair,
+    ResolutionResult,
+    ConnectionsResult,
+    BulkRelevanceResult
 )
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
@@ -39,6 +39,7 @@ def _safe_json(obj):
         return float(obj)
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
+BOOST_LLM_BATCH_SIZE = 15
 
 class BatchProcessor:
 
@@ -57,6 +58,7 @@ class BatchProcessor:
             resolution_threshold: float = 0.85,
             connection_prompt: str = None):
 
+        self._get_next_ent_id = None
         self.session_id = session_id
         self.redis = redis_client
         self.llm = llm
@@ -69,6 +71,16 @@ class BatchProcessor:
         self._get_next_ent_id = get_next_ent_id
         self.resolution_threshold = resolution_threshold
         self.connection_prompt = connection_prompt
+
+    @property
+    def get_next_ent_id(self):
+        if self._get_next_ent_id is None:
+            raise RuntimeError("get_next_ent_id callback not set")
+        return self._get_next_ent_id
+
+    @get_next_ent_id.setter
+    def get_next_ent_id(self, fn):
+        self._get_next_ent_id = fn
     
         
     async def run(self, messages: List[Dict], session_text: str) -> BatchResult:
@@ -76,91 +88,92 @@ class BatchProcessor:
         Process a batch of messages. Returns BatchResult with entity IDs and connections.
         Caller responsible for lock acquisition and publishing results.
         """
-        result = BatchResult()
-        
-        if not messages:
-            return result
-        
-        logger.debug(f"Processing batch of {len(messages)} messages: {[m['id'] for m in messages]}")
-
-        await emit(self.session_id, "pipeline", "batch_start", {
-            "size": len(messages),
-            "msg_ids": [m["id"] for m in messages]
-        })
-        
-        try:
-            mentions = await self._extract_mentions(messages, self.session_id)
-            await emit(self.session_id, "pipeline", "mentions_extracted", {
-                "count": len(mentions),
-                "mentions": [(msg_id, text, typ) for msg_id, text, typ, _ in mentions]
-            }, verbose_only=True)
-
-            mentions = [(msg_id, text, typ, topic) for msg_id, text, typ, topic in mentions if text]
+        with logger.contextualize(user=self.user_name, session=self.session_id, component="BatchProcessor"):
+            result = BatchResult()
             
-            msg_texts = [m['message'] for m in messages]
-    
-            embeddings = await self.ent_resolver.embedding_service.encode(msg_texts)
-
-            for i, msg in enumerate(messages):
-                msg['embedding'] = embeddings[i]
-                result.message_embeddings[msg['id']] = embeddings[i]
-
-            if not mentions:
-                logger.info("No mentions found in batch, skipping LLM calls")
+            if not messages:
                 return result
-            
-            res = await self._resolve_mentions(mentions, messages)
+        
+            logger.debug(f"Processing batch of {len(messages)} messages: {[m['id'] for m in messages]}")
 
-            await emit(self.session_id, "pipeline", "resolution_complete", {
-                "new": len(res.new_ids),
-                "existing": len(res.entity_ids) - len(res.new_ids),
-                "aliases_added": len(res.alias_ids)
+            await emit(self.session_id, "pipeline", "batch_start", {
+                "size": len(messages),
+                "msg_ids": [m["id"] for m in messages]
             })
-
-            result.entity_ids = res.entity_ids
-            result.new_entity_ids = res.new_ids
-            result.alias_updated_ids = res.alias_ids
-            result.alias_updates = res.alias_updates
-            user_id = self.ent_resolver.get_id(self.user_name)
-            if user_id and user_id not in res.entity_ids:
-                res.entity_ids.append(user_id)
             
-            connections = await self._extract_connections(res.entity_ids, res.entity_msg_map, messages, session_text)
-            if connections is None:
-                logger.error("Connection extraction failed")
-                result.success = False
-                result.error = "Connection extraction failed (VP-03)"
-                await emit(self.session_id, "pipeline", "connections_failed", {
-                    "entity_count": len(res.entity_ids)
+            try:
+                mentions = await self._extract_mentions(messages, self.session_id)
+                await emit(self.session_id, "pipeline", "mentions_extracted", {
+                    "count": len(mentions),
+                    "mentions": [(msg_id, text, typ) for msg_id, text, typ, _ in mentions]
+                }, verbose_only=True)
+
+                mentions = [(msg_id, text, typ, topic) for msg_id, text, typ, topic in mentions if text]
+                
+                msg_texts = [m['message'] for m in messages]
+        
+                embeddings = await self.ent_resolver.embedding_service.encode(msg_texts)
+
+                for i, msg in enumerate(messages):
+                    msg['embedding'] = embeddings[i]
+                    result.message_embeddings[msg['id']] = embeddings[i]
+
+                if not mentions:
+                    logger.info("No mentions found in batch, skipping LLM calls")
+                    return result
+                
+                res = await self._resolve_mentions(mentions, messages)
+
+                await emit(self.session_id, "pipeline", "resolution_complete", {
+                    "new": len(res.new_ids),
+                    "existing": len(res.entity_ids) - len(res.new_ids),
+                    "aliases_added": len(res.alias_ids)
                 })
-                return result
-            
-            total_pairs = sum(len(mc.entity_pairs) for mc in connections)
-            await emit(self.session_id, "pipeline", "connections_extracted", {
-                "messages_with_connections": len(connections),
-                "total_pairs": total_pairs,
-                "pairs": [
-                    {"a": pair.entity_a, "b": pair.entity_b, "confidence": pair.confidence}
-                    for mc in connections
-                    for pair in mc.entity_pairs
-                ]
-            }, verbose_only=True)
-            
-            result.extraction_result = connections
 
-            await emit(self.session_id, "pipeline", "batch_complete", {
-                "entities": len(result.entity_ids),
-                "new_entities": len(result.new_entity_ids),
-                "success": result.success
-            })
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Batch processing failed: {e}")
-            result.success = False
-            result.error = str(e)
-            return result
+                result.entity_ids = res.entity_ids
+                result.new_entity_ids = res.new_ids
+                result.alias_updated_ids = res.alias_ids
+                result.alias_updates = res.alias_updates
+                user_id = await self.ent_resolver.get_id(self.user_name)
+                if user_id is not None and user_id not in res.entity_ids:
+                    res.entity_ids.append(user_id)
+                
+                connections = await self._extract_connections(res.entity_ids, res.entity_msg_map, messages, session_text)
+                if connections is None:
+                    logger.error("Connection extraction failed")
+                    result.success = False
+                    result.error = "Connection extraction failed (VP-03)"
+                    await emit(self.session_id, "pipeline", "connections_failed", {
+                        "entity_count": len(res.entity_ids)
+                    })
+                    return result
+                
+                total_pairs = sum(len(mc.entity_pairs) for mc in connections)
+                await emit(self.session_id, "pipeline", "connections_extracted", {
+                    "messages_with_connections": len(connections),
+                    "total_pairs": total_pairs,
+                    "pairs": [
+                        {"a": pair.entity_a, "b": pair.entity_b, "confidence": pair.confidence}
+                        for mc in connections
+                        for pair in mc.entity_pairs
+                    ]
+                }, verbose_only=True)
+                
+                result.extraction_result = connections
+
+                await emit(self.session_id, "pipeline", "batch_complete", {
+                    "entities": len(result.entity_ids),
+                    "new_entities": len(result.new_entity_ids),
+                    "success": result.success
+                })
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"Batch processing failed: {e}")
+                result.success = False
+                result.error = str(e)
+                return result
     
     
     async def _extract_mentions(self, messages: List[Dict], session_id: str) -> List[Tuple[int, str, str, str]]:
@@ -287,34 +300,24 @@ class BatchProcessor:
                     ent_id = top_id
                     batch_matched_ids.add(ent_id)
 
-                    existing_id, aliases_added, new_aliases = self.ent_resolver.validate_existing(
-                        name.strip(), [name.strip()]
-                    )
-                    if existing_id and aliases_added:
-                        self.ent_resolver.commit_new_aliases(existing_id, new_aliases)
-                        alias_ids.add(existing_id)
-                        alias_updates[existing_id] = new_aliases
-                # NOTE: Zombie eviction — currently unreachable because _boost_candidates
-                # only adds to scores (never reduces below threshold). Keep for future
-                # negative signals (e.g. fact contradiction penalty). See test_processor.py
-                # TestResolveMentions.test_zombie_candidate_evicted for coverage.
-                #
-                # else:
-                #     verified = await loop.run_in_executor(
-                #         self.executor,
-                #         self.store.validate_existing_ids, [top_id]
-                #     )
-                #     if not verified:
-                #         logger.warning(f"Zombie candidate {top_id} for '{name}', evicting")
-                #         self.ent_resolver.remove_entities([top_id])
+                    profile = await self.ent_resolver.get_profile(ent_id)
+                    if profile:
+                        existing_id, aliases_added, new_aliases = self.ent_resolver.validate_existing(
+                            profile["canonical_name"], [name.strip()]
+                        )
+                        if existing_id and aliases_added:
+                            self.ent_resolver.commit_new_aliases(existing_id, new_aliases)
+                            alias_ids.add(existing_id)
+                            if existing_id not in alias_updates:
+                                alias_updates[existing_id] = []
+                            alias_updates[existing_id].extend(new_aliases)
 
-            # New entity — re-check batch dedup before creating
             if ent_id is None:
                 if canonical_lower in created_in_batch:
                     ent_id = created_in_batch[canonical_lower]
                 else:
                     try:
-                        ent_id = await self._get_next_ent_id()
+                        ent_id = await self.get_next_ent_id()
                         source_context = msg_text_map.get(msg_id)
 
                         await self.ent_resolver.register_entity(
@@ -355,7 +358,11 @@ class BatchProcessor:
         Signal 4: Connection co-occurrence
         """
         results = {}
-        loop = asyncio.get_running_loop()
+
+        # ── Prefetch all facts and neighbors in two queries ──
+        all_candidate_ids = list({cid for cid, _, _ in candidate_pairs})
+        facts_by_entity = await self.store.get_facts_for_entities(all_candidate_ids, active_only=True)
+        neighbors_by_entity = await self.store.get_neighbor_ids_batch(all_candidate_ids)
 
         # --- Signal 3: Fact relevance via LLM ---
         llm_pairs = []
@@ -367,11 +374,7 @@ class BatchProcessor:
                 results[candidate_id] = base_score
                 continue
 
-            # TODO: Update to async (Refactor Task)
-            facts = await loop.run_in_executor(
-                self.executor,
-                self.store.get_facts_for_entity, candidate_id, True
-            )
+            facts = facts_by_entity.get(candidate_id, [])
 
             if not facts:
                 results[candidate_id] = base_score
@@ -382,52 +385,44 @@ class BatchProcessor:
             pair_keys.append((candidate_id, base_score))
 
         if llm_pairs:
-            lines = []
-            for i, (msg, facts) in enumerate(llm_pairs, 1):
-                lines.append(f"{i}. Message: \"{msg}\" | Facts: {', '.join(facts)}")
-
-            prompt = (
-                "For each pair, does the message relate to the entity's facts? "
-                "Answer YES or NO per line, nothing else.\n\n"
-                + "\n".join(lines)
-            )
-
-            try:
-                response = await self.llm.call_llm(
-                    system="You are a relevance judge. Answer only YES or NO per line.",
-                    user=prompt
+            for chunk_start in range(0, len(llm_pairs), BOOST_LLM_BATCH_SIZE):
+                chunk_pairs = llm_pairs[chunk_start:chunk_start + BOOST_LLM_BATCH_SIZE]
+                chunk_keys = pair_keys[chunk_start:chunk_start + BOOST_LLM_BATCH_SIZE]
+                
+                lines = []
+                for i, (msg, facts) in enumerate(chunk_pairs, 1):
+                    lines.append(f"{i}. Message: \"{msg}\" | Facts: {', '.join(facts)}")
+                
+                prompt = (
+                    "For each index, determine if the message relates to the entity's facts.\n\n"
+                    + "\n".join(lines)
                 )
-
-                if response:
-                    # Match patterns like "1. YES", "2: NO", "3 YES"
-                    matches = re.findall(r"^\s*\d+[\.\:\-]?\s*(YES|NO)", response, re.IGNORECASE | re.MULTILINE)
+                
+                try:
+                    bulk_relevance: BulkRelevanceResult = await self.llm.call_llm(
+                        response_model=BulkRelevanceResult,
+                        system="You are a relevance judge. For each provided pair (message + entity facts), decide if they are related.",
+                        user=prompt,
+                        temperature=0.0
+                    )
                     
-                    if matches:
-                        for i, (candidate_id, base_score) in enumerate(pair_keys):
+                    if bulk_relevance and bulk_relevance.judgments:
+                        judgment_map = {j.index: j.is_relevant for j in bulk_relevance.judgments}
+                        
+                        for i, (candidate_id, base_score) in enumerate(chunk_keys, 1):
                             current = results.get(candidate_id, base_score)
-                            if i < len(matches) and "YES" in matches[i].upper():
+                            if judgment_map.get(i):
                                 results[candidate_id] = max(current, base_score + 0.05)
                             else:
                                 results[candidate_id] = max(current, base_score)
                     else:
-                        # Fallback if the LLM didn't number them but just output YES/NO lines
-                        lines = [line.strip().upper() for line in response.strip().split("\n") if line.strip()]
-                        valid_lines = [line for line in lines if "YES" in line or "NO" in line]
-                        
-                        for i, (candidate_id, base_score) in enumerate(pair_keys):
-                            current = results.get(candidate_id, base_score)
-                            if i < len(valid_lines) and "YES" in valid_lines[i]:
-                                results[candidate_id] = max(current, base_score + 0.05)
-                            else:
-                                results[candidate_id] = max(current, base_score)
-                else:
-                    for candidate_id, base_score in pair_keys:
+                        for candidate_id, base_score in chunk_keys:
+                            results[candidate_id] = max(results.get(candidate_id, base_score), base_score)
+                
+                except Exception as e:
+                    logger.warning(f"Fact relevance LLM failed for chunk, using base scores: {e}")
+                    for candidate_id, base_score in chunk_keys:
                         results[candidate_id] = max(results.get(candidate_id, base_score), base_score)
-
-            except Exception as e:
-                logger.warning(f"Fact relevance LLM failed, using base scores: {e}")
-                for candidate_id, base_score in pair_keys:
-                    results[candidate_id] = max(results.get(candidate_id, base_score), base_score)
 
         # --- Signal 4: Connection co-occurrence ---
         processed_candidates = set()
@@ -439,11 +434,7 @@ class BatchProcessor:
             score = results.get(candidate_id, base_score)
 
             if batch_matched_ids:
-                # TODO: Update to async (Refactor Task)
-                neighbors = await loop.run_in_executor(
-                    self.executor,
-                    self.store.get_neighbor_ids, candidate_id
-                )
+                neighbors = neighbors_by_entity.get(candidate_id, set())
                 overlap = batch_matched_ids & neighbors
                 if overlap:
                     score += min(len(overlap) * 0.03, 0.05)
@@ -467,7 +458,7 @@ class BatchProcessor:
         
         candidates = []
         for ent_id in entity_ids:
-            profile = self.ent_resolver.entity_profiles.get(ent_id)
+            profile = await self.ent_resolver.get_profile(ent_id)
             if profile:
                 candidates.append({
                     "canonical_name": profile["canonical_name"],
@@ -491,11 +482,41 @@ class BatchProcessor:
             "stage": "connections",
             "prompt": user_03
         }, verbose_only=True)
-        reasoning = await self.llm.call_llm(system_03, user_03)
-        if not reasoning:
-            return None
         
-        return parse_connection_response(reasoning)
+        conn_result: ConnectionsResult = await self.llm.call_llm(
+            response_model=ConnectionsResult,
+            system=system_03,
+            user=user_03,
+            temperature=0.0
+        )
+        
+        if not conn_result:
+            return None
+            
+        valid_msg_ids = {m["id"] for m in messages}
+
+        msg_map: Dict[int, List[EntityPair]] = {}
+        for conn in conn_result.connections:
+            if conn.msg_id not in valid_msg_ids:
+                logger.warning(
+                    f"VP-02 returned invalid msg_id {conn.msg_id} "
+                    f"(valid: {valid_msg_ids}), skipping connection "
+                    f"{conn.entity_a} -> {conn.entity_b}"
+                )
+                continue
+            if conn.msg_id not in msg_map:
+                msg_map[conn.msg_id] = []
+            msg_map[conn.msg_id].append(EntityPair(
+                entity_a=conn.entity_a,
+                entity_b=conn.entity_b,
+                confidence=conn.confidence,
+                context=conn.context or conn.relationship
+            ))
+            
+        return [
+            MessageConnections(message_id=mid, entity_pairs=pairs)
+            for mid, pairs in msg_map.items()
+        ]
 
 
     async def move_to_dead_letter(

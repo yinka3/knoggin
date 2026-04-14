@@ -18,8 +18,12 @@ class CommunityStore:
         async def _create(tx: AsyncManagedTransaction):
             await tx.run(query, id=discussion_id, topic=topic, agent_ids=agent_ids, ts=datetime.now(timezone.utc).isoformat())
             
-        async with self.driver.session() as session:
-            await session.execute_write(_create)
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_create)
+        except Exception as e:
+            logger.error(f"Failed to create_discussion: {e}")
+            raise
 
     async def add_message(self, discussion_id: str, agent_id: str, content: str, role: str = "agent"):
         query = """
@@ -30,8 +34,12 @@ class CommunityStore:
         async def _add(tx: AsyncManagedTransaction):
             await tx.run(query, discussion_id=discussion_id, agent_id=agent_id, content=content, role=role, ts=datetime.now(timezone.utc).isoformat())
             
-        async with self.driver.session() as session:
-            await session.execute_write(_add)
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_add)
+        except Exception as e:
+            logger.error(f"Failed to add_message in discussion {discussion_id}: {e}")
+            raise
 
     async def close_discussion(self, discussion_id: str):
         query = """
@@ -41,8 +49,12 @@ class CommunityStore:
         async def _close(tx: AsyncManagedTransaction):
             await tx.run(query, id=discussion_id, ts=datetime.now(timezone.utc).isoformat())
             
-        async with self.driver.session() as session:
-            await session.execute_write(_close)
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_close)
+        except Exception as e:
+            logger.error(f"Failed to close_discussion: {e}")
+            raise
 
     async def register_agent_spawn(self, parent_id: str, child_id: str, detail: str = ""):
         query = """
@@ -53,8 +65,12 @@ class CommunityStore:
         async def _register(tx: AsyncManagedTransaction):
             await tx.run(query, parent_id=parent_id, child_id=child_id, detail=detail, ts=datetime.now(timezone.utc).isoformat())
             
-        async with self.driver.session() as session:
-            await session.execute_write(_register)
+        try:
+            async with self.driver.session() as session:
+                await session.execute_write(_register)
+        except Exception as e:
+            logger.error(f"Failed to register_agent_spawn: {e}")
+            raise
 
     async def get_discussions(self) -> List[Dict]:
         query = """
@@ -64,9 +80,13 @@ class CommunityStore:
                d.agent_ids as agent_ids
         ORDER BY d.created_at DESC
         """
-        async with self.driver.session() as session:
-            result = await session.run(query)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_discussions: {e}")
+            return []
 
     async def get_discussion_history(self, discussion_id: str) -> List[Dict]:
         query = """
@@ -74,18 +94,26 @@ class CommunityStore:
         RETURN m.agent_id as agent_id, m.content as content, m.role as role, m.timestamp as timestamp
         ORDER BY m.timestamp ASC
         """
-        async with self.driver.session() as session:
-            result = await session.run(query, discussion_id=discussion_id)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, discussion_id=discussion_id)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_discussion_history: {e}")
+            return []
 
     async def get_agent_hierarchy(self) -> List[Dict]:
         query = """
         MATCH (p:AAC_Agent)-[r:SPAWNED]->(c:AAC_Agent)
         RETURN p.id as parent, c.id as child, r.detail as detail, r.ts as timestamp
         """
-        async with self.driver.session() as session:
-            result = await session.run(query)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_agent_hierarchy: {e}")
+            return []
     
     async def get_recent_discussions(self, limit: int = 5) -> List[Dict]:
         """Get recent discussions with topic and outcome summary."""
@@ -102,9 +130,13 @@ class CommunityStore:
         ORDER BY d.created_at DESC
         LIMIT $limit
         """
-        async with self.driver.session() as session:
-            result = await session.run(query, limit=limit)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, limit=limit)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_recent_discussions: {e}")
+            return []
 
     async def get_discussion_insights(self, limit: int = 10) -> List[Dict]:
         """Get recent insights from past discussions."""
@@ -117,9 +149,13 @@ class CommunityStore:
         ORDER BY m.timestamp DESC
         LIMIT $limit
         """
-        async with self.driver.session() as session:
-            result = await session.run(query, limit=limit)
-            return [dict(r) async for r in result]
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, limit=limit)
+                return [dict(r) async for r in result]
+        except Exception as e:
+            logger.error(f"Failed to get_discussion_insights: {e}")
+            return []
     
     async def delete_old_discussions(self, retention_days: int = 30) -> int:
         """Delete discussions and their messages older than retention period."""

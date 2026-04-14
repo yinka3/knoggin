@@ -1,7 +1,10 @@
 import asyncio
+import json
+import redis.asyncio as aioredis
+from typing import Any, List, Optional, Tuple
 import re
-from typing import List, Optional, Tuple
 
+from common.infra.redis import RedisKeys
 from loguru import logger
 from typing import Dict
 
@@ -9,8 +12,6 @@ from wordfreq import word_frequency
 from common.config.topics_config import TopicConfig
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
-
-from common.schema.dtypes import EntityItem, EntityPair, MessageConnections
 
 
 PRONOUNS = {
@@ -48,6 +49,7 @@ def is_generic_phrase(text: str, threshold: float = 5e-6) -> bool:
     if any(f < threshold for f in freqs):
         return False
     
+    # Single common word shouldn't be blocked here (handled by global Stop Word filters)
     if len(words) <= 1:
         return False
     
@@ -58,44 +60,25 @@ def is_generic_phrase(text: str, threshold: float = 5e-6) -> bool:
 def is_covered(candidate: str, covered_texts: set[str]) -> bool:
     """
     Check if candidate span is already covered by known entities.
-    Uses text comparison, not index comparison.
+    Uses word-boundary text comparison.
     """
     candidate_lower = candidate.lower().strip()
     
     for covered in covered_texts:
         if candidate_lower == covered:
             return True
-        if candidate_lower in covered:
+            
+        cov_esc = re.escape(covered)
+        cand_esc = re.escape(candidate_lower)
+        
+        if re.search(r'\b' + cov_esc + r'\b', candidate_lower):
             return True
-        if covered in candidate_lower:
+        if re.search(r'\b' + cand_esc + r'\b', covered):
             return True
     
     return False
 
-def extract_xml_content(text: str, tag: str) -> Optional[str]:
-    """
-    Lenient XML Extraction.
-    1. MUST have <tag>.
-    2. captures everything after <tag>.
-    3. If </tag> exists, stops there. If not, takes to end of string.
-    """
-    if not text:
-        return None
-    
-    start_match = re.search(f"<{tag}>", text, re.IGNORECASE)
-    if not start_match:
-        return None
-    
-    content_start = start_match.end()
-    remaining_text = text[content_start:]
-    
-    end_match = re.search(f"</{tag}>", remaining_text, re.IGNORECASE)
-    
-    if end_match:
-        return remaining_text[:end_match.start()].strip()
-    else:
-        logger.warning(f"Missing closing </{tag}> tag. Parsing available content.")
-        return remaining_text.strip()
+
 
 
 def validate_entity(name: str, topic: str, topic_config: TopicConfig, label: str = None) -> bool:
@@ -160,8 +143,9 @@ def format_vp01_input(
     
     lines.append("\n## GLiNER Extractions (can override if wrong)\n")
     gliner_resolved = []
+    known_spans = {k[0].lower() for k in known_ents}
     for msg_id, span, label in gliner_ents:
-        if span.lower() in covered_texts.get(msg_id, set()):
+        if span.lower() not in known_spans:
             if not any(span == a[1] for a in ambiguous):
                 gliner_resolved.append((msg_id, span, label))
     
@@ -177,78 +161,12 @@ def format_vp01_input(
             lines.append(f"- MSG {msg_id}: \"{span_text}\" ({label}) -> choose from: {topics}")
     
     lines.append("\n## Discovery (Task 2: find missed entities)")
-    lines.append("Scan messages above for proper nouns not listed in Already Resolved.")
+    lines.append("Scan messages above for proper nouns not listed in Known Entities or GLiNER extractions.")
     lines.append("Include the MSG id where you found each entity.")
     
     return "\n".join(lines)
 
-def parse_entities(reasoning: str, min_confidence: float = 0.8, topic_config: TopicConfig = None) -> Optional[List[EntityItem]]:
-    """Parse <entities> block from VP-01 output. Expects: msg_id | name | label | topic | confidence
-    Falls back to: msg_id | name | label | confidence (topic defaults to General)"""
-    content = extract_xml_content(reasoning, "entities")
-    
-    if not content:
-        return None
-    
-    entities = []
-    malformed = 0
-    
-    for line in content.split("\n"):
-        line = line.strip()
-        if not line or line.lower().startswith("msg_id"):
-            continue
-            
-        # Allow the last field (confidence or topic) to contain extra pipes if the LLM hallucinated them, 
-        # but realistically we just want exactly 5 fields. Splitting with a max prevents unpacking errors
-        # if the 'name' or 'label' somehow contains a pipe.
-        parts = line.split("|", 4)
-        
-        if len(parts) == 5:
-            msg_id_str, name, label, topic, conf_str = [p.strip() for p in parts]
-        elif len(parts) == 4:
-            msg_id_str, name, field3, conf_str = [p.strip() for p in parts]
-            
-            if topic_config and field3.lower() in topic_config.alias_lookup:
-                label = ""
-                topic = field3
-                logger.debug(f"VP-01 missing label, inferred topic from field3: {name} -> {topic}")
-            else:
-                label = field3
-                topic = "General"
-                logger.warning(f"VP-01 missing topic field, defaulting to General: {name}")
-        else:
-            malformed += 1
-            continue
-        
-        if not name:
-            malformed += 1
-            continue
-        
-        try:
-            msg_id = int(msg_id_str.replace("MSG", "").replace("msg", "").strip())
-            confidence = float(conf_str)
-        except ValueError:
-            malformed += 1
-            continue
-        
-        if confidence < min_confidence:
-            continue
-        
-        entities.append(EntityItem(
-            msg_id=msg_id,
-            name=name,
-            label=label,
-            topic=topic,
-            confidence=confidence
-        ))
-    
-    if malformed > 0:
-        logger.warning(f"VP-01 malformed lines: {malformed}")
-    
-    if not entities:
-        return None
-    
-    return entities
+
 
 def format_vp02_input(
     candidates: List[Dict],
@@ -291,86 +209,110 @@ def format_vp02_input(
     
     return "\n".join(lines)
 
-def parse_connection_response(text: str) -> List[MessageConnections]:
+
+
+
+async def fetch_conversation_turns(
+    redis_client: aioredis.Redis,
+    user_name: str,
+    session_id: str,
+    num_turns: int,
+    up_to_msg_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """
-    Parses <connections> block.
-    Format: MSG <id> | entity_a; entity_b | confidence | reason
+    Fetch conversation turns from Redis in chronological order.
+
+    Shared between Context (agent prompt context) and ProfileRefinementJob
+    (fact extraction context). Callers post-process the results for their
+    specific formatting needs.
+
+    Returns list of dicts with keys:
+        turn_id, role, content, timestamp, user_msg_id, metadata
     """
-    content = extract_xml_content(text, "connections")
-    if not content:
-        return []
-    
-    connections = []
-    skipped = 0
-    for line in content.split('\n'):
-        line = line.strip()
-        if not line:
-            continue
-            
-        parts = [p.strip() for p in line.split('|')]
-        
-        if len(parts) < 2:
-            skipped += 1
-            continue
-            
-        msg_match = re.search(r"MSG\s+(\d+)", parts[0], re.IGNORECASE)
-        if not msg_match:
-            skipped += 1
-            continue
-        msg_id = msg_match.group(1)
-        
-        mid_part = parts[1].strip()
-        if mid_part.upper() == "NO CONNECTIONS":
-            continue
-            
-        if len(parts) < 4:
-            continue
-        
-        try:
-            confidence = float(parts[2].strip())
-            confidence = max(0.0, min(1.0, confidence))
-        except ValueError:
-            confidence = 0.8
-        
-        reason = " | ".join(parts[3:]).strip()
-            
-        if ";" in mid_part:
-            ents = [e.strip() for e in mid_part.split(';')]
-            if len(ents) >= 2:
-                connections.append({
-                    "msg_id": msg_id,
-                    "entity_a": ents[0],
-                    "entity_b": ents[1],
-                    "confidence": confidence,
-                    "reason": reason
-                })
-    
-    if skipped > 0:
-        logger.debug(f"parse_connection_response: skipped {skipped} malformed lines")
+    sorted_key = RedisKeys.recent_conversation(user_name, session_id)
+    conv_key = RedisKeys.conversation(user_name, session_id)
 
-    return build_connection_response(connections)
-
-
-def build_connection_response(parsed: List[dict]) -> List[MessageConnections]:
-    from collections import defaultdict
-    
-    grouped = defaultdict(list)
-    for item in parsed:
-        grouped[item["msg_id"]].append(
-            EntityPair(
-                entity_a=item["entity_a"],
-                entity_b=item["entity_b"],
-                confidence=item["confidence"],
-                context=item.get("reason")
-            )
+    if up_to_msg_id:
+        turn_key = await redis_client.hget(
+            RedisKeys.msg_to_turn_lookup(user_name, session_id),
+            f"msg_{up_to_msg_id}",
         )
-    
-    message_results = [
-        MessageConnections(message_id=int(msg_id), entity_pairs=pairs)
-        for msg_id, pairs in grouped.items()
-    ]
-    
-    return message_results
+        if turn_key:
+            turn_score = await redis_client.zscore(sorted_key, turn_key)
+            turn_ids = await redis_client.zrange(
+                sorted_key,
+                f"({turn_score}",
+                "-inf",
+                desc=True,
+                byscore=True,
+                offset=0,
+                num=num_turns,
+            )
+            turn_ids = list(reversed(turn_ids))
+        else:
+            # DLQ Retry Guard: If up_to_msg_id isn't in DB, check if it's an old message by comparing to the latest.
+            latest_turn_ids = await redis_client.zrange(sorted_key, 0, 0, desc=True)
+            is_dlq_retry = False
+            latest_msg_id = None
+            
+            if latest_turn_ids:
+                latest_turn_data = await redis_client.hget(conv_key, latest_turn_ids[0])
+                if latest_turn_data:
+                    try:
+                        parsed = json.loads(latest_turn_data)
+                        latest_msg_id = parsed.get("user_msg_id")
+                        if latest_msg_id is not None and int(latest_msg_id) >= int(up_to_msg_id):
+                            is_dlq_retry = True
+                    except (ValueError, TypeError, Exception) as e:
+                        logger.warning(f"Failed to unpack latest turn for DLQ guard: {e}")
+            
+            if is_dlq_retry:
+                logger.warning(
+                    f"DLQ Guard: Msg {up_to_msg_id} missing from cache, but DB is already at msg {latest_msg_id}. "
+                    "Returning empty context to prevent leaking future messages."
+                )
+                return []
+
+            # If not a DLQ retry, it's a truly new message. Safe to grab the current state as context.
+            turn_ids = await redis_client.zrange(
+                sorted_key, 0, num_turns - 1, desc=True
+            )
+            turn_ids = list(turn_ids)
+            turn_ids.reverse()
+    else:
+        turn_ids = await redis_client.zrange(
+            sorted_key, 0, num_turns - 1, desc=True
+        )
+        turn_ids = list(turn_ids)
+        turn_ids.reverse()
+
+    if not turn_ids:
+        return []
+
+    turn_data = await redis_client.hmget(conv_key, *turn_ids)
+
+    results = []
+    for turn_id, data in zip(turn_ids, turn_data):
+        if not data:
+            continue
+        try:
+            parsed = json.loads(data)
+            results.append(
+                {
+                    "turn_id": turn_id,
+                    "role": parsed["role"],
+                    "content": parsed["content"],
+                    "timestamp": parsed["timestamp"],
+                    "user_msg_id": parsed.get("user_msg_id"),
+                    "metadata": parsed.get("metadata"),
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Failed to parse turn data for {turn_id}: {e}")
+            continue
+
+    return results
+
 
 
 

@@ -1,8 +1,10 @@
 import asyncio
+import threading
 from core.prompts import ner_reasoning_prompt
 from common.services.llm_service import LLMService
 from common.config.topics_config import TopicConfig
-from core.utils import PRONOUNS, format_vp01_input, is_covered, is_generic_phrase, parse_entities, validate_entity
+from core.utils import PRONOUNS, format_vp01_input, is_covered, is_generic_phrase, validate_entity
+from common.schema.dtypes import NERResult
 from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
 import spacy
@@ -19,7 +21,7 @@ class NLPPipeline:
         llm: LLMService,
         topic_config: TopicConfig,
         get_known_aliases: Callable[[], Dict[str, int]],
-        get_profiles: Callable[[], Dict[int, dict]],
+        get_profile: Callable[[int], Optional[dict]],
         gliner: GLiNER,
         spacy: spacy.Language,
         gliner_threshold: float = 0.85,
@@ -29,13 +31,15 @@ class NLPPipeline:
         self.llm_client = llm
         self.topic_config = topic_config
         self.get_known_aliases = get_known_aliases
-        self.get_profiles = get_profiles
+        self.get_profile = get_profile
         self._label_to_topics = self._build_label_to_topics()
         self._nlp = spacy
         self._gliner = gliner
         self.gliner_threshold = gliner_threshold
         self.vp01_min_confidence = vp01_min_confidence
         self.ner_prompt = ner_prompt
+        self.llm_ner = True
+        self._spacy_lock = threading.Lock()
 
     def update_settings(self, gliner_threshold=None, vp01_min_confidence=None, ner_prompt=None, llm_ner=None):
         if gliner_threshold is not None:
@@ -112,7 +116,9 @@ class NLPPipeline:
             
             # Using spacy POS tagging as a tie-breaker for lower-case mentions
             # Note: GLiNER span might not align perfectly with spacy tokens, so we tag the span itself
-            temp_doc = self._nlp(span)
+            temp_doc = None
+            with self._spacy_lock:
+                temp_doc = self._nlp(span)
             if any(t.pos_ == "PROPN" for t in temp_doc):
                 filtered.append(e)
                 continue
@@ -159,7 +165,9 @@ class NLPPipeline:
         
         text = "\n".join([f"[MSG {m['id']}]: {m['message']}" for m in messages])
         matcher, aliases = self._build_phrase_matcher()
-        doc = self._nlp(text)
+        doc = None
+        with self._spacy_lock:
+            doc = self._nlp(text)
         
         known_ents: List[Tuple[str, int]] = []
         for _, start, end in matcher(doc):
@@ -172,8 +180,6 @@ class NLPPipeline:
             "count": len(known_ents)
         }, verbose_only=True)
         
-        loop = asyncio.get_running_loop()
-
         def _run_gliner_batch():
             results = []
             for msg in messages:
@@ -183,7 +189,7 @@ class NLPPipeline:
                     results.append((msg_id, span, label))
             return results
 
-        gliner_ents = await loop.run_in_executor(None, _run_gliner_batch)
+        gliner_ents = await asyncio.to_thread(_run_gliner_batch)
         
         covered_texts: Dict[int, set] = {m['id']: set() for m in messages}
         resolved: List[Tuple[int, str, str, str]] = []
@@ -191,7 +197,8 @@ class NLPPipeline:
         
         # process known entities first (highest priority)
         for span_text, eid in known_ents:
-            profile = self.get_profiles().get(eid, {})
+            profile = await self.get_profile(eid)
+            profile = profile or {}
             matched_msg_ids = set()
 
             for msg in messages:
@@ -245,22 +252,32 @@ class NLPPipeline:
             "stage": "ner",
             "prompt": user_content
         }, verbose_only=True)
-        reasoning = await self.llm_client.call_llm(system_prompt, user_content)
+        
+        ner_result: NERResult = await self.llm_client.call_llm(
+            response_model=NERResult,
+            system=system_prompt,
+            user=user_content,
+            temperature=0.0
+        )
         
         vp01_count = 0
-        if reasoning and "<entities>" in reasoning:
-            response = parse_entities(reasoning, min_confidence=self.vp01_min_confidence, topic_config=self.topic_config)
-            if response:
-                for entity in response:
-                    if validate_entity(entity.name, entity.topic, self.topic_config, label=entity.label):
-                        if entity.name.lower() in gliner_filtered:
-                            logger.info(f"VP-01 recovered GLiNER-filtered entity: '{entity.name}'")
-                        output.append((entity.msg_id, entity.name, entity.label, entity.topic))
-                        vp01_count += 1
-                    else:
-                        logger.debug(f"Filtered invalid VP-01 entity: '{entity.name}'")
-            else:            
-                logger.warning("VP-01 entities block empty or all below confidence threshold")
+        if ner_result and ner_result.mentions:
+            for entity in ner_result.mentions:
+                if entity.confidence < self.vp01_min_confidence:
+                    continue
+                    
+                if validate_entity(entity.name, entity.topic, self.topic_config, label=entity.type):
+                    if is_covered(entity.name, covered_texts.get(entity.msg_id, set())):
+                        logger.debug(f"VP-01 entity '{entity.name}' filtered (already covered)")
+                        continue
+                    if entity.name.lower() in gliner_filtered:
+                        logger.info(f"VP-01 recovered GLiNER-filtered entity: '{entity.name}'")
+                    output.append((entity.msg_id, entity.name, entity.type, entity.topic))
+                    vp01_count += 1
+                else:
+                    logger.debug(f"Filtered invalid VP-01 entity: '{entity.name}'")
+        else:            
+            logger.warning("VP-01 extraction returned no valid entities or failed validation")
         
         logger.info(
             f"Extracted {len(output)} mentions: "

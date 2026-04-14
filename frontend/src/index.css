@@ -139,6 +139,11 @@
   }
 }
 
+:root {
+  --ease-elastic-out: cubic-bezier(0.68, -0.6, 0.32, 1.6);
+  --ease-premium: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .animate-bounce-high {
   animation: bounce-high 0.5s ease-in-out infinite;
 }
@@ -509,6 +514,7 @@ html.streaming .gradient-bg {
 .glass-container {
   @apply bg-white/[0.03] backdrop-blur-sm;
   @apply border border-white/[0.05];
+  transition: all 0.3s var(--ease-premium);
 }
 
 .glass-container:hover,
@@ -553,6 +559,22 @@ button.no-press-scale:active,
 
 .press-bounce:active {
   animation: press-bounce 0.15s ease-out;
+}
+
+@keyframes token-appear {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.token-stream {
+  display: inline-block;
+  animation: token-appear 0.2s ease-out forwards;
 }
 
 @layer base {

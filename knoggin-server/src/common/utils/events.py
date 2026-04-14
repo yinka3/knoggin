@@ -1,4 +1,3 @@
-
 import asyncio
 from collections import deque
 from datetime import datetime, timezone
@@ -6,9 +5,6 @@ from typing import Dict, Optional, Set, Any
 from dataclasses import dataclass
 from loguru import logger
 from common.infra.redis import AsyncRedisClient, RedisKeys
-from common.config.env_config import EventsConfig
-HISTORY_SIZE = 5
-
 
 @dataclass
 class DebugEvent:
@@ -19,41 +15,46 @@ class DebugEvent:
     data: Dict[str, Any]
     verbose_only: bool = False
 
+@dataclass
+class Subscriber:
+    queue: asyncio.Queue
+    last_active: float
+    failed_emits: int = 0
+
+    def __hash__(self):
+        return id(self)
 
 class DebugEventEmitter:
     """Session-scoped event emitter for debug WebSocket streaming."""
-    
-    _instance: Optional["DebugEventEmitter"] = None
-    
+
     def __init__(self):
         self._emit_count = 0
-        self._subscribers: Dict[str, Set[asyncio.Queue]] = {}
+        self._subscribers: Dict[str, Set[Subscriber]] = {}
         self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
         
-    
     @classmethod
     def get(cls) -> "DebugEventEmitter":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        return _DEBUG_EMITTER
     
     async def subscribe(self, session_id: str) -> asyncio.Queue:
         async with self._lock:
             if session_id not in self._subscribers:
                 self._subscribers[session_id] = set()
-            queue = asyncio.Queue(maxsize=1000)
-            # Replay recent events so the UI isn't empty on connect
+            queue = asyncio.Queue(maxsize=500)
             for evt in self._history.get(session_id, []):
                 queue.put_nowait(evt)
-            self._subscribers[session_id].add(queue)
+            sub = Subscriber(queue=queue, last_active=asyncio.get_event_loop().time())
+            self._subscribers[session_id].add(sub)
             logger.debug(f"Debug subscriber added for session {session_id}")
             return queue
     
     async def unsubscribe(self, session_id: str, queue: asyncio.Queue):
         async with self._lock:
             if session_id in self._subscribers:
-                self._subscribers[session_id].discard(queue)
+                self._subscribers[session_id] = {
+                    s for s in self._subscribers[session_id] if s.queue is not queue
+                }
                 if not self._subscribers[session_id]:
                     del self._subscribers[session_id]
     
@@ -78,31 +79,37 @@ class DebugEventEmitter:
         )
         
         if session_id not in self._history:
-            self._history[session_id] = deque(maxlen=HISTORY_SIZE)
+            self._history[session_id] = deque(maxlen=5)
         self._history[session_id].append(evt)
         
         if not self.has_subscribers(session_id):
             return
         
         async with self._lock:
-            queues = self._subscribers.get(session_id, set()).copy()
-        
-        for queue in queues:
-            try:
-                queue.put_nowait(evt)
-            except asyncio.QueueFull:
+            subs = self._subscribers.get(session_id, set())
+            to_remove = set()
+            
+            for sub in subs:
                 try:
-                    queue.get_nowait()
-                    queue.put_nowait(evt)
-                except asyncio.QueueEmpty:
-                    # In case another task popped it right after it reported Full
+                    sub.queue.put_nowait(evt)
+                    sub.failed_emits = 0
+                except asyncio.QueueFull:
+                    sub.failed_emits += 1
+                    if sub.failed_emits > 50:
+                        to_remove.add(sub)
+                        continue
                     try:
-                        queue.put_nowait(evt)
-                    except asyncio.QueueFull:
+                        sub.queue.get_nowait()
+                        sub.queue.put_nowait(evt)
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
                         pass
-        
+            
+            if to_remove:
+                self._subscribers[session_id] = subs - to_remove
+                logger.warning(f"Dropped {len(to_remove)} stale subscribers for session {session_id}")
+
         self._emit_count += 1
-        if self._emit_count % 1000 == 0:
+        if self._emit_count % 100 == 0:
             asyncio.create_task(self.cleanup_stale_sessions())
     
     async def cleanup_session(self, session_id: str):
@@ -139,35 +146,34 @@ class DebugEventEmitter:
 
 class CommunityEventEmitter:
     """Global (user-scoped) event emitter for Community live streaming."""
-    
-    _instance: Optional["CommunityEventEmitter"] = None
-    
+
     def __init__(self):
         self._emit_count = 0
-        self._subscribers: Dict[str, Set[asyncio.Queue]] = {}
+        self._subscribers: Dict[str, Set[Subscriber]] = {}
         self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
         
     @classmethod
     def get(cls) -> "CommunityEventEmitter":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        return _COMMUNITY_EMITTER
     
     async def subscribe(self, user_name: str) -> asyncio.Queue:
         async with self._lock:
             if user_name not in self._subscribers:
                 self._subscribers[user_name] = set()
-            queue = asyncio.Queue(maxsize=1000)
+            queue = asyncio.Queue(maxsize=500)
             for evt in self._history.get(user_name, []):
                 queue.put_nowait(evt)
-            self._subscribers[user_name].add(queue)
+            sub = Subscriber(queue=queue, last_active=asyncio.get_event_loop().time())
+            self._subscribers[user_name].add(sub)
             return queue
     
     async def unsubscribe(self, user_name: str, queue: asyncio.Queue):
         async with self._lock:
             if user_name in self._subscribers:
-                self._subscribers[user_name].discard(queue)
+                self._subscribers[user_name] = {
+                    s for s in self._subscribers[user_name] if s.queue is not queue
+                }
                 if not self._subscribers[user_name]:
                     del self._subscribers[user_name]
     
@@ -191,28 +197,28 @@ class CommunityEventEmitter:
         self._history[user_name].append(evt)
         
         async with self._lock:
-            queues = self._subscribers.get(user_name, set()).copy()
-        
-        for queue in queues:
-            try:
-                queue.put_nowait(evt)
-            except asyncio.QueueFull:
+            subs = self._subscribers.get(user_name, set())
+            to_remove = set()
+            for sub in subs:
                 try:
-                    queue.get_nowait()
-                    queue.put_nowait(evt)
-                except asyncio.QueueEmpty:
+                    sub.queue.put_nowait(evt)
+                except asyncio.QueueFull:
                     try:
-                        queue.put_nowait(evt)
-                    except asyncio.QueueFull:
+                        sub.queue.get_nowait()
+                        sub.queue.put_nowait(evt)
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
                         pass
-        try:
             
+            if to_remove:
+                self._subscribers[user_name] = subs - to_remove
+
+        try:
             await AsyncRedisClient.publish(RedisKeys.community_pubsub_channel(), evt)
         except Exception as e:
             logger.error(f"Failed to publish community event to Redis: {e}")
         
         self._emit_count += 1
-        if self._emit_count % 1000 == 0:
+        if self._emit_count % 100 == 0:
             asyncio.create_task(self.cleanup())
         
     async def cleanup(self, max_age_hours: int = 24):
@@ -241,42 +247,19 @@ class CommunityEventEmitter:
             if stale:
                 logger.debug(f"Pruned {len(stale)} stale community event histories")
 
+_DEBUG_EMITTER = DebugEventEmitter()
+_COMMUNITY_EMITTER = CommunityEventEmitter()
 
-# Convenience wrappers
-
-async def emit(
-    session_id: str,
-    component: str,
-    event: str,
-    data: Dict[str, Any] = None,
-    verbose_only: bool = False
-):
-    """Async emit for use in async functions."""
+async def emit(session_id: str, component: str, event: str, data: Dict[str, Any] = None, verbose_only: bool = False):
     await DebugEventEmitter.get().emit(session_id, component, event, data, verbose_only)
 
-
-def emit_sync(
-    session_id: str,
-    component: str,
-    event: str,
-    data: Dict[str, Any] = None,
-    verbose_only: bool = False
-):
-    """Fire-and-forget emit for sync code. Schedules on running loop."""
+def emit_sync(session_id: str, component: str, event: str, data: Dict[str, Any] = None, verbose_only: bool = False):
     emitter = DebugEventEmitter.get()
     try:
         loop = asyncio.get_running_loop()
         asyncio.run_coroutine_threadsafe(emitter.emit(session_id, component, event, data, verbose_only), loop)
     except RuntimeError:
-        # No running loop - event dropped (expected during shutdown/init)
         pass
 
-
-async def emit_community(
-    user_name: str,
-    component: str,
-    event: str,
-    data: Dict[str, Any] = None
-):
-    """Emit a community event."""
+async def emit_community(user_name: str, component: str, event: str, data: Dict[str, Any] = None):
     await CommunityEventEmitter.get().emit(user_name, component, event, data)

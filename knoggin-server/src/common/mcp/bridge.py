@@ -1,5 +1,5 @@
 
-from typing import List
+from typing import List, Optional, Tuple
 from loguru import logger
 
 
@@ -54,3 +54,18 @@ def mcp_tools_to_schemas(tools: List[dict]) -> List[dict]:
 def get_mcp_tool_names(tools: List[dict]) -> List[str]:
     """Return list of namespaced MCP tool names. Useful for ToolToggles integration."""
     return [t.get("namespaced") for t in tools if t.get("namespaced")]
+
+
+def parse_mcp_tool_name(namespaced: str) -> Optional[Tuple[str, str]]:
+    """
+    Parse 'mcp__gmail__search_emails' -> ('gmail', 'search_emails').
+    Returns None if not a valid MCP tool name.
+    """
+    if not namespaced.startswith("mcp__"):
+        return None
+
+    parts = namespaced.split("__", 2)
+    if len(parts) != 3:
+        return None
+
+    return parts[1], parts[2]

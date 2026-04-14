@@ -1,14 +1,23 @@
-
 import asyncio
 import httpx
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 from openai import AsyncOpenAI
 from loguru import logger
 import redis.asyncio as aioredis
+import instructor
+from transformers import AutoTokenizer
 from common.infra.redis import RedisKeys
+from common.errors.agent import ConfigurationError, DependencyError
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_RETRIES = 3
+FALLBACK_COSTS = {
+    "google/gemini-3.1-pro": {"input": 2.00, "output": 12.00},
+    "google/gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
+    "google/gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
+    "google/gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "google/gemini-2.5-flash": {"input": 0.30, "output": 1.50},
+}
 
 
 class LLMService:
@@ -18,7 +27,7 @@ class LLMService:
         api_key: str = None,
         base_url: str = None,
         trace_logger=None,
-        agent_model: str = "google/gemini-3.1-pro-preview",
+        agent_model: str = "google/gemini-3-flash-preview",
         extraction_model: str = "google/gemini-2.5-flash",
         merge_model: str = "google/gemini-2.5-pro",
         redis_client: aioredis.Redis = None
@@ -32,19 +41,43 @@ class LLMService:
         self._merge_model = merge_model
         self._redis = redis_client
         self._client = None
+        self._raw_client = None
         self._http_client = httpx.AsyncClient(timeout=10.0)
         self._background_tasks: set = set()
-        
+        self._model_prices: Dict[str, Dict[str, float]] = FALLBACK_COSTS.copy()
+        self._prices_fetched = False
+        self._tokenizer = None
+
         if api_key:
-            self._client = AsyncOpenAI(
+            client = AsyncOpenAI(
                 base_url=self._base_url,
                 api_key=self._api_key,
                 timeout=60.0
             )
+
+            self._raw_client = client
+            self._client = instructor.from_openai(client)
+            
             provider_label = "OpenRouter" if self._is_openrouter else self._base_url
             logger.info(f"LLMService initialized ({provider_label}) | extraction={extraction_model} | merge={merge_model} | agent={agent_model}")
         else:
             logger.warning("LLMService initialized without API key")
+    
+    async def load_tokenizer(self):
+        """Async loading of the heavy tokenizer."""
+        if self._tokenizer:
+            return
+            
+        try:
+            loop = asyncio.get_running_loop()
+            # Offload heavy loading to thread pool
+            self._tokenizer = await loop.run_in_executor(
+                None, 
+                lambda: AutoTokenizer.from_pretrained("unsloth/gemma-2-2b")
+            )
+            logger.info("LLM tokenizer loaded")
+        except Exception as e:
+            logger.warning(f"Failed to load transformers tokenizer: {e}. Token estimation will be less accurate.")
     
     @property
     def agent_model(self) -> str:
@@ -64,7 +97,7 @@ class LLMService:
     
     def _ensure_client(self):
         if self._client is None:
-            raise ValueError(
+            raise ConfigurationError(
                 "LLM API key not configured. "
                 "Please add your API key in Settings > Configuration."
             )
@@ -75,11 +108,13 @@ class LLMService:
             if base_url:
                 self._base_url = base_url
                 self._is_openrouter = "openrouter.ai" in self._base_url
-            self._client = AsyncOpenAI(
+            client = AsyncOpenAI(
                 base_url=self._base_url,
                 api_key=self._api_key,
                 timeout=60.0
             )
+            self._raw_client = client
+            self._client = instructor.from_openai(client)
             logger.info("LLMService: API key updated")
         
         if agent_model:
@@ -94,127 +129,168 @@ class LLMService:
             logger.info(f"LLMService: merge model {self._merge_model} -> {merge_model}")
             self._merge_model = merge_model
     
-    def _extra_body(self, reasoning: str = None) -> Dict:
-        """Build provider-specific extra_body. Only sent for OpenRouter."""
-        if not self._is_openrouter:
-            return {}
-        body = {
-            "provider": {
-                "allow_fallbacks": True,
-                "data_collection": "deny"
+    def _extra_body(self, reasoning: Optional[str] = "low") -> Dict[str, Any]:
+        """Extra body parameters for OpenRouter."""
+        body: Dict[str, Any] = {}
+        if self._is_openrouter:
+            body["provider"] = {
+                "require_parameters": True,
             }
-        }
-        if reasoning:
-            body["reasoning"] = {"effort": reasoning}
-        return body
-    
-    async def _record_usage_stats(self, generation_id: str):
-        """Fetch exact usage/cost from OpenRouter and increment global limits in Redis."""
-        if not self._is_openrouter or not self._redis or not generation_id:
+            # Add prompt caching for Anthropic/Gemini
+            # By default OpenRouter uses 5m, we can keep it as is or specify
+            body["cache_control"] = {"type": "ephemeral"} 
+            
+            if reasoning == "high":
+                body["reasoning"] = {"max_tokens": 4096}
+            elif reasoning == "medium":
+                body["reasoning"] = {"max_tokens": 1024}
+            elif reasoning == "low":
+                # Default reasoning, no specific max_tokens
+                pass
+            elif reasoning: # For any other custom reasoning string
+                body["reasoning"] = reasoning
+        # Cast to ensure Pyre2 doesn't specialize the dict too early
+        return dict(body)
+
+    async def _fetch_model_prices(self):
+        """Fetch live model pricing from OpenRouter."""
+        if not self._is_openrouter:
             return
             
-        # OpenRouter may take time to finalize generation stats, retry with backoff
-        delays = [3, 6, 10]
-        for attempt, delay in enumerate(delays):
-            await asyncio.sleep(delay)
-            
-            usage = await self._fetch_generation_stats(generation_id)
-            if not usage:
-                if attempt < len(delays) - 1:
-                    logger.debug(f"Generation stats not ready for {generation_id}, retrying in {delays[attempt+1]}s...")
-                    continue
-                logger.warning(f"Could not fetch generation stats for {generation_id} after {len(delays)} attempts")
-                return
-                
-            try:
-                total_tokens = usage.get("total_tokens", 0)
-                cost = usage.get("cost", 0.0)
-                
-                if total_tokens > 0 or (cost and cost > 0):
-                    stats_key = RedisKeys.global_stats()
-                    
-                    async with self._redis.pipeline() as pipe:
-                        if total_tokens > 0:
-                            pipe.hincrby(stats_key, "total_tokens", total_tokens)
-                        if cost and cost > 0:
-                            pipe.hincrbyfloat(stats_key, "total_cost", cost)
-                        await pipe.execute()
-                        
-                    logger.debug(f"Recorded usage for {generation_id}: {total_tokens} tokens, ${cost:.6f}")
-                return
-            except Exception as e:
-                logger.error(f"Failed to record usage stats for {generation_id}: {e}")
-                return
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{OPENROUTER_BASE_URL}/models", timeout=10.0)
+                if response.status_code == 200:
+                    data = response.json().get("data", [])
+                    for m in data:
+                        m_id = m.get("id")
+                        pricing = m.get("pricing", {})
+                        if m_id and pricing:
+                            # OpenRouter gives per-token. Convert to per-1M for internal table
+                            self._model_prices[m_id] = {
+                                "input": float(pricing.get("prompt", 0)) * 1_000_000,
+                                "output": float(pricing.get("completion", 0)) * 1_000_000
+                            }
+                    logger.info(f"Refreshed pricing for {len(data)} OpenRouter models.")
+        except Exception as e:
+            logger.error(f"Failed to refresh model prices: {e}")
+
+    def count_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        if not self._tokenizer:
+            # Fallback to rough estimation if tokenizer failed to load
+            return len(text) // 4
+        return len(self._tokenizer.encode(text))
     
-    async def _record_cost_only(self, generation_id: str):
-        """Fetch cost from OpenRouter generation API and record it (tokens tracked separately)."""
-        if not self._is_openrouter or not self._redis or not generation_id:
-            return
-        
-        # OpenRouter may take time to finalize generation stats, retry with backoff
-        delays = [3, 6, 10]
-        for attempt, delay in enumerate(delays):
-            await asyncio.sleep(delay)
-            
-            usage = await self._fetch_generation_stats(generation_id)
-            if usage:
+    async def _ensure_prices(self):
+        if not self._prices_fetched:
+            self._prices_fetched = True
+
+            async def _fetch_and_confirm():
                 try:
-                    cost = usage.get("cost", 0.0)
-                    if cost and cost > 0:
-                        stats_key = RedisKeys.global_stats()
-                        await self._redis.hincrbyfloat(stats_key, "total_cost", cost)
-                        logger.debug(f"Recorded cost for {generation_id}: ${cost:.6f}")
-                        return
-                except Exception as e:
-                    logger.error(f"Failed to record cost for {generation_id}: {e}")
-                    return
+                    await self._fetch_model_prices()
+                except Exception:
+                    self._prices_fetched = False
+
+            task = asyncio.create_task(_fetch_and_confirm())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
             
-            if attempt < len(delays) - 1:
-                logger.debug(f"Generation stats not ready for {generation_id}, retrying in {delays[attempt+1]}s...")
+    
+    async def _record_local_usage(self, model: str, prompt_tokens: int, completion_tokens: int):
+        """Record usage stats locally based on dynamic cost table (No HTTP calls)."""
+        if not self._redis:
+            return
+            
+        costs = self._model_prices.get(model)
+        if not costs:
+            logger.warning(f"No cost data for model {model}. Usage not recorded.")
+            return
+            
+        input_cost = (prompt_tokens / 1_000_000) * costs["input"]
+        output_cost = (completion_tokens / 1_000_000) * costs["output"]
+        total_cost = input_cost + output_cost
+        total_tokens = prompt_tokens + completion_tokens
         
-        logger.warning(f"Could not fetch generation stats for {generation_id} after {len(delays)} attempts")
+        try:
+            stats_key = RedisKeys.global_stats()
+            async with self._redis.pipeline() as pipe:
+                if total_tokens > 0:
+                    pipe.hincrby(stats_key, "total_tokens", total_tokens)
+                if total_cost > 0:
+                    pipe.hincrbyfloat(stats_key, "total_cost", total_cost)
+                await pipe.execute()
+                
+            logger.debug(f"Recorded approx usage ({model}): {total_tokens} tokens, ${total_cost:.6f} (approx)")
+        except Exception as e:
+            logger.error(f"Failed to record approx usage: {e}")
     
     async def call_llm(
         self,
         system: str,
         user: str,
         model: Optional[str] = None,
-        temperature: float = 0.0,
-        reasoning: str = "low"
-    ) -> Optional[str]:
+        temperature: float = 1.0,
+        response_model: Optional[type] = None,
+        reasoning: Optional[str] = None,
+        mode: Optional[instructor.Mode] = None
+    ) -> Optional[object]:
         """
         Basic completion for pipeline tasks.
         Defaults to EXTRACTION_MODEL. Callers can override for specific use cases.
         """
         self._ensure_client()
+        await self._ensure_prices()
         model = model or self._extraction_model
         
+        # Default to Mode.JSON if response_model is provided but no mode specified.
+        # This is generally more reliable across different OpenRouter models.
+        if response_model and mode is None:
+            mode = instructor.Mode.JSON
         for attempt in range(MAX_RETRIES):
             try:
-                response = await self._client.chat.completions.create(
-                    model=model,
-                    messages=[
+                # Use Dict[str, Any] to avoid Pyre2 being overly restrictive with types here
+                create_kwargs: Dict[str, Any] = {
+                    "model": model,
+                    "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user}
                     ],
-                    temperature=temperature,
-                    **(dict(extra_body=self._extra_body(reasoning)) if self._is_openrouter else {})
-                )
+                    "temperature": temperature,
+                    "max_retries": MAX_RETRIES,
+                }
                 
+                if self._is_openrouter:
+                    create_kwargs["extra_body"] = self._extra_body(reasoning)
+                    
+                if response_model:
+                    create_kwargs["response_model"] = response_model
+                    if mode:
+                        create_kwargs["mode"] = mode
+                
+                if response_model:
+                    response, completion = await self._client.chat.completions.create_with_completion(**create_kwargs)
+                    
+                    if completion and completion.usage:
+                        task = asyncio.create_task(self._record_local_usage(
+                            model,
+                            completion.usage.prompt_tokens,
+                            completion.usage.completion_tokens
+                        ))
+                        self._background_tasks.add(task)
+                        task.add_done_callback(self._background_tasks.discard)
+                    
+                    return response
+
+                response = await self._client.chat.completions.create(**create_kwargs)
+
                 if not response.choices:
-                    if attempt < MAX_RETRIES - 1:
-                        logger.warning(f"Empty response choices, retrying ({attempt+1}/{MAX_RETRIES})")
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
                     return None
                     
                 content = response.choices[0].message.content
                 
                 if not content or not content.strip():
-                    if attempt < MAX_RETRIES - 1:
-                        logger.warning(f"Empty response, retrying ({attempt+1}/{MAX_RETRIES})")
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
                     return None
                 
                 if self._trace:
@@ -224,8 +300,10 @@ class LLMService:
                         f"RESPONSE:\n{content}"
                     )
                 
-                if response.id:
-                    task = asyncio.create_task(self._record_usage_stats(response.id))
+                if response.usage:
+                    prompt = response.usage.prompt_tokens
+                    comp = response.usage.completion_tokens
+                    task = asyncio.create_task(self._record_local_usage(model, prompt, comp))
                     self._background_tasks.add(task)
                     task.add_done_callback(self._background_tasks.discard)
                 
@@ -245,15 +323,18 @@ class LLMService:
         user: str,
         tools: List[Dict],
         model: Optional[str] = None,
-        temperature: float = 0.0
+        temperature: float = 0.0,
+        reasoning: Optional[str] = "low"
     ) -> AsyncGenerator[Dict, None]:
         """Streaming completion with tools. Defaults to agent model."""
         self._ensure_client()
+        await self._ensure_prices()
         model = model or self._agent_model
         
         for attempt in range(MAX_RETRIES):
             try:
-                create_kwargs = dict(
+                # Use Dict[str, Any] for flexibility
+                create_kwargs: Dict[str, Any] = dict(
                     model=model,
                     messages=[
                         {"role": "system", "content": system},
@@ -265,16 +346,19 @@ class LLMService:
                     stream=True,
                 )
                 if self._is_openrouter:
-                    create_kwargs["stream_options"] = {"include_usage": True}
-                    create_kwargs["extra_body"] = self._extra_body(reasoning="low")
+                    # Use update to avoid item assignment type issues
+                    create_kwargs.update({
+                        "stream_options": {"include_usage": True},
+                        "extra_body": self._extra_body(reasoning=reasoning)
+                    })
                 
                 response = await self._client.chat.completions.create(**create_kwargs)
                 
-                content = ""
-                tool_calls_by_index = {}
+                content: str = ""
+                tool_calls_by_index: Dict[int, Any] = {}
                 tool_calls_detected = False
                 usage = None
-                generation_id = None
+                generation_id: Optional[str] = None
                 
                 async for chunk in response:
                     if chunk.id and not generation_id:
@@ -317,22 +401,22 @@ class LLMService:
                     calls = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index.keys())]
                     yield {"type": "tool_calls", "content": content, "calls": calls}
                 
-                if not usage and generation_id:
-                    usage = await self._fetch_generation_stats(generation_id)
+                if not usage:
+                    # Final fallback: Estimate tokens if stream didn't provide them
+                    p_tokens = self.count_tokens(f"{system}\n{user}")
+                    c_tokens = self.count_tokens(content)
+                    usage = {
+                        "prompt_tokens": p_tokens,
+                        "completion_tokens": c_tokens,
+                        "total_tokens": p_tokens + c_tokens
+                    }
+
                 
-                # Immediately record stream usage tokens (reliable, doesn't need generation API)
-                if self._redis and usage:
-                    stream_tokens = usage.get("total_tokens", 0)
-                    if stream_tokens > 0:
-                        try:
-                            stats_key = RedisKeys.global_stats()
-                            await self._redis.hincrby(stats_key, "total_tokens", stream_tokens)
-                        except Exception as e:
-                            logger.warning(f"Failed to record stream tokens: {e}")
-                
-                # Background fetch for cost (needs OpenRouter generation API)
-                if generation_id:
-                    task = asyncio.create_task(self._record_cost_only(generation_id))
+                # Local usage recording (No background HTTP fetch needed anymore)
+                if usage:
+                    prompt = usage.get("prompt_tokens", 0)
+                    comp = usage.get("completion_tokens", 0)
+                    task = asyncio.create_task(self._record_local_usage(model, prompt, comp))
                     self._background_tasks.add(task)
                     task.add_done_callback(self._background_tasks.discard)
                 
@@ -352,41 +436,16 @@ class LLMService:
                 logger.error(f"Stream failed ({model}) after {MAX_RETRIES} retries: {e}")
                 yield {"type": "error", "message": str(e)}
     
-    async def _fetch_generation_stats(self, generation_id: str) -> Optional[Dict]:
-        try:
-            resp = await self._http_client.get(
-                f"https://openrouter.ai/api/v1/generation?id={generation_id}",
-                headers={"Authorization": f"Bearer {self._api_key}"}
-            )
-            
-            if resp.status_code != 200:
-                logger.warning(f"OpenRouter generation stats API returned {resp.status_code} for {generation_id}: {resp.text[:200]}")
-                return None
-            
-            data = resp.json().get("data", {})
-            cost = data.get("total_cost") or 0.0  # handle None
-            tokens_prompt = data.get("tokens_prompt") or 0
-            tokens_completion = data.get("tokens_completion") or 0
-            
-            logger.debug(f"Generation {generation_id}: {tokens_prompt}+{tokens_completion} tokens, cost=${cost}")
-            
-            return {
-                "prompt_tokens": tokens_prompt,
-                "completion_tokens": tokens_completion,
-                "total_tokens": tokens_prompt + tokens_completion,
-                "cost": float(cost)
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch generation stats for {generation_id}: {e}")
-        return None
-
     async def close(self):
         if self._background_tasks:
-            # Wait with shield to protect crucial stats requests
-            shielded = [asyncio.shield(t) for t in self._background_tasks]
-            try:
-                await asyncio.wait(shielded, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for LLM usage stats recording tasks")
-        if self._client:
+            done, pending = await asyncio.wait(self._background_tasks, timeout=5.0)
+            if pending:
+                logger.warning(f"Timeout waiting for {len(pending)} LLM usage stats recording tasks")
+                
+        if self._http_client:
+            await self._http_client.aclose()
+            
+        if self._raw_client:
+            await self._raw_client.close()
+        elif self._client and hasattr(self._client, 'close'):
             await self._client.close()

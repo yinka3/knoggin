@@ -6,7 +6,7 @@ from rapidfuzz import fuzz, process
 from db.store import MemGraphStore
 from common.rag.embedding import EmbeddingService
 from core.utils import is_substring_match
-from src.common.schema.dtypes import Fact
+from common.schema.dtypes import Fact
 from common.utils.events import emit_sync
 from jobs.utils import cosine_similarity
 from cachetools import LRUCache, cached, TTLCache
@@ -28,7 +28,7 @@ class EntityResolver:
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
         self._name_to_id = LRUCache(maxsize=3000000)
-        self._id_to_names: Dict[int, Set[str]] = {}
+        self._id_to_names = LRUCache(maxsize=1000000)
         self._lock = threading.RLock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
@@ -36,53 +36,7 @@ class EntityResolver:
         self.fuzzy_substring_threshold = fuzzy_substring_threshold
         self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
         self.generic_token_freq = generic_token_freq
-    
-        self._hydrate_from_store()
-
-    def _hydrate_from_store(self):
-        """Populate all resolver structures from Memgraph."""
-        try:
-            # TODO: Update to async (Refactor Task) - CRITICAL: Cannot call async from __init__
-            entities = self.store.get_all_entities_for_hydration()
-            
-            if not entities:
-                logger.info("No entities in Memgraph. Starting fresh.")
-                return
-            
-            with self._lock:
-                for ent in entities:
-                    ent_id = ent["id"]
-                    canonical = ent["canonical_name"]
-                    aliases = ent["aliases"] or []
-                    
-                    self._name_to_id[canonical.lower()] = ent_id
-                    for alias in aliases:
-                        self._name_to_id[alias.lower()] = ent_id
-                    
-                    self.entity_profiles[ent_id] = {
-                        "canonical_name": canonical,
-                        "type": ent["type"],
-                        "topic": ent.get("topic", "General"),
-                        "session_id": ent.get("session_id")
-                    }
-                
-                self._id_to_names = {}
-                for name, eid in self._name_to_id.items():
-                    if eid not in self._id_to_names:
-                        self._id_to_names[eid] = set()
-                    self._id_to_names[eid].add(name)
-
-            logger.info(f"Hydrated {len(self.entity_profiles)} entities from Memgraph")
-
-            if self.session_id:  # May be None during early init
-                emit_sync(self.session_id, "resolver", "hydrated", {
-                    "entity_count": len(self.entity_profiles),
-                    "alias_count": len(self._name_to_id)
-                })
-            
-        except Exception as e:
-            logger.error(f"Hydration failed: {e}")
-            raise
+        
     
     def update_settings(self, fuzzy_substring_threshold: int = None, 
                         fuzzy_non_substring_threshold: int = None, 
@@ -105,7 +59,7 @@ class EntityResolver:
             
         logger.info(f"EntityResolver settings updated: sub={self.fuzzy_substring_threshold}, non-sub={self.fuzzy_non_substring_threshold}, freq={self.generic_token_freq}")
     
-    def get_id(self, name: str) -> Optional[int]:
+    async def get_id(self, name: str) -> Optional[int]:
         if not name:
             return None
             
@@ -113,10 +67,9 @@ class EntityResolver:
         
         with self._lock:
             stored_id = self._name_to_id.get(lower_name)
-            if stored_id:
+            if stored_id is not None:
                 return stored_id
-        # TODO: Update to async (Refactor Task)
-        found = self.store.get_entities_by_names([name])
+        found = await self.store.get_entities_by_names([name])
         if found:
             entity = found[0]
             eid = entity["id"]
@@ -143,10 +96,45 @@ class EntityResolver:
             return eid
         return None
     
-    def get_profile(self, entity_id: int) -> Optional[dict]:
+    async def get_profile(self, entity_id: int) -> Optional[dict]:
         with self._lock:
-            return self.entity_profiles.get(entity_id)
+            profile = self.entity_profiles.get(entity_id)
+            if profile:
+                return profile
+        
+        # Cache miss: fetch from store
+        entity = await self.store.get_entity_by_id(entity_id)
+        if entity:
+            eid = entity["id"]
+            canonical = entity.get("canonical_name")
+            
+            with self._lock:
+                profile = {
+                    "canonical_name": canonical,
+                    "type": entity.get("type"),
+                    "topic": entity.get("topic", "General"),
+                    "session_id": entity.get("session_id"),
+                    "embedding": entity.get("embedding")
+                }
+                self.entity_profiles[eid] = profile
+                
+                if canonical:
+                    lower_canonical = canonical.lower()
+                    self._name_to_id[lower_canonical] = eid
+                    if eid not in self._id_to_names:
+                        self._id_to_names[eid] = set()
+                    self._id_to_names[eid].add(lower_canonical)
+                
+                aliases = entity.get("aliases") or []
+                for a in aliases:
+                    lower_a = a.lower()
+                    self._name_to_id[lower_a] = eid
+                    self._id_to_names[eid].add(lower_a)
+                    
+                return profile
+        return None
     
+
     def get_profiles(self) -> Dict[int, Dict]:
         with self._lock:
             return dict(list(self.entity_profiles.items()))
@@ -159,14 +147,13 @@ class EntityResolver:
         with self._lock:
             return dict(list(self._name_to_id.items()))
     
-    def get_embedding_for_id(self, entity_id: int) -> List[float]:
+    async def get_embedding_for_id(self, entity_id: int) -> List[float]:
         """Retrieve embedding from graph by ID."""
         with self._lock:
             profile = self.entity_profiles.get(entity_id)
             if profile and profile.get("embedding"):
                 return profile["embedding"]
-        # TODO: Update to async (Refactor Task)
-        return self.store.get_entity_embedding(entity_id)
+        return await self.store.get_entity_embedding(entity_id)
         
 
     async def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
@@ -224,13 +211,14 @@ class EntityResolver:
     
         with self._lock:
             profiles_snapshot = dict(self.entity_profiles)
+            aliases_snapshot = {eid: list(self._id_to_names.get(eid, set())) for eid in profiles_snapshot}
         
         for ent_id, profile in profiles_snapshot.items():
             canonical = profile.get("canonical_name", "").lower()
             for token in canonical.split():
                 token_to_entities[token].add(ent_id)
             
-            for alias in self.get_mentions_for_id(ent_id):
+            for alias in aliases_snapshot.get(ent_id, []):
                 for token in alias.lower().split():
                     token_to_entities[token].add(ent_id)
         
@@ -280,8 +268,7 @@ class EntityResolver:
         vector_results = []
         if vector:
             try:
-                # TODO: Update to async (Refactor Task)
-                vector_results = self.store.search_entities_by_embedding(
+                vector_results = await self.store.search_entities_by_embedding(
                         vector, 
                         limit=5, 
                         score_threshold=self.candidate_vector_threshold
@@ -293,7 +280,12 @@ class EntityResolver:
             if eid:
                 candidate_scores[eid] = max(candidate_scores.get(eid, 0), vec_score)
 
-        return sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
+        with self._lock:
+            valid_scores = {
+                eid: score for eid, score in candidate_scores.items()
+                if eid in self.entity_profiles
+            }
+        return sorted(valid_scores.items(), key=lambda x: x[1], reverse=True)
     
     async def register_entity(
         self, 
@@ -389,17 +381,19 @@ class EntityResolver:
                 "aliases_transferred": len(secondary_aliases)
             })
     
-    def find_alias_collisions_targeted(self, target_ids: set) -> List[Tuple[int, int]]:
+    async def find_alias_collisions_targeted(self, target_ids: set) -> List[Tuple[int, int]]:
         """Check alias collisions only involving the given entity IDs."""
         collisions = []
         
-        with self._lock:
-            profiles_snapshot = {eid: self.entity_profiles[eid] 
-                            for eid in target_ids 
-                            if eid in self.entity_profiles}
+        # Hydrate targets first
+        profiles = {}
+        for eid in target_ids:
+            p = await self.get_profile(eid)
+            if p:
+                profiles[eid] = p
         
-        for eid, profile in profiles_snapshot.items():
-            names = self.get_mentions_for_id(eid)
+        for eid, profile in profiles.items():
+            names = list(self.get_mentions_for_id(eid))
             names.append(profile["canonical_name"].lower())
             
             for name in names:
@@ -421,40 +415,39 @@ class EntityResolver:
         
         top_id, _ = candidates[0]
         
-        with self._lock:
-            profile = self.entity_profiles.get(top_id)
-        
+        profile = await self.get_profile(top_id)
         return profile["canonical_name"] if profile else None
             
 
-    def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
+    async def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
         """Detect potential entity merges using vector search + fuzzy matching."""
+        # Note: with lazy loading, we scan what's in memory or what's specifically passed.
+        # If dirty_ids is None, we scan the current memory cache.
         with self._lock:
             scan_targets = dirty_ids if dirty_ids else list(self.entity_profiles.keys())
-            profiles_snapshot = dict(self.entity_profiles)
         
-        valid_targets = [eid for eid in scan_targets if eid in profiles_snapshot]
-        
-        if not valid_targets:
-            logger.debug("Merge detection skipped: No valid dirty entities to check.")
+        if not scan_targets:
+            logger.debug("Merge detection skipped: No entities to check.")
             return []
 
-        logger.info(f"Merge detection started. Scanning {len(valid_targets)} entities against graph.")
+        logger.info(f"Merge detection started. Scanning {len(scan_targets)} entities against graph.")
 
         generic_tokens = self._build_generic_tokens()
-        candidate_pairs = self._collect_candidate_pairs(valid_targets, generic_tokens)
+        candidate_pairs = await self._collect_candidate_pairs(scan_targets, generic_tokens)
 
         if not candidate_pairs:
             return []
 
+        entity_ids = set()
+        for id_a, id_b in candidate_pairs.keys():
+            entity_ids.add(id_a)
             entity_ids.add(id_b)
         
-        # TODO: Update to async (Refactor Task)
-        facts_by_entity = self.store.get_facts_for_entities(list(entity_ids), active_only=True)
+        facts_by_entity = await self.store.get_facts_for_entities(list(entity_ids), active_only=True)
 
         candidates = []
         for (id_a, id_b), fuzz_score in candidate_pairs.items():
-            result = self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity, profiles_snapshot)
+            result = await self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity)
             if result:
                 candidates.append(result)
 
@@ -473,9 +466,9 @@ class EntityResolver:
                     del self.entity_profiles[eid]
                     removed += 1
                 
-                to_remove = [alias for alias, id_ in self._name_to_id.items() if id_ == eid]
+                to_remove = list(self._id_to_names.get(eid, set()))
                 for alias in to_remove:
-                    del self._name_to_id[alias]
+                    self._name_to_id.pop(alias, None)
                 
                 self._id_to_names.pop(eid, None)
         
@@ -488,7 +481,7 @@ class EntityResolver:
         return removed
 
 
-    def _collect_candidate_pairs(
+    async def _collect_candidate_pairs(
         self,
         target_ids: list,
         generic_tokens: set
@@ -499,18 +492,14 @@ class EntityResolver:
         """
         seen_pairs = {}
 
-        with self._lock:
-            profiles_snapshot = dict(self.entity_profiles)
-
         for primary_id in target_ids:
-            primary_profile = profiles_snapshot.get(primary_id)
+            primary_profile = await self.get_profile(primary_id)
             if not primary_profile:
                 continue
 
             primary_name = primary_profile["canonical_name"]
             
-            # TODO: Update to async (Refactor Task)
-            neighbors = self.store.search_similar_entities(primary_id, limit=50)
+            neighbors = await self.store.search_similar_entities(primary_id, limit=50)
 
             for neighbor_id, _ in neighbors:
                 if neighbor_id == primary_id:
@@ -521,7 +510,7 @@ class EntityResolver:
                 if pair_key in seen_pairs:
                     continue
 
-                neighbor_profile = profiles_snapshot.get(neighbor_id)
+                neighbor_profile = await self.get_profile(neighbor_id)
                 if not neighbor_profile:
                     continue
 
@@ -535,8 +524,8 @@ class EntityResolver:
                 )
 
                 if not passes_threshold:
-                    emb_a = self.get_embedding_for_id(primary_id)
-                    emb_b = self.get_embedding_for_id(neighbor_id)
+                    emb_a = primary_profile.get("embedding") or await self.get_embedding_for_id(primary_id)
+                    emb_b = neighbor_profile.get("embedding") or await self.get_embedding_for_id(neighbor_id)
                     if emb_a and emb_b:
                         
                         cos_sim = cosine_similarity(emb_a, emb_b)
@@ -561,26 +550,29 @@ class EntityResolver:
         return {k: v[0] for k, v in seen_pairs.items()}
 
 
-    def _classify_pair(
+    async def _classify_pair(
         self,
         id_a: int,
         id_b: int,
         fuzz_score: int,
-        facts_by_entity: Dict[int, List[Fact]],
-        profiles_snapshot: Dict[int, dict]
+        facts_by_entity: Dict[int, List[Fact]]
     ) -> Optional[dict]:
         """
         Evaluate one pair for merge or hierarchy relationship.
         Returns candidate dict or None to skip.
         """
-        if self.store.has_direct_edge(id_a, id_b):
+        direct_edge = await self.store.has_direct_edge(id_a, id_b)
+        if direct_edge:
             return None
-        if self.store.has_hierarchy_edge(id_a, id_b):
+        hierarchy_edge = await self.store.has_hierarchy_edge(id_a, id_b)
+        if hierarchy_edge:
             return None
-        # TODO: Above two calls need await (Refactor Task)
 
-        profile_a = profiles_snapshot.get(id_a, {})
-        profile_b = profiles_snapshot.get(id_b, {})
+        profile_a = await self.get_profile(id_a)
+        profile_b = await self.get_profile(id_b)
+        
+        if not profile_a or not profile_b:
+            return None
 
         type_a = profile_a.get("type")
         type_b = profile_b.get("type")
@@ -592,9 +584,8 @@ class EntityResolver:
             if not (fuzz_score >= 85 and type_a == type_b):
                 return None
         
-        # TODO: Update to async (Refactor Task)
-        neighbors_a = self.store.get_neighbor_ids(id_a)
-        neighbors_b = self.store.get_neighbor_ids(id_b)
+        neighbors_a = await self.store.get_neighbor_ids(id_a)
+        neighbors_b = await self.store.get_neighbor_ids(id_b)
         neighbors_a.discard(1) # ignore user node
         neighbors_b.discard(1)
 
@@ -615,8 +606,8 @@ class EntityResolver:
             "secondary_session": profile_b.get("session_id"),
             "topic_a": topic_a,
             "topic_b": topic_b,
-            "facts_a": facts_by_entity[id_a],
-            "facts_b": facts_by_entity[id_b],
+            "facts_a": facts_by_entity.get(id_a, []),
+            "facts_b": facts_by_entity.get(id_b, []),
             "fuzz_score": fuzz_score,
             "shared_neighbor_count": len(shared_neighbors)
         }

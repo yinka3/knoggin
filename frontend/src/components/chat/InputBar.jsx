@@ -1,9 +1,16 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { cn } from '@/lib/utils'
 import { ArrowUp, Slash, TerminalSquare } from 'lucide-react'
-import ModelSelector from './ModelSelector'
+import ModelSelector from './elements/ModelSelector'
 import { getAutocomplete } from '@/api/commands'
 import { motion, AnimatePresence } from 'motion/react'
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command"
 
 const MAX_CHARS = 4000
 
@@ -147,38 +154,34 @@ export default function InputBar({ onSend, disabled, currentModel, onModelChange
               ref={suggestionsRef}
               className="absolute bottom-full left-0 right-0 mb-1 mx-2 z-50"
             >
-              <div className="glass-card rounded-lg shadow-xl overflow-hidden">
-                <div className="px-3 py-1.5 border-b border-white/[0.06]">
-                  <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                    Commands
-                  </span>
-                </div>
-                {suggestions.map((s, idx) => (
-                  <button
-                    key={s.command}
-                    onClick={() => applySuggestion(s)}
-                    onMouseEnter={() => setSelectedIdx(idx)}
-                    className={cn(
-                      'w-full flex items-center gap-3 px-3 py-2 text-left transition-all duration-150',
-                      idx === selectedIdx
-                        ? 'bg-primary/10 text-foreground'
-                        : 'text-foreground/80 hover:bg-white/[0.03]'
-                    )}
-                  >
-                    <div className="shrink-0 w-5 h-5 rounded flex items-center justify-center glass-container">
-                      <Slash size={12} className="text-primary" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <span className="text-sm font-mono font-medium">{s.command}</span>
-                      {s.description && (
-                        <span className="text-[11px] text-muted-foreground ml-2">
-                          {s.description}
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                ))}
-              </div>
+              <Command className="glass-card rounded-lg shadow-xl overflow-hidden border border-white/[0.08]">
+                <CommandList>
+                  <CommandGroup heading="Commands">
+                    {suggestions.map((s, idx) => (
+                      <CommandItem
+                        key={s.command}
+                        onSelect={() => applySuggestion(s)}
+                        className={cn(
+                          "flex items-center gap-3 px-3 py-2 cursor-pointer transition-colors",
+                          idx === selectedIdx && "bg-primary/10 text-foreground"
+                        )}
+                      >
+                        <div className="shrink-0 w-5 h-5 rounded flex items-center justify-center glass-container">
+                          <Slash size={12} className="text-primary" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <span className="text-sm font-mono font-medium">{s.command}</span>
+                          {s.description && (
+                            <span className="text-[11px] text-muted-foreground ml-2">
+                              {s.description}
+                            </span>
+                          )}
+                        </div>
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                </CommandList>
+              </Command>
             </motion.div>
           )}
         </AnimatePresence>
@@ -226,9 +229,9 @@ export default function InputBar({ onSend, disabled, currentModel, onModelChange
                 initial={{ opacity: 0, scale: 0.8 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.8 }}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                transition={{ duration: 0.15 }}
+                whileHover={{ scale: 1.05, boxShadow: "0 0 15px rgba(46, 170, 110, 0.3)" }}
+                whileTap={{ scale: 0.92 }}
+                transition={{ type: "spring", stiffness: 400, damping: 25 }}
                 onClick={handleSend}
                 disabled={!canSend}
                 className={cn(
@@ -247,7 +250,7 @@ export default function InputBar({ onSend, disabled, currentModel, onModelChange
         <div className="flex items-center gap-2 px-3 py-1.5 border-t border-white/[0.06] bg-white/[0.01]">
           <ModelSelector
             currentModel={currentModel}
-            onModelChange={onModelChange}
+            onModelChange={handleModelChange}
             disabled={disabled}
           />
 

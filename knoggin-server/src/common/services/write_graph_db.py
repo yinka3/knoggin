@@ -54,9 +54,7 @@ async def write_batch_to_graph(
     existing_candidates = list(set(entity_ids) - new_entity_ids)
 
     if existing_candidates:
-        validation_result = await loop.run_in_executor(
-            executor, store.validate_existing_ids, existing_candidates,
-        )
+        validation_result = await store.validate_existing_ids(existing_candidates)
 
         if validation_result is None:
             logger.warning(
@@ -75,9 +73,7 @@ async def write_batch_to_graph(
 
     # ── Alias persistence ───────────────────────────────────
     if alias_updates:
-        await loop.run_in_executor(
-            executor, store.update_entity_aliases, alias_updates,
-        )
+        await store.update_entity_aliases(alias_updates)
         logger.info(f"Persisted alias updates for {len(alias_updates)} entities")
 
     safe_ids = valid_existing_ids.union(new_entity_ids)
@@ -94,7 +90,7 @@ async def write_batch_to_graph(
                 "type": profile.get("type", ""),
                 "confidence": 1.0,
                 "topic": profile.get("topic", "General"),
-                "embedding": resolver.get_embedding_for_id(eid),
+                "embedding": await resolver.get_embedding_for_id(eid),
                 "aliases": resolver.get_mentions_for_id(eid),
                 "session_id": profile.get("session_id") or session_id,
             })
@@ -113,7 +109,7 @@ async def write_batch_to_graph(
                 "type": profile.get("type", ""),
                 "confidence": 1.0,
                 "topic": profile.get("topic", "General"),
-                "embedding": resolver.get_embedding_for_id(eid),
+                "embedding": await resolver.get_embedding_for_id(eid),
                 "aliases": resolver.get_mentions_for_id(eid),
                 "session_id": profile.get("session_id") or session_id,
             })
@@ -166,10 +162,7 @@ async def write_batch_to_graph(
 
     # ── Write to graph ──────────────────────────────────────
     if entities_to_write or relationships:
-        await loop.run_in_executor(
-            executor,
-            partial(store.write_batch, entities_to_write, relationships),
-        )
+        await store.write_batch(entities_to_write, relationships)
 
     # ── Dirty entity tracking (for profile refinement) ──────
     if redis_client and user_name and safe_ids:
@@ -201,7 +194,13 @@ async def write_batch_callback(
 
     Returns (success, error_message).
     """
-    if not batch.extraction_result:
+    has_writes = bool(
+        batch.extraction_result or
+        batch.new_entity_ids or
+        batch.alias_updated_ids or
+        batch.alias_updates
+    )
+    if not has_writes:
         return True, None
 
     try:

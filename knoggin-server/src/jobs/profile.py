@@ -1,11 +1,9 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from functools import partial
-import json
-import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
+from core.utils import fetch_conversation_turns
 from loguru import logger
 import numpy as np
 from db.store import MemGraphStore
@@ -14,11 +12,12 @@ from common.rag.embedding import EmbeddingService
 from common.services.llm_service import LLMService
 from core.entity_resolver import EntityResolver
 from core.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
-from jobs.utils import enrich_facts_with_sources, extract_fact_with_source, format_vp04_input, process_extracted_facts, parse_new_facts
-from src.common.schema.dtypes import Fact, FactMergeResult
+from jobs.utils import enrich_facts_with_sources, extract_fact_with_source, format_vp04_input, process_extracted_facts
+from common.schema.dtypes import Fact, EntityProfilesResult, BulkContradictionResult
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
-from common.config.base import get_config_value
+import redis.asyncio as aioredis
+from common.config.base import get_config
 
 class ProfileRefinementJob(BaseJob):
     """
@@ -31,7 +30,7 @@ class ProfileRefinementJob(BaseJob):
     """
 
     def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, 
-                executor: ThreadPoolExecutor, embedding_service: EmbeddingService,
+                executor: ThreadPoolExecutor, embedding_service: EmbeddingService, redis_client: aioredis.Redis,
                 msg_window: int = 30, volume_threshold: int = 15, idle_threshold: int = 90,
                 contradiction_sim_low: float = 0.70, contradiction_sim_high: float = 0.95,
                 contradiction_batch_size: int = 4, profile_batch_size: int = 8,
@@ -41,6 +40,7 @@ class ProfileRefinementJob(BaseJob):
         self.llm = llm
         self.resolver = resolver
         self.store = store
+        self.redis = redis_client
         self.executor = executor
         self.embedding_service = embedding_service
         self.batch_semaphore = asyncio.Semaphore(2)
@@ -64,7 +64,7 @@ class ProfileRefinementJob(BaseJob):
 
     async def should_run(self, ctx: JobContext) -> bool:
         dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-        count = await ctx.redis.scard(dirty_key)
+        count = await self.redis.scard(dirty_key)
         
         if count == 0:
             return False
@@ -101,10 +101,10 @@ class ProfileRefinementJob(BaseJob):
         Returns True if refinement ran.
         """
         ran_key = RedisKeys.user_profile_ran(ctx.user_name, ctx.session_id)
-        if await ctx.redis.get(ran_key):
+        if await self.redis.get(ran_key):
             return False
         
-        user_id = self.resolver.get_id(ctx.user_name)
+        user_id = await self.resolver.get_id(ctx.user_name)
         if not user_id:
             logger.warning(f"User entity {ctx.user_name} not found in resolver")
             return False
@@ -116,166 +116,177 @@ class ProfileRefinementJob(BaseJob):
         
         success = await self._refine_user_profile(ctx, user_id, profile, curr_msg_id)
 
-        await ctx.redis.setex(ran_key, 300, "true")
+        await self.redis.setex(ran_key, 300, "true")
         
         return success
     
-    async def _get_conversation_context(self, ctx: JobContext, num_turns: int, user_ratio: float = 0.75, up_to_msg_id: int = None) -> List[Dict]:
-        """Fetch recent conversation with both user and agent turns."""
-        sorted_key = RedisKeys.recent_conversation(ctx.user_name, ctx.session_id)
-        conv_key = RedisKeys.conversation(ctx.user_name, ctx.session_id)
-        
+    async def _get_conversation_context(self, ctx: JobContext, num_turns: int, user_ratio: float = 0.75, up_to_msg_id: int = None) -> List[Dict[str, Any]]:
+        """Fetch recent conversation with user/assistant ratio splitting."""
         fetch_count = int(num_turns * 2)
-        if up_to_msg_id:
-            turn_key = await ctx.redis.hget(
-                RedisKeys.msg_to_turn_lookup(ctx.user_name, ctx.session_id),
-                f"msg_{up_to_msg_id}"
-            )
-            if turn_key:
-                turn_score = await ctx.redis.zscore(sorted_key, turn_key)
-                turn_ids = await ctx.redis.zrange(
-                    sorted_key,
-                    f"({turn_score}",
-                    "-inf",
-                    desc=True,
-                    byscore=True,
-                    offset=0,
-                    num=fetch_count
-                )
-                turn_ids = list(reversed(turn_ids))
-            else:
-                turn_ids = await ctx.redis.zrange(sorted_key, 0, fetch_count - 1, desc=True)
-                turn_ids = list(turn_ids)
-                turn_ids.reverse()
-        else:
-            turn_ids = await ctx.redis.zrange(sorted_key, 0, fetch_count - 1, desc=True)
-            if not turn_ids:
-                return []
-            turn_ids = list(turn_ids)
-            turn_ids.reverse()
-        
-        if not turn_ids:
+        turns = await fetch_conversation_turns(
+            self.redis, ctx.user_name, ctx.session_id,
+            fetch_count, up_to_msg_id
+        )
+
+        if not turns:
             return []
-        
-        turn_data = await ctx.redis.hmget(conv_key, *turn_ids)
-        
+
         user_turns = []
         assistant_turns = []
-        
-        for turn_id, data in zip(turn_ids, turn_data):
-            if not data:
-                continue
-            
-            parsed = json.loads(data)
-            ts = datetime.fromisoformat(parsed['timestamp'])
+
+        for turn in turns:
+            role_label = "USER" if turn["role"] == "user" else "AGENT"
+            ts = datetime.fromisoformat(turn["timestamp"])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
-            role_label = "USER" if parsed["role"] == "user" else "AGENT"
-            
-            if parsed["role"] == "user" and parsed.get("user_msg_id") is not None:
-                formatted = f"[MSG_{parsed['user_msg_id']}] [{date_str}] [{role_label}]: {parsed['content']}"
+
+            if turn["role"] == "user" and turn.get("user_msg_id") is not None:
+                formatted = f"[MSG_{turn['user_msg_id']}] [{date_str}] [{role_label}]: {turn['content']}"
             else:
-                formatted = f"[{date_str}] [{role_label}]: {parsed['content']}"
-            
-            turn = {"turn_id": turn_id, "role": parsed["role"], "role_label": role_label, "content": parsed["content"],
-                "formatted": formatted, "raw": parsed["content"], "timestamp": parsed["timestamp"], "user_msg_id": parsed.get("user_msg_id")
+                formatted = f"[{date_str}] [{role_label}]: {turn['content']}"
+
+            enriched = {
+                **turn,
+                "role_label": role_label,
+                "formatted": formatted,
+                "raw": turn["content"],
             }
-            
-            if parsed["role"] == "user":
-                user_turns.append(turn)
+
+            if turn["role"] == "user":
+                user_turns.append(enriched)
             else:
-                assistant_turns.append(turn)
-        
+                assistant_turns.append(enriched)
+
         user_count = min(len(user_turns), int(num_turns * user_ratio))
         assistant_count = min(len(assistant_turns), num_turns - user_count)
-        
-        if user_count < int(num_turns * user_ratio):
-            assistant_count = min(len(assistant_turns), num_turns - user_count)
-        
+
         selected_user = user_turns[-user_count:] if user_count else []
         selected_assistant = assistant_turns[-assistant_count:] if assistant_count else []
-        
+
         combined = selected_user + selected_assistant
-        combined.sort(key=lambda x: x["timestamp"])
-        
+        combined.sort(key=lambda x: str(x["timestamp"]))
+
         return combined
 
-    async def execute(self, ctx: JobContext) -> JobResult:
+    async def execute(self, ctx: JobContext, force: bool = False, target_ids: Optional[List[int]] = None) -> JobResult:
+        """
+        Refines entity embeddings and profiles based on new facts.
+        :param force: If True, ignore volume thresholds and process as many as possible.
+        :param target_ids: If provided, only process these specific entities.
+        """
+        # Establish structured logging context for the job
+        with logger.contextualize(user=ctx.user_name, job=self.name, session=ctx.session_id):
+            current_msg_id = await self.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
+            current_msg_id = int(current_msg_id) if current_msg_id else 0
 
-        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
-        current_msg_id = int(current_msg_id) if current_msg_id else 0
-
-        dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-        
-        raw_ids = await ctx.redis.srandmember(dirty_key, self.volume_threshold)
-        
-        user_id = self.resolver.get_id(ctx.user_name)
-        entity_ids = [int(id_str) for id_str in raw_ids if int(id_str) != user_id] if raw_ids else []
-
-        logger.info(f"Profile refinement starting: {len(entity_ids)} entities to process")
-        
-        updates = []
-        
-        if entity_ids:
-            conversation = await self._get_conversation_context(ctx, self.msg_window, up_to_msg_id=current_msg_id)
-
-            if not conversation:
-                return JobResult(success=False, summary="No context found")
+            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
             
-            try:
+            if target_ids:
+                # Targeted mode: use provided IDs, but verify they are still in the dirty set
+                raw_ids = [str(eid) for eid in target_ids]
+                logger.info(f"Targeted refinement for {len(raw_ids)} entities")
+            else:
+                # If forced, take up to 3x the normal batch size to clear the queue
+                limit = self.volume_threshold * 3 if force else self.volume_threshold
+                raw_ids = await self.redis.srandmember(dirty_key, limit)
+        
+            user_id = await self.resolver.get_id(ctx.user_name)
+            candidate_ids = [int(id_str) for id_str in raw_ids if int(id_str) != user_id] if raw_ids else []
 
-                updates, clear_ids = await self._run_updates(ctx, entity_ids, conversation)
+            # Recency Guard (Targeted only)
+            # Avoid refining if it was updated in the last 60 seconds
+            entity_ids = []
+            if target_ids and candidate_ids:
+                for eid in candidate_ids:
+                    last_update = await self.redis.get(RedisKeys.last_profile_update(ctx.user_name, ctx.session_id, eid))
+                    if last_update:
+                        age = datetime.now(timezone.utc).timestamp() - float(last_update)
+                        if age < 60:
+                            logger.info(f"Skipping targeted refinement for entity {eid} (refined {age:.1f}s ago)")
+                            continue
+                    entity_ids.append(eid)
+            else:
+                entity_ids = candidate_ids
+
+            force_tag = " (force=True)" if force else ""
+            target_tag = f" (target_ids={len(target_ids)})" if target_ids else ""
+            logger.info(f"Profile refinement starting: {len(entity_ids)} entities to process{force_tag}{target_tag}")
+            
+            updates = []
+            
+            if entity_ids:
+                conversation = await self._get_conversation_context(ctx, self.msg_window, up_to_msg_id=current_msg_id)
+
+                if not conversation:
+                    return JobResult(success=False, summary="No context found")
                 
-                if updates:
-                    await self._write_updates(updates)
-                    await emit(ctx.session_id, "job", "profiles_refined", {
-                        "count": len(updates),
-                        "entities": [u["canonical_name"] for u in updates]
-                    })
-                    merge_queue = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
-                    updated_ids = [str(u["id"]) for u in updates]
+                updates = []
+                clear_ids = []
+                try:
+                    updates, clear_ids = await self._run_updates(ctx, entity_ids, conversation)
                     
-                    dev_settings = get_config_value("developer_settings", {})
-                    merger_enabled = dev_settings.get("jobs", {}).get("merger", {}).get("enabled", True)
+                    if updates:
+                        await self._write_updates(updates)
+                        await emit(ctx.session_id, "job", "profiles_refined", {
+                            "count": len(updates),
+                            "entities": [u["canonical_name"] for u in updates]
+                        })
+                        
+                        # Update recency timestamps for all processed entities
+                        for eid in clear_ids:
+                            await self.redis.setex(
+                                RedisKeys.last_profile_update(ctx.user_name, ctx.session_id, eid),
+                                3600, # Keep for 1 hour
+                                str(datetime.now(timezone.utc).timestamp())
+                            )
 
-                    if updated_ids and merger_enabled:
-                        await ctx.redis.sadd(merge_queue, *updated_ids)
-                        logger.info(f"Passed {len(updated_ids)} updated entities to Merge Queue")
+                        merge_queue = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
+                        updated_ids = [str(u["id"]) for u in updates]
+                        
+                        if updated_ids:
+                            config = get_config()
+                            merger_enabled = config.developer_settings.jobs.merger.enabled
 
-            except Exception as e:
-                logger.error(f"Profile refinement failed: {e}")
-                await emit(ctx.session_id, "job", "profile_refinement_failed", {
-                    "entity_count": len(entity_ids),
-                    "error": str(e)
-                })
-                return JobResult(success=False, summary=f"Failed: {e}")
-        
-        user_refined = await self._maybe_refine_user(ctx, current_msg_id)
-        
-        # Clear IDs from dirty queue to prevent infinite loop
-        # We clear both successfully updated entities AND entities that had no new context/facts
-        processed_ids = []
-        if 'clear_ids' in locals() and clear_ids:
-            processed_ids.extend([str(eid) for eid in clear_ids])
-            
-        if processed_ids:
-            await ctx.redis.srem(dirty_key, *processed_ids)
-            logger.debug(f"Cleared {len(processed_ids)} entities from dirty queue")
-        
-        parts = []
-        if updates:
-            parts.append(f"Refined {len(updates)} profiles")
-        if user_refined:
-            parts.append(f"refined {ctx.user_name}")
-        
-        summary = ", ".join(parts) if parts else "No profiles to update"
+                            if updated_ids and merger_enabled:
+                                await self.redis.sadd(merge_queue, *updated_ids)
+                                logger.info(f"Passed {len(updated_ids)} updated entities to Merge Queue")
 
-        await ctx.redis.setex(
-            RedisKeys.profile_complete(ctx.user_name, ctx.session_id),
-            300,
-            str(datetime.now(timezone.utc).timestamp())
-        )
-        
-        return JobResult(success=True, summary=summary)
+                except Exception as e:
+                    logger.exception(f"Profile refinement batch process failed: {e}")
+                    await emit(ctx.session_id, "job", "profile_refinement_failed", {
+                        "entity_count": len(entity_ids),
+                        "error": str(e)
+                    })
+                        # We don't return here so that user refinement still has a chance
+                
+                user_refined = await self._maybe_refine_user(ctx, current_msg_id)
+                
+                # Clear IDs from dirty queue to prevent infinite loop
+                # We clear both successfully updated entities AND entities that had no new context/facts
+                processed_ids = []
+                if clear_ids:
+                    processed_ids.extend([str(eid) for eid in clear_ids])
+                    
+                if processed_ids:
+                    await self.redis.srem(dirty_key, *processed_ids)
+                    logger.debug(f"Cleared {len(processed_ids)} entities from dirty queue")
+                
+                parts = []
+                if updates:
+                    parts.append(f"Refined {len(updates)} profiles")
+                if user_refined:
+                    parts.append(f"refined {ctx.user_name}")
+                
+                summary = ", ".join(parts) if parts else "No profiles to update"
+
+                await self.redis.setex(
+                    RedisKeys.profile_complete(ctx.user_name, ctx.session_id),
+                    300,
+                    str(datetime.now(timezone.utc).timestamp())
+                )
+                
+                return JobResult(success=True, summary=summary)
+            else:
+                return JobResult(success=True, summary="No profiles to update")
     
     async def _refine_user_profile(self, ctx: JobContext, user_id: int, profile: dict, curr_msg_id: int) -> bool:
         """Execute user profile refinement."""
@@ -292,15 +303,11 @@ class ProfileRefinementJob(BaseJob):
             return False
         
         # Get current message ID for checkpoint
-        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
+        current_msg_id = await self.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
         
         # Fetch existing facts from DB
-        loop = asyncio.get_running_loop()
-        # TODO: Update to async (Refactor Task)
-        existing_facts = await loop.run_in_executor(
-            self.executor,
-            self.store.get_facts_for_entity,
+        existing_facts = await self.store.get_facts_for_entity(
             user_id,
             True  # active_only
         )
@@ -330,20 +337,19 @@ class ProfileRefinementJob(BaseJob):
             "stage": "user_profile_extraction",
             "prompt": user_content
         }, verbose_only=True)
-        
-        reasoning = await self.llm.call_llm(system_reasoning, user_content)
 
-        if not reasoning:
-            logger.warning("VEGAPUNK-06 returned None for user profile")
-            return False
-        
-        response = parse_new_facts(reasoning)
-        
-        if not response or not response:
-            logger.warning("No facts parsed for user profile")
+        profiles_result: EntityProfilesResult = await self.llm.call_llm(
+            response_model=EntityProfilesResult,
+            system=system_reasoning,
+            user=user_content,
+            temperature=0.0
+        )
+
+        if not profiles_result or not profiles_result.profiles:
+            logger.warning("No profiles extracted for user")
             return False
 
-        profile_map = {p.canonical_name.lower(): p for p in response}
+        profile_map = {p.canonical_name.lower(): p for p in profiles_result.profiles}
         profile_out = profile_map.get(ctx.user_name.lower())
         
         if not profile_out:
@@ -360,21 +366,20 @@ class ProfileRefinementJob(BaseJob):
         
         valid_msg_ids = {int(turn['user_msg_id']) for turn in conversation if turn.get('user_msg_id') is not None}
 
-        await self._apply_fact_changes(user_id, merge_result, existing_facts, valid_msg_ids, ctx.session_id)
+        final_active_facts, failed_invalidations = await self._apply_fact_changes(user_id, merge_result, existing_facts, valid_msg_ids, ctx.session_id)
+        if failed_invalidations:
+            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
+            await self.redis.sadd(dirty_key, str(user_id))
+            logger.warning(f"Re-dirtied user entity {user_id}: {len(failed_invalidations)} invalidations failed")
         
-        embedding = await self._update_entity_embedding(user_id, ctx.user_name)
+        embedding = await self._update_entity_embedding(user_id, ctx.user_name, final_active_facts)
         
         
-        # TODO: Update to async (Refactor Task)
-        await loop.run_in_executor(
-            self.executor,
-            partial(
-                self.store.update_entity_profile,
-                entity_id=user_id,
-                canonical_name=ctx.user_name,
-                embedding=embedding,
-                last_msg_id=current_msg_id
-            )
+        await self.store.update_entity_profile(
+            entity_id=user_id,
+            canonical_name=ctx.user_name,
+            embedding=embedding,
+            last_msg_id=current_msg_id
         )
         
         logger.info(f"Refined user profile for {ctx.user_name}")
@@ -422,21 +427,20 @@ class ProfileRefinementJob(BaseJob):
                 "entities": [e["entity_name"] for e in batch],
                 "prompt": user_content
             }, verbose_only=True)
+
+            profiles_result: EntityProfilesResult = await self.llm.call_llm(
+                response_model=EntityProfilesResult,
+                system=system_reasoning,
+                user=user_content,
+                temperature=0.0
+            )
             
-            reasoning = await self.llm.call_llm(system_reasoning, user_content)
-            
-            if not reasoning:
-                logger.warning(f"VEGAPUNK-06 returned None for: {[e['entity_name'] for e in batch]}")
-                return []
-            
-            response = parse_new_facts(reasoning)
-            
-            if not response:
-                logger.warning(f"No facts parsed for: {[e['entity_name'] for e in batch]}")
+            if not profiles_result or not profiles_result.profiles:
+                logger.warning(f"No profiles extracted for: {[e['entity_name'] for e in batch]}")
                 return []
             
             updates = []
-            profile_map = {p.canonical_name.lower(): p for p in response}
+            profile_map = {p.canonical_name.lower(): p for p in profiles_result.profiles}
             
             for orig in batch:
                 profile_out = profile_map.get(orig["entity_name"].lower())
@@ -452,10 +456,14 @@ class ProfileRefinementJob(BaseJob):
                 existing_facts = ents_to_facts[orig["ent_id"]]
                 merge_result = process_extracted_facts(existing_facts, new_facts)
                 
-                await self._apply_fact_changes(orig["ent_id"], merge_result, existing_facts, valid_msg_ids, ctx.session_id)
+                # Pass local facts to avoid N+1 DB fetch
+                final_active_facts, failed_invalidations = await self._apply_fact_changes(orig["ent_id"], merge_result, existing_facts, valid_msg_ids, ctx.session_id)
+                if failed_invalidations:
+                    dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
+                    await self.redis.sadd(dirty_key, str(orig["ent_id"]))
+                    logger.warning(f"Re-dirtied entity {orig['ent_id']}: {len(failed_invalidations)} invalidations failed")
                 
-                # Update entity embedding
-                embedding = await self._update_entity_embedding(orig["ent_id"], orig["entity_name"])
+                embedding = await self._update_entity_embedding(orig["ent_id"], orig["entity_name"], final_active_facts)
                 
                 updates.append({
                     "id": orig["ent_id"],
@@ -464,15 +472,11 @@ class ProfileRefinementJob(BaseJob):
                     "last_msg_id": current_msg_id
                 })
 
-            loop = asyncio.get_running_loop()
             updated_ids = {u["id"] for u in updates}
             no_update_ents = [orig for orig in batch if orig["ent_id"] not in updated_ids]
             
             for orig in no_update_ents:
-                # TODO: Update to async (Refactor Task)
-                await loop.run_in_executor(
-                    None,
-                    self.store.update_entity_checkpoint,
+                await self.store.update_entity_checkpoint(
                     orig["ent_id"],
                     current_msg_id
                 )
@@ -480,8 +484,8 @@ class ProfileRefinementJob(BaseJob):
             return updates
     
 
-    async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict]) -> Tuple[List[Dict], List[int]]:
-        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
+    async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[int]]:
+        current_msg_id = await self.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
 
         loop = asyncio.get_running_loop()
@@ -496,10 +500,7 @@ class ProfileRefinementJob(BaseJob):
             return [], entity_ids # if invalid, we should clear them from dirty queue too
 
 
-        # TODO: Update to async (Refactor Task)
-        ents_to_facts = await loop.run_in_executor(
-            None,
-            self.store.get_facts_for_entities,
+        ents_to_facts = await self.store.get_facts_for_entities(
             [ent_id for ent_id, _ in valid_entities],
             True
         )
@@ -509,15 +510,9 @@ class ProfileRefinementJob(BaseJob):
             return [], []
 
 
-        # Fetch last_profiled_msg_id for each entity
-        profiled_checkpoints = {}
-        for ent_id, _ in valid_entities:
-            # TODO: Update to async (Refactor Task)
-            entity_data = await loop.run_in_executor(
-                None, self.store.get_entity_by_id, ent_id
-            )
-            if entity_data and entity_data.get("last_profiled_msg_id"):
-                profiled_checkpoints[ent_id] = entity_data["last_profiled_msg_id"]
+        # Batch fetch last_profiled_msg_id for all entities to avoid N+1
+        entities_data = await self.store.get_entities_by_ids([ent_id for ent_id, _ in valid_entities])
+        profiled_checkpoints = {e["id"]: e.get("last_profiled_msg_id", 0) for e in entities_data}
 
         entity_inputs = []
         for ent_id, profile in valid_entities:
@@ -560,26 +555,35 @@ class ProfileRefinementJob(BaseJob):
             for batch in batches
         ]
 
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Return the generated updates, along with the ENTIRE list of entity_ids we evaluated,
-        # so they can all be removed from the dirty queue and stop the infinite loop.
-        # - If an entity had no new conversation turns, it was skipped, so it should be removed.
-        # - If an entity was evaluated but got no new facts, it should be removed.
-        # - If an entity was updated, it should also be removed.
-        return [update for batch_updates in results for update in batch_updates], entity_ids
+        all_updates = []
+        successful_entity_ids = []
+        
+        # Track which entities weren't even in entity_inputs (no new conversation)
+        input_ids = {inp["ent_id"] for inp in entity_inputs}
+        skipped_ids = [eid for eid in entity_ids if eid not in input_ids]
+        successful_entity_ids.extend(skipped_ids)
+
+        for i, res in enumerate(results):
+            batch_ents = [inp["ent_id"] for inp in batches[i]]
+            if isinstance(res, Exception):
+                logger.error(f"Batch {i} failed with {type(res).__name__}: {res}")
+            else:
+                all_updates.extend(res)
+                # If the batch succeeded, these entities are considered "done" even if no facts found
+                successful_entity_ids.extend(batch_ents)
+
+        return all_updates, successful_entity_ids
     
 
     async def _apply_fact_changes(
-        self,
-        entity_id: int,
-        merge_result: FactMergeResult,
-        existing_facts: List[Fact],
-        valid_msg_ids: Optional[set] = None,
-        session_id: str = None
-    ):
-        """Invalidate old facts and create new ones. Creates first, invalidates after."""
-        loop = asyncio.get_running_loop()
+        self, entity_id, merge_result, existing_facts, valid_msg_ids, session_id
+    ) -> Tuple[List[Fact], List[str]]:
+        """
+        Invalidate old facts and create new ones. Creates first, invalidates after.
+        Returns the final set of active facts.
+        """
         now = datetime.now(timezone.utc)
         
         to_invalidate = set(merge_result.to_invalidate)
@@ -587,14 +591,14 @@ class ProfileRefinementJob(BaseJob):
         
         facts_to_create = []
 
-        for raw_content in merge_result.new_contents:
-            content, msg_id = extract_fact_with_source(raw_content)
+        for fact_update in merge_result.new_contents:
+            content, msg_id = extract_fact_with_source(fact_update)
             
-            if msg_id and valid_msg_ids and msg_id not in valid_msg_ids:
+            if msg_id is not None and valid_msg_ids is not None and msg_id not in valid_msg_ids:
                 msg_type = type(msg_id).__name__
                 valid_type = type(list(valid_msg_ids)[0]).__name__ if valid_msg_ids else "empty"
                 logger.warning(
-                    f"[{self.session_id}] ProfileRefinementJob: "
+                    f"[{session_id}] ProfileRefinementJob: "
                     f"Invalid msg_id {msg_id} (type {msg_type}) not in conversation window "
                     f"{valid_msg_ids} (type {valid_type})"
                 )
@@ -623,10 +627,7 @@ class ProfileRefinementJob(BaseJob):
 
         if facts_to_create:
             try:
-                # TODO: Update to async (Refactor Task)
-                count = await loop.run_in_executor(
-                    self.executor,
-                    self.store.create_facts_batch,
+                count = await self.store.create_facts_batch(
                     entity_id,
                     facts_to_create
                 )
@@ -635,10 +636,7 @@ class ProfileRefinementJob(BaseJob):
                 failed_invalidations = []
                 for fact_id in to_invalidate:
                     try:
-                        # TODO: Update to async (Refactor Task)
-                        await loop.run_in_executor(
-                            self.executor,
-                            self.store.invalidate_fact,
+                        await self.store.invalidate_fact(
                             fact_id,
                             now
                         )
@@ -665,13 +663,12 @@ class ProfileRefinementJob(BaseJob):
                     "fact_count": len(facts_to_create),
                     "error": str(e)
                 })
+                return [f for f in active_existing if f not in facts_to_create], list(to_invalidate)
         elif to_invalidate:
             failed_invalidations = []
             for fact_id in to_invalidate:
                 try:
-                    await loop.run_in_executor(
-                        self.executor,
-                        self.store.invalidate_fact,
+                    await self.store.invalidate_fact(
                         fact_id,
                         now
                     )
@@ -690,6 +687,10 @@ class ProfileRefinementJob(BaseJob):
                 "invalidated": len(to_invalidate),
                 "created": 0
             }, verbose_only=True)
+
+            return active_existing, failed_invalidations
+        
+        return active_existing, []
                 
     async def _detect_contradictions(
         self,
@@ -727,12 +728,15 @@ class ProfileRefinementJob(BaseJob):
                         if new_msg_id < fact.source_msg_id:
                             logger.debug(f"Skipping contradiction check: msg_{new_msg_id} older than msg_{fact.source_msg_id} for '{new_content[:40]}...'")
                             continue
+                        if new_msg_id == fact.source_msg_id:
+                            logger.debug(f"Skipping contradiction check: msg_{new_msg_id} same as source msg for '{new_content[:40]}...'")
+                            continue
                     candidates.append((fact, similarity))
         
         if not candidates:
             return []
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
+        candidates: List[Tuple[Fact, float]] = sorted(candidates, key=lambda x: x[1], reverse=True)
         
         to_invalidate = []
     
@@ -772,74 +776,46 @@ class ProfileRefinementJob(BaseJob):
             lines.append(f'{i}. FACT_A: "{existing}" | FACT_B: "{new}"')
         user = "\n".join(lines)
         
-        result = await self.llm.call_llm(system, user)
-
-        await emit(session_id, "job", "llm_call", {
-            "stage": "contradiction_judgment",
-            "pair_count": len(pairs),
-            "prompt": user
-        }, verbose_only=True)
-        
-        if not result:
-            logger.warning("LLM returned empty for contradiction check, skipping")
-            return {}
-        
-        match = re.search(r"<results>\s*(.*?)\s*</results>", result, re.DOTALL | re.IGNORECASE)
-    
-        if match:
-            results_block = match.group(1).strip()
-        else:
-            # Fallback: try parsing raw output
-            logger.warning("Missing <results> tags, attempting raw parse")
-            results_block = result.strip()
-        
-        judgments = {}
-        
-        for line in results_block.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            
-            line_match = re.match(r"(\d+)\s*:\s*(true|false)", line, re.IGNORECASE)
-            if not line_match:
-                continue  # Skip malformed lines instead of raising
-            
-            idx = int(line_match.group(1)) - 1
-            if 0 <= idx < len(pairs):
-                value = line_match.group(2).lower() == "true"
-                judgments[idx] = value
-            else:
-                logger.warning(f"LLM contradiction judgment returned out-of-bounds index: {idx+1}")
-        
-        if len(judgments) != len(pairs):
-            missing = len(pairs) - len(judgments)
-            logger.warning(f"Contradiction check: {missing}/{len(pairs)} indices missing")
-            await emit(session_id, "job", "contradiction_partial_result", {
-                "expected": len(pairs),
-                "received": len(judgments),
-                "missing": missing
+        try:
+            await emit(session_id, "job", "llm_call", {
+                "stage": "contradiction_judgment",
+                "pair_count": len(pairs),
+                "prompt": user
             }, verbose_only=True)
-        
-        return judgments
+
+            bulk_contradiction: BulkContradictionResult = await self.llm.call_llm(
+                response_model=BulkContradictionResult,
+                system=system,
+                user=user,
+                temperature=0.0
+            )
+
+            if not bulk_contradiction or not bulk_contradiction.judgments:
+                logger.warning("LLM returned no contradiction judgments")
+                return {}
+            
+            # Map index (1-based) to is_contradiction
+            return {j.index - 1: j.is_contradiction for j in bulk_contradiction.judgments}
+
+        except Exception as e:
+            logger.error(f"Structured contradiction detection failed: {e}")
+            return {}
     
     async def _update_entity_embedding(
         self,
         entity_id: int, 
-        canonical_name: str
+        canonical_name: str,
+        active_facts: Optional[List[Fact]] = None
     ) -> List[float]:
         """Recompute entity embedding from current active facts."""
-        loop = asyncio.get_running_loop()
-        
-        active_facts = await loop.run_in_executor(
-            self.executor,
-            self.store.get_facts_for_entity,
-            entity_id,
-            True
-        )
-
         if active_facts is None:
-            logger.warning(f"Could not fetch facts for embedding update, using name only")
-            active_facts = []
+            active_facts = await self.store.get_facts_for_entity(
+                entity_id,
+                True
+            )
+            if active_facts is None:
+                logger.warning(f"Could not fetch facts for embedding update, using name only")
+                active_facts = []
         
         resolution_text = f"{canonical_name}. " + " ".join([f.content for f in active_facts])
         
@@ -849,18 +825,13 @@ class ProfileRefinementJob(BaseJob):
 
     async def _write_updates(self, updates: List[Dict]):
         """Write profile updates to Memgraph sequentially."""
-        loop = asyncio.get_running_loop()
         
         for update in updates:
-            await loop.run_in_executor(
-                self.executor,
-                partial(
-                    self.store.update_entity_profile,
-                    entity_id=update["id"],
-                    canonical_name=update["canonical_name"],
-                    embedding=update["embedding"],
-                    last_msg_id=update["last_msg_id"]
-                )
+            await self.store.update_entity_profile(
+                entity_id=update["id"],
+                canonical_name=update["canonical_name"],
+                embedding=update["embedding"],
+                last_msg_id=update["last_msg_id"]
             )
 
         logger.info(f"Wrote {len(updates)} profile updates to graph")

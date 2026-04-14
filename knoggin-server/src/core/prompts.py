@@ -42,17 +42,20 @@ processing. Every missed entity is lost context. When uncertain about proper
 nouns, lean toward extraction—duplicates are resolved later.
 </stakes>
 
-<output_format>
-<entities>
-msg_id | name | label | topic | confidence
-Example: 1 | The Museum of Modern Art | museum | Culture | 0.9
-</entities>
+<example>
+Input: [USER] "I'm heading to the Louvre with my friend Alice."
+Output: {{
+  "entities": [
+    {{"name": "Louvre", "label": "landmark", "topic": "Travel", "confidence": 0.98}},
+    {{"name": "Alice", "label": "person", "topic": "Social", "confidence": 0.95}}
+  ]
+}}
+</example>
 
-Rules:
-- One entity per line, pipe-separated
-- Confidence: 0.9+ unambiguous, 0.7-0.9 likely correct, below 0.7 omit
-- Empty block if nothing qualifies
-- No markdown tables, no header rows, no dashes
+<output_format>
+Return your response as a JSON object matching the requested schema.
+Include only entities that qualify based on the tasks and ubiquity filters.
+Confidence scores: 0.9+ for unambiguous matches, 0.7-0.9 for likely correct ones.
 </output_format>
 """
 
@@ -92,15 +95,19 @@ You receive:
 3. **Guideline**: Only extract connections that are **explicitly stated** or **physically implied** (e.g., "sat next to"). If they are just discussed in the same topic, DO NOT connect.
 </stakes>
 
-<output_format>
-<connections>
-MSG <id> | entity_a; entity_b | confidence | short reason
-</connections>
+<example>
+Input: [USER] "Alice and Bob were there."
+Output: {{
+  "connections": [
+    {{"msg_id": 1, "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "confidence": 0.85, "context": "Mentioned together as being in the same place."}}
+  ]
+}}
+</example>
 
-Rules:
-- One line per connection, pipe-separated
-- Confidence: 0.8+ explicit, 0.5-0.8 strong implication
-- If no connections: MSG <id> | NO CONNECTIONS
+<output_format>
+Return your response as a JSON object matching the requested schema.
+Include only connections that are explicitly stated or physically implied.
+Confidence: 0.8+ for explicit, 0.5-0.8 for strong implication.
 </output_format>
 """
 
@@ -132,16 +139,15 @@ Each entity includes:
 2. **SPECIFIC** — Concrete beats vague. Names, counts, dates, locations, states.
    - "Works in tech" BAD → "Engineer at Google" GOOD
 
-3. **ATOMIC** — One fact per item. Short, dense strings.
+3. **ATOMIC** — One fact per item. Keep content dense.
 
-4. **SUPERSEDES** — Fact replaces a previous value (counts, grades, status).
-   - Format: `[SUPERSEDES: <exact old content>] new fact [MSG_X]`
-   - Copy the old fact's content field exactly.
+4. **SUPERSEDES** — Fact replaces a previous value (counts, status, locations).
+   - Set the `supersedes` field to the exact text of the old fact.
 
 5. **INVALIDATES** — Fact no longer true, no replacement stated.
-   - Format: `[INVALIDATES: <exact content>] [MSG_X]`
+   - Set the `invalidates` field to the exact text of the old fact.
 
-6. **SOURCE** — Tag conversation-derived facts with message ID: `fact [MSG_X]`
+6. **SOURCE** — Always include the `msg_id` where the fact was found.
 </rules>
 
 <conflict_resolution>
@@ -151,30 +157,14 @@ When existing facts contradict (same attribute, different values):
 - SUPERSEDES the older fact with the newer one
 </conflict_resolution>
 
-<stakes>
-1. **False Overwrite (Data Loss)**: Using [SUPERSEDES] incorrectly deletes valid historical data.
-2. **False Fact (Clutter)**: Adding a minor or redundant fact is messy but harmless.
-3. **Guideline**: 
-   - Only use [SUPERSEDES] if the new fact is a **state change** (e.g., "moved to NY") or a **correction**. 
-   - If it's just a nuance or addition, just add it as a new fact.
-</stakes>
-
-<output>
-<new_facts>
-EntityName: fact [MSG_X] | [SUPERSEDES: old content] new content [MSG_X]
-</new_facts>
-
-Rules:
-- One entity per line, facts separated by |
-- Tag message source: [MSG_X]
-- SUPERSEDES: copy old fact content exactly, then new fact
-- INVALIDATES: [INVALIDATES: old content] [MSG_X]
-- Omit entities with no changes
-</output>
+<output_format>
+Return your response as a JSON object matching the requested schema.
+Each entity should have a list of structured fact updates.
+</output_format>
 """
 
 def get_merge_judgment_prompt() -> str:
-   return f"""
+   return r"""
 You are VEGAPUNK-04, the Entity Deduplication Arbiter.
 
 <task>
@@ -207,18 +197,29 @@ Entity A & Entity B:
 3. **Guideline**: If you are 99% sure, merge. If you are 90% sure, REJECT.
 </stakes>
 
-<output>
-<score>X.XX</score>
+<example>
+Input: 
+Entity A: Mike [Person], Facts: ["works at Google"]
+Entity B: Michael [Person], Facts: ["engineer at Google"]
+Output: {{
+  "should_merge": true,
+  "reasoning": "Names Michael and Mike are common aliases, and both share the same workplace and profession.",
+  "confidence": 0.96,
+  "new_canonical_name": "Michael"
+}}
+</example>
 
-Single float 0.0-1.0.
-- **0.95-1.00**: Absolute certainty (Unique ID match, exact rare name + overlap).
-- **0.75-0.94**: High confidence (Alias match + fact consistency).
-- **0.00-0.74**: REJECT. (Any doubt means keep separate).
-</output>
+<output_format>
+Return your response as a JSON object matching the requested schema.
+- should_merge: True only if evidence is overwhelming.
+- reasoning: Concise justification citing specific facts.
+- confidence: 0.95+ absolute certainty, 0.75-0.94 high confidence.
+- new_canonical_name: Suggested better name if merging.
+</output_format>
 """
 
 def get_contradiction_judgment_prompt() -> str:
-   return """
+   return r"""
 You are VEGAPUNK-05, the Fact Contradiction Detector.
 
 <task>
@@ -229,7 +230,7 @@ For each numbered pair, determine if FACT_B contradicts or supersedes FACT_A.
 FACT_B replaces the same quality/state as FACT_A:
 - "Works at Google" → "Works at Meta" (employer changed)
 - "Has 2 kids" → "Has 3 kids" (count updated)
-- "Is dating Sarah" → "Is single" (status changed)
+- "Is dating Sarah" -> "Is single" (status changed)
 </contradiction>
 
 <not_contradiction>
@@ -244,71 +245,74 @@ FACT_B replaces the same quality/state as FACT_A:
 </input_format>
 
 <output_format>
-<results>
-1:true
-2:false
-</results>
+Return your response as a JSON object matching the requested schema.
+The response should contain a "judgments" field, which is a list of results.
+Each result must have:
+- index: the 1-based index from the input list.
+- is_contradiction: true or false.
 </output_format>
-
-Respond ONLY with the results block. One judgment per line. No explanation.
 """
 
-def get_topic_seed_prompt() -> str:
-   return """You are a knowledge graph configuration assistant. Given the user's onboarding responses, generate a topic configuration.
+def get_topic_seed_prompt(user_name: str) -> str:
+   return f"""
+You are a knowledge graph configuration assistant for {user_name}. 
+Given their onboarding responses, generate a topic configuration that reflects their life and interests.
 
-<schema>
-"TopicName": {
-    "active": true,
-    "labels": [],
-    "aliases": [],
-    "hierarchy": {}
-}
-
-- **labels** (primary): Concrete singular nouns representing entity types that would become nodes in a knowledge graph. Max 5 per topic. 
+<labels_guidance>
+- **labels**: Concrete singular nouns representing entity types that would become nodes in a knowledge graph. Max 5 per topic. 
 Labels are used downstream to classify messages into topics — they should be specific enough to distinguish this topic from others, 
 but common enough to appear naturally in conversation.
-- **aliases** (optional): A few alternative names for the topic itself. Keep brief — these are refined later.
-- **hierarchy**: Leave empty — detected automatically.
+- **aliases**: Optional. Alternative names for the topic itself. Keep very brief.
+- **hierarchy**: Optional. Map of higher-level category names to lists of sub-topic labels if a clear hierarchy exists. Keep simple and brief.
 
 Good labels (concrete, extractable as graph nodes):
   "recipe", "investor", "language", "medication", "tool", "landmark"
 
 Bad labels (abstract, not entity types):
   "routine", "culture", "management", "space", "strength", "journey"
-</schema>
+</labels_guidance>
 
 <rules>
-1. Generate 1–5 topics based on what the user described. Fewer well-defined topics over many sparse ones.
+1. Generate 1–5 topics based on what {user_name} described. Fewer well-defined topics over many sparse ones.
 2. Do NOT generate "General" or "Identity" — system-managed.
 3. Labels must be concrete nouns you would extract as named entities from conversation. If it wouldn't be a node in a graph, don't include it.
 4. A label should appear under only one topic.
 5. Max 5 labels per topic.
+6. The output should be a mapping of TopicName to its configuration.
 </rules>
 
-Respond with ONLY valid JSON. No markdown, no explanation."""
+Respond with the FULL updated config as valid JSON in the requested format."""
 
 
-def get_topic_evolution_prompt() -> str:
-   return """You are a knowledge graph configuration assistant. Given the current topic config and recent conversation, evolve the topic configuration.
+def get_lightweight_extraction_prompt(content: str) -> str:
+    return (
+        f"Review this assistant response in a conversation:\n\n"
+        f"---\n{content}\n---\n\n"
+        f"Does this response contain specific facts, definitions, or clear statements worth remembering long-term?\n"
+        f"If so, extract them as structured profiles. Each profile is an entity name (canonical_name) "
+        f"and its associated facts.\n"
+        f"If the response is just chit-chat or general advice, return an empty list of profiles."
+    )
 
-<schema>
-"TopicName": {
-    "active": true/false,
-    "labels": [],
-    "aliases": [],
-    "hierarchy": {}
-}
 
-- **labels**: Concrete singular nouns representing entity types that would become nodes in a knowledge graph. Max 5 per topic. Labels are used downstream to classify messages into topics — they should be specific enough to distinguish this topic from others, but common enough to appear naturally in conversation.
-- **aliases**: Alternative names a user might say to refer to this topic.
-- **hierarchy**: Preserve exactly as-is from the current config.
+def get_topic_evolution_prompt(user_name: str) -> str:
+   return f"""
+You are a knowledge graph configuration assistant for {user_name}. 
+Given the current topic config and recent conversation, evolve the topic configuration.
+
+<labels_guidance>
+- **labels**: Concrete singular nouns representing entity types that would become nodes in a knowledge graph. Max 5 per topic. 
+Labels are used downstream to classify messages into topics — they should be specific enough to distinguish this topic from others, 
+but common enough to appear naturally in conversation.
+- **aliases**: Optional. Alternative names a user might say to refer to this topic. Keep very brief.
+- **hierarchy**: Optional. Map of higher-level category names to lists of sub-topic labels. Preserve or adjust slightly if the conversation reveals a better structure. Keep simple and brief.
 
 Good labels (concrete, extractable as graph nodes):
   "recipe", "investor", "language", "medication", "tool", "landmark"
 
 Bad labels (abstract, not entity types — use as aliases instead):
   "routine", "culture", "management", "space", "strength", "journey"
-</schema>
+</labels_guidance>
 
 <rules>
 1. Do NOT modify "General" or "Identity" — return them unchanged.
@@ -318,6 +322,7 @@ Bad labels (abstract, not entity types — use as aliases instead):
 5. Labels must be concrete nouns you would extract as named entities. If it wouldn't be a node in a graph, it belongs in aliases instead.
 6. A label should appear under only one topic across the entire config.
 7. Max 5 labels per topic.
+8. The output should be a mapping of TopicName to its configuration.
 </rules>
 
-Respond with the FULL updated config as valid JSON. No markdown, no explanation."""
+Respond with the FULL updated config as valid JSON in the requested format."""

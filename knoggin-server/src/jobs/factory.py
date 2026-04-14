@@ -73,7 +73,7 @@ def build_scheduler(
             )
         )
 
-    # LLM jobs
+    # LLM jobs(might want to remove profile and merger since those are session jobs and not scheduled jobs)
     if llm and getattr(llm, "is_configured", True):
         if store and resolver and executor and embedding_service:
             prof_cfg = jobs_cfg.get("profile", {})

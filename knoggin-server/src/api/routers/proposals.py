@@ -10,7 +10,7 @@ from common.utils.events import emit
 from common.infra.redis import RedisKeys
 from loguru import logger
 from datetime import datetime, timezone
-from src.common.schema.dtypes import Fact
+from common.schema.dtypes import Fact
 
 router = APIRouter()
 
@@ -35,13 +35,16 @@ async def list_merge_proposals(session_id: str, state: AppState = Depends(get_ap
 
     proposals = []
     for idx, raw in enumerate(raw_proposals, start=1):
-        p = json.loads(raw)
+        try:
+            p = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
         proposals.append({
             "index": idx,
             "primary_id": p.get("primary_id"),
             "secondary_id": p.get("secondary_id"),
-            "primary_name": p["primary_name"],
-            "secondary_name": p["secondary_name"],
+            "primary_name": p.get("primary_name", "Unknown"),
+            "secondary_name": p.get("secondary_name", "Unknown"),
             "score": p.get("llm_score", 0),
             "created_at": p.get("created_at")
         })
@@ -92,8 +95,7 @@ async def approve_merge_proposal(
     undo_key = RedisKeys.merge_undo(session_id, primary_id, secondary_id)
     await redis.setex(undo_key, UNDO_TTL_SECONDS, json.dumps(snapshot))
 
-    loop = asyncio.get_running_loop()
-    success = await loop.run_in_executor(None, store.merge_entities, primary_id, secondary_id)
+    success = await store.merge_entities(primary_id, secondary_id)
 
     if not success:
         await redis.delete(undo_key)
@@ -103,9 +105,7 @@ async def approve_merge_proposal(
         resolver.merge_into(primary_id, secondary_id)
 
     try:
-        all_facts = await loop.run_in_executor(
-            None, store.get_facts_for_entity, primary_id, False
-        )
+        all_facts = await store.get_facts_for_entity(primary_id, False)
         if all_facts and len(all_facts) > 1:
             active = [f for f in all_facts if f.invalid_at is None and f.embedding]
             
@@ -132,7 +132,7 @@ async def approve_merge_proposal(
                     now = datetime.now(timezone.utc)
                     for fact_id in to_invalidate:
                         try:
-                            await loop.run_in_executor(None, store.invalidate_fact, fact_id, now)
+                            await store.invalidate_fact(fact_id, now)
                         except Exception:
                             pass
                     logger.info(f"Invalidated {len(to_invalidate)} duplicate facts after manual merge")
@@ -235,12 +235,10 @@ async def _build_merge_snapshot(
     primary_name: str, secondary_name: str
 ) -> dict:
     """Capture full pre-merge state for undo capability."""
-    loop = asyncio.get_running_loop()
-
-    entity_data = await loop.run_in_executor(None, store.get_entity_by_id, secondary_id)
+    entity_data = await store.get_entity_by_id(secondary_id)
     embedding = resolver.get_embedding_for_id(secondary_id)
 
-    facts_raw = await loop.run_in_executor(None, store.get_facts_for_entity, secondary_id, False)
+    facts_raw = await store.get_facts_for_entity(secondary_id, False)
     facts = []
     if facts_raw:
         for f in facts_raw:
@@ -255,10 +253,10 @@ async def _build_merge_snapshot(
                 "source": getattr(f, "source", "user")
             })
 
-    sec_rels = await loop.run_in_executor(None, store.get_entity_relationships, secondary_id)
-    pri_rels = await loop.run_in_executor(None, store.get_entity_relationships, primary_id)
-    parents = await loop.run_in_executor(None, store.get_parent_entities, secondary_id)
-    children = await loop.run_in_executor(None, store.get_child_entities, secondary_id)
+    sec_rels = await store.get_entity_relationships(secondary_id)
+    pri_rels = await store.get_entity_relationships(primary_id)
+    parents = await store.get_parent_entities(secondary_id)
+    children = await store.get_child_entities(secondary_id)
 
     return {
         "primary_id": primary_id,
@@ -301,8 +299,6 @@ async def _build_merge_snapshot(
 
 async def _execute_undo(store, resolver, redis, snapshot: dict, session_id: str) -> dict:
     """Restore secondary entity from snapshot."""
-    loop = asyncio.get_running_loop()
-
     primary_id = snapshot["primary_id"]
     ent_data = snapshot["entity"]
 
@@ -318,7 +314,7 @@ async def _execute_undo(store, resolver, redis, snapshot: dict, session_id: str)
         "aliases": ent_data["aliases"],
         "session_id": ent_data.get("session_id", "undo")
     }
-    await loop.run_in_executor(None, partial(store.write_batch, [entity], []))
+    await store.write_batch([entity], [])
 
     facts_restored = 0
     if snapshot["facts"]:
@@ -336,9 +332,7 @@ async def _execute_undo(store, resolver, redis, snapshot: dict, session_id: str)
                 source=fd.get("source", "user")
             ))
         try:
-            facts_restored = await loop.run_in_executor(
-                None, partial(store.create_facts_batch, new_id, fact_objects)
-            )
+            facts_restored = await store.create_facts_batch(new_id, fact_objects)
         except Exception as e:
             logger.error(f"Failed to restore facts during undo: {e}")
 
@@ -357,7 +351,7 @@ async def _execute_undo(store, resolver, redis, snapshot: dict, session_id: str)
                 "confidence": rel.get("confidence", 1.0),
                 "context": rel.get("context")
             }]
-            await loop.run_in_executor(None, partial(store.write_batch, [], rel_data))
+            await store.write_batch([], rel_data)
             rels_restored += 1
         except Exception as e:
             logger.warning(f"Failed to restore relationship to {rel['neighbor_name']}: {e}")
@@ -370,26 +364,20 @@ async def _execute_undo(store, resolver, redis, snapshot: dict, session_id: str)
             continue
         if neighbor_id not in primary_pre_merge_neighbors:
             try:
-                await loop.run_in_executor(
-                    None, partial(store.delete_relationship, primary_id, neighbor_id)
-                )
+                await store.delete_relationship(primary_id, neighbor_id)
                 edges_removed += 1
             except Exception as e:
                 logger.warning(f"Failed to remove transferred edge ({primary_id}, {neighbor_id}): {e}")
 
     for parent in snapshot.get("parents", []):
         try:
-            await loop.run_in_executor(
-                None, partial(store.create_hierarchy_edge, parent["id"], new_id)
-            )
+            await store.create_hierarchy_edge(parent["id"], new_id)
         except Exception as e:
             logger.warning(f"Failed to restore parent edge: {e}")
 
     for child in snapshot.get("children", []):
         try:
-            await loop.run_in_executor(
-                None, partial(store.create_hierarchy_edge, new_id, child["id"])
-            )
+            await store.create_hierarchy_edge(new_id, child["id"])
         except Exception as e:
             logger.warning(f"Failed to restore child edge: {e}")
 
