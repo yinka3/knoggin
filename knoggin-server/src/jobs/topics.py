@@ -8,6 +8,7 @@ from core.prompts import get_topic_evolution_prompt
 from common.schema.dtypes import TopicConfigResult
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
+import redis.asyncio as aioredis
 
 
 class TopicConfigJob(BaseJob):
@@ -22,11 +23,13 @@ class TopicConfigJob(BaseJob):
         llm: LLMService, 
         topic_config: TopicConfig,
         update_callback,
+        redis_client: aioredis.Redis,
         interval_msgs: int = 40,
         conversation_window: int = 50
     ):
         self.llm = llm
         self.topic_config = topic_config
+        self.redis = redis_client
         self.update_callback = update_callback
         self.interval_msgs = interval_msgs
         self.conversation_window = conversation_window
@@ -37,12 +40,12 @@ class TopicConfigJob(BaseJob):
 
     async def should_run(self, ctx: JobContext) -> bool:
         count_key = RedisKeys.heartbeat_counter(ctx.user_name, ctx.session_id)
-        count = await ctx.redis.get(count_key)
+        count = await self.redis.get(count_key)
         if int(count or 0) < self.interval_msgs:
             return False
         
         buffer_key = RedisKeys.buffer(ctx.user_name, ctx.session_id)
-        buffer_len = await ctx.redis.llen(buffer_key)
+        buffer_len = await self.redis.llen(buffer_key)
         if buffer_len > 0:
             return False
         
@@ -54,13 +57,13 @@ class TopicConfigJob(BaseJob):
         sorted_key = RedisKeys.recent_conversation(ctx.user_name, ctx.session_id)
         conv_key = RedisKeys.conversation(ctx.user_name, ctx.session_id)
         
-        turn_ids = await ctx.redis.zrevrange(sorted_key, 0, self.conversation_window - 1)
+        turn_ids = await self.redis.zrevrange(sorted_key, 0, self.conversation_window - 1)
         if not turn_ids:
-            await ctx.redis.set(count_key, 0)
+            await self.redis.set(count_key, 0)
             return JobResult(success=True, summary="No conversation to evaluate")
         
         turn_ids = list(reversed(turn_ids))
-        turn_data = await ctx.redis.hmget(conv_key, *turn_ids)
+        turn_data = await self.redis.hmget(conv_key, *turn_ids)
         
         lines = []
         for turn_id, raw in zip(turn_ids, turn_data):
@@ -77,7 +80,7 @@ class TopicConfigJob(BaseJob):
         conversation_text = "\n".join(lines)
         
         if not conversation_text.strip():
-            await ctx.redis.set(count_key, 0)
+            await self.redis.set(count_key, 0)
             return JobResult(success=True, summary="Empty conversation")
         
         current_config = json.dumps(self.topic_config.raw, indent=2)
@@ -111,7 +114,7 @@ class TopicConfigJob(BaseJob):
         new_config = self.sanitize_topic_evolution(self.topic_config.raw, new_config)
 
         if new_config is None:
-            await ctx.redis.set(count_key, 0)
+            await self.redis.set(count_key, 0)
             return JobResult(success=False, summary="Rejected: destructive changes")
 
         old_topics = set(self.topic_config.raw.keys())
@@ -123,11 +126,11 @@ class TopicConfigJob(BaseJob):
         deactivated = old_active - new_active
         
         if not added and not deactivated and new_config == self.topic_config.raw:
-            await ctx.redis.set(count_key, 0)
+            await self.redis.set(count_key, 0)
             return JobResult(success=True, summary="No changes needed")
         
         await self.update_callback(new_config)
-        await ctx.redis.set(count_key, 0)
+        await self.redis.set(count_key, 0)
         
         summary_parts = []
         if added:

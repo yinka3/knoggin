@@ -40,9 +40,7 @@ class Scheduler:
         return JobContext(
             user_name=self.user_name,
             session_id=self.session_id,
-            redis=self.redis,
-            idle_seconds=idle_seconds,
-            resources=self.resources
+            idle_seconds=idle_seconds
         )
     
     async def start(self):

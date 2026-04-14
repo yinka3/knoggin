@@ -16,6 +16,7 @@ from jobs.utils import enrich_facts_with_sources, extract_fact_with_source, form
 from common.schema.dtypes import Fact, EntityProfilesResult, BulkContradictionResult
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
+import redis.asyncio as aioredis
 from common.config.base import get_config
 
 class ProfileRefinementJob(BaseJob):
@@ -29,7 +30,7 @@ class ProfileRefinementJob(BaseJob):
     """
 
     def __init__(self, llm: LLMService, resolver: EntityResolver, store: MemGraphStore, 
-                executor: ThreadPoolExecutor, embedding_service: EmbeddingService,
+                executor: ThreadPoolExecutor, embedding_service: EmbeddingService, redis_client: aioredis.Redis,
                 msg_window: int = 30, volume_threshold: int = 15, idle_threshold: int = 90,
                 contradiction_sim_low: float = 0.70, contradiction_sim_high: float = 0.95,
                 contradiction_batch_size: int = 4, profile_batch_size: int = 8,
@@ -39,6 +40,7 @@ class ProfileRefinementJob(BaseJob):
         self.llm = llm
         self.resolver = resolver
         self.store = store
+        self.redis = redis_client
         self.executor = executor
         self.embedding_service = embedding_service
         self.batch_semaphore = asyncio.Semaphore(2)
@@ -62,7 +64,7 @@ class ProfileRefinementJob(BaseJob):
 
     async def should_run(self, ctx: JobContext) -> bool:
         dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-        count = await ctx.redis.scard(dirty_key)
+        count = await self.redis.scard(dirty_key)
         
         if count == 0:
             return False
@@ -99,7 +101,7 @@ class ProfileRefinementJob(BaseJob):
         Returns True if refinement ran.
         """
         ran_key = RedisKeys.user_profile_ran(ctx.user_name, ctx.session_id)
-        if await ctx.redis.get(ran_key):
+        if await self.redis.get(ran_key):
             return False
         
         user_id = await self.resolver.get_id(ctx.user_name)
@@ -114,7 +116,7 @@ class ProfileRefinementJob(BaseJob):
         
         success = await self._refine_user_profile(ctx, user_id, profile, curr_msg_id)
 
-        await ctx.redis.setex(ran_key, 300, "true")
+        await self.redis.setex(ran_key, 300, "true")
         
         return success
     
@@ -122,7 +124,7 @@ class ProfileRefinementJob(BaseJob):
         """Fetch recent conversation with user/assistant ratio splitting."""
         fetch_count = int(num_turns * 2)
         turns = await fetch_conversation_turns(
-            ctx.redis, ctx.user_name, ctx.session_id,
+            self.redis, ctx.user_name, ctx.session_id,
             fetch_count, up_to_msg_id
         )
 
@@ -173,7 +175,7 @@ class ProfileRefinementJob(BaseJob):
         """
         # Establish structured logging context for the job
         with logger.contextualize(user=ctx.user_name, job=self.name, session=ctx.session_id):
-            current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
+            current_msg_id = await self.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
             current_msg_id = int(current_msg_id) if current_msg_id else 0
 
             dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
@@ -185,7 +187,7 @@ class ProfileRefinementJob(BaseJob):
             else:
                 # If forced, take up to 3x the normal batch size to clear the queue
                 limit = self.volume_threshold * 3 if force else self.volume_threshold
-                raw_ids = await ctx.redis.srandmember(dirty_key, limit)
+                raw_ids = await self.redis.srandmember(dirty_key, limit)
         
             user_id = await self.resolver.get_id(ctx.user_name)
             candidate_ids = [int(id_str) for id_str in raw_ids if int(id_str) != user_id] if raw_ids else []
@@ -195,7 +197,7 @@ class ProfileRefinementJob(BaseJob):
             entity_ids = []
             if target_ids and candidate_ids:
                 for eid in candidate_ids:
-                    last_update = await ctx.redis.get(RedisKeys.last_profile_update(ctx.user_name, ctx.session_id, eid))
+                    last_update = await self.redis.get(RedisKeys.last_profile_update(ctx.user_name, ctx.session_id, eid))
                     if last_update:
                         age = datetime.now(timezone.utc).timestamp() - float(last_update)
                         if age < 60:
@@ -231,7 +233,7 @@ class ProfileRefinementJob(BaseJob):
                         
                         # Update recency timestamps for all processed entities
                         for eid in clear_ids:
-                            await ctx.redis.setex(
+                            await self.redis.setex(
                                 RedisKeys.last_profile_update(ctx.user_name, ctx.session_id, eid),
                                 3600, # Keep for 1 hour
                                 str(datetime.now(timezone.utc).timestamp())
@@ -245,7 +247,7 @@ class ProfileRefinementJob(BaseJob):
                             merger_enabled = config.developer_settings.jobs.merger.enabled
 
                             if updated_ids and merger_enabled:
-                                await ctx.redis.sadd(merge_queue, *updated_ids)
+                                await self.redis.sadd(merge_queue, *updated_ids)
                                 logger.info(f"Passed {len(updated_ids)} updated entities to Merge Queue")
 
                 except Exception as e:
@@ -265,7 +267,7 @@ class ProfileRefinementJob(BaseJob):
                     processed_ids.extend([str(eid) for eid in clear_ids])
                     
                 if processed_ids:
-                    await ctx.redis.srem(dirty_key, *processed_ids)
+                    await self.redis.srem(dirty_key, *processed_ids)
                     logger.debug(f"Cleared {len(processed_ids)} entities from dirty queue")
                 
                 parts = []
@@ -276,7 +278,7 @@ class ProfileRefinementJob(BaseJob):
                 
                 summary = ", ".join(parts) if parts else "No profiles to update"
 
-                await ctx.redis.setex(
+                await self.redis.setex(
                     RedisKeys.profile_complete(ctx.user_name, ctx.session_id),
                     300,
                     str(datetime.now(timezone.utc).timestamp())
@@ -301,7 +303,7 @@ class ProfileRefinementJob(BaseJob):
             return False
         
         # Get current message ID for checkpoint
-        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
+        current_msg_id = await self.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
         
         # Fetch existing facts from DB
@@ -367,7 +369,7 @@ class ProfileRefinementJob(BaseJob):
         final_active_facts, failed_invalidations = await self._apply_fact_changes(user_id, merge_result, existing_facts, valid_msg_ids, ctx.session_id)
         if failed_invalidations:
             dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-            await ctx.redis.sadd(dirty_key, str(user_id))
+            await self.redis.sadd(dirty_key, str(user_id))
             logger.warning(f"Re-dirtied user entity {user_id}: {len(failed_invalidations)} invalidations failed")
         
         embedding = await self._update_entity_embedding(user_id, ctx.user_name, final_active_facts)
@@ -458,7 +460,7 @@ class ProfileRefinementJob(BaseJob):
                 final_active_facts, failed_invalidations = await self._apply_fact_changes(orig["ent_id"], merge_result, existing_facts, valid_msg_ids, ctx.session_id)
                 if failed_invalidations:
                     dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-                    await ctx.redis.sadd(dirty_key, str(orig["ent_id"]))
+                    await self.redis.sadd(dirty_key, str(orig["ent_id"]))
                     logger.warning(f"Re-dirtied entity {orig['ent_id']}: {len(failed_invalidations)} invalidations failed")
                 
                 embedding = await self._update_entity_embedding(orig["ent_id"], orig["entity_name"], final_active_facts)
@@ -483,7 +485,7 @@ class ProfileRefinementJob(BaseJob):
     
 
     async def _run_updates(self, ctx: JobContext, entity_ids: List[int], conversation: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[int]]:
-        current_msg_id = await ctx.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
+        current_msg_id = await self.redis.get(RedisKeys.last_processed(ctx.user_name, ctx.session_id))
         current_msg_id = int(current_msg_id) if current_msg_id else 0
 
         loop = asyncio.get_running_loop()

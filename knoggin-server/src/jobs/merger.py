@@ -12,6 +12,7 @@ from common.services.llm_service import LLMService
 from common.config.topics_config import TopicConfig
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
+import redis.asyncio as aioredis
 from db.store import MemGraphStore
 from common.schema.dtypes import Fact, MergeJudgment
 
@@ -22,13 +23,14 @@ class MergeDetectionJob(BaseJob):
     """
 
     def __init__(self, user_name: str, ent_resolver: EntityResolver, store: MemGraphStore, 
-                    llm_client: LLMService, topic_config: TopicConfig, executor: ThreadPoolExecutor,
+                    llm_client: LLMService, topic_config: TopicConfig, executor: ThreadPoolExecutor, redis_client: aioredis.Redis,
                     auto_threshold: float = 0.93, hitl_threshold: float = 0.65, cosine_threshold: float = 0.65,
                     merge_prompt: str = None):
         
         self.user_name = user_name
         self.ent_resolver = ent_resolver
         self.store = store
+        self.redis = redis_client
         self.llm = llm_client
         self.topic_config = topic_config
         self.executor = executor
@@ -44,7 +46,7 @@ class MergeDetectionJob(BaseJob):
     
     async def should_run(self, ctx: JobContext) -> bool:
         merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
-        queue_size = await ctx.redis.scard(merge_key)
+        queue_size = await self.redis.scard(merge_key)
         return queue_size > 0
     
     def _same_topic(self, topic_a: str, topic_b: str) -> bool:
@@ -57,7 +59,7 @@ class MergeDetectionJob(BaseJob):
         with logger.contextualize(user=ctx.user_name, job=self.name, session=ctx.session_id):
             merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
         
-            dirty_raw = await ctx.redis.srandmember(merge_key, 50)
+            dirty_raw = await self.redis.srandmember(merge_key, 50)
             
             if not dirty_raw:
                 return JobResult(success=True, summary="No dirty entities to merge")
@@ -72,7 +74,7 @@ class MergeDetectionJob(BaseJob):
             candidates = await self.ent_resolver.detect_merge_entity_candidates(dirty_ids=dirty_ids)
             
             if not candidates:
-                await ctx.redis.srem(merge_key, *[str(eid) for eid in dirty_ids])
+                await self.redis.srem(merge_key, *[str(eid) for eid in dirty_ids])
                 return JobResult(success=True, summary="No candidates found")
             
             logger.info(f"Processing {len(candidates)} merge candidates")
@@ -85,7 +87,7 @@ class MergeDetectionJob(BaseJob):
 
             evaluated_ids = [str(eid) for eid in dirty_ids]
             if evaluated_ids:
-                await ctx.redis.srem(merge_key, *evaluated_ids)
+                await self.redis.srem(merge_key, *evaluated_ids)
             
             return JobResult(
                 success=True,
@@ -183,24 +185,24 @@ class MergeDetectionJob(BaseJob):
     async def _recover_pending_merges(self, ctx: JobContext):
         """Scan Redis for intents that didn't complete and finish them."""
         index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.session_id)
-        intent_keys = await ctx.redis.smembers(index_key)
+        intent_keys = await self.redis.smembers(index_key)
         
         if not intent_keys:
             return
             
         logger.info(f"Recovery: Found {len(intent_keys)} pending merge intents")
         for key in intent_keys:
-            data_raw = await ctx.redis.get(key)
+            data_raw = await self.redis.get(key)
             if not data_raw:
-                await ctx.redis.srem(index_key, key)
+                await self.redis.srem(index_key, key)
                 continue
                 
             try:
                 item = json.loads(data_raw)
             except json.JSONDecodeError:
                 logger.error(f"Recovery: Corrupt merge intent for key {key}, discarding")
-                await ctx.redis.delete(key)
-                await ctx.redis.srem(index_key, key)
+                await self.redis.delete(key)
+                await self.redis.srem(index_key, key)
                 continue
                 
             p_id = item["primary_id"]
@@ -212,8 +214,8 @@ class MergeDetectionJob(BaseJob):
             await self._finalize_merge(ctx, item)
             
             # Clean up
-            await ctx.redis.delete(key)
-            await ctx.redis.srem(index_key, key)
+            await self.redis.delete(key)
+            await self.redis.srem(index_key, key)
 
     async def _finalize_merge(self, ctx: JobContext, merge_info: dict):
         p_id = merge_info["primary_id"]
@@ -244,7 +246,7 @@ class MergeDetectionJob(BaseJob):
         finally:
             # Always mark dirty so profile refinement picks up any incomplete work
             dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-            await ctx.redis.sadd(dirty_key, str(p_id))
+            await self.redis.sadd(dirty_key, str(p_id))
 
         await emit(ctx.session_id, "job", "entities_merged", {
             "primary": p_name,
@@ -398,8 +400,8 @@ class MergeDetectionJob(BaseJob):
             
             # 1. Record Intent
             intent_key = RedisKeys.merge_intent(ctx.user_name, ctx.session_id, p_id, s_id)
-            await ctx.redis.set(intent_key, json.dumps(item_dict))
-            await ctx.redis.sadd(index_key, intent_key)
+            await self.redis.set(intent_key, json.dumps(item_dict))
+            await self.redis.sadd(index_key, intent_key)
 
             db_success = await self._execute_merge_db_only(
                 p_id, 
@@ -413,12 +415,12 @@ class MergeDetectionJob(BaseJob):
                 successful += 1
 
                 # Intent tracking cleanup
-                await ctx.redis.delete(intent_key)
-                await ctx.redis.srem(index_key, intent_key)
+                await self.redis.delete(intent_key)
+                await self.redis.srem(index_key, intent_key)
             else:
                 failed += 1
-                await ctx.redis.delete(intent_key)
-                await ctx.redis.srem(index_key, intent_key)
+                await self.redis.delete(intent_key)
+                await self.redis.srem(index_key, intent_key)
         
         filtered_hitl = [
             c for c in hitl
@@ -494,11 +496,11 @@ class MergeDetectionJob(BaseJob):
                 "status": "pending"
             }
             
-            await ctx.redis.rpush(proposal_key, json.dumps(proposal))
+            await self.redis.rpush(proposal_key, json.dumps(proposal))
             stored += 1
         
         if stored > 0:
-            await ctx.redis.expire(proposal_key, 7 * 24 * 3600)
+            await self.redis.expire(proposal_key, 7 * 24 * 3600)
         
         return stored
     
@@ -520,7 +522,7 @@ class MergeDetectionJob(BaseJob):
     
     async def on_shutdown(self, ctx: JobContext) -> None:
         """Set pending flag so next session picks up merge work."""
-        await ctx.redis.set(RedisKeys.job_pending(ctx.user_name, ctx.session_id, self.name), "true")
+        await self.redis.set(RedisKeys.job_pending(ctx.user_name, ctx.session_id, self.name), "true")
         logger.debug("Merge detection pending flag set")
 
     async def _judge_with_sem(self, candidate: dict, session_id: str, sem: asyncio.Semaphore) -> Tuple[dict, Tuple[Optional[float], Optional[str]]]:

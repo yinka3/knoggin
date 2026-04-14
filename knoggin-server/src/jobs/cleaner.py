@@ -6,6 +6,7 @@ from db.store import MemGraphStore
 from core.entity_resolver import EntityResolver
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
+import redis.asyncio as aioredis
 
 
 class EntityCleanupJob(BaseJob):
@@ -17,10 +18,11 @@ class EntityCleanupJob(BaseJob):
     Safety: Only deletes if last_mentioned < 24h ago.
     """
 
-    def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver,
+    def __init__(self, user_name: str, store: MemGraphStore, ent_resolver: EntityResolver, redis_client: aioredis.Redis,
                  interval_hours: int = 24, orphan_age_hours: int = 24, stale_junk_days: int = 30):
         self.user_name = user_name
         self.store = store
+        self.redis = redis_client
         self.ent_resolver = ent_resolver
 
         self.run_interval_seconds = interval_hours * 3600
@@ -36,16 +38,16 @@ class EntityCleanupJob(BaseJob):
     async def should_run(self, ctx: JobContext) -> bool:
         """Run if we haven't run in X hours."""
         last_run_key = RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id)
-        last_run_ts = await ctx.redis.get(last_run_key)
+        last_run_ts = await self.redis.get(last_run_key)
         
         if not last_run_ts:
-            await ctx.redis.set(last_run_key, time.time())
+            await self.redis.set(last_run_key, time.time())
             return False
         
         try:
             elapsed = time.time() - float(last_run_ts)
         except ValueError:
-            await ctx.redis.set(last_run_key, time.time())
+            await self.redis.set(last_run_key, time.time())
             return False
             
         return elapsed >= self.run_interval_seconds
@@ -61,7 +63,7 @@ class EntityCleanupJob(BaseJob):
             
             user_id = await self.ent_resolver.get_id(self.user_name)
             if user_id is None:
-                await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
+                await self.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
                 return JobResult(success=True, summary="User entity not initialized")
 
             orphan_ids = await self.store.get_orphan_entities(
@@ -71,7 +73,7 @@ class EntityCleanupJob(BaseJob):
             )
             
             if not orphan_ids:
-                await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
+                await self.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
                 return JobResult(success=True, summary="No orphans found")
             
             logger.info(f"Cleanup trigger: Found {len(orphan_ids)} entities (Orphans >24h or Junk >30d)")
@@ -87,7 +89,7 @@ class EntityCleanupJob(BaseJob):
                 self.ent_resolver.remove_entities(batch)
                 await asyncio.sleep(0.1) # Yield to other tasks
 
-            await ctx.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
+            await self.redis.set(RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id), time.time())
 
             await emit(ctx.session_id, "job", "entities_cleaned", {
                 "orphan_count": len(orphan_ids),

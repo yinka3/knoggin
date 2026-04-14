@@ -38,7 +38,7 @@ class AppState:
         from jobs.aac_job import AACJob
         
         self.global_scheduler = Scheduler(self.user_name, "global", self.resources.redis, self.resources)
-        self.global_scheduler.register(AACJob())
+        self.global_scheduler.register(AACJob(resources=self.resources))
         await self.global_scheduler.start()
         logger.info(f"Global scheduler started lazily for user: {self.user_name}")
     

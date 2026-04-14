@@ -29,6 +29,8 @@ TOOL_DISPATCH = {
     "web_search": ("web_search", ["query", "limit", "freshness"]),
     "news_search": ("news_search", ["query", "limit", "freshness"]),
     "request_clarification": None,  # handled specially
+    "save_insight": ("save_insight", ["content"]),
+    "spawn_specialist": ("spawn_specialist", ["name", "persona", "initial_rules", "initial_preferences", "initial_icks"]),
 }
 
 class Tools:

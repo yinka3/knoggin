@@ -73,7 +73,6 @@ AAC_SPECIFIC_SCHEMAS = [
     }
 ]
 
-# Unify core read-only tools with community-specific write tools
 COMMUNITY_TOOL_SCHEMAS = get_filtered_schemas(
     tags=["graph:read", "external:search"]
 ) + AAC_SPECIFIC_SCHEMAS

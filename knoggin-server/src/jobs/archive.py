@@ -6,6 +6,7 @@ from jobs.base import BaseJob, JobContext, JobResult
 from db.store import MemGraphStore
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
+import redis.asyncio as aioredis
 
 
 class FactArchivalJob(BaseJob):
@@ -14,8 +15,9 @@ class FactArchivalJob(BaseJob):
     With Fact nodes, we simply delete facts past retention period.
     """
     
-    def __init__(self, user_name: str, store: MemGraphStore, retention_days: int = 14, fallback_interval_hours: float = 24):
+    def __init__(self, user_name: str, store: MemGraphStore, redis_client: aioredis.Redis, retention_days: int = 14, fallback_interval_hours: float = 24):
         self.user_name = user_name
+        self.redis = redis_client
         self.store = store
         self.retention_days = retention_days
         self._fallback_interval_seconds = fallback_interval_hours * 3600
@@ -25,14 +27,14 @@ class FactArchivalJob(BaseJob):
         return "fact_archival"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        profile_done = await ctx.redis.get(
+        profile_done = await self.redis.get(
             RedisKeys.profile_complete(ctx.user_name, ctx.session_id)
         ) is not None
 
         if profile_done:
             return True
 
-        last_run_ts = await ctx.redis.get(
+        last_run_ts = await self.redis.get(
             RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id)
         )
         if not last_run_ts:

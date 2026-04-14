@@ -140,9 +140,8 @@ class Context:
         await emit(self.session_id, "job", "session_jobs_started", {})
         ctx = JobContext(
             user_name=self.user_name,
-            redis=self.redis_client,
-            idle_seconds=0,
-            session_id=self.session_id
+            session_id=self.session_id,
+            idle_seconds=0
         )
 
         # 1. Profile Refinement (Primary focus for consistent views)

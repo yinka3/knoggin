@@ -226,6 +226,7 @@ class SessionAssembler:
             store=self.resources.store,
             executor=self.resources.executor,
             embedding_service=self.resources.embedding,
+            redis_client=self.resources.redis,
             msg_window=prof_cfg.msg_window,
             volume_threshold=prof_cfg.volume_threshold,
             idle_threshold=prof_cfg.idle_threshold,
@@ -249,6 +250,7 @@ class SessionAssembler:
             llm_client=self.resources.llm_service,
             topic_config=topic_config,
             executor=self.resources.executor,
+            redis_client=self.resources.redis,
             auto_threshold=merge_cfg.auto_threshold,
             hitl_threshold=merge_cfg.hitl_threshold,
             cosine_threshold=merge_cfg.cosine_threshold,
@@ -263,6 +265,7 @@ class SessionAssembler:
             ent_resolver=resolver,
             processor=processor,
             write_to_graph=None,
+            redis_client=self.resources.redis,
             interval=dlq_cfg.interval_seconds,
             batch_size=dlq_cfg.batch_size,
             max_attempts=dlq_cfg.max_attempts
@@ -273,6 +276,7 @@ class SessionAssembler:
             user_name=self.user_name, 
             store=self.resources.store, 
             ent_resolver=resolver,
+            redis_client=self.resources.redis,
             interval_hours=clean_cfg.interval_hours,
             orphan_age_hours=clean_cfg.orphan_age_hours,
             stale_junk_days=clean_cfg.stale_junk_days
@@ -282,6 +286,7 @@ class SessionAssembler:
         scheduler.register(FactArchivalJob(
             user_name=self.user_name, 
             store=self.resources.store,
+            redis_client=self.resources.redis,
             retention_days=arch_cfg.retention_days,
             fallback_interval_hours=arch_cfg.fallback_interval_hours
         ))
@@ -291,6 +296,7 @@ class SessionAssembler:
             llm=self.resources.llm_service,
             topic_config=topic_config,
             update_callback=None,
+            redis_client=self.resources.redis,
             interval_msgs=topic_cfg.interval_msgs,
             conversation_window=topic_cfg.conversation_window
         ))
