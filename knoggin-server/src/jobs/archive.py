@@ -32,12 +32,19 @@ class FactArchivalJob(BaseJob):
         ) is not None
 
         if profile_done:
+            await self.redis.delete(
+                RedisKeys.profile_complete(ctx.user_name, ctx.session_id)
+            )
             return True
 
         last_run_ts = await self.redis.get(
             RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id)
         )
         if not last_run_ts:
+            await self.redis.set(
+                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id),
+                time.time()
+            )
             return False
             
         try:
@@ -62,7 +69,12 @@ class FactArchivalJob(BaseJob):
                     "deleted_count": deleted_count,
                     "retention_days": self.retention_days
                 })
-                
+            
+            await self.redis.set(
+                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id),
+                time.time()
+            )
+            
             return JobResult(success=True, summary=summary)
     
     def update_settings(self, retention_days: int = None, fallback_interval_hours: float = None):

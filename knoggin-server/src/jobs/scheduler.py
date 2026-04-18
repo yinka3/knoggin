@@ -127,9 +127,8 @@ class Scheduler:
             try:
                 await asyncio.sleep(self.CHECK_INTERVAL)
                 
-                ctx = await self._build_context()
-                
                 for job_name, job in self._jobs.items():
+                    ctx = await self._build_context()
                     ctx.last_run = self._last_runs.get(job_name)
                     
                     try:

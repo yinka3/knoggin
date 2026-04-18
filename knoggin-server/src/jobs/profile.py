@@ -655,6 +655,8 @@ class ProfileRefinementJob(BaseJob):
                     "invalidated": len(to_invalidate),
                     "created": len(facts_to_create)
                 }, verbose_only=True)
+
+                return active_existing, failed_invalidations
                 
             except Exception as e:
                 logger.error(f"Failed to write facts for {entity_id}, skipping invalidations. Error: {e}")
@@ -749,9 +751,12 @@ class ProfileRefinementJob(BaseJob):
             
             for idx, is_contradiction in judgments.items():
                 if is_contradiction:
-                    fact, sim = batch[idx]
-                    logger.info(f"LLM confirmed contradiction: '{new_content[:50]}' supersedes '{fact.content[:50]}' (sim={sim:.3f})")
-                    to_invalidate.append(fact.id)
+                    if 0 <= idx < len(batch):
+                        fact, sim = batch[idx]
+                        logger.info(f"LLM confirmed contradiction: '{new_content[:50]}' supersedes '{fact.content[:50]}' (sim={sim:.3f})")
+                        to_invalidate.append(fact.id)
+                    else:
+                        logger.warning(f"LLM returned out-of-range contradiction index {idx} (batch size={len(batch)})")
         
         await emit(session_id, "job", "contradictions_detected", {
             "new_fact": new_content,

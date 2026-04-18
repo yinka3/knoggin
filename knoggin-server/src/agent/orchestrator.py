@@ -32,6 +32,7 @@ class Orchestrator:
         user_name: str,
         session_id: str,
         redis: aioredis.Redis,
+        resolver: Optional['EntityResolver'] = None,
         user_timezone: Optional[str] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -77,18 +78,19 @@ class Orchestrator:
             )
             
             # Initialize EntityResolver for Tools
-            er_cfg = config.developer_settings.entity_resolution
-            resolver = EntityResolver(
-                session_id=session_id,
-                store=self._resources.store,
-                embedding_service=self._resources.embedding,
-                hierarchy_config=topic_config.hierarchy,
-                fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
-                fuzzy_non_substring_threshold=er_cfg.fuzzy_non_substring_threshold,
-                generic_token_freq=er_cfg.generic_token_freq,
-                candidate_fuzzy_threshold=er_cfg.candidate_fuzzy_threshold,
-                candidate_vector_threshold=er_cfg.candidate_vector_threshold
-            )
+            if not resolver:
+                er_cfg = config.developer_settings.entity_resolution
+                resolver = EntityResolver(
+                    session_id=session_id,
+                    store=self._resources.store,
+                    embedding_service=self._resources.embedding,
+                    hierarchy_config=topic_config.hierarchy,
+                    fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
+                    fuzzy_non_substring_threshold=er_cfg.fuzzy_non_substring_threshold,
+                    generic_token_freq=er_cfg.generic_token_freq,
+                    candidate_fuzzy_threshold=er_cfg.candidate_fuzzy_threshold,
+                    candidate_vector_threshold=er_cfg.candidate_vector_threshold
+                )
             
             # Initialize FileRAG for Tools
             upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")

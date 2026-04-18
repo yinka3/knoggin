@@ -57,8 +57,6 @@ class BatchProcessor:
             get_next_ent_id,
             resolution_threshold: float = 0.85,
             connection_prompt: str = None):
-
-        self._get_next_ent_id = None
         self.session_id = session_id
         self.redis = redis_client
         self.llm = llm
@@ -243,11 +241,9 @@ class BatchProcessor:
 
             if candidates:
                 top_id, top_score = candidates[0]
+                entry = ("candidate", top_id, top_score)
                 if top_score >= self.resolution_threshold:
-                    entry = ("candidate", top_id, top_score)
                     batch_matched_ids.add(top_id)
-                else:
-                    entry = ("new", None)
             else:
                 entry = ("new", None)
                 
@@ -439,7 +435,7 @@ class BatchProcessor:
                 if overlap:
                     score += min(len(overlap) * 0.03, 0.05)
 
-            results[candidate_id] = score
+            results[candidate_id] = max(results.get(candidate_id, 0), base_score)
 
         return results
     
@@ -499,7 +495,7 @@ class BatchProcessor:
         for conn in conn_result.connections:
             if conn.msg_id not in valid_msg_ids:
                 logger.warning(
-                    f"VP-02 returned invalid msg_id {conn.msg_id} "
+                    f"VP-02 (connections) returned invalid msg_id {conn.msg_id} "
                     f"(valid: {valid_msg_ids}), skipping connection "
                     f"{conn.entity_a} -> {conn.entity_b}"
                 )

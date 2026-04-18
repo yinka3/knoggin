@@ -186,9 +186,15 @@ class Context:
             msg.id = int(existing_id)
             return msg
         
-        msg.id = await self.get_next_msg_id()
+        new_id = await self.get_next_msg_id()
+        was_set = await self.redis_client.set(dedup_key, str(new_id), ex=300, nx=True)
         
-        await self.redis_client.setex(dedup_key, 300, str(msg.id))
+        if not was_set:
+            existing_id = await self.redis_client.get(dedup_key)
+            msg.id = int(existing_id) if existing_id else new_id
+            return msg
+            
+        msg.id = new_id
         
         await self.add_to_redis(msg)
 
@@ -235,9 +241,20 @@ class Context:
         if count > limit:
             old_turns = await self.redis_client.zrange(sorted_key, 0, -(limit + 1))
             if old_turns:
+                old_turn_data = await self.redis_client.hmget(conv_key, *old_turns)
+                msg_keys = []
+                for data_str in old_turn_data:
+                    if data_str:
+                        turn_payload = json.loads(data_str)
+                        if "user_msg_id" in turn_payload:
+                            msg_keys.append(f"msg_{turn_payload['user_msg_id']}")
+
                 pipe = self.redis_client.pipeline()
                 pipe.zremrangebyrank(sorted_key, 0, -(limit + 1))
                 pipe.hdel(conv_key, *old_turns)
+                if msg_keys:
+                    pipe.hdel(RedisKeys.message_content(self.user_name, self.session_id), *msg_keys)
+                    pipe.hdel(RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id), *msg_keys)
                 await pipe.execute()
                 
         return turn_id
@@ -475,7 +492,6 @@ class Context:
         await write_batch_to_graph(
             batch,
             store=self.store,
-            executor=self.executor,
             resolver=self.ent_resolver,
             session_id=self.session_id,
             user_name=self.user_name,
@@ -487,7 +503,6 @@ class Context:
         return await write_batch_callback(
             result,
             store=self.store,
-            executor=self.executor,
             resolver=self.ent_resolver,
             session_id=self.session_id,
             user_name=self.user_name,
@@ -645,7 +660,11 @@ class Context:
         
         if self._background_tasks:
             logger.info(f"Awaiting {len(self._background_tasks)} background tasks...")
-            await asyncio.wait(self._background_tasks, timeout=10.0)
+            done, pending = await asyncio.wait(self._background_tasks, timeout=10.0)
+            if pending:
+                logger.warning(f"Cancelling {len(pending)} background tasks that did not complete in time")
+                for task in pending:
+                    task.cancel()
         await emit(self.session_id, "system", "session_shutdown", {})
         await DebugEventEmitter.get().cleanup_session(self.session_id)
         

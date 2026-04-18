@@ -143,16 +143,6 @@ class Tools:
                 })
                 
         return results
-    
-    def _normalize_output(self, entity_list: List[Dict]) -> List[Dict]:
-        if not entity_list:
-            return entity_list
-        
-        for entity in entity_list:
-            if "top_connections" in entity:
-                self._normalize_output(entity["top_connections"])
-        
-        return entity_list
         
 
     async def _get_surrounding_context(self, msg_id: str, forward: int = 3, target_total: int = 10) -> List[Dict]:
@@ -459,7 +449,6 @@ class Tools:
         if not results:
             return []
         
-        results = self._normalize_output(results)
         for entity in results:
             for conn in entity.get("top_connections", []):
                 evidence_ids = conn.pop("evidence_ids", [])
@@ -485,7 +474,7 @@ class Tools:
             return [{"error": f"Entity not found: '{entity_name}'"}]
         
         results = await self.store.get_related_entities([canonical], active_topics=self.active_topics)
-        results = self._normalize_output(results)
+
         if results:
             for r in results:
                 evidence_ids = r.pop("evidence_ids", [])
@@ -914,7 +903,7 @@ class Tools:
         }
 
         try:
-            response = await self._http_client.get(url, json=payload, timeout=10.0)
+            response = await self._http_client.post(url, json=payload, timeout=10.0)
 
             if response.status_code == 401:
                 logger.warning("Tavily API key invalid, falling back to DuckDuckGo")
@@ -1047,6 +1036,15 @@ class Tools:
         except Exception as e:
             logger.error(f"Brave news search failed: {e}")
             return [{"title": "Search Error", "url": "", "snippet": f"News search failed: {e}"}]
+    
+    async def save_insight(self, content: str) -> Dict:
+        return {"error": "save_insight is only available in community discussions."}
+
+    async def spawn_specialist(self, name: str, persona: str,
+                            initial_rules: List[str] = None,
+                            initial_preferences: List[str] = None,
+                            initial_icks: List[str] = None) -> Dict:
+        return {"error": "spawn_specialist is only available in community discussions."}
 
 
     def get_file_manifest(self) -> List[Dict]:

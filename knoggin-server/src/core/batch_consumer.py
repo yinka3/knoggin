@@ -1,11 +1,11 @@
 import asyncio
 import json
 from typing import Awaitable, Callable, Dict, List, Optional
+from common.schema.dtypes import BatchResult
 from loguru import logger
 from db.store import MemGraphStore
 import redis.asyncio as aioredis
 from core.batch_processor import BatchProcessor
-from common.schema.dtypes import BatchResult
 from common.utils.events import emit, emit_sync
 from common.infra.redis import RedisKeys
 
@@ -15,7 +15,7 @@ class BatchConsumer:
     def __init__(self, user_name: str, session_id: str, store: MemGraphStore, processor: BatchProcessor, redis: aioredis.Redis,
                 get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
                 run_session_jobs: Callable[[], Awaitable[None]],
-                write_to_graph: Callable[[BatchResult], Awaitable[None]],
+                write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
                 batch_size: int = 8, batch_timeout: float =  360.0, 
                 checkpoint_interval: int = 24, session_window: int = 18):
         
@@ -174,7 +174,7 @@ class BatchConsumer:
 
             while True:
                 buffer_len = await self.redis.llen(self._buffer_key)
-                if buffer_len < self.batch_size and not flush_partial:
+                if buffer_len == 0:
                     break
 
                 raw = await self.redis.lrange(self._buffer_key, 0, self.batch_size - 1)
@@ -191,7 +191,12 @@ class BatchConsumer:
                 conversation = await self.get_session_ctx(self.session_window, messages[0]['id'])
                 session_text = self._format_session_text(conversation)
 
-                result = await self.processor.run(messages, session_text)
+                try:
+                    result = await self.processor.run(messages, session_text)
+                except Exception as e:
+                    logger.error(f"Fatal error during BatchProcessor computation: {e}")
+                    from core.batch_processor import BatchResult
+                    result = BatchResult(success=False, error=f"Fatal exception: {str(e)}")
 
                 if not result.success:
                     dlq_success = await self.processor.move_to_dead_letter(
@@ -231,7 +236,8 @@ class BatchConsumer:
                             messages,
                             f"MESSAGE_LOG_SAVE_FAILED: {e}",
                             stage="message_log",
-                            session_text=None
+                            session_text=session_text,
+                            batch_result=result
                         )
                         if not dlq_success:
                             logger.critical(f"DLQ write failed after message log failure. Leaving messages in buffer.")

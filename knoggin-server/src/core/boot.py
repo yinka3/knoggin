@@ -129,7 +129,7 @@ class SessionAssembler:
         return t_config
 
     async def _sync_entity_counters(self):
-        max_id = await self.resources.store.get_max_entity_id()
+        max_id = (await self.resources.store.get_max_entity_id()) or 0
         current_redis = await self.resources.redis.get(RedisKeys.global_next_ent_id())
         # Set to max_id so next INCR returns max_id + 1 (first unused ID)
         if not current_redis or int(current_redis) < max_id:
