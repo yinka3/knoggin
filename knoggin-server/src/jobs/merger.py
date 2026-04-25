@@ -222,7 +222,14 @@ class MergeDetectionJob(BaseJob):
             if db_success:
                 await self._finalize_merge(ctx, item)
             else:
-                logger.error(f"Recovery: Aborted merge finalization for {p_id} <- {s_id} due to DB failure.")
+                # If s_id is missing but p_id exists, the DB merge likely succeeded just before the crash!
+                s_exists = await self.store.get_entity_by_id(s_id)
+                p_exists = await self.store.get_entity_by_id(p_id)
+                if p_exists and not s_exists:
+                    logger.info(f"Recovery: Secondary {s_id} missing. Assuming DB merge succeeded previously. Finalizing...")
+                    await self._finalize_merge(ctx, item)
+                else:
+                    logger.error(f"Recovery: Aborted merge finalization for {p_id} <- {s_id} due to DB failure.")
             
             # Clean up
             await self.redis.delete(key)

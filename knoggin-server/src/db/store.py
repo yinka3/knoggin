@@ -179,6 +179,9 @@ class MemGraphStore:
     async def get_facts_for_entity(self, entity_id: int, active_only: bool = True) -> List[Fact]:
         return await self._reader.get_facts_for_entity(entity_id, active_only)
 
+    async def search_relevant_facts(self, entity_id: int, query_embedding: List[float], limit: int = 5) -> List[Fact]:
+        return await self._reader.search_relevant_facts(entity_id, query_embedding, limit)
+
     async def get_facts_for_entities(self, entity_ids: List[int], active_only: bool = True) -> Dict[int, List[Fact]]:
         return await self._reader.get_facts_for_entities(entity_ids, active_only)
 

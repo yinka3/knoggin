@@ -165,18 +165,21 @@ class NLPPipeline:
         
         matcher, aliases = self._build_phrase_matcher()
         
-        known_ents: List[Tuple[str, int]] = []
-        known_ents_msgs: List[Tuple[int, str, int]] = [] # msg_id, span_text, eid
-        
-        with self._spacy_lock:
-            for msg in messages:
-                doc = self._nlp(msg['message'])
-                for _, start, end in matcher(doc):
-                    span_text = doc[start:end].text
-                    eid = aliases.get(span_text.lower())
-                    if eid:
-                        known_ents.append((span_text, eid))
-                        known_ents_msgs.append((msg['id'], span_text, eid))
+        def _run_spacy_matcher():
+            k_ents: List[Tuple[str, int]] = []
+            k_ents_msgs: List[Tuple[int, str, int]] = []
+            with self._spacy_lock:
+                for msg in messages:
+                    doc = self._nlp(msg['message'])
+                    for _, start, end in matcher(doc):
+                        span_text = doc[start:end].text
+                        eid = aliases.get(span_text.lower())
+                        if eid:
+                            k_ents.append((span_text, eid))
+                            k_ents_msgs.append((msg['id'], span_text, eid))
+            return k_ents, k_ents_msgs
+
+        known_ents, known_ents_msgs = await asyncio.to_thread(_run_spacy_matcher)
         
         await emit(session_id, "pipeline", "known_matched", {
             "count": len(known_ents)

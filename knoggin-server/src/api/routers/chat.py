@@ -84,7 +84,7 @@ async def send_message(
     
     async def event_stream():
         final_response = None
-        tool_calls_log = []
+        tool_calls_log = {}
         final_usage = None
         final_sources = None
         first_tool_start = None
@@ -121,16 +121,21 @@ async def send_message(
                 if event["event"] == "tool_start":
                     if first_tool_start is None:
                         first_tool_start = time.time()
-                    tool_calls_log.append({
-                        "tool": event["data"].get("tool"),
-                        "args": event["data"].get("args"),
-                        "thinking": event["data"].get("thinking"),
-                        "_start": time.time(),
-                    })
+                    
+                    call_id = event["data"].get("call_id")
+                    if call_id:
+                        tool_calls_log[call_id] = {
+                            "tool": event["data"].get("tool"),
+                            "args": event["data"].get("args"),
+                            "thinking": event["data"].get("thinking"),
+                            "_start": time.time(),
+                            "call_id": call_id
+                        }
                 
                 if event["event"] == "tool_end":
-                    if tool_calls_log:
-                        tc = tool_calls_log[-1]
+                    call_id = event["data"].get("call_id")
+                    if call_id and call_id in tool_calls_log:
+                        tc = tool_calls_log[call_id]
                         tc["summary"] = event["data"].get("summary")
                         tc["count"] = event["data"].get("count")
                         if "_start" in tc:
@@ -150,7 +155,7 @@ async def send_message(
             if final_response:
                 metadata: Dict[str, Any] = {}
                 if tool_calls_log:
-                    metadata["tool_calls"] = tool_calls_log
+                    metadata["tool_calls"] = list(tool_calls_log.values())
                     if first_tool_start is not None:
                         metadata["total_duration"] = round((time.time() - first_tool_start) * 1000)
                 if final_usage:

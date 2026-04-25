@@ -134,6 +134,7 @@ class BatchConsumer:
         with logger.contextualize(user=self.user_name, session=self.session_id, component="BatchConsumer"):
             logger.info(f"BatchConsumer started for {self.user_name}")
 
+            error_count = 0
             while not self._shutdown_requested:
                 timed_out = False
                 try:
@@ -147,9 +148,12 @@ class BatchConsumer:
                 self._wake_event.clear()
                 try:
                     await self._drain_buffer(flush_partial=timed_out or self._flush_future is not None)
+                    error_count = 0  # Reset on success
                 except Exception as e:
-                    logger.error(f"BatchConsumer: Unexpected error during _drain_buffer: {e}")
-                    await asyncio.sleep(5)
+                    error_count += 1
+                    backoff = min(60, 2 ** error_count)
+                    logger.error(f"BatchConsumer: Unexpected error during _drain_buffer: {e}. Backing off for {backoff}s...")
+                    await asyncio.sleep(backoff)
                 finally:
                     if self._flush_future and not self._flush_future.done():
                         self._flush_future.set_result(None)

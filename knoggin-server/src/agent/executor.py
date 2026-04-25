@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 import json
 import re
+import uuid
 
 
 from agent.tools import Tools
@@ -92,6 +93,10 @@ class AgentExecutor:
         needs_replanning = False
 
         while self.ctx.state.attempt_count < self.ctx.config.max_attempts:
+            if self.ctx.state.consecutive_errors >= self.ctx.config.max_consecutive_errors:
+                logger.warning(f"AgentExecutor: Global consecutive error limit reached ({self.ctx.state.consecutive_errors}). Aborting.")
+                break
+
             self.ctx.state.attempt_count += 1
             
             current_model = None
@@ -104,7 +109,6 @@ class AgentExecutor:
                 current_reasoning = "high"
                 if needs_replanning:
                     logger.info("AgentExecutor: Escalating back to Architect for re-planning.")
-                    needs_replanning = False
             else:
                 # Librarian Mode: Execution, use the lighter extraction model
                 current_mode_name = "Librarian"
@@ -228,41 +232,46 @@ class AgentExecutor:
         pending_tool_calls = []
         content_accumulator = ""
         
-        async for chunk in self.llm.call_llm_with_tools_streaming(
-            system=system_prompt,
-            user=user_message,
-            tools=active_schemas,
-            model=model or self.llm.agent_model,
-            temperature=temp,
-            reasoning=reasoning
-        ):
-            chunk_type = chunk.get("type")
-            
-            if chunk_type == "token":
-                content_accumulator += chunk["content"]
-                yield {"event": "token", "data": {"content": chunk["content"]}}
-            elif chunk_type == "thinking":
-                yield {"event": "thinking", "data": {"content": chunk["content"]}}
-            elif chunk_type == "tool_calls":
-                for call in chunk.get("calls", []):
-                    args = self._safe_parse_args(call.get("arguments", "{}"))
-                    pending_tool_calls.append(ToolCall(
-                        name=call["name"],
-                        args=args,
-                        thinking=content_accumulator.strip() or None
-                    ))
-            elif chunk_type == "done":
-                u = chunk.get("usage")
-                if u:
-                    u["approximate"] = True
-                self._accumulate_usage(u)
-                if not pending_tool_calls:
-                    # Final Response
-                    yield {"event": "done", "data": FinalResponse(content=content_accumulator.strip())}
-                else:
-                    yield {"event": "done", "data": pending_tool_calls}
-            elif chunk_type == "error":
-                yield {"event": "error", "data": {"message": chunk["message"]}}
+        try:
+            async for chunk in self.llm.call_llm_with_tools_streaming(
+                system=system_prompt,
+                user=user_message,
+                tools=active_schemas,
+                model=model or self.llm.agent_model,
+                temperature=temp,
+                reasoning=reasoning
+            ):
+                chunk_type = chunk.get("type")
+                
+                if chunk_type == "token":
+                    content_accumulator += chunk["content"]
+                    yield {"event": "token", "data": {"content": chunk["content"]}}
+                elif chunk_type == "thinking":
+                    yield {"event": "thinking", "data": {"content": chunk["content"]}}
+                elif chunk_type == "tool_calls":
+                    for call in chunk.get("calls", []):
+                        args = self._safe_parse_args(call.get("arguments", "{}"))
+                        pending_tool_calls.append(ToolCall(
+                            name=call["name"],
+                            args=args,
+                            thinking=content_accumulator.strip() or None,
+                            call_id=call.get("id", str(uuid.uuid4()))
+                        ))
+                elif chunk_type == "done":
+                    u = chunk.get("usage")
+                    if u:
+                        u["approximate"] = True
+                    self._accumulate_usage(u)
+                    if not pending_tool_calls:
+                        # Final Response
+                        yield {"event": "done", "data": FinalResponse(content=content_accumulator.strip())}
+                    else:
+                        yield {"event": "done", "data": pending_tool_calls}
+                elif chunk_type == "error":
+                    yield {"event": "error", "data": {"message": chunk["message"]}}
+        except Exception as e:
+            logger.error(f"LLM API Stream failed: {e}")
+            yield {"event": "error", "data": {"message": f"LLM API failure: {str(e)}"}}
 
     @staticmethod
     def _safe_parse_args(json_str: str) -> Dict:
@@ -299,7 +308,7 @@ class AgentExecutor:
 
         for call in tool_calls:
             yield {"event": "tool_start", "data": {
-                "tool": call.name, "args": call.args, "thinking": call.thinking
+                "tool": call.name, "args": call.args, "thinking": call.thinking, "call_id": call.call_id
             }}
 
             try:
@@ -346,7 +355,7 @@ class AgentExecutor:
                 results_out.append({"tool": call.name, "result": result})
 
                 yield {"event": "tool_end", "data": {
-                    "tool": call.name, "result": summary
+                    "tool": call.name, "result": summary, "call_id": call.call_id
                 }}
 
             except ToolExecutionError as e:
@@ -419,17 +428,16 @@ class AgentExecutor:
         evidence_str = build_evidence_context(self.ctx.evidence)
         self.ctx.evidence.token_count = self.llm.count_tokens(evidence_str)
         
-        # Soft limit: 10000 tokens
         if self.ctx.evidence.token_count > 10000:
             logger.info(f"Evidence size ({self.ctx.evidence.token_count} tokens) exceeds limit. Summarizing...")
             
             summary = await self._generate_evidence_summary(evidence_str)
             if summary:
-                # Store summary and clear raw evidence to save tokens
+                # Store summary and truncate raw evidence to save tokens while retaining recent IDs
                 self.ctx.evidence.summary = summary
-                self.ctx.evidence.messages = []
-                self.ctx.evidence.profiles = []
-                self.ctx.evidence.graph = []
+                self.ctx.evidence.messages = self.ctx.evidence.messages[-5:]
+                self.ctx.evidence.profiles = self.ctx.evidence.profiles[-5:]
+                self.ctx.evidence.graph = self.ctx.evidence.graph[-15:]
                 self.ctx.evidence.facts = []
                 self.ctx.evidence.paths = []
                 self.ctx.evidence.hierarchy = []

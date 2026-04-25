@@ -355,30 +355,42 @@ class BatchProcessor:
         """
         results = {}
 
-        # ── Prefetch all facts and neighbors in two queries ──
+        # ── Vector Embed Messages and Query Neighbors ──
         all_candidate_ids = list({cid for cid, _, _ in candidate_pairs})
-        facts_by_entity = await self.store.get_facts_for_entities(all_candidate_ids, active_only=True)
         neighbors_by_entity = await self.store.get_neighbor_ids_batch(all_candidate_ids)
+        
+        unique_msg_ids = list({msg_id for _, _, msg_id in candidate_pairs})
+        msg_embeddings = {}
+        if unique_msg_ids:
+            texts_to_embed = [msg_text_map[m] for m in unique_msg_ids if m in msg_text_map]
+            if texts_to_embed:
+                embeddings = await self.ent_resolver.embedding_service.encode(texts_to_embed)
+                msg_embeddings = {m: emb for m, emb in zip(unique_msg_ids, embeddings)}
 
-        # --- Signal 3: Fact relevance via LLM ---
+        # --- Signal 3: Fact relevance via LLM (RAG injected) ---
         llm_pairs = []
         pair_keys = []
+        
+        async def fetch_candidate_facts(cid, b_score, m_id):
+            m_text = msg_text_map.get(m_id, "")
+            if not m_text or m_id not in msg_embeddings:
+                return cid, b_score, m_text, []
+            
+            # Vector search facts for this specific entity against the message
+            facts = await self.store.search_relevant_facts(cid, msg_embeddings[m_id], limit=5)
+            return cid, b_score, m_text, facts
 
-        for candidate_id, base_score, msg_id in candidate_pairs:
-            msg_text = msg_text_map.get(msg_id, "")
-            if not msg_text:
-                results[candidate_id] = base_score
-                continue
-
-            facts = facts_by_entity.get(candidate_id, [])
-
-            if not facts:
-                results[candidate_id] = base_score
-                continue
-
-            fact_strs = [f.content for f in facts[:5]]
-            llm_pairs.append((msg_text, fact_strs))
-            pair_keys.append((candidate_id, base_score))
+        tasks = [fetch_candidate_facts(c, b, m) for c, b, m in candidate_pairs]
+        if tasks:
+            rag_results = await asyncio.gather(*tasks)
+            for cid, b_score, m_text, facts in rag_results:
+                if not facts:
+                    results[cid] = b_score
+                    continue
+                
+                fact_strs = [f.content for f in facts]
+                llm_pairs.append((m_text, fact_strs))
+                pair_keys.append((cid, b_score))
 
         if llm_pairs:
             for chunk_start in range(0, len(llm_pairs), BOOST_LLM_BATCH_SIZE):

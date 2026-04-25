@@ -354,6 +354,7 @@ class ToolCall:
     name: str
     args: Dict = field(default_factory=dict)
     thinking: Optional[str] = None
+    call_id: Optional[str] = None
 
 
 @dataclass 
