@@ -16,7 +16,6 @@ import redis.asyncio as aioredis
 async def write_batch_to_graph(
     batch: BatchResult,
     store: MemGraphStore,
-    executor: ThreadPoolExecutor,
     resolver: EntityResolver,
     session_id: str,
     user_name: str = None,
@@ -184,7 +183,6 @@ async def write_batch_to_graph(
 async def write_batch_callback(
     batch: BatchResult,
     store: MemGraphStore,
-    executor: ThreadPoolExecutor,
     resolver: EntityResolver,
     session_id: str,
     user_name: str = None,
@@ -205,7 +203,7 @@ async def write_batch_callback(
 
     try:
         await write_batch_to_graph(
-            batch, store, executor, resolver,
+            batch, store, resolver,
             session_id, user_name, redis_client,
         )
         return True, None

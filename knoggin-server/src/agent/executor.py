@@ -216,8 +216,9 @@ class AgentExecutor:
             participants=self.ctx.current_participants,
             current_mode=current_mode
         )
+
         user_message = build_user_message(self.ctx, last_result)
-        
+        self.ctx.state.last_error = None
         active_schemas = get_filtered_schemas(enabled_tools)
         if client_tools:
             active_schemas = active_schemas + client_tools
@@ -282,15 +283,17 @@ class AgentExecutor:
             return json.loads(cleaned)
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse tool arguments: {json_str[:200]}")
-            return {}
+            return {"_parse_error": True, "_raw": json_str[:500]}
 
     async def _execute_tools(self, tool_calls: List[ToolCall], results_out: List[Dict]) -> AsyncGenerator[Dict, None]:
         """Executes a batch of tool calls sequentially to avoid shared state races."""
 
         if self.ctx.state.call_count >= self.ctx.config.max_calls:
+            err_msg = f"Global call limit reached ({self.ctx.config.max_calls})"
+            results_out.append({"tool": "all", "error": err_msg})
             yield {"event": "tool_error", "data": {
                 "tool": "all",
-                "error": f"Global call limit reached ({self.ctx.config.max_calls})"
+                "error": err_msg
             }}
             return
 
@@ -302,6 +305,7 @@ class AgentExecutor:
             try:
                 if self.ctx.state.tool_limit_reached(call.name, self.ctx.config):
                     self.ctx.state.last_error = f"Tool '{call.name}' has reached its call limit"
+                    results_out.append({"tool": call.name, "error": self.ctx.state.last_error})
                     yield {"event": "tool_error", "data": {
                         "tool": call.name,
                         "error": f"Call limit reached for {call.name}"
@@ -310,6 +314,7 @@ class AgentExecutor:
 
                 if self.ctx.state.is_duplicate(call.name, call.args):
                     self.ctx.state.last_error = f"Duplicate call to '{call.name}' with same arguments"
+                    results_out.append({"tool": call.name, "error": self.ctx.state.last_error})
                     yield {"event": "tool_error", "data": {
                         "tool": call.name,
                         "error": "Duplicate call skipped"
@@ -322,6 +327,15 @@ class AgentExecutor:
                     question = call.args.get("question", "Could you clarify?")
                     yield {"event": "clarification", "data": {"question": question}}
                     return
+                
+                if call.args.get("_parse_error"):
+                    self.ctx.state.last_error = f"Failed to parse arguments for '{call.name}'"
+                    results_out.append({"tool": call.name, "error": self.ctx.state.last_error})
+                    yield {"event": "tool_error", "data": {
+                        "tool": call.name,
+                        "error": "Argument parse failure"
+                    }}
+                    continue
 
                 result = await execute_tool(self.tools, call.name, call.args)
 

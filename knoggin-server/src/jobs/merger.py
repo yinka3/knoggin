@@ -148,8 +148,9 @@ class MergeDetectionJob(BaseJob):
         max_retries: int = 2
     ) -> bool:
         """Execute DB merge then invalidate duplicate facts."""
-        if secondary_id == 1:
-            logger.critical(f"BLOCKED: Attempted to delete user entity (id=1) during merge with {primary_id}")
+        user_id = await self.ent_resolver.get_id(self.user_name)
+        if user_id is not None and secondary_id == user_id:
+            logger.critical(f"BLOCKED: Attempted to delete user entity (id={user_id}) during merge with {primary_id}")
             return False
         
         for attempt in range(1, max_retries + 1):
@@ -209,9 +210,19 @@ class MergeDetectionJob(BaseJob):
             s_id = item["secondary_id"]
             
             logger.info(f"Recovery: Finishing merge {p_id} <- {s_id}")
-            # We assume the DB merge might have finished (it's idempotent enough)
-            # or it didn't. Either way, we re-run the final steps.
-            await self._finalize_merge(ctx, item)
+            # We assume the DB merge might have finished (it's idempotent enough),
+            # but if the transaction aborted during the crash, skipping it fully fragments the Graph DB.
+            # We MUST explicitly re-run the DB transaction to guarantee safety before finalizing.
+            db_success = await self._execute_merge_db_only(
+                p_id, 
+                s_id, 
+                item.get("duplicate_fact_ids", [])
+            )
+            
+            if db_success:
+                await self._finalize_merge(ctx, item)
+            else:
+                logger.error(f"Recovery: Aborted merge finalization for {p_id} <- {s_id} due to DB failure.")
             
             # Clean up
             await self.redis.delete(key)
@@ -368,7 +379,8 @@ class MergeDetectionJob(BaseJob):
             if p_id in seen_ids or s_id in seen_ids:
                 continue
             
-            if s_id == 1:
+            user_id = await self.ent_resolver.get_id(self.user_name)
+            if user_id is not None and s_id == user_id:
                 c["primary_id"], c["secondary_id"] = s_id, p_id
                 c["primary_name"], c["secondary_name"] = c["secondary_name"], c["primary_name"]
                 c["primary_type"], c["secondary_type"] = c["secondary_type"], c["primary_type"]

@@ -358,10 +358,7 @@ class EntityResolver:
     def merge_into(self, primary_id: int, secondary_id: int):
         """Transfer secondary entity's aliases to primary, remove secondary from indexes."""
         with self._lock:
-            secondary_aliases = [
-                alias for alias, eid in self._name_to_id.items() 
-                if eid == secondary_id
-            ]
+            secondary_aliases = list(self._id_to_names.get(secondary_id, set()))
             
             for alias in secondary_aliases:
                 self._name_to_id[alias] = primary_id

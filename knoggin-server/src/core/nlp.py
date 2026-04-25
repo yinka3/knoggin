@@ -98,12 +98,12 @@ class NLPPipeline:
             score = e.get("score", 0)
             
             logger.debug(f"GLiNER: '{span}' | label={e['label']} | score={score:.3f}")
-            
-            if span.lower() in PRONOUNS or span.split()[0].lower() in PRONOUNS:
+            words = span.split()
+            if span.lower() in PRONOUNS or (words and words[0].lower() in PRONOUNS):
                 logger.debug(f"  -> Filtered (pronoun)")
                 continue
             
-            # Trust specific labels from our schema even if they are common dictionary words.
+            # Trust specific labels from the schema even if they are common dictionary words.
             # (e.g. "Notion" is a common word but a valid company entity)
             if e["label"] and e["label"].lower() != "general":
                 filtered.append(e)
@@ -163,18 +163,20 @@ class NLPPipeline:
         if not messages:
             return []
         
-        text = "\n".join([f"[MSG {m['id']}]: {m['message']}" for m in messages])
         matcher, aliases = self._build_phrase_matcher()
-        doc = None
-        with self._spacy_lock:
-            doc = self._nlp(text)
         
         known_ents: List[Tuple[str, int]] = []
-        for _, start, end in matcher(doc):
-            span_text = doc[start:end].text
-            eid = aliases.get(span_text.lower())
-            if eid:
-                known_ents.append((span_text, eid))
+        known_ents_msgs: List[Tuple[int, str, int]] = [] # msg_id, span_text, eid
+        
+        with self._spacy_lock:
+            for msg in messages:
+                doc = self._nlp(msg['message'])
+                for _, start, end in matcher(doc):
+                    span_text = doc[start:end].text
+                    eid = aliases.get(span_text.lower())
+                    if eid:
+                        known_ents.append((span_text, eid))
+                        known_ents_msgs.append((msg['id'], span_text, eid))
         
         await emit(session_id, "pipeline", "known_matched", {
             "count": len(known_ents)
@@ -196,22 +198,23 @@ class NLPPipeline:
         ambiguous: List[Tuple[int, str, str, List[str]]] = []
         
         # process known entities first (highest priority)
-        for span_text, eid in known_ents:
+        tracked_known_matches = set()
+        for msg_id, span_text, eid in known_ents_msgs:
+            match_key = (msg_id, span_text.lower(), eid)
+            if match_key in tracked_known_matches:
+                continue
+            tracked_known_matches.add(match_key)
+            
             profile = await self.get_profile(eid)
             profile = profile or {}
-            matched_msg_ids = set()
-
-            for msg in messages:
-                if span_text.lower() in msg['message'].lower():
-                    if msg['id'] not in matched_msg_ids:
-                        matched_msg_ids.add(msg['id'])
-                        covered_texts[msg['id']].add(span_text.lower())
-                        resolved.append((
-                            msg['id'],
-                            span_text,
-                            profile.get("type", "unknown"),
-                            profile.get("topic") or "General"
-                        ))
+            
+            covered_texts[msg_id].add(span_text.lower())
+            resolved.append((
+                msg_id,
+                span_text,
+                profile.get("type", "unknown"),
+                profile.get("topic") or "General"
+            ))
         
         gliner_filtered = set()
 
@@ -240,6 +243,16 @@ class NLPPipeline:
         }, verbose_only=True)
         
         output: List[Tuple[int, str, str, str]] = list(resolved)
+        
+        if not self.llm_ner:
+            logger.info(f"Extracted {len(output)} mentions: {len(known_ents)} known, {len(gliner_ents) - len(gliner_filtered)} gliner (LLM NER disabled)")
+            await emit(session_id, "pipeline", "ner_complete", {
+                "total": len(output),
+                "known": len(known_ents),
+                "gliner": len(gliner_ents) - len(gliner_filtered),
+                "vp01": 0
+            })
+            return output
         
         user_content = format_vp01_input(messages, known_ents, gliner_ents, ambiguous, covered_texts, self.topic_config.label_block)
         

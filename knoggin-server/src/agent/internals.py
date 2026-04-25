@@ -149,7 +149,6 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
 
     if ctx.state.last_error:
         msg += f"\n**Last action rejected:** {ctx.state.last_error}\n"
-        ctx.state.last_error = None
 
     # Latest tool results — full detail
     if last_result:
@@ -207,6 +206,8 @@ def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
                 new_profile_ids = {d.get("id") for d in data if d.get("id")}
             elif tool == "search_messages":
                 new_message_ids = {d.get("id") for d in data if d.get("id")}
+            elif tool == "search_files":
+                new_message_ids = {f"{d.get('file_id', 'file')}_{d.get('chunk_index', 0)}" for d in data}
             elif tool in ("get_connections", "get_recent_activity"):
                 new_graph_keys = {
                     (d.get("source"), d.get("target")) for d in data
@@ -257,6 +258,9 @@ def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
 
     if evidence.facts:
         msg += f"\n**Fact check results:**\n{format_fact_results(evidence.facts)}\n"
+    
+    if evidence.summary:
+        msg += f"\n**Evidence summary (compressed):**\n{evidence.summary}\n"
 
     return msg
 

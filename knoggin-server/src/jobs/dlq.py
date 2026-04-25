@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Callable, Awaitable
+from typing import Callable, Awaitable, Optional
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from core.entity_resolver import EntityResolver
@@ -52,7 +52,7 @@ class DLQReplayJob(BaseJob):
         self, 
         ent_resolver: EntityResolver,
         processor: BatchProcessor,
-        write_to_graph: Callable[[BatchResult], Awaitable[bool]],
+        write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
         redis_client: aioredis.Redis,
         interval: int = 60, 
         batch_size: int = 50, 
@@ -121,7 +121,7 @@ class DLQReplayJob(BaseJob):
                 logger.warning("DLQ: No valid entities left after validation, skipping")
                 return True  # Consider it handled
             
-            success, error_msg = await self.write_to_graph(result)
+            success, _ = await self.write_to_graph(result)
             
             if success:
                 logger.info(f"DLQ: Graph write retry succeeded for {len(result.entity_ids)} entities")
@@ -133,6 +133,62 @@ class DLQReplayJob(BaseJob):
             
         except Exception as e:
             logger.error(f"DLQ graph write retry failed: {e}")
+            return False
+
+    async def _retry_message_log(self, entry: dict, ctx: JobContext) -> bool:
+        """Retry saving message logs and subsequently the graph write."""
+        import asyncio
+        try:
+            messages = entry.get("messages", [])
+            if not messages:
+                logger.warning("DLQ: No messages in entry, skipping message log retry")
+                return True
+                
+            batch_result_dict = entry.get("batch_result")
+            if not batch_result_dict:
+                logger.error("DLQ: No batch_result mapped for message_log retry. Falling back to full processing.")
+                return await self._retry_processing(entry, ctx)
+                
+            result = BatchResult.from_dict(batch_result_dict)
+            result = self._validate_batch_result(result)
+            
+            batch = [
+                {
+                    "id": msg['id'],
+                    "content": msg.get('message', msg.get('content', '')),
+                    "role": msg.get('role', 'user'),
+                    "timestamp": msg.get('timestamp', ''),
+                    "embedding": result.message_embeddings.get(msg['id'], [])
+                }
+                for msg in messages
+            ]
+            
+            await asyncio.wait_for(
+                self.processor.store.save_message_logs(batch),
+                timeout=30.0
+            )
+            logger.info(f"DLQ: Message log retry succeeded for {len(messages)} messages")
+            
+            has_writes = bool(
+                result.extraction_result or 
+                result.new_entity_ids or 
+                result.alias_updated_ids or
+                result.alias_updates
+            )
+            
+            if has_writes:
+                success, err = await self.write_to_graph(result)
+                if not success:
+                    logger.error(f"DLQ: Message log succeeded, but paired graph write failed: {err}")
+                    return False
+                    
+            return True
+
+        except asyncio.TimeoutError:
+            logger.error("DLQ message log retry timed out")
+            return False
+        except Exception as e:
+            logger.error(f"DLQ message log retry failed: {e}")
             return False
 
     async def _retry_processing(self, entry: dict, ctx: JobContext) -> bool:
@@ -156,10 +212,16 @@ class DLQReplayJob(BaseJob):
                 logger.warning(f"DLQ: Reprocessing failed: {result.error}")
                 return False
             
-            if result.extraction_result:
-                success, error_msg = await self.write_to_graph(result)
+            has_writes = bool(
+                result.extraction_result or
+                result.new_entity_ids or
+                result.alias_updated_ids or
+                result.alias_updates
+            )
+            if has_writes:
+                success, err = await self.write_to_graph(result)
                 if not success:
-                    logger.warning(f"DLQ: Reprocessing succeeded but graph write failed: {error_msg}")
+                    logger.warning(f"DLQ: Reprocessing succeeded but graph write failed: {err}")
                     return False
             
             logger.info(f"DLQ: Full reprocess succeeded for {len(messages)} messages")
@@ -218,6 +280,8 @@ class DLQReplayJob(BaseJob):
                 if is_transient and attempt < self.max_attempts:
                     if stage == "graph_write":
                         success = await self._retry_graph_write(entry, ctx)
+                    elif stage == "message_log":
+                        success = await self._retry_message_log(entry, ctx)
                     else:
                         success = await self._retry_processing(entry, ctx)
                     
