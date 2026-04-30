@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from jobs.base import BaseJob, JobContext, JobResult
-from common.services.community_manager import CommunityManager
+from services.community_manager import CommunityManager
 from common.config.base import get_config_value, get_config
 from common.infra.redis import RedisKeys
 import redis.asyncio as aioredis

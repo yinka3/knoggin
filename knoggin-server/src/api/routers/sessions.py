@@ -4,7 +4,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-
+from common.schema.dtypes import Message
 from api.deps import get_app_state
 from api.state import AppState
 from common.infra.redis import RedisKeys
@@ -37,7 +37,7 @@ async def list_sessions(
     offset: int = Query(0, ge=0),
     state: AppState = Depends(get_app_state)
 ):
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
 
     sorted_sessions = sorted(
         sessions.items(),
@@ -71,14 +71,14 @@ async def create_session(
     
     agent_id = None
     if body and body.agent_id:
-        agent = await state.get_agent(body.agent_id)
+        agent = await state.agent_manager.get_agent(body.agent_id)
         if not agent:
             raise HTTPException(status_code=400, detail="Agent not found")
         agent_id = body.agent_id
     else:
-        agent_id = await state.get_default_agent_id()
+        agent_id = await state.agent_manager.get_default_agent_id()
 
-    context = await state.create_session(
+    context = await state.session_manager.create_session(
         body.topics_config if body else None,
         model=body.model if body else None,
         agent_id=agent_id,
@@ -88,26 +88,7 @@ async def create_session(
     await state.resources.redis.delete(f"topic_gen_count:{state.user_name}")
 
     if body and body.enabled_tools is not None:
-        raw = await state.resources.redis.hget(RedisKeys.sessions(state.user_name), context.session_id)
-        if raw:
-            try:
-                metadata = json.loads(raw)
-            except json.JSONDecodeError:
-                metadata = {}
-        metadata["enabled_tools"] = body.enabled_tools
-        await state.resources.redis.hset(
-            RedisKeys.sessions(state.user_name),
-            context.session_id,
-            json.dumps(metadata)
-        )
-    
-    raw = await state.resources.redis.hget(RedisKeys.sessions(state.user_name), context.session_id)
-    metadata = {}
-    if raw:
-        try:
-            metadata = json.loads(raw)
-        except json.JSONDecodeError:
-            pass
+        await state.session_manager.update_session_metadata(context.session_id, {"enabled_tools": body.enabled_tools})
     
     return {
         "session_id": context.session_id,
@@ -121,7 +102,7 @@ async def export_all_sessions(
     state: AppState = Depends(get_app_state)
 ):
     """Export all sessions' conversation histories as JSON."""
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     
     all_exports = []
     for session_id, metadata in sessions.items():
@@ -133,7 +114,7 @@ async def export_all_sessions(
                     for turn in history
                 ]
             else:
-                messages = await state.get_session_history_readonly(session_id)
+                messages = await state.session_manager.get_session_history_readonly(session_id)
             
             all_exports.append({
                 "session_id": session_id,
@@ -164,7 +145,7 @@ async def get_session(
     session_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -189,7 +170,7 @@ async def update_session(
     body: UpdateSessionRequest,
     state: AppState = Depends(get_app_state)
 ):
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -200,7 +181,7 @@ async def update_session(
         metadata["model"] = body.model
     
     if body.agent_id is not None:
-        agent = await state.get_agent(body.agent_id)
+        agent = await state.agent_manager.get_agent(body.agent_id)
         if not agent:
             raise HTTPException(status_code=400, detail="Agent not found")
         metadata["agent_id"] = body.agent_id
@@ -217,11 +198,7 @@ async def update_session(
     
     metadata["last_active"] = datetime.now(timezone.utc).isoformat()
     
-    await state.resources.redis.hset(
-        RedisKeys.sessions(state.user_name),
-        session_id,
-        json.dumps(metadata)
-    )
+    await state.session_manager.update_session_metadata(session_id, metadata)
 
     if session_id in state.active_sessions:
         if body.model is not None:
@@ -235,7 +212,7 @@ async def delete_session(
     force: bool = Query(False),
     state: AppState = Depends(get_app_state)
 ):
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -246,10 +223,9 @@ async def delete_session(
                 status_code=409, 
                 detail="Session is active. Use ?force=true to close and delete."
             )
-        await state.close_session(session_id)
+        await state.session_manager.close_session(session_id)
     
-    deleted_count = await state.delete_session_data(session_id)
-    await state.resources.redis.hdel(RedisKeys.sessions(state.user_name), session_id)
+    deleted_count = await state.session_manager.delete_session_data(session_id)
     
     return {"success": True, "keys_deleted": deleted_count}
 
@@ -260,7 +236,7 @@ async def get_session_memory(
     state: AppState = Depends(get_app_state)
 ):
     """Read agent-saved memory notes for a session."""
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -303,11 +279,11 @@ async def export_session(
     state: AppState = Depends(get_app_state)
 ):
     """Export a single session's conversation history as JSON."""
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     metadata = sessions.get(session_id, {})
     history = await context.get_conversation_context(num_turns=1000)
     
@@ -342,7 +318,7 @@ async def import_session(
     state: AppState = Depends(get_app_state)
 ):
     """Import a session's conversation history."""
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -364,9 +340,8 @@ async def import_session(
                 pass
                 
         if role == "user":
-            from common.schema.dtypes import MessageData
-            from datetime import datetime
-            m = MessageData(message=content, timestamp=timestamp)
+
+            m = Message(content=content, timestamp=timestamp)
             await context.add(m)
             imported += 1
         elif role == "assistant":

@@ -3,7 +3,7 @@ import time
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from db.store import MemGraphStore
-from core.entity_resolver import EntityResolver
+from core.pipeline.entity_resolver import EntityResolver
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
 import redis.asyncio as aioredis

@@ -1,3 +1,10 @@
+"""Data types for the Knoggin pipeline.
+
+Domain Primitives (Entity, Connection, Fact, Message, ProfileUpdate) live in
+`common.schema.primitives`. This module re-exports them and holds pipeline-specific
+processing types (BatchResult, DLQEntry, etc.) and LLM judgment models.
+"""
+
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
@@ -5,31 +12,39 @@ import time
 from typing import Dict, List, Literal, Optional, Set, Union
 from pydantic import BaseModel, Field
 
+# ── Re-export Domain Primitives ──────────────────────────────────
+from common.schema.primitives import (
+    Entity,
+    EntityRecord,
+    Connection,
+    ConnectionRecord,
+    Fact,
+    FactRecord,
+    Message,
+    ProfileUpdate,
+    _parse_dt,
+)
 
-class EntityExtraction(BaseModel):
-    """Model for a single entity mention extraction."""
-    msg_id: int = Field(..., description="The ID of the message this entity was extracted from")
-    name: str = Field(..., description="The name of the entity as mentioned in text")
-    type: str = Field(..., description="The semantic type (e.g., person, organization, location, concept)")
-    topic: str = Field(..., description="The high-level topic category")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score from 0 to 1")
+# ═══════════════════════════════════════════════════════════════════
+#  LLM EXTRACTION COLLECTION WRAPPERS
+# ═══════════════════════════════════════════════════════════════════
 
 class NERResult(BaseModel):
     """Collection model for NER batch extraction."""
-    mentions: List[EntityExtraction] = Field(default_factory=list)
-
-class ConnectionExtraction(BaseModel):
-    """Model for a relationship between two entities."""
-    msg_id: int = Field(..., description="The ID of the message where this connection was found")
-    entity_a: str = Field(..., description="Name of the first entity")
-    entity_b: str = Field(..., description="Name of the second entity")
-    relationship: str = Field(..., description="Brief description of the connection")
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    context: Optional[str] = Field(None, description="Short snippet proving the connection")
+    mentions: List[Entity] = Field(default_factory=list)
 
 class ConnectionsResult(BaseModel):
     """Collection model for extracted connections."""
-    connections: List[ConnectionExtraction] = Field(default_factory=list)
+    connections: List[Connection] = Field(default_factory=list)
+
+class EntityProfilesResult(BaseModel):
+    """Collection model for profile extraction results."""
+    profiles: List[ProfileUpdate] = Field(default_factory=list)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  LLM JUDGMENT MODELS (unchanged)
+# ═══════════════════════════════════════════════════════════════════
 
 class MergeJudgment(BaseModel):
     """Model for deciding if two entities should be merged."""
@@ -47,23 +62,6 @@ class RelevanceResult(BaseModel):
 class BulkRelevanceResult(BaseModel):
     """Collection of relevance results."""
     judgments: List[RelevanceResult] = Field(default_factory=list)
-
-
-class FactUpdate(BaseModel):
-    """Model for a single fact update during profile extraction."""
-    content: str = Field(..., description="The atomic fact content")
-    msg_id: Optional[int] = Field(None, description="The ID of the source message")
-    supersedes: Optional[str] = Field(None, description="Exact text of an existing fact this replaces")
-    invalidates: Optional[str] = Field(None, description="Exact text of an existing fact this removes")
-
-class ProfileExtraction(BaseModel):
-    """Model for a single entity's profile facts extraction."""
-    canonical_name: str = Field(..., description="The name of the entity")
-    facts: List[FactUpdate] = Field(default_factory=list, description="List of structured fact updates")
-
-class EntityProfilesResult(BaseModel):
-    """Collection model for profile extraction results."""
-    profiles: List[ProfileExtraction] = Field(default_factory=list)
 
 
 class ContradictionJudgment(BaseModel):
@@ -88,87 +86,9 @@ class TopicConfigResult(BaseModel):
     topics: Dict[str, TopicDetail] = Field(..., description="Map of TopicName to its configuration")
 
 
-@dataclass
-class MessageData:
-    message: str
-    id: int = -1
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class EntityPair(BaseModel):
-    entity_a: str
-    entity_b: str
-    confidence: float
-    context: Optional[str] = None
-
-class MessageConnections(BaseModel):
-    message_id: int
-    entity_pairs: List[EntityPair] = Field(default_factory=list)
-
-
-@dataclass
-class EntityItem:
-    msg_id: int
-    name: str
-    label: str
-    topic: str
-    confidence: float
-
-
-@dataclass
-class ProfileUpdate:
-    canonical_name: str
-    facts: List[str]
-
-
-@dataclass
-class Fact:
-    id: str
-    source_entity_id: int
-    content: str
-    valid_at: datetime
-    invalid_at: Optional[datetime] = None
-    source_msg_id: Optional[int] = None 
-    confidence: float = 1.0
-    embedding: List[float] = field(default_factory=list)
-    source: str = "user"
-
-    @classmethod
-    def from_record(cls, record: dict) -> "Fact":
-        return cls(
-            id=record["id"],
-            source_entity_id=record["source_entity_id"],
-            content=record["content"],
-            valid_at=cls._parse_dt(record["valid_at"]),
-            invalid_at=cls._parse_dt(record["invalid_at"]) if record.get("invalid_at") else None,
-            confidence=record.get("confidence", 1.0),
-            embedding=record.get("embedding") or [],
-            source_msg_id=record.get("source_msg_id"),
-            source=record.get("source", "user")
-        )
-    
-    def to_dict(self, exclude: set = None) -> dict:
-        if exclude is None:
-            exclude = {"embedding"}
-        result = {}
-        for k in self.__dataclass_fields__:
-            if k in exclude:
-                continue
-            val = getattr(self, k)
-            if isinstance(val, datetime):
-                val = val.isoformat()
-            result[k] = val
-        return result
-
-    @staticmethod
-    def _parse_dt(val) -> datetime:
-        if isinstance(val, str):
-            return datetime.fromisoformat(val)
-        if isinstance(val, (int, float)):
-            return datetime.fromtimestamp(val, tz=timezone.utc)
-        if isinstance(val, datetime):
-            return val
-        raise TypeError(f"Cannot parse datetime from {type(val)}: {val}")
+# ═══════════════════════════════════════════════════════════════════
+#  PIPELINE PROCESSING TYPES
+# ═══════════════════════════════════════════════════════════════════
 
 @dataclass
 class FactMergeResult:
@@ -193,7 +113,7 @@ class BatchResult:
     new_entity_ids: Set[int] = field(default_factory=set)
     alias_updated_ids: Set[int] = field(default_factory=set)
     alias_updates: Dict[int, List[str]] = field(default_factory=dict)
-    extraction_result: Optional[List[MessageConnections]] = None
+    extraction_result: Optional[List[Dict]] = None
     message_embeddings: Dict[int, List[float]] = field(default_factory=dict)
     success: bool = True
     error: Optional[str] = None
@@ -205,13 +125,7 @@ class BatchResult:
             "new_entity_ids": list(self.new_entity_ids),
             "alias_updated_ids": list(self.alias_updated_ids),
             "alias_updates": {str(k): v for k, v in self.alias_updates.items()},
-            "extraction_result": [
-                {"message_id": mc.message_id, "entity_pairs": [
-                    {"entity_a": p.entity_a, "entity_b": p.entity_b, 
-                    "confidence": p.confidence, "context": p.context}
-                    for p in mc.entity_pairs
-                ]} for mc in (self.extraction_result or [])
-            ],
+            "extraction_result": self.extraction_result or [],
             "message_embeddings": {
                 k: (v.tolist() if hasattr(v, 'tolist') else v)
                 for k, v in self.message_embeddings.items()
@@ -223,29 +137,12 @@ class BatchResult:
     @classmethod
     def from_dict(cls, data: dict) -> "BatchResult":
         """Deserialize from DLQ storage."""
-        extraction_result = None
-        if data.get("extraction_result"):
-            extraction_result = [
-                MessageConnections(
-                    message_id=mc["message_id"],
-                    entity_pairs=[
-                        EntityPair(
-                            entity_a=p["entity_a"], 
-                            entity_b=p["entity_b"], 
-                            confidence=p["confidence"],
-                            context=p.get("context")
-                        )
-                        for p in mc["entity_pairs"]
-                    ]
-                ) for mc in data["extraction_result"]
-            ]
-        
         return cls(
             entity_ids=data.get("entity_ids", []),
             new_entity_ids=set(data.get("new_entity_ids", [])),
             alias_updated_ids=set(data.get("alias_updated_ids", [])),
             alias_updates={int(k): v for k, v in data.get("alias_updates", {}).items() if str(k).isdigit()},
-            extraction_result=extraction_result,
+            extraction_result=data.get("extraction_result"),
             message_embeddings={int(k): v for k, v in data.get("message_embeddings", {}).items() if str(k).isdigit()},
             success=data.get("success", True),
             error=data.get("error")
@@ -277,7 +174,9 @@ class DLQEntry:
         return any(t in self.error for t in transient_errors)
 
 
-# ===== AGENT RESPONSE/RESULT TYPES =====
+# ═══════════════════════════════════════════════════════════════════
+#  AGENT CONFIG (global, stays here)
+# ═══════════════════════════════════════════════════════════════════
 
 @dataclass
 class AgentConfig:
@@ -326,48 +225,3 @@ class AgentConfig:
             spawned_by=data.get("spawned_by"),
             created_at=created or datetime.now(timezone.utc)
         )
-
-@dataclass
-class BaseResult:
-    status: str
-    state: str
-    tools_used: List[str]
-
-
-@dataclass
-class CompleteResult(BaseResult):
-    response: str
-    messages: List[Dict]
-    profiles: List[Dict]
-    graph: List[Dict]
-
-
-@dataclass
-class ClarificationResult(BaseResult):
-    question: str
-
-
-RunResult = Union[CompleteResult, ClarificationResult]
-
-@dataclass
-class ToolCall:
-    name: str
-    args: Dict = field(default_factory=dict)
-    thinking: Optional[str] = None
-    call_id: Optional[str] = None
-
-
-@dataclass 
-class FinalResponse:
-    content: str
-    usage: Optional[Dict] = None
-    sources: Optional[List[Dict]] = None
-
-
-@dataclass
-class ClarificationRequest:
-    question: str
-    usage: Optional[Dict] = None
-
-
-AgentResponse = Union[ToolCall, List[ToolCall], FinalResponse, ClarificationRequest]

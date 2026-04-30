@@ -7,14 +7,14 @@ from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
 from jobs.utils import cosine_similarity, enrich_facts_with_sources, find_duplicate_facts, format_vp05_input, has_sufficient_facts
 from core.prompts import get_merge_judgment_prompt
-from core.entity_resolver import EntityResolver
-from common.services.llm_service import LLMService
+from core.pipeline.entity_resolver import EntityResolver
+from services.llm_service import LLMService
 from common.config.topics_config import TopicConfig
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
 import redis.asyncio as aioredis
 from db.store import MemGraphStore
-from common.schema.dtypes import Fact, MergeJudgment
+from common.schema.dtypes import FactRecord, MergeJudgment
 
 
 class MergeDetectionJob(BaseJob):
@@ -553,7 +553,7 @@ class MergeDetectionJob(BaseJob):
                 logger.error(f"LLM judgment failed for ({candidate['primary_id']}, {candidate['secondary_id']}): {e}")
                 return candidate, (None, None)
 
-    async def _prepare_single_merge(self, candidate: dict, sem: asyncio.Semaphore, facts_cache: Dict[int, List[Fact]]):
+    async def _prepare_single_merge(self, candidate: dict, sem: asyncio.Semaphore, facts_cache: Dict[int, List[FactRecord]]):
         async with sem:
             try:
                 p_id = candidate["primary_id"]

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from api.deps import get_app_state
 from api.state import AppState
-from common.services.memory_manager import MemoryManager
+from services.memory_manager import MemoryManager
 from common.config.topics_config import TopicConfig
 
 router = APIRouter()
@@ -19,13 +19,13 @@ async def add_memory(
     body: AddMemoryRequest,
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
         
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     session_meta = sessions.get(session_id, {})
-    agent_id = session_meta.get("agent_id") or await state.get_default_agent_id()
+    agent_id = session_meta.get("agent_id") or await state.agent_manager.get_default_agent_id()
 
     topic_config = await TopicConfig.load(
         state.resources.redis,
@@ -57,13 +57,13 @@ async def delete_memory(
     memory_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
         
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     session_meta = sessions.get(session_id, {})
-    agent_id = session_meta.get("agent_id") or await state.get_default_agent_id()
+    agent_id = session_meta.get("agent_id") or await state.agent_manager.get_default_agent_id()
 
     topic_config = await TopicConfig.load(
         state.resources.redis,

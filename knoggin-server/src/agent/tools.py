@@ -434,7 +434,7 @@ class Tools:
         """
         Find a person, place, or thing by name. 
         Returns their full profile (type, summary, aliases, topic) and their 5 strongest connections.
-        Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.
+        Connections only include canonical name and aliases ΓÇö use this tool again on a connection's name if you need their full profile.
         
         Args:
             query: Name or partial name to search
@@ -460,7 +460,7 @@ class Tools:
     async def get_connections(self, entity_name: str) -> List[Dict]:
         """
         Get the full relationship network for an entity.
-        Returns all connections (up to 50) with evidence — the actual messages that established each connection. 
+        Returns all connections (up to 50) with evidence ΓÇö the actual messages that established each connection. 
         Use when you need comprehensive relationship details beyond the top 5 from search_entity.
         
         Args:
@@ -597,7 +597,7 @@ class Tools:
     async def get_hot_topic_context(self, hot_topics: List[str], slim: bool = False) -> Dict[str, Dict]:
         """
         Retrieve pre-cached context for frequently accessed topics.
-        Called automatically at start — you already have this data in hot_topic_context.
+        Called automatically at start ΓÇö you already have this data in hot_topic_context.
         Only call manually if hot topics changed mid-conversation.
         
         Args:
@@ -692,7 +692,7 @@ class Tools:
     async def fact_check(self, entity_name: str, query: str) -> Dict:
         """
         Retrieve and verify stored facts about a specific entity from the knowledge graph.
-        Uses a resolution cascade: exact lookup → vector search → message search fallback.
+        Uses a resolution cascade: exact lookup ΓåÆ vector search ΓåÆ message search fallback.
 
         Args:
             entity_name: The entity to look up facts for.
@@ -859,11 +859,11 @@ class Tools:
         """
         brave_key = self.search_cfg.get("brave_api_key", "")
         if not brave_key:
-            return [{"title": "Not Available", "url": "", "snippet": "News search requires a Brave Search API key. Configure one in Settings → Web Search."}]
+            return [{"title": "Not Available", "url": "", "snippet": "News search requires a Brave Search API key. Configure one in Settings ΓåÆ Web Search."}]
         return await self._news_brave(query, limit, brave_key, freshness or "pw")
 
     async def _search_duckduckgo(self, query: str, limit: int, freshness: str = None) -> List[Dict]:
-        """Free web search via DuckDuckGo — no API key required."""
+        """Free web search via DuckDuckGo ΓÇö no API key required."""
         loop = asyncio.get_running_loop()
         try:
             from duckduckgo_search import DDGS

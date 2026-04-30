@@ -5,13 +5,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Dict
 
-from agent.tools import Tools
+from agent.tools.registry import Tools
 from common.config.base import get_config_value, get_config
 from common.utils.events import emit_community
 from common.infra.redis import RedisKeys
 from db.community_store import CommunityStore
 from common.schema.dtypes import AgentConfig
-from common.services.memory_manager import MemoryManager
+from services.memory_manager import MemoryManager
 
 class CommunityTools(Tools):
     """

@@ -2,7 +2,7 @@ import json
 import re
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
-from common.services.llm_service import LLMService
+from services.llm_service import LLMService
 from common.config.topics_config import TopicConfig
 from core.prompts import get_topic_evolution_prompt
 from common.schema.dtypes import TopicConfigResult

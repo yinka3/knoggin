@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, List
 from loguru import logger
-from common.schema.dtypes import Fact
+from common.schema.dtypes import FactRecord
 from common.infra.redis import RedisKeys
 from mcp.server.fastmcp import FastMCP
 
@@ -319,7 +319,7 @@ def create_mcp_app(get_resources) -> FastMCP:
 
             
 
-            new_fact = Fact(
+            new_fact = FactRecord(
                 id=str(uuid.uuid4()),
                 content=fact,
                 valid_at=datetime.now(timezone.utc),

@@ -10,7 +10,7 @@ from common.utils.events import emit
 from common.infra.redis import RedisKeys
 from loguru import logger
 from datetime import datetime, timezone
-from common.schema.dtypes import Fact
+from common.schema.dtypes import FactRecord
 
 router = APIRouter()
 
@@ -320,7 +320,7 @@ async def _execute_undo(store, resolver, redis, snapshot: dict, session_id: str)
     if snapshot["facts"]:
         fact_objects = []
         for fd in snapshot["facts"]:
-            fact_objects.append(Fact(
+            fact_objects.append(FactRecord(
                 id=fd["id"],
                 content=fd["content"],
                 valid_at=datetime.fromisoformat(fd["valid_at"]),

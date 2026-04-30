@@ -3,8 +3,8 @@ import time
 from typing import Callable, Awaitable, Optional
 from loguru import logger
 from jobs.base import BaseJob, JobContext, JobResult
-from core.entity_resolver import EntityResolver
-from core.batch_processor import BatchProcessor, BatchResult
+from core.pipeline.entity_resolver import EntityResolver
+from core.pipeline.batch_processor import BatchProcessor, BatchResult
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
 import redis.asyncio as aioredis

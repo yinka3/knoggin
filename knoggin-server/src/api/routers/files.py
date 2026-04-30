@@ -19,7 +19,7 @@ async def upload_file(
     file: UploadFile = File(...),
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -76,7 +76,7 @@ async def list_files(
     session_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -93,7 +93,7 @@ async def delete_file(
     file_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     

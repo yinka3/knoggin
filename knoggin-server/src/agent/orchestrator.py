@@ -5,13 +5,13 @@ from loguru import logger
 import redis.asyncio as aioredis
 
 from common.config.topics_config import TopicConfig
-from common.services.memory_manager import MemoryManager
+from services.memory_manager import MemoryManager
 from common.config.base import get_config
 from common.schema.dtypes import AgentConfig
-from agent.internals import AgentContext, AgentRunConfig, AgentState, RetrievedEvidence
+from agent.types import AgentContext, AgentRunConfig, AgentState, RetrievedEvidence
 from agent.executor import AgentExecutor
-from agent.tools import Tools
-from core.entity_resolver import EntityResolver
+from agent.tools.registry import Tools
+from core.pipeline.entity_resolver import EntityResolver
 from common.rag.file_rag import FileRAGService
 from common.infra.redis import RedisKeys
 import uuid

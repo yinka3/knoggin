@@ -21,7 +21,7 @@ async def execute_command(
 ):
     command_name, args = parse_command(body.input)
     
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     if body.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     

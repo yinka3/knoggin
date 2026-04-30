@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from api.deps import get_app_state
 from api.state import AppState
 from agent.orchestrator import Orchestrator
-from common.schema.dtypes import MessageData
+from common.schema.dtypes import Message
 from common.config.base import get_config_value, get_config
 from common.infra.redis import RedisKeys
 
@@ -42,20 +42,20 @@ async def send_message(
     if orchestrator._resources is None:
         orchestrator._resources = state.resources
 
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     session_meta = sessions.get(session_id, {})
-    agent_id = session_meta.get("agent_id") or await state.get_default_agent_id()
+    agent_id = session_meta.get("agent_id") or await state.agent_manager.get_default_agent_id()
     enabled_tools = session_meta.get("enabled_tools")
     
-    agent = await state.get_agent(agent_id)
+    agent = await state.agent_manager.get_agent(agent_id)
     if not agent:
         logger.warning(f"Agent {agent_id} not found, falling back to default")
-        agent_id = await state.get_default_agent_id()
-        agent = await state.get_agent(agent_id)
+        agent_id = await state.agent_manager.get_default_agent_id()
+        agent = await state.agent_manager.get_agent(agent_id)
         
         session_meta["agent_id"] = agent_id
         await state.resources.redis.hset(
@@ -72,8 +72,8 @@ async def send_message(
     # HTML sanitization to prevent prompt injection 
     safe_message = html.escape(body.message)
     
-    msg = MessageData(
-        message=safe_message,
+    msg = Message(
+        content=safe_message,
         timestamp=datetime.now(timezone.utc)
     )
     await context.add(msg)
@@ -239,7 +239,7 @@ async def get_history(
     limit: int = Query(40, ge=1, le=100),
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     

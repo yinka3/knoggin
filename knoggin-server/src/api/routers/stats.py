@@ -25,8 +25,8 @@ async def get_stats(state: AppState = Depends(get_app_state)):
         logger.error(f"Failed to get graph stats: {e}")
         graph_stats = {"entities": 0, "facts": 0, "relationships": 0}
     
-    sessions = await state.list_sessions()
-    agents = await state.list_agents()
+    sessions = await state.session_manager.list_sessions()
+    agents = await state.agent_manager.list_agents()
     
     global_stats_key = RedisKeys.global_stats()
     global_stats_raw = await state.resources.redis.hgetall(global_stats_key)

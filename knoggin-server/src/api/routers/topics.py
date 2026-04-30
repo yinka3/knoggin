@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from api.deps import get_app_state
 from api.state import AppState
 from common.config.topics_config import TopicConfig
-from common.services.topic_manager import generate_topics
+from services.topic_manager import generate_topics
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ class GenerateFromDescriptionRequest(BaseModel):
 
 async def get_topic_config(session_id: str, state: AppState) -> TopicConfig:
     """Load TopicConfig for a session."""
-    sessions = await state.list_sessions()
+    sessions = await state.session_manager.list_sessions()
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     

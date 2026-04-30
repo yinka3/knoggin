@@ -17,7 +17,7 @@ async def extract_message_facts(
     background_tasks: BackgroundTasks,
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
         

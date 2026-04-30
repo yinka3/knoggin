@@ -44,7 +44,7 @@ async def get_agent_defaults(state: AppState = Depends(get_app_state)):
 
 @router.get("/")
 async def list_agents(state: AppState = Depends(get_app_state)):
-    agents = await state.list_agents()
+    agents = await state.agent_manager.list_agents()
     return {
         "agents": [a.to_dict() for a in agents]
     }
@@ -55,11 +55,11 @@ async def create_agent(
     body: CreateAgentRequest,
     state: AppState = Depends(get_app_state)
 ):
-    existing = await state.get_agent_by_name(body.name)
+    existing = await state.agent_manager.get_agent_by_name(body.name)
     if existing:
         raise HTTPException(status_code=400, detail="Agent with this name already exists")
     
-    agent = await state.create_agent(
+    agent = await state.agent_manager.create_agent(
         name=body.name,
         persona=body.persona,
         instructions=body.instructions,
@@ -76,7 +76,7 @@ async def get_agent_by_name(
     name: str,
     state: AppState = Depends(get_app_state)
 ):
-    agent = await state.get_agent_by_name(name)
+    agent = await state.agent_manager.get_agent_by_name(name)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent.to_dict()
@@ -87,7 +87,7 @@ async def get_agent(
     agent_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    agent = await state.get_agent(agent_id)
+    agent = await state.agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent.to_dict()
@@ -100,11 +100,11 @@ async def update_agent(
     state: AppState = Depends(get_app_state)
 ):
     if body.name:
-        existing = await state.get_agent_by_name(body.name)
+        existing = await state.agent_manager.get_agent_by_name(body.name)
         if existing and existing.id != agent_id:
             raise HTTPException(status_code=400, detail="Agent with this name already exists")
     
-    agent = await state.update_agent(
+    agent = await state.agent_manager.update_agent(
         agent_id=agent_id,
         name=body.name,
         persona=body.persona,
@@ -125,14 +125,14 @@ async def delete_agent(
     agent_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    agent = await state.get_agent(agent_id)
+    agent = await state.agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
     if agent.is_default:
         raise HTTPException(status_code=400, detail="Cannot delete default agent")
     
-    success = await state.delete_agent(agent_id)
+    success = await state.agent_manager.delete_agent(agent_id)
     return {"success": success}
 
 
@@ -141,7 +141,7 @@ async def set_default_agent(
     agent_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    success = await state.set_default_agent(agent_id)
+    success = await state.agent_manager.set_default_agent(agent_id)
     if not success:
         raise HTTPException(status_code=404, detail="Agent not found")
     return {"success": True}
@@ -151,7 +151,7 @@ async def get_session_memory(
     session_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    context = await state.get_or_resume_session(session_id)
+    context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -185,7 +185,7 @@ async def get_agent_memory(
     agent_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    agent = await state.get_agent(agent_id)
+    agent = await state.agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
         
@@ -219,7 +219,7 @@ async def add_agent_memory(
     body: AgentMemoryEntry,
     state: AppState = Depends(get_app_state)
 ):
-    agent = await state.get_agent(agent_id)
+    agent = await state.agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
         
@@ -249,7 +249,7 @@ async def delete_agent_memory(
     memory_id: str,
     state: AppState = Depends(get_app_state)
 ):
-    agent = await state.get_agent(agent_id)
+    agent = await state.agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
         

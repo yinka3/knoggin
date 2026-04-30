@@ -8,7 +8,7 @@ import re
 import uuid
 
 
-from agent.tools import Tools
+from agent.tools.registry import Tools
 from agent.internals import (
     AgentContext,
     build_user_message,
@@ -27,10 +27,10 @@ from agent.formatters import (
     format_hierarchy_results
 )
 from agent.system_prompt import get_agent_prompt, get_fallback_summary_prompt
-from common.services.llm_service import LLMService
-from common.services.memory_manager import MemoryManager
+from services.llm_service import LLMService
+from services.memory_manager import MemoryManager
 from common.config.topics_config import TopicConfig
-from common.schema.dtypes import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
+from agent.types import AgentResponse, ClarificationRequest, FinalResponse, ToolCall
 from common.schema.tool_schema import get_filtered_schemas, TOOL_SCHEMAS
 from common.mcp.bridge import mcp_tools_to_schemas
 from common.utils.events import emit

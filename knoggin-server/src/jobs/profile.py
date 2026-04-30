@@ -9,11 +9,11 @@ import numpy as np
 from db.store import MemGraphStore
 from jobs.base import BaseJob, JobContext, JobResult
 from common.rag.embedding import EmbeddingService
-from common.services.llm_service import LLMService
-from core.entity_resolver import EntityResolver
+from services.llm_service import LLMService
+from core.pipeline.entity_resolver import EntityResolver
 from core.prompts import get_contradiction_judgment_prompt, get_profile_extraction_prompt
 from jobs.utils import enrich_facts_with_sources, extract_fact_with_source, format_vp04_input, process_extracted_facts
-from common.schema.dtypes import Fact, EntityProfilesResult, BulkContradictionResult
+from common.schema.dtypes import Fact, FactRecord, EntityProfilesResult, BulkContradictionResult
 from common.utils.events import emit
 from common.infra.redis import RedisKeys
 import redis.asyncio as aioredis
@@ -395,7 +395,7 @@ class ProfileRefinementJob(BaseJob):
         self, 
         ctx: JobContext,
         batch: List[Dict],
-        ents_to_facts: Dict[int, List[Fact]],
+        ents_to_facts: Dict[int, List[FactRecord]],
         current_msg_id: int,
         valid_msg_ids: set
     ) -> List[Dict]:
@@ -579,7 +579,7 @@ class ProfileRefinementJob(BaseJob):
 
     async def _apply_fact_changes(
         self, entity_id, merge_result, existing_facts, valid_msg_ids, session_id
-    ) -> Tuple[List[Fact], List[str]]:
+    ) -> Tuple[List[FactRecord], List[str]]:
         """
         Invalidate old facts and create new ones. Creates first, invalidates after.
         Returns the final set of active facts.
@@ -614,7 +614,7 @@ class ProfileRefinementJob(BaseJob):
                 contradicted_set = set(contradicted_ids)
                 active_existing = [f for f in active_existing if f.id not in contradicted_set]
             
-            fact = Fact(
+            fact = FactRecord(
                 id=str(uuid.uuid4()),
                 content=content,
                 valid_at=now,
@@ -698,7 +698,7 @@ class ProfileRefinementJob(BaseJob):
         self,
         new_content: str,
         new_embedding: List[float],
-        existing_facts: List[Fact],
+        existing_facts: List[FactRecord],
         new_msg_id: Optional[int] = None,
         session_id: str = None
     ) -> List[str]:
@@ -738,7 +738,7 @@ class ProfileRefinementJob(BaseJob):
         if not candidates:
             return []
 
-        candidates: List[Tuple[Fact, float]] = sorted(candidates, key=lambda x: x[1], reverse=True)
+        candidates: List[Tuple[FactRecord, float]] = sorted(candidates, key=lambda x: x[1], reverse=True)
         
         to_invalidate = []
     
@@ -810,7 +810,7 @@ class ProfileRefinementJob(BaseJob):
         self,
         entity_id: int, 
         canonical_name: str,
-        active_facts: Optional[List[Fact]] = None
+        active_facts: Optional[List[FactRecord]] = None
     ) -> List[float]:
         """Recompute entity embedding from current active facts."""
         if active_facts is None:

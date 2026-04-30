@@ -4,7 +4,7 @@ from functools import partial
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from loguru import logger
-from common.services.community_manager import CommunityManager
+from services.community_manager import CommunityManager
 from common.utils.events import CommunityEventEmitter
 from common.infra.redis import RedisKeys
 from common.config.base import update_config_value, get_config_value, get_config

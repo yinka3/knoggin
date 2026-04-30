@@ -17,7 +17,7 @@ from common.config.base import get_config
 from common.rag.embedding import EmbeddingService
 from common.mcp.client import MCPClientManager
 from common.infra.redis import AsyncRedisClient
-from common.services.llm_service import LLMService
+from services.llm_service import LLMService
 from common.errors.agent import DependencyError, ConfigurationError
 
 class ResourceManager:

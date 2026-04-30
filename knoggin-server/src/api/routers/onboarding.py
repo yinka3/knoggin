@@ -7,10 +7,10 @@ from loguru import logger
 
 from api.deps import get_app_state
 from api.state import AppState
-from core.setup import run_setup
+from core.session.onboarding import run_setup
 from common.config.base import load_config, async_save_config, get_default_config, get_config
 from common.config.topics_config import TopicConfig
-from common.services.topic_manager import generate_topics as generate_topics_from_text
+from services.topic_manager import generate_topics as generate_topics_from_text
 
 router = APIRouter()
 

@@ -1,0 +1,315 @@
+import asyncio
+import threading
+from core.prompts import ner_reasoning_prompt
+from services.llm_service import LLMService
+from common.config.topics_config import TopicConfig
+from core.utils import PRONOUNS, format_vp01_input, is_covered, is_generic_phrase, validate_entity
+from common.schema.dtypes import NERResult
+from typing import Callable, Dict, List, Optional, Tuple
+from loguru import logger
+import spacy
+from spacy.matcher import PhraseMatcher
+from gliner import GLiNER
+
+from common.utils.events import emit
+
+
+class NLPPipeline:
+
+    def __init__(
+        self,
+        llm: LLMService,
+        topic_config: TopicConfig,
+        get_known_aliases: Callable[[], Dict[str, int]],
+        get_profile: Callable[[int], Optional[dict]],
+        gliner: GLiNER,
+        spacy: spacy.Language,
+        gliner_threshold: float = 0.85,
+        vp01_min_confidence: float = 0.8,
+        ner_prompt: str = None
+    ):
+        self.llm_client = llm
+        self.topic_config = topic_config
+        self.get_known_aliases = get_known_aliases
+        self.get_profile = get_profile
+        self._label_to_topics = self._build_label_to_topics()
+        self._nlp = spacy
+        self._gliner = gliner
+        self.gliner_threshold = gliner_threshold
+        self.vp01_min_confidence = vp01_min_confidence
+        self.ner_prompt = ner_prompt
+        self.llm_ner = True
+        self._spacy_lock = threading.Lock()
+
+    def update_settings(self, gliner_threshold=None, vp01_min_confidence=None, ner_prompt=None, llm_ner=None):
+        if gliner_threshold is not None:
+            self.gliner_threshold = gliner_threshold
+        if vp01_min_confidence is not None:
+            self.vp01_min_confidence = vp01_min_confidence
+        if ner_prompt is not None:
+            self.ner_prompt = ner_prompt
+        if llm_ner is not None:
+            self.llm_ner = llm_ner
+            logger.info(f"NLPPipeline: llm_ner={self.llm_ner}")
+            
+        logger.info(f"NLPPipeline updated: gliner={self.gliner_threshold}, vp01_conf={self.vp01_min_confidence}")
+       
+    def _build_label_to_topics(self) -> Dict[str, List[str]]:
+        """Invert topic_config: label -> [topics that include it]"""
+        label_to_topics = {}
+        
+        for topic, config in self.topic_config.raw.items():
+            if config.get("active", True) is False:
+                continue
+            for label in config.get("labels", []):
+                label_lower = label.lower()
+                if label_lower not in label_to_topics:
+                    label_to_topics[label_lower] = []
+                label_to_topics[label_lower].append(topic)
+        
+        logger.debug(f"Built label to topics map: {label_to_topics}")
+        return label_to_topics
+
+    def _build_phrase_matcher(self) -> Tuple[PhraseMatcher, Dict[str, int]]:
+        """Build PhraseMatcher from current known aliases."""
+        aliases = self.get_known_aliases()
+        matcher = PhraseMatcher(self._nlp.vocab, attr="LOWER")
+        
+        if aliases:
+            patterns = [self._nlp.make_doc(alias) for alias in aliases.keys()]
+            matcher.add("KNOWN", patterns)
+        
+        return matcher, aliases
+    
+
+    
+    def run_gliner(self, text: str) -> List[Tuple[str, str]]:
+        all_labels = list(self._label_to_topics.keys())
+        if not all_labels:
+            return []
+        
+        entities = self._gliner.predict_entities(text, all_labels, threshold=self.gliner_threshold)
+
+        filtered = []
+        for e in entities:
+            span = e["text"]
+            if not span:
+                continue
+            score = e.get("score", 0)
+            
+            logger.debug(f"GLiNER: '{span}' | label={e['label']} | score={score:.3f}")
+            words = span.split()
+            if span.lower() in PRONOUNS or (words and words[0].lower() in PRONOUNS):
+                logger.debug(f"  -> Filtered (pronoun)")
+                continue
+            
+            # Trust specific labels from the schema even if they are common dictionary words.
+            # (e.g. "Notion" is a common word but a valid company entity)
+            if e["label"] and e["label"].lower() != "general":
+                filtered.append(e)
+                continue
+            
+            # If capitalized at all, it's a strong signal of a proper noun in middle of text
+            if any(c.isupper() for c in span):
+                filtered.append(e)
+                continue
+            
+            # Using spacy POS tagging as a tie-breaker for lower-case mentions
+            # Note: GLiNER span might not align perfectly with spacy tokens, so we tag the span itself
+            temp_doc = None
+            with self._spacy_lock:
+                temp_doc = self._nlp(span)
+            if any(t.pos_ == "PROPN" for t in temp_doc):
+                filtered.append(e)
+                continue
+
+            if is_generic_phrase(span):
+                logger.debug(f"{span}  -> Filtered (generic word)")
+                continue
+            
+            filtered.append(e)
+        
+        return [(e["text"], e["label"]) for e in filtered]
+    
+    def _assign_topic(self, label: str) -> Tuple[Optional[str], bool]:
+        """
+        Assign topic from label.
+        Returns: (topic or None, is_ambiguous)
+        """
+        if not label:
+            if self.topic_config.is_active("General"):
+                return "General", False
+            return None, False
+        
+        label_lower = label.lower()
+        topics = self._label_to_topics.get(label_lower, [])
+        
+        if len(topics) == 1:
+            return topics[0], False
+        elif len(topics) > 1:
+            return None, True
+        else:
+            if self.topic_config.is_active("General"):
+                return "General", False
+            return None, False
+        
+    
+    
+    async def extract_mentions(self, user_name: str, messages: List[Dict], session_id: str) -> List[Tuple[int, str, str, str]]:
+        """
+        Extracts entities via PhraseMatcher (known) + GLiNER (labeled) + VP-01 (catch-all).
+        Returns: List[(name, type, topic)]
+        """
+        if not messages:
+            return []
+        
+        matcher, aliases = self._build_phrase_matcher()
+        
+        def _run_spacy_matcher():
+            k_ents: List[Tuple[str, int]] = []
+            k_ents_msgs: List[Tuple[int, str, int]] = []
+            with self._spacy_lock:
+                for msg in messages:
+                    doc = self._nlp(msg['message'])
+                    for _, start, end in matcher(doc):
+                        span_text = doc[start:end].text
+                        eid = aliases.get(span_text.lower())
+                        if eid:
+                            k_ents.append((span_text, eid))
+                            k_ents_msgs.append((msg['id'], span_text, eid))
+            return k_ents, k_ents_msgs
+
+        known_ents, known_ents_msgs = await asyncio.to_thread(_run_spacy_matcher)
+        
+        await emit(session_id, "pipeline", "known_matched", {
+            "count": len(known_ents)
+        }, verbose_only=True)
+        
+        def _run_gliner_batch():
+            results = []
+            for msg in messages:
+                msg_id = msg['id']
+                extractions = self.run_gliner(msg['message'])
+                for span, label in extractions:
+                    results.append((msg_id, span, label))
+            return results
+
+        gliner_ents = await asyncio.to_thread(_run_gliner_batch)
+        
+        covered_texts: Dict[int, set] = {m['id']: set() for m in messages}
+        resolved: List[Tuple[int, str, str, str]] = []
+        ambiguous: List[Tuple[int, str, str, List[str]]] = []
+        
+        # process known entities first (highest priority)
+        tracked_known_matches = set()
+        for msg_id, span_text, eid in known_ents_msgs:
+            match_key = (msg_id, span_text.lower(), eid)
+            if match_key in tracked_known_matches:
+                continue
+            tracked_known_matches.add(match_key)
+            
+            profile = await self.get_profile(eid)
+            profile = profile or {}
+            
+            covered_texts[msg_id].add(span_text.lower())
+            resolved.append((
+                msg_id,
+                span_text,
+                profile.get("type", "unknown"),
+                profile.get("topic") or "General"
+            ))
+        
+        gliner_filtered = set()
+
+        for msg_id, span_text, label in gliner_ents:
+            if is_covered(span_text, covered_texts[msg_id]):
+                continue
+
+            if not validate_entity(span_text, "General", self.topic_config, label=label):
+                logger.debug(f"Filtered invalid GLiNER entity: '{span_text}'")
+                gliner_filtered.add(span_text.lower())
+                continue
+            
+            covered_texts[msg_id].add(span_text.lower())
+
+            topic, is_ambiguous = self._assign_topic(label)
+
+            if is_ambiguous:
+                topics = self._label_to_topics.get(label.lower(), [])
+                ambiguous.append((msg_id, span_text, label, topics))
+            else:
+                resolved.append((msg_id, span_text, label, topic))
+        
+        await emit(session_id, "pipeline", "gliner_complete", {
+            "raw_count": len(gliner_ents),
+            "filtered_count": len(gliner_filtered)
+        }, verbose_only=True)
+        
+        output: List[Tuple[int, str, str, str]] = list(resolved)
+        
+        if not self.llm_ner:
+            logger.info(f"Extracted {len(output)} mentions: {len(known_ents)} known, {len(gliner_ents) - len(gliner_filtered)} gliner (LLM NER disabled)")
+            await emit(session_id, "pipeline", "ner_complete", {
+                "total": len(output),
+                "known": len(known_ents),
+                "gliner": len(gliner_ents) - len(gliner_filtered),
+                "vp01": 0
+            })
+            return output
+        
+        user_content = format_vp01_input(messages, known_ents, gliner_ents, ambiguous, covered_texts, self.topic_config.label_block)
+        
+        if self.ner_prompt:
+            system_prompt = self.ner_prompt.replace("{user_name}", user_name)
+        else:
+            system_prompt = ner_reasoning_prompt(user_name)
+            
+        await emit(session_id, "pipeline", "llm_call", {
+            "stage": "ner",
+            "prompt": user_content
+        }, verbose_only=True)
+        
+        ner_result: NERResult = await self.llm_client.call_llm(
+            response_model=NERResult,
+            system=system_prompt,
+            user=user_content,
+            temperature=0.0
+        )
+        
+        vp01_count = 0
+        if ner_result and ner_result.mentions:
+            for entity in ner_result.mentions:
+                if entity.confidence < self.vp01_min_confidence:
+                    continue
+                    
+                if validate_entity(entity.name, entity.topic, self.topic_config, label=entity.type):
+                    if is_covered(entity.name, covered_texts.get(entity.msg_id, set())):
+                        logger.debug(f"VP-01 entity '{entity.name}' filtered (already covered)")
+                        continue
+                    if entity.name.lower() in gliner_filtered:
+                        logger.info(f"VP-01 recovered GLiNER-filtered entity: '{entity.name}'")
+                    output.append((entity.msg_id, entity.name, entity.type, entity.topic))
+                    vp01_count += 1
+                else:
+                    logger.debug(f"Filtered invalid VP-01 entity: '{entity.name}'")
+        else:            
+            logger.warning("VP-01 extraction returned no valid entities or failed validation")
+        
+        logger.info(
+            f"Extracted {len(output)} mentions: "
+            f"{len(known_ents)} known, {len(gliner_ents)} gliner, "
+            f"{vp01_count} from VP-01"
+        )
+        await emit(session_id, "pipeline", "ner_complete", {
+            "total": len(output),
+            "known": len(known_ents),
+            "gliner": len(gliner_ents) - len(gliner_filtered),
+            "vp01": vp01_count
+        })
+        
+        return output
+    
+    def refresh_topic_mappings(self):
+        """Rebuild label-to-topics map after TopicConfig change."""
+        self._label_to_topics = self._build_label_to_topics()
+        logger.info(f"NLPPipeline label mappings refreshed: {len(self._label_to_topics)} labels")
