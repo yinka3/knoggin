@@ -308,3 +308,24 @@ class GraphReader:
         except Exception as e:
             logger.error(f"Failed to get graph stats: {e}")
             return {"entities": 0, "facts": 0, "relationships": 0}
+
+    async def get_neighbor_ids_batch(self, entity_ids: List[int]) -> Dict[int, set[int]]:
+        """Batch fetch neighbor IDs for multiple entities."""
+        if not entity_ids:
+            return {}
+        query = """
+        MATCH (e:Entity)-[:RELATED_TO]-(neighbor:Entity)
+        WHERE e.id IN $ids
+        RETURN e.id as entity_id, collect(neighbor.id) as neighbor_ids
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, {"ids": entity_ids})
+                records = await result.data()
+                result_map = {eid: set() for eid in entity_ids}
+                for record in records:
+                    result_map[record["entity_id"]] = set(record["neighbor_ids"])
+                return result_map
+        except Exception as e:
+            logger.error(f"Failed to batch fetch neighbor IDs: {e}")
+            return {eid: set() for eid in entity_ids}

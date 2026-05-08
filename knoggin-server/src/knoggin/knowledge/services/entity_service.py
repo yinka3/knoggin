@@ -8,9 +8,9 @@ from rapidfuzz import fuzz, process
 
 from common.schema.dtypes import FactRecord
 from common.utils.core_utils import is_substring_match
+from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
 from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.jobs.utils import cosine_similarity
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 
 

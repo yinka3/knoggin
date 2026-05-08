@@ -10,12 +10,15 @@ from gliner import GLiNER
 from loguru import logger
 
 from common.conf.base import get_config
-from common.errors.agent import ConfigurationError, DependencyError
+from common.errors.exceptions import ConfigurationError, DependencyError
 from common.mcp.client import MCPClientManager
 from infrastructure.database.memgraph_client import MemgraphClient
 from infrastructure.llm.llm_client import LLMService
 from infrastructure.redis.redis_client import AsyncRedisClient
 from knoggin.knowledge.services.embedding_service import EmbeddingService
+from knoggin.knowledge.services.entity_service import EntityManager
+from knoggin.knowledge.services.graph_search_service import GraphSearchService
+from knoggin.knowledge.services.graph_builder_service import GraphBuilderService
 from log.llm_trace import get_trace_logger
 
 
@@ -41,6 +44,8 @@ class ResourceManager:
         self.mcp_manager = None
         self.active_entities = None
         self.community_store = None
+        self.graph_search = None
+        self.graph_builder = None
 
     @classmethod
     async def initialize(cls, num_workers: int = 4) -> "ResourceManager":
@@ -128,6 +133,20 @@ class ResourceManager:
 
                 await instance.memgraph.initialize()
                 instance.community_store = instance.memgraph.community
+                instance.active_entities = EntityManager(
+                    memgraph=instance.memgraph,
+                    embedding_service=instance.embedding
+                )
+                instance.graph_search = GraphSearchService(
+                    memgraph=instance.memgraph,
+                    embedding_service=instance.embedding
+                )
+                instance.graph_builder = GraphBuilderService(
+                    memgraph=instance.memgraph,
+                    embedding_service=instance.embedding,
+                    redis=instance.redis,
+                    entities_manager=instance.active_entities
+                )
 
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")

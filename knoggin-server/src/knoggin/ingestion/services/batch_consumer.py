@@ -221,8 +221,6 @@ class BatchConsumer:
                     result = await self.processor.run(messages, session_text)
                 except Exception as e:
                     logger.error(f"Fatal error during BatchProcessor computation: {e}")
-                    from core.pipeline.batch_processor import BatchResult
-
                     result = BatchResult(
                         success=False, error=f"Fatal exception: {str(e)}"
                     )

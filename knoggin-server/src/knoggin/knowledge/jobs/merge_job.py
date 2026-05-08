@@ -9,16 +9,16 @@ from loguru import logger
 
 from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import FactRecord, MergeJudgment
-from common.utils.events import emit
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.jobs.utils import (
+from common.utils.data_utils import (
     cosine_similarity,
     enrich_facts_with_sources,
     find_duplicate_facts,
     format_vp05_input,
     has_sufficient_facts,
 )
+from common.utils.events import emit
+from infrastructure.database.memgraph_client import MemgraphClient
+from infrastructure.jobs.base import BaseJob, JobContext, JobResult
 from infrastructure.llm.llm_client import LLMService
 from infrastructure.redis.redis_client import RedisKeys
 from knoggin.agent.prompts import get_merge_judgment_prompt

@@ -7,7 +7,7 @@ import redis.asyncio as aioredis
 from dotenv import load_dotenv
 from loguru import logger
 
-from common.errors.agent import DependencyError
+from common.errors.exceptions import DependencyError
 
 load_dotenv()
 

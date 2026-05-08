@@ -330,20 +330,20 @@ class MemgraphClient:
         return await self._entity_reader.get_entity_relationships(entity_id)
 
     async def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
-        return await self._reader.get_recent_facts(days, limit)
+        return await self._fact_reader.get_recent_facts(days, limit)
 
     async def get_recently_active_entities(
         self, days: int = 7, limit: int = 10
     ) -> List[Dict]:
-        return await self._reader.get_recently_active_entities(days, limit)
+        return await self._entity_reader.get_recently_active_entities(days, limit)
 
     async def get_notable_entities(self, limit: int = 10) -> List[Dict]:
-        return await self._reader.get_notable_entities(limit)
+        return await self._entity_reader.get_notable_entities(limit)
 
     async def get_neighbor_ids_batch(
         self, entity_ids: List[int]
     ) -> Dict[int, Set[int]]:
-        return await self._reader.get_neighbor_ids_batch(entity_ids)
+        return await self._graph_reader.get_neighbor_ids_batch(entity_ids)
 
     # ===== TOOL QUERY DELEGATIONS =====
 

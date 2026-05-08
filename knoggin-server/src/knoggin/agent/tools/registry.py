@@ -1,12 +1,12 @@
 import httpx
 import redis.asyncio as aioredis
-from core.entity_manager import EntityManager
+from knoggin.knowledge.services.entity_service import EntityManager
 
 from common.conf.topics_config import TopicConfig
 from infrastructure.database.memgraph_client import MemgraphClient
-from knoggin.agent.tools.graph import GraphToolsMixin
-from knoggin.agent.tools.memory import MemoryToolsMixin
-from knoggin.agent.tools.search import SearchToolsMixin
+from knoggin.agent.tools.graph import GraphTools
+from knoggin.agent.tools.memory import MemoryTools
+from knoggin.agent.tools.search import SearchTools
 from knoggin.knowledge.services.file_rag import FileRAGService
 
 TOOL_DISPATCH = {
@@ -31,7 +31,7 @@ TOOL_DISPATCH = {
 }
 
 
-class Tools(SearchToolsMixin, GraphToolsMixin, MemoryToolsMixin):
+class Tools(SearchTools, GraphTools, MemoryTools):
     def __init__(
         self,
         user_name: str,
@@ -59,3 +59,12 @@ class Tools(SearchToolsMixin, GraphToolsMixin, MemoryToolsMixin):
         self.memory = memory
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
+
+    def get_file_manifest(self):
+        """Get list of uploaded files for prompt context."""
+        if not self.file_rag:
+            return []
+        return self.file_rag.list_files()
+
+    async def close(self):
+        await self._http_client.aclose()

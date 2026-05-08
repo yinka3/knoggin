@@ -214,7 +214,8 @@ class MCPClientManager:
                         }
 
         try:
-            result = await conn.session.call_tool(tool_name, arguments=args)
+            async with asyncio.timeout(30.0):
+                result = await conn.session.call_tool(tool_name, arguments=args)
 
             text_parts = []
             for block in result.content:
@@ -224,6 +225,11 @@ class MCPClientManager:
             return {
                 "data": "\n".join(text_parts) if text_parts else "No content returned"
             }
+
+        except TimeoutError:
+            logger.error(f"[MCP] Tool call timed out after 30s — {server_name}.{tool_name}")
+            conn.last_error = "Tool call timed out"
+            return {"error": f"MCP tool call timed out after 30s"}
 
         except (ConnectionError, BrokenPipeError, EOFError, OSError) as e:
             logger.error(f"[MCP] Connection lost to '{server_name}': {e}")

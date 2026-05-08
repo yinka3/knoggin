@@ -80,7 +80,7 @@ class Context:
         model: str = None,
     ) -> "Context":
         """Assembles and launches a new session context."""
-        from core.session.boot import SessionAssembler
+        from knoggin.session.boot import SessionAssembler
 
         assembler = SessionAssembler(user_name, resources)
         ctx = await assembler.bootstrap(topics_config, session_id, model)

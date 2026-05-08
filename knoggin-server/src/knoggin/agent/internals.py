@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple
 
 from loguru import logger
 
-from common.errors.agent import ToolExecutionError
+from common.errors.exceptions import ToolExecutionError
 from common.mcp.bridge import parse_mcp_tool_name
 from knoggin.agent.formatters import (
     format_entity_results,

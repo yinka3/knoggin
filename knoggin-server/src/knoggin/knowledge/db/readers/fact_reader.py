@@ -144,3 +144,29 @@ class FactReader:
         except Exception as e:
             logger.error(f"Failed to get facts from message {msg_id}: {e}")
             return []
+
+    async def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
+        """Get recently created facts."""
+        from datetime import datetime, timezone, timedelta
+        
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        
+        query = """
+        MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
+        WHERE f.valid_at > $cutoff
+        AND f.invalid_at IS NULL
+        RETURN f.id as id,
+            f.content as content,
+            f.valid_at as created_at,
+            e.canonical_name as entity_name,
+            e.type as entity_type
+        ORDER BY f.valid_at DESC
+        LIMIT $limit
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, {"cutoff": cutoff, "limit": limit})
+                return await result.data()
+        except Exception as e:
+            logger.error(f"Failed to get recent facts: {e}")
+            return []

@@ -1,13 +1,15 @@
+import json
 from typing import Dict, List
 
-from infrastructure.jobs.utils import cosine_similarity
+from common.utils.data_utils import cosine_similarity
+from infrastructure.redis.redis_client import RedisKeys
 
 
-class GraphToolsMixin:
+class GraphTools:
     async def get_connections(self, entity_name: str) -> List[Dict]:
         """
         Get the full relationship network for an entity.
-        Returns all connections (up to 50) with evidence ΓÇö the actual messages that established each connection.
+        Returns all connections (up to 50) with evidence — the actual messages that established each connection.
         Use when you need comprehensive relationship details beyond the top 5 from search_entity.
 
         Args:
@@ -80,7 +82,7 @@ class GraphToolsMixin:
     async def fact_check(self, entity_name: str, query: str) -> Dict:
         """
         Retrieve and verify stored facts about a specific entity from the knowledge graph.
-        Uses a resolution cascade: exact lookup ΓåÆ vector search ΓåÆ message search fallback.
+        Uses a resolution cascade: exact lookup → vector search → message search fallback.
 
         Args:
             entity_name: The entity to look up facts for.
@@ -294,3 +296,49 @@ class GraphToolsMixin:
             result["children"] = children
 
         return [result]
+
+    async def get_hot_topic_context(
+        self, hot_topics: List[str], slim: bool = False
+    ) -> Dict[str, Dict]:
+        """
+        Retrieve pre-cached context for frequently accessed topics.
+        Called automatically at start — you already have this data in hot_topic_context.
+        Only call manually if hot topics changed mid-conversation.
+
+        Args:
+            hot_topics: List of topic names marked as "hot"
+            slim: Returns if you want more information or not
+
+        Returns: Dict mapping topic name to list of top entities with summaries.
+        """
+        if not hot_topics:
+            return {}
+
+        # Fetch context
+        raw = await self.memgraph.get_hot_topic_context_with_messages(
+            hot_topics, msg_limit=10, slim=slim
+        )
+        content_key = RedisKeys.message_content(self.user_name, self.session_id)
+
+        for _, data in raw.items():
+            msg_ids = data.get("message_ids", [])
+
+            if msg_ids:
+                raw_msgs = await self.redis.hmget(content_key, *msg_ids)
+                messages = []
+                for msg_id, raw_msg in zip(msg_ids, raw_msgs):
+                    if raw_msg:
+                        try:
+                            parsed = json.loads(raw_msg)
+                            messages.append(
+                                {"id": msg_id, "message": parsed.get("message", "")}
+                            )
+                        except json.JSONDecodeError:
+                            continue
+                data["messages"] = messages
+            else:
+                data["messages"] = []
+
+            data.pop("message_ids", None)
+
+        return raw

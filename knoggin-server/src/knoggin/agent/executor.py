@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from common.errors.agent import ToolExecutionError
+from common.errors.exceptions import ToolExecutionError
 from common.mcp.bridge import mcp_tools_to_schemas
 from common.schema.tool_schema import get_filtered_schemas
 from common.utils.events import emit
@@ -79,7 +79,7 @@ class AgentExecutor:
 
         files_context = ""
         if self.tools.file_rag:
-            from agent.formatters import format_files_context
+            from knoggin.agent.formatters import format_files_context
 
             manifest = self.tools.get_file_manifest()
             if manifest:

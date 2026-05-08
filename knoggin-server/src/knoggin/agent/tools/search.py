@@ -1,14 +1,17 @@
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
+from functools import partial
 from typing import Dict, List, Optional
 
+import httpx
 from loguru import logger
 
 from infrastructure.redis.redis_client import RedisKeys
 
 
-class SearchToolsMixin:
+class SearchTools:
     async def search_messages(self, query: str, limit: int = None) -> List[Dict]:
         """
         Search the user's actual messages by keyword or phrase.
@@ -117,7 +120,7 @@ class SearchToolsMixin:
         """
         Find a person, place, or thing by name.
         Returns their full profile (type, summary, aliases, topic) and their 5 strongest connections.
-        Connections only include canonical name and aliases ΓÇö use this tool again on a connection's name if you need their full profile.
+        Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.
 
         Args:
             query: Name or partial name to search
@@ -223,14 +226,78 @@ class SearchToolsMixin:
                 {
                     "title": "Not Available",
                     "url": "",
-                    "snippet": "News search requires a Brave Search API key. Configure one in Settings ΓåÆ Web Search.",
+                    "snippet": "News search requires a Brave Search API key. Configure one in Settings → Web Search.",
                 }
             ]
         return await self._news_brave(query, limit, brave_key, freshness or "pw")
 
+    # ── Internal helpers ──
+
     async def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
         return await self.entities.resolve_entity_name(entity)
+
+    async def _search_messages(self, query: str, k: int) -> list[tuple[str, float]]:
+        """
+        Asynchronous internal method executing hybrid vector + FTS search over messages,
+        followed by an optional cross-encoder reranking step if candidates exceed 1.
+        """
+        vector_limit = self.search_cfg.get("vector_limit", 50)
+        fts_limit = self.search_cfg.get("fts_limit", 50)
+        rerank_candidates = self.search_cfg.get("rerank_candidates", 45)
+
+        results = {}
+        query_embedding = await self.embedding_service.encode_single(query)
+
+        sem_results = await self.memgraph.search_messages_vector(
+            query_embedding, vector_limit
+        )
+
+        for msg_id, score in sem_results:
+            msg_key = self._format_message_id(msg_id)
+            results[msg_key] = ("semantic", float(score))
+
+        fts_results = await self.memgraph.search_messages_fts(query, fts_limit)
+
+        max_fts = max([s for _, s in fts_results], default=1.0) or 1.0
+
+        for msg_id, raw_score in fts_results:
+            msg_key = self._format_message_id(msg_id)
+
+            norm_score = raw_score / max_fts if max_fts > 0 else 0
+
+            logger.debug(f"FTS result: {msg_key} score={norm_score:.3f}")
+
+            if msg_key in results:
+                _, sem_score = results[msg_key]
+                results[msg_key] = ("both", sem_score + norm_score)
+            else:
+                results[msg_key] = ("keyword", norm_score)
+
+        if not results:
+            return []
+
+        try:
+            if len(results) > 1:
+                candidate_keys = list(results.keys())[:rerank_candidates]
+
+                hydrated = await self._hydrate_evidence(candidate_keys)
+                text_map = {h["id"]: h.get("message", "") for h in hydrated}
+                texts = [text_map.get(k, "") for k in candidate_keys]
+
+                scores = await self.embedding_service.rerank(query, texts)
+                reranked = sorted(
+                    zip(candidate_keys, scores), key=lambda x: x[1], reverse=True
+                )
+                return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
+        except Exception as e:
+            logger.warning(f"Rerank failed, falling back to raw scores: {e}")
+
+        # Fallback: single result
+        sorted_results = sorted(results.items(), key=lambda x: x[1][1], reverse=True)[
+            :k
+        ]
+        return [(key, score) for key, (_, score) in sorted_results]
 
     async def _hydrate_evidence(
         self, evidence_ids: list[str], timeout: float = 5.0
@@ -456,3 +523,253 @@ class SearchToolsMixin:
             )
 
         return pre_context + [target_msg] + post_context
+
+    async def _search_duckduckgo(
+        self, query: str, limit: int, freshness: str = None
+    ) -> List[Dict]:
+        """Free web search via DuckDuckGo — no API key required."""
+        loop = asyncio.get_running_loop()
+        try:
+            from duckduckgo_search import DDGS
+
+            ddgs = DDGS()
+            timelimit = {"pd": "d", "pw": "w", "pm": "m", "py": "y"}.get(freshness)
+
+            raw = await loop.run_in_executor(
+                None,
+                partial(
+                    ddgs.text, query, max_results=min(limit, 10), timelimit=timelimit
+                ),
+            )
+
+            if not raw:
+                return [
+                    {
+                        "title": "No Results",
+                        "url": "",
+                        "snippet": f"No web results found for: {query}",
+                    }
+                ]
+
+            results = []
+            for r in raw:
+                results.append(
+                    {
+                        "title": r.get("title", "Untitled"),
+                        "url": r.get("href", r.get("link", "")),
+                        "snippet": r.get("body", r.get("snippet", "")),
+                    }
+                )
+            return results
+        except Exception as e:
+            logger.error(f"DuckDuckGo search failed: {e}")
+            return [
+                {
+                    "title": "Search Error",
+                    "url": "",
+                    "snippet": f"DuckDuckGo search failed: {e}",
+                }
+            ]
+
+    async def _search_tavily(self, query: str, limit: int, api_key: str) -> List[Dict]:
+        """Web search via Tavily API"""
+        url = "https://api.tavily.com/search"
+        payload = {
+            "api_key": api_key,
+            "query": query,
+            "max_results": min(limit, 10),
+            "search_depth": "basic",
+            "include_answer": False,
+        }
+
+        try:
+            response = await self._http_client.post(url, json=payload, timeout=10.0)
+
+            if response.status_code == 401:
+                logger.warning("Tavily API key invalid, falling back to DuckDuckGo")
+                return await self._search_duckduckgo(query, limit)
+            if response.status_code == 429:
+                logger.warning("Tavily rate limit hit, falling back to DuckDuckGo")
+                return await self._search_duckduckgo(query, limit)
+
+            response.raise_for_status()
+            data = response.json()
+
+            results = []
+            for r in data.get("results", []):
+                results.append(
+                    {
+                        "title": r.get("title", "Untitled"),
+                        "url": r.get("url", ""),
+                        "snippet": r.get("content", ""),
+                    }
+                )
+
+            if not results:
+                return [
+                    {
+                        "title": "No Results",
+                        "url": "",
+                        "snippet": f"No web results found for: {query}",
+                    }
+                ]
+            return results
+        except httpx.TimeoutException:
+            logger.warning("Tavily timed out, falling back to DuckDuckGo")
+            return await self._search_duckduckgo(query, limit)
+        except Exception as e:
+            logger.error(f"Tavily search failed: {e}")
+            return await self._search_duckduckgo(query, limit)
+
+    async def _search_brave(
+        self, query: str, limit: int, api_key: str, freshness: str = None
+    ) -> List[Dict]:
+        """Premium web search via Brave Search API."""
+        url = "https://api.search.brave.com/res/v1/web/search"
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": api_key,
+        }
+        params = {
+            "q": query,
+            "count": min(limit, 10),
+            "extra_snippets": True,
+            "spellcheck": 1,
+        }
+        if freshness and freshness in ("pd", "pw", "pm", "py"):
+            params["freshness"] = freshness
+
+        try:
+            response = await self._http_client.get(url, headers=headers, params=params)
+
+            if response.status_code == 401:
+                logger.warning("Brave API key invalid, falling back")
+                return (
+                    await self._search_tavily(
+                        query, limit, self.search_cfg.get("tavily_api_key", "")
+                    )
+                    if self.search_cfg.get("tavily_api_key")
+                    else await self._search_duckduckgo(query, limit)
+                )
+            if response.status_code == 429:
+                logger.warning("Brave rate limit hit, falling back")
+                return (
+                    await self._search_tavily(
+                        query, limit, self.search_cfg.get("tavily_api_key", "")
+                    )
+                    if self.search_cfg.get("tavily_api_key")
+                    else await self._search_duckduckgo(query, limit)
+                )
+
+            response.raise_for_status()
+            data = response.json()
+
+            results = []
+            for result in data.get("web", {}).get("results", []):
+                snippet = result.get("description", result.get("snippet", ""))
+                snippet = re.sub(r"<[^>]+>", "", snippet)
+                # Append extra snippets for richer context
+                extra = result.get("extra_snippets", [])
+                if extra:
+                    snippet += " ... " + " ... ".join(
+                        re.sub(r"<[^>]+>", "", s) for s in extra[:2]
+                    )
+                results.append(
+                    {
+                        "title": result.get("title", "Untitled"),
+                        "url": result.get("url", ""),
+                        "snippet": snippet,
+                    }
+                )
+
+            if not results:
+                return [
+                    {
+                        "title": "No Results",
+                        "url": "",
+                        "snippet": f"No web results found for: {query}",
+                    }
+                ]
+            return results
+        except httpx.TimeoutException:
+            logger.warning("Brave timed out, falling back to DuckDuckGo")
+            return await self._search_duckduckgo(query, limit)
+        except Exception as e:
+            logger.error(f"Brave search failed: {e}")
+            return await self._search_duckduckgo(query, limit)
+
+    async def _news_brave(
+        self, query: str, limit: int, api_key: str, freshness: str = "pw"
+    ) -> List[Dict]:
+        """News search via Brave News API."""
+        url = "https://api.search.brave.com/res/v1/news/search"
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": api_key,
+        }
+        params = {
+            "q": query,
+            "count": min(limit, 20),
+            "spellcheck": 1,
+            "freshness": freshness,
+        }
+
+        try:
+            response = await self._http_client.get(url, headers=headers, params=params)
+
+            if response.status_code in (401, 429):
+                logger.warning(f"Brave news API returned {response.status_code}")
+                return [
+                    {
+                        "title": "Error",
+                        "url": "",
+                        "snippet": f"Brave News API error ({response.status_code}). Check your API key in Settings.",
+                    }
+                ]
+
+            response.raise_for_status()
+            data = response.json()
+
+            results = []
+            for article in data.get("results", []):
+                snippet = article.get("description", "")
+                snippet = re.sub(r"<[^>]+>", "", snippet)
+                results.append(
+                    {
+                        "title": article.get("title", "Untitled"),
+                        "url": article.get("url", ""),
+                        "snippet": snippet,
+                        "source": article.get("meta_url", {}).get("hostname", ""),
+                        "date": article.get("age", ""),
+                    }
+                )
+
+            if not results:
+                return [
+                    {
+                        "title": "No Results",
+                        "url": "",
+                        "snippet": f"No news found for: {query}",
+                    }
+                ]
+            return results
+        except httpx.TimeoutException:
+            logger.warning("Brave news timed out")
+            return [
+                {
+                    "title": "Timeout",
+                    "url": "",
+                    "snippet": "News search timed out. Try a simpler query.",
+                }
+            ]
+        except Exception as e:
+            logger.error(f"Brave news search failed: {e}")
+            return [
+                {
+                    "title": "Search Error",
+                    "url": "",
+                    "snippet": f"News search failed: {e}",
+                }
+            ]

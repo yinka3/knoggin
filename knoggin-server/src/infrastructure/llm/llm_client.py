@@ -8,7 +8,7 @@ from loguru import logger
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
-from common.errors.agent import ConfigurationError
+from common.errors.exceptions import ConfigurationError
 from infrastructure.redis.redis_client import RedisKeys
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

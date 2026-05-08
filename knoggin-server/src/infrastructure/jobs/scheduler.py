@@ -127,7 +127,11 @@ class Scheduler:
             if await self.redis.get(pending_key):
                 logger.info(f"Found pending work for job: {job_name}")
                 await self.redis.delete(pending_key)
-                await self._execute_job(job, ctx)
+                task = asyncio.create_task(self._execute_job(job, ctx))
+                self._running_tasks[job_name] = task
+                task.add_done_callback(
+                    lambda t, name=job_name: self._cleanup_task(name, t)
+                )
 
     async def _monitor_loop(self):
         """Main loop - check jobs periodically."""
