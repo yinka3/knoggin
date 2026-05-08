@@ -4,7 +4,7 @@ Knoggin CLI entry point.
 
 import typer
 
-from cli.commands import start, end, init, check
+from cli.commands import check, end, init, start
 
 app = typer.Typer(
     name="knoggin",

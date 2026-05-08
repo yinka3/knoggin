@@ -1,20 +1,20 @@
-
-import json
 import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import List, Optional
+
 from loguru import logger
-from common.schema.dtypes import Fact
-from common.infra.redis import RedisKeys
 from mcp.server.fastmcp import FastMCP
 
+from common.schema.dtypes import FactRecord
+from infrastructure.redis.redis_client import RedisKeys
 
 
 def create_mcp_app(get_resources) -> FastMCP:
     """
     Creates an MCP server with Knoggin's graph tools.
-    
+
     Args:
         get_resources: Callable that returns ResourceManager instance.
                        Resolved lazily since resources aren't ready at import time.
@@ -26,11 +26,11 @@ def create_mcp_app(get_resources) -> FastMCP:
             "and facts from the user's conversations. Use these tools to query "
             "the user's personal knowledge base for context about people, projects, "
             "tools, and decisions they've discussed."
-        )
+        ),
     )
 
     def _store():
-        return get_resources().store
+        return get_resources().memgraph
 
     def _embedding():
         return get_resources().embedding
@@ -41,12 +41,14 @@ def create_mcp_app(get_resources) -> FastMCP:
     def _redis():
         return get_resources().redis
 
-    async def _resolve_or_create_entity(store, embedding, name, entity_type, topic, loop) -> Optional[int]:
+    async def _resolve_or_create_entity(
+        memgraph, embedding, name, entity_type, topic, loop
+    ) -> Optional[int]:
         """
         Find existing entity by name or create a new one.
-        Always uses DB operations — no session resolver dependency.
+        Always uses DB operations — no session entities dependency.
         """
-        fts_results = await store.search_entity(name, active_topics=None, limit=3)
+        fts_results = await memgraph.search_entity(name, active_topics=None, limit=3)
 
         if fts_results:
             for r in fts_results:
@@ -58,11 +60,13 @@ def create_mcp_app(get_resources) -> FastMCP:
                     return r["id"]
 
         name_embedding = await embedding.encode_single(name)
-        vec_results = await store.search_entities_by_embedding(name_embedding, limit=3, score_threshold=0.88)
+        vec_results = await memgraph.search_entities_by_embedding(
+            name_embedding, limit=3, score_threshold=0.88
+        )
 
         if vec_results:
             entity_id = vec_results[0][0]
-            entity = await store.get_entity_by_id(entity_id)
+            entity = await memgraph.get_entity_by_id(entity_id)
             if entity:
                 return entity_id
 
@@ -77,14 +81,13 @@ def create_mcp_app(get_resources) -> FastMCP:
             "topic": topic,
             "embedding": name_embedding,
             "aliases": [name],
-            "session_id": "mcp"
+            "session_id": "mcp",
         }
 
-        await store.write_batch([entity_data], [])
+        await memgraph.write_batch([entity_data], [])
 
         logger.info(f"[MCP] Created entity '{name}' (id={new_id}) via direct graph")
         return new_id
-
 
     @mcp.tool()
     async def search_entity(query: str, limit: int = 5) -> str:
@@ -93,19 +96,25 @@ def create_mcp_app(get_resources) -> FastMCP:
         Returns full profiles with facts, aliases, and top connections.
         Start here for any entity lookup.
         """
-        store = _store()
+        memgraph = _store()
         loop = asyncio.get_running_loop()
 
         try:
-            results = await store.search_entity(query, active_topics=None, limit=limit)
+            results = await memgraph.search_entity(
+                query, active_topics=None, limit=limit
+            )
 
             if not results:
-                return json.dumps({"results": [], "message": f"No entities found for '{query}'"})
+                return json.dumps(
+                    {"results": [], "message": f"No entities found for '{query}'"}
+                )
 
             for entity in results:
                 for conn in entity.get("top_connections", []):
                     evidence_ids = conn.pop("evidence_ids", [])
-                    conn["evidence"] = await _hydrate_evidence_from_graph(store, evidence_ids, loop)
+                    conn["evidence"] = await _hydrate_evidence_from_graph(
+                        memgraph, evidence_ids, loop
+                    )
 
             return json.dumps({"results": results}, default=str)
 
@@ -123,20 +132,31 @@ def create_mcp_app(get_resources) -> FastMCP:
         Returns all connections with evidence messages.
         Use when you need comprehensive relationship details.
         """
-        store = _store()
+        memgraph = _store()
         loop = asyncio.get_running_loop()
 
         try:
-            results = await store.get_related_entities([entity_name], active_topics=None)
+            results = await memgraph.get_related_entities(
+                [entity_name], active_topics=None
+            )
 
             if not results:
-                return json.dumps({"connections": [], "message": f"No connections found for '{entity_name}'"})
+                return json.dumps(
+                    {
+                        "connections": [],
+                        "message": f"No connections found for '{entity_name}'",
+                    }
+                )
 
             for conn in results:
                 evidence_ids = conn.pop("evidence_ids", [])
-                conn["evidence"] = await _hydrate_evidence_from_graph(store, evidence_ids, loop)
+                conn["evidence"] = await _hydrate_evidence_from_graph(
+                    memgraph, evidence_ids, loop
+                )
 
-            return json.dumps({"entity": entity_name, "connections": results}, default=str)
+            return json.dumps(
+                {"entity": entity_name, "connections": results}, default=str
+            )
 
         except (ValueError, TypeError) as e:
             logger.warning(f"[MCP] get_connections invalid input: {e}")
@@ -151,20 +171,31 @@ def create_mcp_app(get_resources) -> FastMCP:
         Trace the connection chain between two entities.
         Shows how they're linked through intermediate entities.
         """
-        store = _store()
+        memgraph = _store()
         loop = asyncio.get_running_loop()
 
         try:
-            path, has_hidden = await store.find_path_filtered(entity_a, entity_b, active_topics=None)
+            path, has_hidden = await memgraph.find_path_filtered(
+                entity_a, entity_b, active_topics=None
+            )
 
             if not path:
-                return json.dumps({"path": [], "message": f"No path found between '{entity_a}' and '{entity_b}'"})
+                return json.dumps(
+                    {
+                        "path": [],
+                        "message": f"No path found between '{entity_a}' and '{entity_b}'",
+                    }
+                )
 
             for step in path:
                 evidence_ids = step.pop("evidence_ids", [])
-                step["evidence"] = await _hydrate_evidence_from_graph(store, evidence_ids, loop)
+                step["evidence"] = await _hydrate_evidence_from_graph(
+                    memgraph, evidence_ids, loop
+                )
 
-            return json.dumps({"from": entity_a, "to": entity_b, "path": path}, default=str)
+            return json.dumps(
+                {"from": entity_a, "to": entity_b, "path": path}, default=str
+            )
 
         except (ValueError, TypeError) as e:
             logger.warning(f"[MCP] find_path invalid input: {e}")
@@ -179,13 +210,15 @@ def create_mcp_app(get_resources) -> FastMCP:
         Get structural relationships for an entity.
         'up' = what does this belong to, 'down' = what's inside this, 'both' = full context.
         """
-        store = _store()
+        memgraph = _store()
         embedding = _embedding()
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
 
         try:
             vector = await embedding.encode_single(entity_name)
-            matches = await store.search_entities_by_embedding(vector, limit=1, score_threshold=0.7)
+            matches = await memgraph.search_entities_by_embedding(
+                vector, limit=1, score_threshold=0.7
+            )
 
             if not matches:
                 return json.dumps({"error": f"Entity '{entity_name}' not found"})
@@ -194,11 +227,11 @@ def create_mcp_app(get_resources) -> FastMCP:
             result = {"entity": entity_name}
 
             if direction in ("up", "both"):
-                parents = await store.get_parent_entities(entity_id)
+                parents = await memgraph.get_parent_entities(entity_id)
                 result["parents"] = parents
 
             if direction in ("down", "both"):
-                children = await store.get_child_entities(entity_id)
+                children = await memgraph.get_child_entities(entity_id)
                 result["children"] = children
 
             return json.dumps(result, default=str)
@@ -217,16 +250,16 @@ def create_mcp_app(get_resources) -> FastMCP:
         Returns matching messages with timestamps and context.
         Use for finding specific discussions, decisions, or quotes.
         """
-        store = _store()
+        memgraph = _store()
         embedding = _embedding()
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
 
         try:
             vector = await embedding.encode_single(query)
 
-            vec_results = await store.search_messages_vector(vector, limit=limit * 3)
+            vec_results = await memgraph.search_messages_vector(vector, limit=limit * 3)
 
-            fts_results = await store.search_messages_fts(query, limit=limit * 3)
+            fts_results = await memgraph.search_messages_fts(query, limit=limit * 3)
 
             scores = {}
             for msg_id, score in vec_results:
@@ -234,20 +267,26 @@ def create_mcp_app(get_resources) -> FastMCP:
             for msg_id, score in fts_results:
                 scores[msg_id] = max(scores.get(msg_id, 0), score * 0.8)
 
-            top_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:limit]
+            top_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[
+                :limit
+            ]
 
             if not top_ids:
-                return json.dumps({"results": [], "message": f"No messages found for '{query}'"})
+                return json.dumps(
+                    {"results": [], "message": f"No messages found for '{query}'"}
+                )
 
             messages = []
             for msg_id in top_ids:
-                text = await store.get_message_text(msg_id)
+                text = await memgraph.get_message_text(msg_id)
                 if text:
-                    messages.append({
-                        "id": msg_id,
-                        "content": text,
-                        "score": round(scores[msg_id], 3)
-                    })
+                    messages.append(
+                        {
+                            "id": msg_id,
+                            "content": text,
+                            "score": round(scores[msg_id], 3),
+                        }
+                    )
 
             return json.dumps({"query": query, "results": messages}, default=str)
 
@@ -264,24 +303,33 @@ def create_mcp_app(get_resources) -> FastMCP:
         Get recent interactions involving an entity within a timeframe.
         Use for status updates, recent mentions, or 'catch me up on X'.
         """
-        store = _store()
+        memgraph = _store()
         loop = asyncio.get_running_loop()
 
         try:
-            results = await store.get_recent_activity(entity_name, active_topics=None, hours=hours)
+            results = await memgraph.get_recent_activity(
+                entity_name, active_topics=None, hours=hours
+            )
 
             if not results:
-                return json.dumps({
-                    "entity": entity_name,
-                    "activity": [],
-                    "message": f"No activity for '{entity_name}' in the last {hours} hours"
-                })
+                return json.dumps(
+                    {
+                        "entity": entity_name,
+                        "activity": [],
+                        "message": f"No activity for '{entity_name}' in the last {hours} hours",
+                    }
+                )
 
             for item in results:
                 evidence_ids = item.pop("evidence_ids", [])
-                item["evidence"] = await _hydrate_evidence_from_graph(store, evidence_ids, loop)
+                item["evidence"] = await _hydrate_evidence_from_graph(
+                    memgraph, evidence_ids, loop
+                )
 
-            return json.dumps({"entity": entity_name, "hours": hours, "activity": results}, default=str)
+            return json.dumps(
+                {"entity": entity_name, "hours": hours, "activity": results},
+                default=str,
+            )
 
         except (ValueError, TypeError) as e:
             logger.warning(f"[MCP] get_recent_activity invalid input: {e}")
@@ -290,62 +338,67 @@ def create_mcp_app(get_resources) -> FastMCP:
             logger.error(f"[MCP] get_recent_activity failed: {e}")
             return json.dumps({"error": f"Internal System Error: {str(e)}"})
 
-
     @mcp.tool()
     async def save_fact(entity_name: str, fact: str) -> str:
         """
         Save a fact about an entity to the knowledge graph.
         Use to preserve important decisions, context, or details before they get lost.
         If the entity doesn't exist yet, it will be created.
-        
+
         Examples:
         - save_fact("AuthModule", "Uses JWT tokens with 24h expiry")
         - save_fact("Alice", "Lead engineer on the payments team")
         - save_fact("Q3 Migration", "Decided to use webhook-based sync instead of polling")
         """
-        store = _store()
+        memgraph = _store()
         embedding = _embedding()
         loop = asyncio.get_running_loop()
 
         try:
             entity_id = await _resolve_or_create_entity(
-                store, embedding, entity_name, "unknown", "General", loop
+                memgraph, embedding, entity_name, "unknown", "General", loop
             )
 
             if entity_id is None:
-                return json.dumps({"error": f"Failed to resolve or create entity '{entity_name}'"})
+                return json.dumps(
+                    {"error": f"Failed to resolve or create entity '{entity_name}'"}
+                )
 
             fact_embedding = await embedding.encode_single(fact)
 
-            
-
-            new_fact = Fact(
+            new_fact = FactRecord(
                 id=str(uuid.uuid4()),
                 content=fact,
                 valid_at=datetime.now(timezone.utc),
                 embedding=fact_embedding,
-                source_entity_id=entity_id
+                source_entity_id=entity_id,
             )
 
-            count = await store.create_facts_batch(entity_id, [new_fact])
+            count = await memgraph.create_facts_batch(entity_id, [new_fact])
 
-            all_facts = await store.get_facts_for_entity(entity_id, True)
-            resolution_text = f"{entity_name}. " + " ".join([f.content for f in all_facts])
+            all_facts = await memgraph.get_facts_for_entity(entity_id, True)
+            resolution_text = f"{entity_name}. " + " ".join(
+                [f.content for f in all_facts]
+            )
             new_embedding = await embedding.encode_single(resolution_text)
-            await store.update_entity_embedding(entity_id, new_embedding)
+            await memgraph.update_entity_embedding(entity_id, new_embedding)
 
-            resolver = get_resources().active_resolver
-            if resolver:
-                resolver.compute_embedding(entity_id, resolution_text)
+            entities = get_resources().active_entities
+            if entities:
+                entities.compute_embedding(entity_id, resolution_text)
 
-            logger.info(f"[MCP] Saved fact for '{entity_name}' (id={entity_id}): {fact[:80]}")
-            return json.dumps({
-                "status": "saved",
-                "entity": entity_name,
-                "entity_id": entity_id,
-                "fact": fact,
-                "facts_created": count
-            })
+            logger.info(
+                f"[MCP] Saved fact for '{entity_name}' (id={entity_id}): {fact[:80]}"
+            )
+            return json.dumps(
+                {
+                    "status": "saved",
+                    "entity": entity_name,
+                    "entity_id": entity_id,
+                    "fact": fact,
+                    "facts_created": count,
+                }
+            )
 
         except (ValueError, TypeError) as e:
             logger.warning(f"[MCP] save_fact invalid input: {e}")
@@ -359,44 +412,48 @@ def create_mcp_app(get_resources) -> FastMCP:
         """
         Create or strengthen a connection between two entities.
         Both entities will be created if they don't exist.
-        
+
         Examples:
         - save_relationship("AuthModule", "UserService", "AuthModule validates tokens for UserService")
         - save_relationship("Alice", "Q3 Migration", "Alice is leading the Q3 migration project")
         """
-        store = _store()
+        memgraph = _store()
         embedding = _embedding()
         loop = asyncio.get_running_loop()
 
         try:
             id_a = await _resolve_or_create_entity(
-                store, embedding, entity_a, "unknown", "General", loop
+                memgraph, embedding, entity_a, "unknown", "General", loop
             )
             id_b = await _resolve_or_create_entity(
-                store, embedding, entity_b, "unknown", "General", loop
+                memgraph, embedding, entity_b, "unknown", "General", loop
             )
 
             if id_a is None or id_b is None:
                 return json.dumps({"error": "Failed to resolve one or both entities"})
-            
+
             relationship = {
                 "entity_a": entity_a,
                 "entity_b": entity_b,
                 "entity_a_id": id_a,
                 "entity_b_id": id_b,
                 "message_id": "mcp_write",
-                "context": context
+                "context": context,
             }
-            
-            await store.write_batch([], [relationship])
 
-            logger.info(f"[MCP] Saved relationship: '{entity_a}' <-> '{entity_b}' ({context[:60]})")
-            return json.dumps({
-                "status": "saved",
-                "entity_a": entity_a,
-                "entity_b": entity_b,
-                "context": context
-            })
+            await memgraph.write_batch([], [relationship])
+
+            logger.info(
+                f"[MCP] Saved relationship: '{entity_a}' <-> '{entity_b}' ({context[:60]})"
+            )
+            return json.dumps(
+                {
+                    "status": "saved",
+                    "entity_a": entity_a,
+                    "entity_b": entity_b,
+                    "context": context,
+                }
+            )
 
         except (ValueError, TypeError) as e:
             logger.warning(f"[MCP] save_relationship invalid input: {e}")
@@ -407,19 +464,23 @@ def create_mcp_app(get_resources) -> FastMCP:
 
     @mcp.tool()
     async def ingest_claude_code(
-        project_path: str,
-        session_ids: Optional[List[str]] = None
+        project_path: str, session_ids: Optional[List[str]] = None
     ) -> str:
         """
         Ingest Claude Code conversation history into the knowledge graph.
         Reads JSONL files from ~/.claude/projects/ and extracts entities and relationships.
         """
-        return json.dumps({"status": "not_implemented", "message": "Claude Code ingestion coming soon. Use save_fact and save_relationship for now."})
+        return json.dumps(
+            {
+                "status": "not_implemented",
+                "message": "Claude Code ingestion coming soon. Use save_fact and save_relationship for now.",
+            }
+        )
 
     return mcp
 
 
-async def _hydrate_evidence_from_graph(store, evidence_ids: list, loop) -> list:
+async def _hydrate_evidence_from_graph(memgraph, evidence_ids: list, loop) -> list:
     """
     Fetch message content from Memgraph Message nodes.
     Unlike Tools._hydrate_evidence which uses Redis, this goes direct to graph.
@@ -437,7 +498,7 @@ async def _hydrate_evidence_from_graph(store, evidence_ids: list, loop) -> list:
             else:
                 continue
 
-            text = await store.get_message_text(msg_id)
+            text = await memgraph.get_message_text(msg_id)
             if text:
                 results.append({"id": msg_ref, "message": text})
         except (ValueError, IndexError):

@@ -13,17 +13,17 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Name of the person, project, place, or concept."
+                        "description": "Name of the person, project, place, or concept.",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max results (default 5)"
-                    }
+                        "description": "Max results (default 5)",
+                    },
                 },
-                "required": ["query"]
+                "required": ["query"],
             },
-            "tags": ["graph:read", "core"]
-        }
+            "tags": ["graph:read", "core"],
+        },
     },
     {
         "type": "function",
@@ -39,13 +39,13 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "entity_name": {
                         "type": "string",
-                        "description": "The exact name of the central entity."
+                        "description": "The exact name of the central entity.",
                     }
                 },
-                "required": ["entity_name"]
+                "required": ["entity_name"],
             },
-            "tags": ["graph:read", "core"]
-        }
+            "tags": ["graph:read", "core"],
+        },
     },
     {
         "type": "function",
@@ -60,12 +60,12 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "entity_a": {"type": "string", "description": "First entity name"},
-                    "entity_b": {"type": "string", "description": "Second entity name"}
+                    "entity_b": {"type": "string", "description": "Second entity name"},
                 },
-                "required": ["entity_a", "entity_b"]
+                "required": ["entity_a", "entity_b"],
             },
-            "tags": ["graph:read", "core"]
-        }
+            "tags": ["graph:read", "core"],
+        },
     },
     {
         "type": "function",
@@ -81,18 +81,18 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "entity_name": {
                         "type": "string",
-                        "description": "Entity to get hierarchy for"
+                        "description": "Entity to get hierarchy for",
                     },
                     "direction": {
                         "type": "string",
                         "enum": ["up", "down", "both"],
-                        "description": "'up' for parents/containers, 'down' for children/contents, 'both' for full context (default: both)."
-                    }
+                        "description": "'up' for parents/containers, 'down' for children/contents, 'both' for full context (default: both).",
+                    },
                 },
-                "required": ["entity_name"]
+                "required": ["entity_name"],
             },
-            "tags": ["graph:read", "core"]
-        }
+            "tags": ["graph:read", "core"],
+        },
     },
     {
         "type": "function",
@@ -108,13 +108,19 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Keywords or phrase to search for"},
-                    "limit": {"type": "integer", "description": "Max results (default 8)"}
+                    "query": {
+                        "type": "string",
+                        "description": "Keywords or phrase to search for",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 8)",
+                    },
                 },
-                "required": ["query"]
+                "required": ["query"],
             },
-            "tags": ["graph:read", "core"]
-        }
+            "tags": ["graph:read", "core"],
+        },
     },
     {
         "type": "function",
@@ -127,16 +133,19 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_name": {"type": "string", "description": "Entity to check activity for"},
+                    "entity_name": {
+                        "type": "string",
+                        "description": "Entity to check activity for",
+                    },
                     "hours": {
                         "type": "integer",
-                        "description": "Hours to look back (e.g., 24 for daily, 168 for weekly)."
-                    }
+                        "description": "Hours to look back (e.g., 24 for daily, 168 for weekly).",
+                    },
                 },
-                "required": ["entity_name"]
+                "required": ["entity_name"],
             },
-            "tags": ["graph:read", "core"]
-        }
+            "tags": ["graph:read", "core"],
+        },
     },
     {
         "type": "function",
@@ -151,13 +160,13 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "question": {
                         "type": "string",
-                        "description": "The clarifying question to ask the user."
+                        "description": "The clarifying question to ask the user.",
                     }
                 },
-                "required": ["question"]
+                "required": ["question"],
             },
-            "tags": ["core"]
-        }
+            "tags": ["core"],
+        },
     },
     {
         "type": "function",
@@ -176,17 +185,17 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "entity_name": {
                         "type": "string",
-                        "description": "The entity to look up facts for."
+                        "description": "The entity to look up facts for.",
                     },
                     "query": {
                         "type": "string",
-                        "description": "A natural language hint describing what you're looking for."
-                    }
+                        "description": "A natural language hint describing what you're looking for.",
+                    },
                 },
-                "required": ["entity_name", "query"]
+                "required": ["entity_name", "query"],
             },
-            "tags": ["graph:read", "core"]
-        }
+            "tags": ["graph:read", "core"],
+        },
     },
     {
         "type": "function",
@@ -201,33 +210,31 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The fact or note to remember."
+                        "description": "The fact or note to remember.",
                     }
                 },
-                "required": ["content"]
+                "required": ["content"],
             },
-            "tags": ["session:memory", "core"]
-        }
+            "tags": ["session:memory", "core"],
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "forget_memory",
-            "description": (
-                "Remove a memory that is no longer accurate or relevant."
-            ),
+            "description": ("Remove a memory that is no longer accurate or relevant."),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "memory_id": {
                         "type": "string",
-                        "description": "The ID of the memory to remove."
+                        "description": "The ID of the memory to remove.",
                     }
                 },
-                "required": ["memory_id"]
+                "required": ["memory_id"],
             },
-            "tags": ["session:memory", "core"]
-        }
+            "tags": ["session:memory", "core"],
+        },
     },
     {
         "type": "function",
@@ -241,58 +248,60 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "What to search for in the uploaded files."
+                        "description": "What to search for in the uploaded files.",
                     },
                     "file_name": {
                         "type": "string",
-                        "description": "Optional: restrict search to a specific file by name."
-                    }
+                        "description": "Optional: restrict search to a specific file by name.",
+                    },
                 },
-                "required": ["query"]
+                "required": ["query"],
             },
-            "tags": ["files:read", "core"]
-        }
+            "tags": ["files:read", "core"],
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": (
-                "Search the live internet for information."
-            ),
+            "description": ("Search the live internet for information."),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "The search query."},
-                    "limit": {"type": "integer", "description": "Max results (default 5)"}
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 5)",
+                    },
                 },
-                "required": ["query"]
+                "required": ["query"],
             },
-            "tags": ["external:search", "core"]
-        }
+            "tags": ["external:search", "core"],
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "news_search",
-            "description": (
-                "Search for recent news articles."
-            ),
+            "description": ("Search for recent news articles."),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "The news search query."}
                 },
-                "required": ["query"]
+                "required": ["query"],
             },
-            "tags": ["external:search", "core"]
-        }
+            "tags": ["external:search", "core"],
+        },
     },
 ]
 
 ALL_TOOL_NAMES = [s["function"]["name"] for s in TOOL_SCHEMAS]
 
-def get_filtered_schemas(enabled_tools: list[str] | None = None, tags: list[str] | None = None) -> list[dict]:
+
+def get_filtered_schemas(
+    enabled_tools: list[str] | None = None, tags: list[str] | None = None
+) -> list[dict]:
     """
     Return tool schemas filtered by enabled tools AND specific tags.
     Always includes request_clarification (not user-toggleable).
@@ -303,23 +312,23 @@ def get_filtered_schemas(enabled_tools: list[str] | None = None, tags: list[str]
     filtered = []
     enabled_set = set(enabled_tools) if enabled_tools else None
     tags_set = set(tags) if tags else None
-    
+
     for schema in TOOL_SCHEMAS:
         name = schema["function"]["name"]
         if name == "request_clarification":
             filtered.append(schema)
             continue
-            
+
         is_enabled = True
         if enabled_set is not None:
             is_enabled = name in enabled_set
-            
+
         has_tag = True
         if tags_set is not None:
             tool_tags = set(schema["function"].get("tags", []))
             has_tag = bool(tool_tags & tags_set)
-            
+
         if is_enabled and has_tag:
             filtered.append(schema)
-            
+
     return filtered

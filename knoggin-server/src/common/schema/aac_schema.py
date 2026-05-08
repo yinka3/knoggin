@@ -15,13 +15,13 @@ AAC_SPECIFIC_SCHEMAS = [
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The insight to persist."
+                        "description": "The insight to persist.",
                     }
                 },
-                "required": ["content"]
+                "required": ["content"],
             },
-            "tags": ["community:write"]
-        }
+            "tags": ["community:write"],
+        },
     },
     {
         "type": "function",
@@ -35,13 +35,13 @@ AAC_SPECIFIC_SCHEMAS = [
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The fact or note to remember."
+                        "description": "The fact or note to remember.",
                     }
                 },
-                "required": ["content"]
+                "required": ["content"],
             },
-            "tags": ["community:write"]
-        }
+            "tags": ["community:write"],
+        },
     },
     {
         "type": "function",
@@ -56,23 +56,26 @@ AAC_SPECIFIC_SCHEMAS = [
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "A short, descriptive name for the specialist."
+                        "description": "A short, descriptive name for the specialist.",
                     },
                     "persona": {
                         "type": "string",
-                        "description": "The specialist's expertise and style."
+                        "description": "The specialist's expertise and style.",
                     },
                     "initial_rules": {"type": "array", "items": {"type": "string"}},
-                    "initial_preferences": {"type": "array", "items": {"type": "string"}},
-                    "initial_icks": {"type": "array", "items": {"type": "string"}}
+                    "initial_preferences": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "initial_icks": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["name", "persona"]
+                "required": ["name", "persona"],
             },
-            "tags": ["community:write"]
-        }
-    }
+            "tags": ["community:write"],
+        },
+    },
 ]
 
-COMMUNITY_TOOL_SCHEMAS = get_filtered_schemas(
-    tags=["graph:read", "external:search"]
-) + AAC_SPECIFIC_SCHEMAS
+COMMUNITY_TOOL_SCHEMAS = (
+    get_filtered_schemas(tags=["graph:read", "external:search"]) + AAC_SPECIFIC_SCHEMAS
+)

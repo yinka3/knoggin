@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 @dataclass
 class MemoryEntry:
     """Single memory block entry."""
+
     id: str
     content: str
     topic: str = "General"
@@ -19,6 +20,7 @@ class MemoryEntry:
 @dataclass
 class MemorySaveResult:
     """Result from save_memory."""
+
     success: bool = True
     memory_id: str = ""
     topic: str = ""
@@ -29,6 +31,7 @@ class MemorySaveResult:
 @dataclass
 class MemoryForgetResult:
     """Result from forget_memory."""
+
     success: bool = True
     memory_id: str = ""
     topic: str = ""
@@ -38,12 +41,15 @@ class MemoryForgetResult:
 @dataclass
 class MemoryListResult:
     """Result from get_memory_blocks."""
+
     blocks: Dict[str, List[MemoryEntry]] = field(default_factory=dict)
     total: int = 0
+
 
 @dataclass
 class WorkingMemoryEntry:
     """Single working memory entry."""
+
     id: str
     content: str
     created_at: str = ""
@@ -52,6 +58,7 @@ class WorkingMemoryEntry:
 @dataclass
 class WorkingMemoryAddResult:
     """Result from add_working_memory."""
+
     success: bool = True
     memory_id: str = ""
     content: str = ""
@@ -62,6 +69,7 @@ class WorkingMemoryAddResult:
 @dataclass
 class WorkingMemoryRemoveResult:
     """Result from remove_working_memory."""
+
     success: bool = True
     memory_id: str = ""
     category: str = ""
@@ -71,12 +79,14 @@ class WorkingMemoryRemoveResult:
 @dataclass
 class WorkingMemoryListResult:
     """Result from list_working_memory."""
+
     blocks: Dict[str, List[WorkingMemoryEntry]] = field(default_factory=dict)
 
 
 @dataclass
 class WorkingMemoryClearResult:
     """Result from clear_working_memory."""
+
     success: bool = True
     cleared: int = 0
     category: str = ""
@@ -91,6 +101,7 @@ class PromptContext:
     tool_schemas, files_ctx, and model are filled in by the caller.
     Used by both SDK agent and server-side streaming agent.
     """
+
     memory_ctx: str = ""
     agent_rules: str = ""
     agent_prefs: str = ""

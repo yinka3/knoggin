@@ -1,10 +1,11 @@
 """Internal CLI utilities."""
 
-import time
 import shutil
 import socket
 import subprocess
+import time
 from pathlib import Path
+
 import typer
 
 from cli.config import COMPOSE_FILE
@@ -25,7 +26,9 @@ def _run_compose(args: list[str], compose_file: Path) -> subprocess.CompletedPro
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def _poll_tcp(host: str, port: int, timeout: float = 15.0, interval: float = 1.0) -> bool:
+def _poll_tcp(
+    host: str, port: int, timeout: float = 15.0, interval: float = 1.0
+) -> bool:
     """Poll a TCP port until it accepts connections or times out."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -38,7 +41,11 @@ def _poll_tcp(host: str, port: int, timeout: float = 15.0, interval: float = 1.0
 
 
 def _status(name: str, ok: bool):
-    mark = typer.style("✓", fg=typer.colors.GREEN) if ok else typer.style("✗", fg=typer.colors.RED)
+    mark = (
+        typer.style("✓", fg=typer.colors.GREEN)
+        if ok
+        else typer.style("✗", fg=typer.colors.RED)
+    )
     typer.echo(f"  {mark} {name}")
 
 

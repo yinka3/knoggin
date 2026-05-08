@@ -7,29 +7,30 @@ import typer
 
 from cli.config import (
     COMPOSE_FILE,
-    TOML_FILE,
     ENV_EXAMPLE_FILE,
+    TOML_FILE,
     load_toml,
     write_compose,
     write_config,
     write_env_example,
 )
-
-
 from cli.utils import (
-    _docker_available,
     _compose_path,
-    _run_compose,
-    _poll_tcp,
-    _status,
+    _docker_available,
     _file_status,
+    _poll_tcp,
+    _run_compose,
+    _status,
 )
 
 
-
 def start(
-    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing compose file"),
-    config: Optional[str] = typer.Option(None, "--config", "-c", help="Path to knoggin.toml"),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Overwrite existing compose file"
+    ),
+    config: Optional[str] = typer.Option(
+        None, "--config", "-c", help="Path to knoggin.toml"
+    ),
 ):
     """Boot Knoggin infrastructure (Redis + Memgraph)."""
 
@@ -73,13 +74,19 @@ def start(
             typer.echo(f"  API:  http://localhost:{cfg.infra.api_port}")
         typer.echo("")
     else:
-        typer.echo(typer.style("\nSome services failed to start. Check docker compose logs.", fg=typer.colors.YELLOW))
+        typer.echo(
+            typer.style(
+                "\nSome services failed to start. Check docker compose logs.",
+                fg=typer.colors.YELLOW,
+            )
+        )
         raise typer.Exit(1)
 
 
-
 def end(
-    volumes: bool = typer.Option(False, "--volumes", "-v", help="Remove persistent data volumes"),
+    volumes: bool = typer.Option(
+        False, "--volumes", "-v", help="Remove persistent data volumes"
+    ),
 ):
     """Tear down Knoggin infrastructure."""
 
@@ -116,7 +123,9 @@ def end(
 
 
 def init(
-    global_config: bool = typer.Option(False, "--global", "-g", help="Initialize in ~/.config/knoggin"),
+    global_config: bool = typer.Option(
+        False, "--global", "-g", help="Initialize in ~/.config/knoggin"
+    ),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing files"),
 ):
     """Generate Knoggin config files."""
@@ -157,15 +166,17 @@ def init(
         write_compose(cwd)
     _file_status(compose_path, wrote_compose)
 
-    typer.echo(f"\nNext steps:")
+    typer.echo("\nNext steps:")
     typer.echo(f"  1. Copy {ENV_EXAMPLE_FILE} to .env and add your API key")
     typer.echo(f"  2. Edit {TOML_FILE} to set your models and profile")
-    typer.echo(f"  3. Run `knoggin start` to boot infrastructure")
-    typer.echo(f"  4. Run `knoggin check` to verify everything works")
+    typer.echo("  3. Run `knoggin start` to boot infrastructure")
+    typer.echo("  4. Run `knoggin check` to verify everything works")
 
 
 def check(
-    config: Optional[str] = typer.Option(None, "--config", "-c", help="Path to knoggin.toml"),
+    config: Optional[str] = typer.Option(
+        None, "--config", "-c", help="Path to knoggin.toml"
+    ),
 ):
     """Validate Knoggin environment and connectivity."""
 
@@ -180,6 +191,7 @@ def check(
     # Config file
     cfg = load_toml(config)
     from cli.config import config_path
+
     has_config = config_path(config) is not None
     _status(f"Config ({TOML_FILE})", has_config)
     if not has_config:
@@ -206,13 +218,13 @@ def check(
 
     # Models
     extraction_ok = bool(cfg.llm.extraction_model)
-    _status(f"Extraction model", extraction_ok)
+    _status("Extraction model", extraction_ok)
     if not extraction_ok:
         typer.echo(f"    Set extraction_model in {TOML_FILE}")
         all_ok = False
 
     agent_ok = bool(cfg.llm.agent_model)
-    _status(f"Agent model", agent_ok)
+    _status("Agent model", agent_ok)
     if not agent_ok:
         typer.echo(f"    Set agent_model in {TOML_FILE}")
         all_ok = False
@@ -222,7 +234,14 @@ def check(
     if device == "auto":
         try:
             import torch
-            resolved = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+
+            resolved = (
+                "cuda"
+                if torch.cuda.is_available()
+                else "mps"
+                if torch.backends.mps.is_available()
+                else "cpu"
+            )
         except ImportError:
             resolved = "cpu (torch not found)"
         _status(f"Device (auto → {resolved})", True)
@@ -233,5 +252,9 @@ def check(
     if all_ok:
         typer.echo(typer.style("\nAll checks passed.", fg=typer.colors.GREEN))
     else:
-        typer.echo(typer.style("\nSome checks failed. See above for details.", fg=typer.colors.YELLOW))
+        typer.echo(
+            typer.style(
+                "\nSome checks failed. See above for details.", fg=typer.colors.YELLOW
+            )
+        )
         raise typer.Exit(1)
