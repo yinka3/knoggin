@@ -1,10 +1,13 @@
 import asyncio
 from collections import deque
-from datetime import datetime, timezone
-from typing import Dict, Optional, Set, Any
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, Set
+
 from loguru import logger
-from common.infra.redis import AsyncRedisClient, RedisKeys
+
+from infrastructure.redis.redis_client import AsyncRedisClient, RedisKeys
+
 
 @dataclass
 class DebugEvent:
@@ -15,6 +18,7 @@ class DebugEvent:
     data: Dict[str, Any]
     verbose_only: bool = False
 
+
 @dataclass
 class Subscriber:
     queue: asyncio.Queue
@@ -24,6 +28,7 @@ class Subscriber:
     def __hash__(self):
         return id(self)
 
+
 class DebugEventEmitter:
     """Session-scoped event emitter for debug WebSocket streaming."""
 
@@ -32,11 +37,11 @@ class DebugEventEmitter:
         self._subscribers: Dict[str, Set[Subscriber]] = {}
         self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
-        
+
     @classmethod
     def get(cls) -> "DebugEventEmitter":
         return _DEBUG_EMITTER
-    
+
     async def subscribe(self, session_id: str) -> asyncio.Queue:
         async with self._lock:
             if session_id not in self._subscribers:
@@ -48,7 +53,7 @@ class DebugEventEmitter:
             self._subscribers[session_id].add(sub)
             logger.debug(f"Debug subscriber added for session {session_id}")
             return queue
-    
+
     async def unsubscribe(self, session_id: str, queue: asyncio.Queue):
         async with self._lock:
             if session_id in self._subscribers:
@@ -57,17 +62,19 @@ class DebugEventEmitter:
                 }
                 if not self._subscribers[session_id]:
                     del self._subscribers[session_id]
-    
+
     def has_subscribers(self, session_id: str) -> bool:
-        return session_id in self._subscribers and len(self._subscribers[session_id]) > 0
-    
+        return (
+            session_id in self._subscribers and len(self._subscribers[session_id]) > 0
+        )
+
     async def emit(
         self,
         session_id: str,
         component: str,
         event: str,
         data: Dict[str, Any] = None,
-        verbose_only: bool = False
+        verbose_only: bool = False,
     ):
         evt = DebugEvent(
             ts=datetime.now(timezone.utc).isoformat(),
@@ -75,20 +82,20 @@ class DebugEventEmitter:
             component=component,
             event=event,
             data=data or {},
-            verbose_only=verbose_only
+            verbose_only=verbose_only,
         )
-        
+
         if session_id not in self._history:
             self._history[session_id] = deque(maxlen=5)
         self._history[session_id].append(evt)
-        
+
         if not self.has_subscribers(session_id):
             return
-        
+
         async with self._lock:
             subs = self._subscribers.get(session_id, set())
             to_remove = set()
-            
+
             for sub in subs:
                 try:
                     sub.queue.put_nowait(evt)
@@ -103,26 +110,28 @@ class DebugEventEmitter:
                         sub.queue.put_nowait(evt)
                     except (asyncio.QueueEmpty, asyncio.QueueFull):
                         pass
-            
+
             if to_remove:
                 self._subscribers[session_id] = subs - to_remove
-                logger.warning(f"Dropped {len(to_remove)} stale subscribers for session {session_id}")
+                logger.warning(
+                    f"Dropped {len(to_remove)} stale subscribers for session {session_id}"
+                )
 
         self._emit_count += 1
         if self._emit_count % 100 == 0:
             asyncio.create_task(self.cleanup_stale_sessions())
-    
+
     async def cleanup_session(self, session_id: str):
         async with self._lock:
             self._history.pop(session_id, None)
             self._subscribers.pop(session_id, None)
-    
+
     async def cleanup_stale_sessions(self, max_age_hours: int = 24):
         """Remove history for sessions with no subscribers and old events."""
         async with self._lock:
             stale = []
             now = datetime.now(timezone.utc)
-            
+
             for session_id, history in self._history.items():
                 if session_id in self._subscribers and self._subscribers[session_id]:
                     continue
@@ -136,10 +145,10 @@ class DebugEventEmitter:
                         stale.append(session_id)
                 except (ValueError, AttributeError):
                     stale.append(session_id)
-            
+
             for session_id in stale:
                 self._history.pop(session_id, None)
-            
+
             if stale:
                 logger.debug(f"Pruned {len(stale)} stale debug event histories")
 
@@ -152,11 +161,11 @@ class CommunityEventEmitter:
         self._subscribers: Dict[str, Set[Subscriber]] = {}
         self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
-        
+
     @classmethod
     def get(cls) -> "CommunityEventEmitter":
         return _COMMUNITY_EMITTER
-    
+
     async def subscribe(self, user_name: str) -> asyncio.Queue:
         async with self._lock:
             if user_name not in self._subscribers:
@@ -167,7 +176,7 @@ class CommunityEventEmitter:
             sub = Subscriber(queue=queue, last_active=asyncio.get_event_loop().time())
             self._subscribers[user_name].add(sub)
             return queue
-    
+
     async def unsubscribe(self, user_name: str, queue: asyncio.Queue):
         async with self._lock:
             if user_name in self._subscribers:
@@ -176,26 +185,22 @@ class CommunityEventEmitter:
                 }
                 if not self._subscribers[user_name]:
                     del self._subscribers[user_name]
-    
+
     async def emit(
-        self,
-        user_name: str,
-        component: str,
-        event: str,
-        data: Dict[str, Any] = None
+        self, user_name: str, component: str, event: str, data: Dict[str, Any] = None
     ):
         evt = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "user_name": user_name,
             "component": component,
             "event": event,
-            "data": data or {}
+            "data": data or {},
         }
-        
+
         if user_name not in self._history:
             self._history[user_name] = deque(maxlen=20)
         self._history[user_name].append(evt)
-        
+
         async with self._lock:
             subs = self._subscribers.get(user_name, set())
             to_remove = set()
@@ -208,7 +213,7 @@ class CommunityEventEmitter:
                         sub.queue.put_nowait(evt)
                     except (asyncio.QueueEmpty, asyncio.QueueFull):
                         pass
-            
+
             if to_remove:
                 self._subscribers[user_name] = subs - to_remove
 
@@ -216,17 +221,17 @@ class CommunityEventEmitter:
             await AsyncRedisClient.publish(RedisKeys.community_pubsub_channel(), evt)
         except Exception as e:
             logger.error(f"Failed to publish community event to Redis: {e}")
-        
+
         self._emit_count += 1
         if self._emit_count % 100 == 0:
             asyncio.create_task(self.cleanup())
-        
+
     async def cleanup(self, max_age_hours: int = 24):
         """Remove history for users with no subscribers and old events."""
         async with self._lock:
             stale = []
             now = datetime.now(timezone.utc)
-            
+
             for user_name, history in self._history.items():
                 if user_name in self._subscribers and self._subscribers[user_name]:
                     continue
@@ -240,26 +245,46 @@ class CommunityEventEmitter:
                         stale.append(user_name)
                 except (ValueError, AttributeError):
                     stale.append(user_name)
-            
+
             for user_name in stale:
                 self._history.pop(user_name, None)
-            
+
             if stale:
                 logger.debug(f"Pruned {len(stale)} stale community event histories")
+
 
 _DEBUG_EMITTER = DebugEventEmitter()
 _COMMUNITY_EMITTER = CommunityEventEmitter()
 
-async def emit(session_id: str, component: str, event: str, data: Dict[str, Any] = None, verbose_only: bool = False):
+
+async def emit(
+    session_id: str,
+    component: str,
+    event: str,
+    data: Dict[str, Any] = None,
+    verbose_only: bool = False,
+):
     await DebugEventEmitter.get().emit(session_id, component, event, data, verbose_only)
 
-def emit_sync(session_id: str, component: str, event: str, data: Dict[str, Any] = None, verbose_only: bool = False):
+
+def emit_sync(
+    session_id: str,
+    component: str,
+    event: str,
+    data: Dict[str, Any] = None,
+    verbose_only: bool = False,
+):
     emitter = DebugEventEmitter.get()
     try:
         loop = asyncio.get_running_loop()
-        asyncio.run_coroutine_threadsafe(emitter.emit(session_id, component, event, data, verbose_only), loop)
+        asyncio.run_coroutine_threadsafe(
+            emitter.emit(session_id, component, event, data, verbose_only), loop
+        )
     except RuntimeError:
         pass
 
-async def emit_community(user_name: str, component: str, event: str, data: Dict[str, Any] = None):
+
+async def emit_community(
+    user_name: str, component: str, event: str, data: Dict[str, Any] = None
+):
     await CommunityEventEmitter.get().emit(user_name, component, event, data)

@@ -1,11 +1,19 @@
-import tomllib
-from pathlib import Path
-from importlib import resources as pkg_resources
-from typing import Optional
 import dataclasses
-from dotenv import load_dotenv
-from common.config.env_config import KnogginConfig, InfraConfig, LLMConfig, ModelsConfig, EventsConfig, MCPConfig
+import tomllib
+from importlib import resources as pkg_resources
+from pathlib import Path
+from typing import Optional
 
+from dotenv import load_dotenv
+
+from common.conf.env_config import (
+    EventsConfig,
+    InfraConfig,
+    KnogginConfig,
+    LLMConfig,
+    MCPConfig,
+    ModelsConfig,
+)
 
 TOML_FILE = "knoggin.toml"
 ENV_EXAMPLE_FILE = ".env.example"
@@ -24,11 +32,12 @@ def load_environment():
     """Load local .env first, then fallback to global .env."""
     local_env = Path.cwd() / ".env"
     global_env = get_global_dir() / ".env"
-    
+
     if local_env.exists():
         load_dotenv(local_env)
     elif global_env.exists():
         load_dotenv(global_env)
+
 
 load_environment()
 
@@ -71,30 +80,45 @@ def load_toml(explicit_path: Optional[str] = None) -> KnogginConfig:
     with open(path, "rb") as f:
         raw = tomllib.load(f)
 
-    infra = InfraConfig(**{
-        k: v for k, v in raw.get("infra", {}).items()
-        if k in {f.name for f in dataclasses.fields(InfraConfig)}
-    })
+    infra = InfraConfig(
+        **{
+            k: v
+            for k, v in raw.get("infra", {}).items()
+            if k in {f.name for f in dataclasses.fields(InfraConfig)}
+        }
+    )
 
-    llm = LLMConfig(**{
-        k: v for k, v in raw.get("llm", {}).items()
-        if k in {f.name for f in dataclasses.fields(LLMConfig)}
-    })
+    llm = LLMConfig(
+        **{
+            k: v
+            for k, v in raw.get("llm", {}).items()
+            if k in {f.name for f in dataclasses.fields(LLMConfig)}
+        }
+    )
 
-    models = ModelsConfig(**{
-        k: v for k, v in raw.get("models", {}).items()
-        if k in {f.name for f in dataclasses.fields(ModelsConfig)}
-    })
+    models = ModelsConfig(
+        **{
+            k: v
+            for k, v in raw.get("models", {}).items()
+            if k in {f.name for f in dataclasses.fields(ModelsConfig)}
+        }
+    )
 
-    events = EventsConfig(**{
-        k: v for k, v in raw.get("events", {}).items()
-        if k in {f.name for f in dataclasses.fields(EventsConfig)}
-    })
+    events = EventsConfig(
+        **{
+            k: v
+            for k, v in raw.get("events", {}).items()
+            if k in {f.name for f in dataclasses.fields(EventsConfig)}
+        }
+    )
 
-    mcp = MCPConfig(**{
-        k: v for k, v in raw.get("mcp", {}).items()
-        if k in {f.name for f in dataclasses.fields(MCPConfig)}
-    })
+    mcp = MCPConfig(
+        **{
+            k: v
+            for k, v in raw.get("mcp", {}).items()
+            if k in {f.name for f in dataclasses.fields(MCPConfig)}
+        }
+    )
 
     return KnogginConfig(
         profile=raw.get("profile", {}).get("mode", "full"),

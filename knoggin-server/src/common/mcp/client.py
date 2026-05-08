@@ -1,4 +1,3 @@
-
 import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,7 +39,7 @@ class MCPServerConnection:
 class MCPClientManager:
     """
     Manages multiple MCP server connections.
-    
+
     Lifecycle: initialized during ResourceManager.initialize(),
     shutdown during ResourceManager.shutdown(). Process-level,
     shared across all sessions.
@@ -48,7 +47,9 @@ class MCPClientManager:
 
     def __init__(self):
         self._servers: Dict[str, MCPServerConnection] = {}
-        self._tool_registry: Dict[str, Tuple[str, str]] = {}  # namespaced_name -> (server_name, original_tool_name)
+        self._tool_registry: Dict[
+            str, Tuple[str, str]
+        ] = {}  # namespaced_name -> (server_name, original_tool_name)
         self.__lock = None
 
     @property
@@ -72,13 +73,17 @@ class MCPClientManager:
 
         connected = [n for n, s in instance._servers.items() if s.connected]
         total_tools = len(instance._tool_registry)
-        logger.info(f"[MCP] Manager ready: {len(connected)}/{len(instance._servers)} servers connected, {total_tools} tools registered")
+        logger.info(
+            f"[MCP] Manager ready: {len(connected)}/{len(instance._servers)} servers connected, {total_tools} tools registered"
+        )
 
         return instance
 
     async def _connect_server(self, conn: MCPServerConnection) -> bool:
         if conn.transport != "stdio":
-            logger.warning(f"[MCP] Unsupported transport '{conn.transport}' for server '{conn.name}', skipping")
+            logger.warning(
+                f"[MCP] Unsupported transport '{conn.transport}' for server '{conn.name}', skipping"
+            )
             return False
 
         command = conn.config.get("command", "uvx")
@@ -86,9 +91,7 @@ class MCPClientManager:
         env = conn.config.get("env")
 
         server_params = StdioServerParameters(
-            command=command,
-            args=args,
-            env=env if env else None
+            command=command, args=args, env=env if env else None
         )
 
         try:
@@ -118,19 +121,25 @@ class MCPClientManager:
                 async with self._lock:
                     self._tool_registry[namespaced] = (conn.name, tool.name)
 
-                discovered.append({
-                    "name": tool.name,
-                    "namespaced": namespaced,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {}
-                })
+                discovered.append(
+                    {
+                        "name": tool.name,
+                        "namespaced": namespaced,
+                        "description": tool.description or "",
+                        "input_schema": tool.inputSchema
+                        if hasattr(tool, "inputSchema")
+                        else {},
+                    }
+                )
 
             conn.tools = discovered
             conn.connected = True
             conn.last_error = None
 
             tool_names = [t["name"] for t in discovered]
-            logger.info(f"[MCP] Connected to '{conn.name}': {len(discovered)} tools — {tool_names}")
+            logger.info(
+                f"[MCP] Connected to '{conn.name}': {len(discovered)} tools — {tool_names}"
+            )
             return True
         except TimeoutError:
             conn.connected = False
@@ -154,7 +163,9 @@ class MCPClientManager:
                 try:
                     await conn.exit_stack.aclose()
                 except Exception as ex:
-                    logger.warning(f"[MCP] Exit stack close failed for '{conn.name}': {ex}")
+                    logger.warning(
+                        f"[MCP] Exit stack close failed for '{conn.name}': {ex}"
+                    )
                 conn.exit_stack = None
                 conn.session = None
 
@@ -172,7 +183,9 @@ class MCPClientManager:
             conn.session = None
 
         async with self._lock:
-            stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == conn.name]
+            stale_keys = [
+                k for k, (srv, _) in self._tool_registry.items() if srv == conn.name
+            ]
             for k in stale_keys:
                 del self._tool_registry[k]
 
@@ -181,7 +194,9 @@ class MCPClientManager:
 
         return await self._connect_server(conn)
 
-    async def call_tool(self, server_name: str, tool_name: str, args: dict) -> Dict[str, Any]:
+    async def call_tool(
+        self, server_name: str, tool_name: str, args: dict
+    ) -> Dict[str, Any]:
         conn = self._servers.get(server_name)
         if not conn:
             return {"error": f"MCP server '{server_name}' not configured"}
@@ -194,7 +209,9 @@ class MCPClientManager:
                 if not conn.connected:
                     success = await self._reconnect_server(conn)
                     if not success:
-                        return {"error": f"MCP server '{server_name}' is unavailable: {conn.last_error}"}
+                        return {
+                            "error": f"MCP server '{server_name}' is unavailable: {conn.last_error}"
+                        }
 
         try:
             result = await conn.session.call_tool(tool_name, arguments=args)
@@ -204,7 +221,9 @@ class MCPClientManager:
                 if hasattr(block, "text"):
                     text_parts.append(block.text)
 
-            return {"data": "\n".join(text_parts) if text_parts else "No content returned"}
+            return {
+                "data": "\n".join(text_parts) if text_parts else "No content returned"
+            }
 
         except (ConnectionError, BrokenPipeError, EOFError, OSError) as e:
             logger.error(f"[MCP] Connection lost to '{server_name}': {e}")
@@ -245,7 +264,7 @@ class MCPClientManager:
                 "enabled": conn.enabled,
                 "tool_count": len(conn.tools),
                 "tools": [t["name"] for t in conn.tools],
-                "last_error": conn.last_error
+                "last_error": conn.last_error,
             }
             for name, conn in self._servers.items()
         }
@@ -269,7 +288,9 @@ class MCPClientManager:
 
         if conn.connected:
             async with self._lock:
-                stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == conn.name]
+                stale_keys = [
+                    k for k, (srv, _) in self._tool_registry.items() if srv == conn.name
+                ]
                 for k in stale_keys:
                     del self._tool_registry[k]
 
@@ -299,17 +320,13 @@ class MCPClientManager:
         if connect and conn.enabled:
             success = await self._connect_server(conn)
             if not success:
-                return {
-                    "name": name,
-                    "connected": False,
-                    "error": conn.last_error
-                }
+                return {"name": name, "connected": False, "error": conn.last_error}
 
         return {
             "name": name,
             "connected": conn.connected,
             "tool_count": len(conn.tools),
-            "tools": [t["name"] for t in conn.tools]
+            "tools": [t["name"] for t in conn.tools],
         }
 
     async def remove_server(self, name: str) -> bool:
@@ -325,7 +342,9 @@ class MCPClientManager:
                 pass
 
         async with self._lock:
-            stale_keys = [k for k, (srv, _) in self._tool_registry.items() if srv == name]
+            stale_keys = [
+                k for k, (srv, _) in self._tool_registry.items() if srv == name
+            ]
             for k in stale_keys:
                 del self._tool_registry[k]
 
