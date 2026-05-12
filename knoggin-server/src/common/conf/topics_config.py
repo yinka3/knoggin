@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 import redis.asyncio as aioredis
 from loguru import logger
 
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 
 def build_label_block(topics_config: dict) -> str:

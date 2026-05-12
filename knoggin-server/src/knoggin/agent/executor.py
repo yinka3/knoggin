@@ -1,3 +1,4 @@
+from __future__ import annotations
 import json
 import re
 import uuid
@@ -11,7 +12,7 @@ from common.errors.exceptions import ToolExecutionError
 from common.mcp.bridge import mcp_tools_to_schemas
 from common.schema.tool_schema import get_filtered_schemas
 from common.utils.events import emit
-from infrastructure.llm.llm_client import LLMService
+from infrastructure.llm_client import LLMService
 from knoggin.agent.formatters import (
     format_entity_results,
     format_graph_results,

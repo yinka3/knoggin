@@ -17,10 +17,10 @@ from common.utils.data_utils import (
     has_sufficient_facts,
 )
 from common.utils.events import emit
-from infrastructure.database.memgraph_client import MemgraphClient
+from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.llm.llm_client import LLMService
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.llm_client import LLMService
+from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import get_merge_judgment_prompt
 from knoggin.knowledge.services.entity_service import EntityManager
 

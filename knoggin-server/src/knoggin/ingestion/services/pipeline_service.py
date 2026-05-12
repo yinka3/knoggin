@@ -1,3 +1,4 @@
+from __future__ import annotations
 import asyncio
 import json
 import time
@@ -18,9 +19,9 @@ from common.schema.dtypes import (
 )
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.llm.llm_client import LLMService
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.llm_client import LLMService
+from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import get_connection_reasoning_prompt
 from knoggin.ingestion.services.processor import TextProcessor
 from knoggin.knowledge.services.entity_service import EntityManager

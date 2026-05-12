@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
 from common.errors.exceptions import ConfigurationError
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_RETRIES = 3

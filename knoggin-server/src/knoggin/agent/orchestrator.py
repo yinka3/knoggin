@@ -1,7 +1,11 @@
+from __future__ import annotations
 import json
 import os
 import uuid
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from knoggin.session.context import Context
 
 import redis.asyncio as aioredis
 from loguru import logger
@@ -9,8 +13,8 @@ from loguru import logger
 from common.conf.base import get_config
 from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import AgentConfig
-from infrastructure.redis.redis_client import RedisKeys
-from infrastructure.redis.resources import ResourceManager
+from infrastructure.redis_client import RedisKeys
+from infrastructure.resources import ResourceManager
 from knoggin.agent.executor import AgentExecutor
 from knoggin.agent.tools.registry import Tools
 from knoggin.agent.types import (
@@ -39,7 +43,8 @@ class Orchestrator:
         user_name: str,
         session_id: str,
         redis: aioredis.Redis,
-        entities: Optional["EntityManager"] = None,
+        context: Optional[Context] = None,
+        entities: Optional[EntityManager] = None,
         user_timezone: Optional[str] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -57,14 +62,13 @@ class Orchestrator:
         client_tools: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[Dict, None]:
         """
-        Main entry point for agent execution.
+        Main entry point for agent execution. Uses modular helpers for initialization.
         """
         tools = None
         try:
-            # 1. Configuration & Initialization
+            # 1. Configuration
             config = get_config()
             limits = config.developer_settings.limits
-
             run_config = AgentRunConfig(
                 max_calls=limits.max_tool_calls,
                 max_attempts=limits.max_attempts,
@@ -74,77 +78,29 @@ class Orchestrator:
                 tool_limits=tuple(limits.tool_limits.items()),
             )
 
-            # 2. Preparation of Services
-            topic_config = await TopicConfig.load(redis, user_name, session_id)
-            memory_mgr = MemoryManager(
-                redis=redis,
-                user_name=user_name,
-                session_id=session_id,
-                agent_id=agent_id or "default",
-                topic_config=topic_config,
+            # 2. Services (Context-Aware)
+            services = await self._bootstrap_services(
+                user_name, session_id, redis, context, entities
             )
+            tools = services["tools"]
+            memory_mgr = services["memory"]
+            entities = services["entities"]
+            topic_config = services["topic_config"]
 
-            # Initialize EntityManager for Tools
-            if not entities:
-                er_cfg = config.developer_settings.entity_resolution
-                entities = EntityManager(
-                    session_id=session_id,
-                    memgraph=self._resources.memgraph,
-                    embedding_service=self._resources.embedding,
-                    hierarchy_config=topic_config.hierarchy,
-                    fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
-                    fuzzy_non_substring_threshold=er_cfg.fuzzy_non_substring_threshold,
-                    generic_token_freq=er_cfg.generic_token_freq,
-                    candidate_fuzzy_threshold=er_cfg.candidate_fuzzy_threshold,
-                    candidate_vector_threshold=er_cfg.candidate_vector_threshold,
-                )
-
-            # Initialize FileRAG for Tools
-            upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
-            file_rag = FileRAGService(
-                session_id=session_id,
-                chroma_client=self._resources.chroma,
-                embedding_service=self._resources.embedding,
-                upload_dir=upload_dir,
+            # 3. Identity & Persona
+            identity = await self._resolve_agent_identity(
+                user_name,
+                redis,
+                agent_id,
+                agent_name_override,
+                agent_persona_override,
             )
+            agent_cfg = identity["config"]
 
-            search_cfg = config.developer_settings.search.model_dump()
-            tools = Tools(
-                user_name=user_name,
-                memgraph=self._resources.memgraph,
-                entities=entities,
-                redis_client=redis,
-                session_id=session_id,
-                topic_config=topic_config,
-                search_config=search_cfg,
-                file_rag=file_rag,
-                mcp_manager=self._resources.mcp_manager,
-                memory=memory_mgr,
-            )
-
+            # 4. Context & State Assembly
             effective_hot_topics = (
                 hot_topics if hot_topics is not None else topic_config.hot_topics
             )
-
-            # 3. Context & State
-            agent_cfg = None
-            if agent_id:
-                agent_data = await redis.hget(RedisKeys.agents(user_name), agent_id)
-                if agent_data:
-                    try:
-                        agent_cfg = AgentConfig.from_dict(json.loads(agent_data))
-                    except (json.JSONDecodeError, Exception) as e:
-                        logger.warning(
-                            f"Failed to parse agent config for '{agent_id}': {e}"
-                        )
-
-            p_name = agent_name_override or (agent_cfg.name if agent_cfg else "Knoggin")
-            p_persona = agent_persona_override or (
-                agent_cfg.persona
-                if agent_cfg
-                else "A helpful and thorough personal intelligence assistant."
-            )
-
             ctx = AgentContext(
                 config=run_config,
                 state=AgentState(),
@@ -154,15 +110,13 @@ class Orchestrator:
                 user_query=user_query,
                 run_id=str(uuid.uuid4()),
                 hot_topics=effective_hot_topics,
-                agent_name=p_name,
-                agent_persona=p_persona,
+                agent_name=identity["name"],
+                agent_persona=identity["persona"],
                 history=conversation_history or [],
             )
 
-            # 4. Execution via AgentExecutor
-            executor = AgentExecutor(
-                ctx, self._resources.llm_service, tools, memory_mgr
-            )
+            # 5. Execution via AgentExecutor
+            executor = AgentExecutor(ctx, self._resources.llm_service, tools, memory_mgr)
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
@@ -186,3 +140,116 @@ class Orchestrator:
         finally:
             if tools:
                 await tools.close()
+
+    async def _resolve_agent_identity(
+        self,
+        user_name: str,
+        redis: aioredis.Redis,
+        agent_id: Optional[str],
+        name_override: Optional[str],
+        persona_override: Optional[str],
+    ) -> Dict:
+        """Fetches agent profile and resolves final name/persona."""
+        agent_cfg = None
+        if agent_id:
+            agent_data = await redis.hget(RedisKeys.agents(user_name), agent_id)
+            if agent_data:
+                try:
+                    agent_cfg = AgentConfig.from_dict(json.loads(agent_data))
+                except Exception as e:
+                    logger.warning(f"Failed to parse agent config for '{agent_id}': {e}")
+
+        return {
+            "config": agent_cfg,
+            "name": name_override or (agent_cfg.name if agent_cfg else "Knoggin"),
+            "persona": persona_override
+            or (
+                agent_cfg.persona
+                if agent_cfg
+                else "A helpful and thorough personal intelligence assistant."
+            ),
+        }
+
+    async def _bootstrap_services(
+        self,
+        user_name: str,
+        session_id: str,
+        redis: aioredis.Redis,
+        context: Optional[Context] = None,
+        entities: Optional[EntityManager] = None,
+    ) -> Dict:
+        """
+        Initializes or reuses the service suite.
+        If context is provided, we avoid redundant initialization and Redis hits.
+        """
+        config = get_config()
+
+        # 1. Reuse or load TopicConfig
+        if context and context.topic_config:
+            topic_config = context.topic_config
+        else:
+            topic_config = await TopicConfig.load(redis, user_name, session_id)
+
+        # 2. Reuse or initialize MemoryManager
+        if context and hasattr(context, "memory_mgr"):  # Future-proofing
+            memory_mgr = context.memory_mgr
+        else:
+            memory_mgr = MemoryManager(
+                redis=redis,
+                user_name=user_name,
+                session_id=session_id,
+                agent_id="default",
+                topic_config=topic_config,
+            )
+
+        # 3. Reuse or initialize EntityManager
+        if context and context.entities:
+            entities = context.entities
+        elif not entities:
+            er_cfg = config.developer_settings.entity_resolution
+            entities = EntityManager(
+                session_id=session_id,
+                memgraph=self._resources.memgraph,
+                embedding_service=self._resources.embedding,
+                hierarchy_config=topic_config.hierarchy,
+                fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
+                fuzzy_non_substring_threshold=er_cfg.fuzzy_non_substring_threshold,
+                generic_token_freq=er_cfg.generic_token_freq,
+                candidate_fuzzy_threshold=er_cfg.candidate_fuzzy_threshold,
+                candidate_vector_threshold=er_cfg.candidate_vector_threshold,
+            )
+
+        # 4. Reuse or initialize FileRAG
+        if context and context.file_rag:
+            file_rag = context.file_rag
+        else:
+            upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
+            file_rag = FileRAGService(
+                session_id=session_id,
+                chroma_client=self._resources.chroma,
+                embedding_service=self._resources.embedding,
+                upload_dir=upload_dir,
+            )
+
+        # 5. Initialize Tools (Always fresh for the run, but using shared services)
+        search_cfg = config.developer_settings.search.model_dump()
+        tools = Tools(
+            user_name=user_name,
+            memgraph=self._resources.memgraph,
+            entities=entities,
+            redis_client=redis,
+            session_id=session_id,
+            topic_config=topic_config,
+            search_config=search_cfg,
+            file_rag=file_rag,
+            mcp_manager=self._resources.mcp_manager,
+            memory=memory_mgr,
+        )
+
+        return {
+            "topic_config": topic_config,
+            "memory": memory_mgr,
+            "entities": entities,
+            "file_rag": file_rag,
+            "tools": tools,
+        }

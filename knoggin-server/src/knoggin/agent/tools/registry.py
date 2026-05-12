@@ -5,7 +5,7 @@ import redis.asyncio as aioredis
 
 from common.conf.topics_config import TopicConfig
 from common.mcp.client import MCPClientManager
-from infrastructure.database.memgraph_client import MemgraphClient
+from infrastructure.memgraph_client import MemgraphClient
 from knoggin.agent.tools.graph import GraphTools
 from knoggin.agent.tools.memory import MemoryTools
 from knoggin.agent.tools.search import SearchTools

@@ -98,6 +98,130 @@ class AsyncRedisClient:
         await ps.subscribe(channel)
         return ps
 
+    # ============ SMART PERSISTENCE (Compound Operations) ============
+
+
+    @classmethod
+    async def log_conversation_turn(
+        cls,
+        user_name: str,
+        session_id: str,
+        turn_id: int,
+        payload: dict,
+        max_history: int = 100,
+    ):
+        """
+        Atomically logs a turn to history and prunes old entries.
+        Updates both the data (Hash) and the timeline (Sorted Set).
+        """
+        redis = await cls.get_instance()
+        conv_key = RedisKeys.conversation(user_name, session_id)
+        recent_key = RedisKeys.recent_conversation(user_name, session_id)
+        turn_key = str(turn_id)
+
+        pipe = redis.pipeline()
+        # 1. Store the JSON data
+        pipe.hset(conv_key, turn_key, json.dumps(payload))
+        # 2. Add to timeline (sorted by timestamp or turn_id)
+        timestamp = payload.get("timestamp")
+        score = turn_id
+        if timestamp:
+            try:
+                if isinstance(timestamp, str):
+                    from datetime import datetime
+                    score = datetime.fromisoformat(timestamp).timestamp()
+            except Exception:
+                pass
+        pipe.zadd(recent_key, {turn_key: score})
+
+        # 3. Prune old entries if we exceed limit
+        # We check card before executing to keep pipe simple,
+        # but for true atomicity we can just always run the remrange
+        pipe.zremrangebyrank(recent_key, 0, -(max_history + 1))
+        
+        await pipe.execute()
+
+        # 4. Secondary Cleanup: Remove Hash entries that were pruned from ZSet
+        # This is a bit more expensive so we only do it if the set shrunk
+        # but for simplicity we'll let the next history fetch handle dead keys
+        # or do a periodic cleanup.
+
+    @classmethod
+    async def update_message_mapping(
+        cls,
+        user_name: str,
+        session_id: str,
+        msg_id: int,
+        turn_id: Optional[int],
+        content: Optional[str] = None,
+    ):
+        """Maps a message ID to a turn ID and optionally stores content."""
+        redis = await cls.get_instance()
+        lookup_key = RedisKeys.msg_to_turn_lookup(user_name, session_id)
+        content_key = RedisKeys.message_content(user_name, session_id)
+
+        pipe = redis.pipeline()
+        if turn_id is not None:
+            pipe.hset(lookup_key, str(msg_id), str(turn_id))
+        if content is not None:
+            pipe.hset(content_key, str(msg_id), content)
+        
+        await pipe.execute()
+
+    @classmethod
+    async def refresh_session_ttls(cls, user_name: str, session_id: str, ttl: int):
+        """Refreshes TTLs for all session-scoped keys in a single pipeline."""
+        redis = await cls.get_instance()
+        keys = RedisKeys.get_session_scoped_keys(user_name, session_id)
+        
+        pipe = redis.pipeline()
+        for key in keys:
+            pipe.expire(key, ttl)
+        await pipe.execute()
+
+
+    @classmethod
+    async def load_formatted_memories(
+        cls, agent_id: str, categories: List[str]
+    ) -> Dict[str, str]:
+        """
+        Loads multiple memory categories and formats them as markdown lists.
+        Returns {category: "\n- content1\n- content2"}.
+        """
+        redis = await cls.get_instance()
+        pipe = redis.pipeline()
+        for cat in categories:
+            pipe.hgetall(RedisKeys.agent_working_memory(agent_id, cat))
+        
+        raw_results = await pipe.execute()
+        formatted = {}
+        
+        for i, raw in enumerate(raw_results):
+            cat = categories[i]
+            if not raw:
+                formatted[cat] = ""
+                continue
+            
+            lines = []
+            # Sort by timestamp if available in payload
+            parsed = []
+            for v in raw.values():
+                try:
+                    data = json.loads(v)
+                    parsed.append(data)
+                except Exception:
+                    continue
+            
+            # Sort by created_at
+            parsed.sort(key=lambda x: x.get("created_at", ""))
+            
+            for item in parsed:
+                lines.append(f"- {item['content']}")
+            
+            formatted[cat] = "\n".join(lines)
+            
+        return formatted
+
 
 class RedisKeys:
     """Centralized Redis key patterns - session-scoped by default."""

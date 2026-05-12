@@ -7,7 +7,7 @@ from loguru import logger
 
 from common.utils.events import emit
 from infrastructure.jobs.base import BaseJob, JobContext
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 
 class Scheduler:

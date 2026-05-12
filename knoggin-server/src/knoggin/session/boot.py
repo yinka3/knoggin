@@ -10,8 +10,8 @@ from loguru import logger
 from common.conf.base import get_config
 from common.conf.topics_config import TopicConfig
 from infrastructure.jobs.scheduler import Scheduler
-from infrastructure.redis.redis_client import RedisKeys
-from infrastructure.redis.resources import ResourceManager
+from infrastructure.redis_client import RedisKeys
+from infrastructure.resources import ResourceManager
 from knoggin.ingestion.jobs.archive_job import FactArchivalJob
 from knoggin.ingestion.jobs.cleaner_job import EntityCleanupJob
 from knoggin.ingestion.jobs.dlq_job import DLQReplayJob

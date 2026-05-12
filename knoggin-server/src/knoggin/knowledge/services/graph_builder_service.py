@@ -1,3 +1,4 @@
+from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
@@ -7,8 +8,8 @@ from typing import Optional
 from loguru import logger
 
 from common.schema.dtypes import FactRecord
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 from knoggin.knowledge.services.entity_service import EntityManager
 

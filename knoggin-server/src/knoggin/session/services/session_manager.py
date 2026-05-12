@@ -9,7 +9,7 @@ from loguru import logger
 
 from common.conf.base import get_config
 from common.conf.topics_config import TopicConfig
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.file_rag import FileRAGService
 from knoggin.session.context import Context
 

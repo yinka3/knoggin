@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 import httpx
 from loguru import logger
 
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 
 class SearchTools:

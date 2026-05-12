@@ -8,8 +8,8 @@ from loguru import logger
 from common.schema.dtypes import BulkContradictionResult, FactRecord
 from common.utils.data_utils import extract_fact_with_source
 from common.utils.events import emit
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.llm.llm_client import LLMService
+from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.llm_client import LLMService
 from knoggin.agent.prompts import get_contradiction_judgment_prompt
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 

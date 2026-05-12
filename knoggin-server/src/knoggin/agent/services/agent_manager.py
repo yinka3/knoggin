@@ -5,7 +5,7 @@ from typing import List, Optional
 from loguru import logger
 
 from common.schema.dtypes import AgentConfig
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 
 class AgentManager:

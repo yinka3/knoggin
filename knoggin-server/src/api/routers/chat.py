@@ -100,6 +100,7 @@ async def send_message(
                 user_name=state.user_name,
                 session_id=session_id,
                 redis=state.resources.redis,
+                context=context,
                 model=effective_model,
                 agent_id=agent_id,
                 enabled_tools=enabled_tools

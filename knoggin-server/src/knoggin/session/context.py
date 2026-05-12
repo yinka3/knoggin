@@ -1,3 +1,5 @@
+from common.schema.settings import JobSettings
+from __future__ import annotations
 import asyncio
 import hashlib
 import json
@@ -9,20 +11,22 @@ from typing import Any, Dict, List, Optional, Tuple
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.base import deep_merge, get_config
 from common.conf.topics_config import TopicConfig
+from common.schema.settings import RootConfig
 from common.schema.dtypes import BatchResult, EntityProfilesResult, FactRecord, Message
 from common.utils.core_utils import (
     fetch_conversation_turns,
     handle_background_task_result,
+    safe_update,
 )
 from common.utils.events import DebugEventEmitter, emit
-from infrastructure.database.memgraph_client import MemgraphClient
+from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.jobs.base import BaseJob, JobContext
 from infrastructure.jobs.scheduler import Scheduler
-from infrastructure.llm.llm_client import LLMService
-from infrastructure.redis.redis_client import RedisKeys
-from infrastructure.redis.resources import ResourceManager
+from infrastructure.llm_client import LLMService
+from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from infrastructure.resources import ResourceManager
 from knoggin.agent.prompts import get_lightweight_extraction_prompt
 from knoggin.ingestion.services.batch_consumer import BatchConsumer
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
@@ -69,6 +73,7 @@ class Context:
         self.profile_job: Optional[BaseJob] = None
         self.merge_job: Optional[BaseJob] = None
         self._background_tasks: set[asyncio.Task] = set()
+        self.current_config: RootConfig = get_config()
 
     @classmethod
     async def create(
@@ -190,9 +195,10 @@ class Context:
         await emit(self.session_id, "job", "session_jobs_complete", {})
 
     async def add(self, msg: Message) -> Message:
-        # Deterministic ID: same content + session + timestamp = same ID
+        # Deterministic ID: same content + session + timestamp_ns = same ID
+        timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
         content_hash = hashlib.sha256(
-            f"{self.session_id}:{msg.content.strip()}:{msg.timestamp.isoformat()}".encode()
+            f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}".encode()
         ).hexdigest()[:12]
 
         dedup_key = f"msg_dedup:{self.session_id}:{content_hash}"
@@ -243,63 +249,34 @@ class Context:
         timestamp: datetime,
         user_msg_id: Optional[int] = None,
         metadata: Optional[dict] = None,
-    ):
+    ) -> int:
+        """Saves a conversation turn to Redis via the hardened Smart Client."""
         turn_id = await self.get_next_turn_id()
-        turn_key = f"turn_{turn_id}"
 
-        payload = {"role": role, "content": content, "timestamp": timestamp.isoformat()}
-        if user_msg_id is not None:
-            payload["user_msg_id"] = user_msg_id
-        if metadata:
-            payload["metadata"] = metadata
+        payload = {
+            "role": role,
+            "role_label": "Assistant" if role == "assistant" else "User",
+            "content": content,
+            "timestamp": timestamp.isoformat(),
+            "metadata": metadata,
+            "user_msg_id": user_msg_id,
+        }
 
-        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
-        sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
-
-        await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
-        await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
-
-        limit = self._max_conversation_history
-
-        count = await self.redis_client.zcard(sorted_key)
-        if count > limit:
-            old_turns = await self.redis_client.zrange(sorted_key, 0, -(limit + 1))
-            if old_turns:
-                old_turn_data = await self.redis_client.hmget(conv_key, *old_turns)
-                msg_keys = []
-                for data_str in old_turn_data:
-                    if data_str:
-                        turn_payload = json.loads(data_str)
-                        if "user_msg_id" in turn_payload:
-                            msg_keys.append(f"msg_{turn_payload['user_msg_id']}")
-
-                pipe = self.redis_client.pipeline()
-                pipe.zremrangebyrank(sorted_key, 0, -(limit + 1))
-                pipe.hdel(conv_key, *old_turns)
-                if msg_keys:
-                    pipe.hdel(
-                        RedisKeys.message_content(self.user_name, self.session_id),
-                        *msg_keys,
-                    )
-                    pipe.hdel(
-                        RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id),
-                        *msg_keys,
-                    )
-                await pipe.execute()
+        # Use the Smart Client to handle storage and history pruning
+        await AsyncRedisClient.log_conversation_turn(
+            user_name=self.user_name,
+            session_id=self.session_id,
+            turn_id=turn_id,
+            payload=payload,
+            max_history=self.current_config.developer_settings.limits.conversation_context_turns
+            or 100,
+        )
 
         return turn_id
 
     async def add_to_redis(self, msg: Message):
-        msg_key = f"msg_{msg.id}"
-
-        await self.redis_client.hset(
-            RedisKeys.message_content(self.user_name, self.session_id),
-            msg_key,
-            json.dumps(
-                {"message": msg.content.strip(), "timestamp": msg.timestamp.isoformat()}
-            ),
-        )
-
+        """Maps a message to a turn and stores its content via the Smart Client."""
+        # 1. First log the conversation turn (User role)
         turn_id = await self.add_to_conversation_log(
             role="user",
             content=msg.content.strip(),
@@ -307,10 +284,13 @@ class Context:
             user_msg_id=msg.id,
         )
 
-        await self.redis_client.hset(
-            RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id),
-            msg_key,
-            f"turn_{turn_id}",
+        # 2. Map the message ID to this turn and store content
+        await AsyncRedisClient.update_message_mapping(
+            user_name=self.user_name,
+            session_id=self.session_id,
+            msg_id=msg.id,
+            turn_id=turn_id,
+            content=msg.content.strip(),
         )
 
     async def add_assistant_turn(
@@ -560,134 +540,90 @@ class Context:
             redis_client=self.redis_client,
         )
 
-    async def update_runtime_settings(self, new_config: dict):
+    async def update_runtime_settings(self, new_config_dict: dict):
         """
         Hot-reload runtime settings from the new configuration dictionary.
-        This propagates configuration changes to the active session components.
+        Supports partial updates (patches) by merging with the current config
+        to ensure active state isn't reset to defaults.
         """
+        # 1. Start with CURRENT state to avoid resetting defaults on partial patches
+        current_data = self.current_config.model_dump()
+        updated_data = deep_merge(current_data, new_config_dict)
+
+        try:
+            new_config = RootConfig(**updated_data)
+        except Exception as e:
+            logger.error(f"Failed to validate new config for hot-reload: {e}")
+            return
+
         logger.info("Applying hot-reload of runtime settings...")
+        dev_settings = new_config.developer_settings
+        old_dev = self.current_config.developer_settings
 
-        dev_settings = new_config.get("developer_settings", {})
+        # 2. Dispatch updates using safe_update to prevent crashes from signature drift
+        if new_config.default_topics != self.current_config.default_topics:
+            await self.update_topics_config(updated_data.get("default_topics", {}))
 
-        if "default_topics" in new_config:
-            await self.update_topics_config(new_config["default_topics"])
-            logger.info(f"Topics updated: {list(new_config['default_topics'].keys())}")
+        if dev_settings.ingestion != old_dev.ingestion and self.consumer:
+            safe_update(self.consumer.update_settings, dev_settings.ingestion)
 
-        ingest_cfg = dev_settings.get("ingestion", {})
-        if ingest_cfg and self.consumer:
-            b_size = ingest_cfg.get("batch_size")
+        if dev_settings.jobs != old_dev.jobs:
+            self._update_job_settings(dev_settings.jobs, old_dev.jobs)
 
-            if b_size:
-                current_chk = ingest_cfg.get("checkpoint_interval") or (b_size * 4)
-                current_win = ingest_cfg.get("session_window") or (b_size * 3)
+        if dev_settings.entity_resolution != old_dev.entity_resolution and self.entities:
+            safe_update(self.entities.update_settings, dev_settings.entity_resolution)
 
-                self.consumer.update_ingestion_settings(
-                    batch_size=b_size,
-                    batch_timeout=ingest_cfg.get("batch_timeout"),
-                    checkpoint_interval=current_chk,
-                    session_window=current_win,
-                )
+        if dev_settings.nlp_pipeline != old_dev.nlp_pipeline and self.processor:
+            safe_update(self.processor.update_settings, dev_settings.nlp_pipeline)
 
-        jobs_cfg = dev_settings.get("jobs", {})
-
-        if "profile" in jobs_cfg and self.profile_job:
-            self.profile_job.update_settings(
-                msg_window=jobs_cfg["profile"].get("msg_window"),
-                volume_threshold=jobs_cfg["profile"].get("volume_threshold"),
-                idle_threshold=jobs_cfg["profile"].get("idle_threshold"),
-                profile_batch_size=jobs_cfg["profile"].get("profile_batch_size"),
-                contradiction_sim_low=jobs_cfg["profile"].get("contradiction_sim_low"),
-                contradiction_sim_high=jobs_cfg["profile"].get(
-                    "contradiction_sim_high"
-                ),
-                contradiction_batch_size=jobs_cfg["profile"].get(
-                    "contradiction_batch_size"
-                ),
-            )
-
-        if "merger" in jobs_cfg and self.merge_job:
-            self.merge_job.update_settings(
-                auto_threshold=jobs_cfg["merger"].get("auto_threshold"),
-                hitl_threshold=jobs_cfg["merger"].get("hitl_threshold"),
-                cosine_threshold=jobs_cfg["merger"].get("cosine_threshold"),
-            )
-
-        if self.scheduler:
-            if "cleaner" in jobs_cfg:
-                cleaner = self.scheduler._jobs.get("entity_cleanup")
-                if cleaner:
-                    cleaner.enabled = jobs_cfg["cleaner"].get("enabled", True)
-                    cleaner.update_settings(
-                        interval_hours=jobs_cfg["cleaner"].get("interval_hours"),
-                        orphan_age_hours=jobs_cfg["cleaner"].get("orphan_age_hours"),
-                        stale_junk_days=jobs_cfg["cleaner"].get("stale_junk_days"),
-                    )
-
-            if "dlq" in jobs_cfg:
-                dlq = self.scheduler._jobs.get("dlq_auto_replay")
-                if dlq:
-                    dlq.update_settings(
-                        interval=jobs_cfg["dlq"].get("interval_seconds"),
-                        batch_size=jobs_cfg["dlq"].get("batch_size"),
-                        max_attempts=jobs_cfg["dlq"].get("max_attempts"),
-                    )
-
-            if "archival" in jobs_cfg:
-                archiver = self.scheduler._jobs.get("fact_archival")
-                if archiver:
-                    archiver.enabled = jobs_cfg["archival"].get("enabled", True)
-                    archiver.update_settings(
-                        retention_days=jobs_cfg["archival"].get("retention_days"),
-                        fallback_interval_hours=jobs_cfg["archival"].get(
-                            "fallback_interval_hours"
-                        ),
-                    )
-
-            if "topic_config" in jobs_cfg:
-                tconfig = self.scheduler._jobs.get("topic_config")
-                if tconfig:
-                    tconfig.enabled = jobs_cfg["topic_config"].get("enabled", True)
-                    # We might need to add `update_settings` to `topic_config` job later if it supports hot reload
-                    # For now just setting the feature flag is enough
-
-        er_cfg = dev_settings.get("entity_resolution", {})
-        if er_cfg and self.entities:
-            self.entities.update_settings(
-                fuzzy_substring_threshold=er_cfg.get("fuzzy_substring_threshold"),
-                fuzzy_non_substring_threshold=er_cfg.get(
-                    "fuzzy_non_substring_threshold"
-                ),
-                generic_token_freq=er_cfg.get("generic_token_freq"),
-                candidate_fuzzy_threshold=er_cfg.get("candidate_fuzzy_threshold"),
-                candidate_vector_threshold=er_cfg.get("candidate_vector_threshold"),
-            )
-
-        nlp_cfg = dev_settings.get("nlp_pipeline", {})
-        if nlp_cfg and self.processor:
-            self.processor.update_settings(
-                gliner_threshold=nlp_cfg.get("gliner_threshold"),
-                vp01_min_confidence=nlp_cfg.get("vp01_min_confidence"),
-                llm_ner=nlp_cfg.get("llm_ner"),
-            )
+        self.current_config = new_config
 
         await emit(
             self.session_id,
             "system",
             "config_updated",
-            {"keys": list(new_config.keys())},
+            {"keys": list(new_config_dict.keys())},
         )
-
         logger.info("Runtime settings update complete.")
 
-    async def refresh_session_ttls(self):
-        """Refresh TTLs on all session-scoped Redis keys. Call on activity."""
-        ttl = SESSION_KEY_TTL
+    def _update_job_settings(self, new_jobs: JobSettings, old_jobs: JobSettings):
+        """Update job-specific settings if they changed."""
+        from common.schema.settings import JobSettings
 
-        keys = RedisKeys.get_session_scoped_keys(self.user_name, self.session_id)
-        pipe = self.redis_client.pipeline()
-        for key in keys:
-            pipe.expire(key, ttl)
-        await pipe.execute()
+        if new_jobs.profile != old_jobs.profile and self.profile_job:
+            safe_update(self.profile_job.update_settings, new_jobs.profile)
+
+        if new_jobs.merger != old_jobs.merger and self.merge_job:
+            safe_update(self.merge_job.update_settings, new_jobs.merger)
+
+        if self.scheduler:
+            if new_jobs.cleaner != old_jobs.cleaner:
+                cleaner = self.scheduler._jobs.get("entity_cleanup")
+                if cleaner:
+                    cleaner.enabled = new_jobs.cleaner.enabled
+                    safe_update(cleaner.update_settings, new_jobs.cleaner)
+
+            if new_jobs.dlq != old_jobs.dlq:
+                dlq = self.scheduler._jobs.get("dlq_auto_replay")
+                if dlq:
+                    safe_update(dlq.update_settings, new_jobs.dlq)
+
+            if new_jobs.archival != old_jobs.archival:
+                archiver = self.scheduler._jobs.get("fact_archival")
+                if archiver:
+                    archiver.enabled = new_jobs.archival.enabled
+                    safe_update(archiver.update_settings, new_jobs.archival)
+
+            if new_jobs.topic_config != old_jobs.topic_config:
+                tconfig = self.scheduler._jobs.get("topic_config")
+                if tconfig:
+                    tconfig.enabled = new_jobs.topic_config.enabled
+
+    async def refresh_session_ttls(self):
+        """Refresh TTLs on all session-scoped Redis keys via the Smart Client."""
+        await AsyncRedisClient.refresh_session_ttls(
+            self.user_name, self.session_id, SESSION_KEY_TTL
+        )
 
     async def shutdown(self):
         if self.consumer:

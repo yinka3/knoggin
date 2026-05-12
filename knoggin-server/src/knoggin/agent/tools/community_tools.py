@@ -6,7 +6,7 @@ from typing import Dict, List
 from common.conf.base import get_config
 from common.schema.dtypes import AgentConfig
 from common.utils.events import emit_community
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 from knoggin.agent.tools.registry import Tools
 from knoggin.community.db.community_store import CommunityStore
 from knoggin.knowledge.services.memory_service import MemoryManager

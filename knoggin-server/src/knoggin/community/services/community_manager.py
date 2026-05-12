@@ -9,7 +9,7 @@ from loguru import logger
 from common.conf.base import get_config
 from common.schema.dtypes import AgentConfig
 from common.utils.events import emit_community
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 from infrastructure.redis.resources import ResourceManager
 from knoggin.agent.executor import AgentExecutor
 from knoggin.agent.internals import (

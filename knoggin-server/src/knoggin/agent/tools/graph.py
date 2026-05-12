@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from knoggin.knowledge.services.entity_service import EntityManager
 
 from common.utils.data_utils import cosine_similarity
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 
 class GraphTools:

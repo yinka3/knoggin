@@ -14,6 +14,8 @@ from knoggin.agent.prompts import (
 class IngestionSettings(BaseModel):
     batch_size: int = Field(8, ge=1, le=100)
     batch_timeout: float = Field(300.0, ge=10.0)
+    checkpoint_interval: int = Field(32, ge=1)
+    session_window: int = Field(24, ge=1)
 
 
 class CleanerSettings(BaseModel):

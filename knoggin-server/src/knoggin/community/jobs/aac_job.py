@@ -4,7 +4,7 @@ from loguru import logger
 
 from common.conf.base import get_config
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 from infrastructure.redis.resources import ResourceManager
 from knoggin.community.services.community_manager import CommunityManager
 

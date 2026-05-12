@@ -8,7 +8,7 @@ from loguru import logger
 
 from common.utils.events import emit
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 from knoggin.ingestion.services.pipeline_service import BatchProcessor, BatchResult
 from knoggin.knowledge.services.entity_service import EntityManager
 

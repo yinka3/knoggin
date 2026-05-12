@@ -18,7 +18,7 @@ from common.schema.memory import (
     WorkingMemoryListResult,
     WorkingMemoryRemoveResult,
 )
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 
 
 class WorkingMemoryStrings(NamedTuple):
@@ -389,24 +389,16 @@ class MemoryManager:
         )
 
     async def _load_working_memory_strings(self) -> WorkingMemoryStrings:
-        result = {}
-        for category in WorkingMemoryStrings._fields:
-            key = RedisKeys.agent_working_memory(self.agent_id, category)
-            raw = await self.redis.hgetall(key)
-            if raw:
-                entries = []
-                for v in raw.values():
-                    try:
-                        entries.append(f"- {json.loads(v)['content']}")
-                    except json.JSONDecodeError:
-                        continue
-                result[category] = "\n".join(entries)
-            else:
-                result[category] = ""
+        """Loads all working memory categories using the hardened Smart Client."""
+        categories = list(WorkingMemoryStrings._fields)
+        formatted = await AsyncRedisClient.load_formatted_memories(
+            agent_id=self.agent_id, categories=categories
+        )
+
         return WorkingMemoryStrings(
-            rules=result.get("rules", ""),
-            preferences=result.get("preferences", ""),
-            icks=result.get("icks", ""),
+            rules=formatted.get("rules", ""),
+            preferences=formatted.get("preferences", ""),
+            icks=formatted.get("icks", ""),
         )
 
     async def save_memory_dict(self, content: str, topic: str = "General") -> dict:

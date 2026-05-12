@@ -6,7 +6,7 @@ from typing import Any, Dict, Set
 
 from loguru import logger
 
-from infrastructure.redis.redis_client import AsyncRedisClient, RedisKeys
+from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 
 
 @dataclass

@@ -13,9 +13,9 @@ from loguru import logger
 from common.conf.base import get_config
 from common.errors.exceptions import ConfigurationError, DependencyError
 from common.mcp.client import MCPClientManager
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.llm.llm_client import LLMService
-from infrastructure.redis.redis_client import AsyncRedisClient
+from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.llm_client import LLMService
+from infrastructure.redis_client import AsyncRedisClient
 from knoggin.community.db.community_store import CommunityStore
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 from knoggin.knowledge.services.entity_service import EntityManager

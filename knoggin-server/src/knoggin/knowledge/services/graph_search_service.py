@@ -3,7 +3,7 @@ from functools import wraps
 
 from loguru import logger
 
-from infrastructure.database.memgraph_client import MemgraphClient
+from infrastructure.memgraph_client import MemgraphClient
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 
 

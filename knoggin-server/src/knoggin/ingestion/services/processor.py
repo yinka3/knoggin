@@ -9,6 +9,7 @@ from spacy.matcher import PhraseMatcher
 
 from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import NERResult
+from common.schema.settings import TextProcessorSettings
 from common.utils.core_utils import (
     PRONOUNS,
     format_vp01_input,
@@ -17,7 +18,7 @@ from common.utils.core_utils import (
     validate_entity,
 )
 from common.utils.events import emit
-from infrastructure.llm.llm_client import LLMService
+from infrastructure.llm_client import LLMService
 from knoggin.agent.prompts import ner_reasoning_prompt
 
 
@@ -47,22 +48,13 @@ class TextProcessor:
         self.llm_ner = True
         self._spacy_lock = threading.Lock()
 
-    def update_settings(
-        self,
-        gliner_threshold=None,
-        vp01_min_confidence=None,
-        ner_prompt=None,
-        llm_ner=None,
-    ):
-        if gliner_threshold is not None:
-            self.gliner_threshold = gliner_threshold
-        if vp01_min_confidence is not None:
-            self.vp01_min_confidence = vp01_min_confidence
-        if ner_prompt is not None:
-            self.ner_prompt = ner_prompt
-        if llm_ner is not None:
-            self.llm_ner = llm_ner
-            logger.info(f"TextProcessor: llm_ner={self.llm_ner}")
+    def update_settings(self, config: TextProcessorSettings):
+        """Update settings dynamically while running."""
+        self.gliner_threshold = config.gliner_threshold
+        self.vp01_min_confidence = config.vp01_min_confidence
+        self.ner_prompt = config.ner_prompt
+        self.llm_ner = config.llm_ner
+        logger.info(f"TextProcessor: llm_ner={self.llm_ner}")
 
         logger.info(
             f"TextProcessor updated: gliner={self.gliner_threshold}, vp01_conf={self.vp01_min_confidence}"

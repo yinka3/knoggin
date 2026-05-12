@@ -2,7 +2,7 @@ from typing import Dict, Optional
 
 from loguru import logger
 
-from infrastructure.redis.resources import ResourceManager
+from infrastructure.resources import ResourceManager
 from knoggin.agent.services.agent_manager import AgentManager
 from knoggin.session.context import Context
 from knoggin.session.services.session_manager import SessionManager

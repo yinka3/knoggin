@@ -6,9 +6,10 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.schema.dtypes import BatchResult
+from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.redis_client import RedisKeys
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
 
 
@@ -124,22 +125,12 @@ class BatchConsumer:
             lines.append(f"[{turn['role_label']}]: {content}")
         return "\n".join(lines)
 
-    def update_ingestion_settings(
-        self,
-        batch_size: Optional[int] = None,
-        batch_timeout: Optional[float] = None,
-        checkpoint_interval: Optional[int] = None,
-        session_window: Optional[int] = None,
-    ):
+    def update_settings(self, config: IngestionSettings):
         """Update settings dynamically while running."""
-        if batch_size is not None:
-            self.batch_size = batch_size
-        if batch_timeout is not None:
-            self.batch_timeout = batch_timeout
-        if checkpoint_interval is not None:
-            self.checkpoint_interval = checkpoint_interval
-        if session_window is not None:
-            self.session_window = session_window
+        self.batch_size = config.batch_size
+        self.batch_timeout = config.batch_timeout
+        self.checkpoint_interval = config.checkpoint_interval
+        self.session_window = config.session_window
 
         logger.info(
             f"Consumer ingestion settings updated: batch={self.batch_size}, timeout={self.batch_timeout}"

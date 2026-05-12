@@ -1,8 +1,9 @@
 import asyncio
+import inspect
 import json
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import redis.asyncio as aioredis
 from loguru import logger
@@ -11,7 +12,7 @@ from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 PRONOUNS = {
     "my",
@@ -398,4 +399,35 @@ def format_vp05_input(entity_a: Dict, entity_b: Dict) -> str:
     output.append("")
     output.extend(_format_entity_block(entity_b, "Entity B"))
 
-    return "\n".join(output)
+
+def safe_update(target_method: Callable, settings_model: Any) -> Optional[Any]:
+    """
+    Safely calls target_method with the provided settings.
+    Detects if the method expects:
+    1. **kwargs (maps all fields)
+    2. A single object (passes the model itself)
+    3. Specific named parameters (maps matching fields)
+    """
+    try:
+        sig = inspect.signature(target_method)
+        params = list(sig.parameters.values())
+        all_settings = settings_model.model_dump()
+
+        if any(p.kind == p.VAR_KEYWORD for p in params):
+            valid_updates = {k: v for k, v in all_settings.items() if v is not None}
+            return target_method(**valid_updates)
+
+        if len(params) == 1:
+            return target_method(settings_model)
+
+        valid_updates = {
+            k: v for k, v in all_settings.items()
+            if k in sig.parameters and v is not None
+        }
+        if valid_updates:
+            return target_method(**valid_updates)
+
+    except Exception as e:
+        logger.error(f"Safe update failed for {target_method}: {e}")
+
+    return None

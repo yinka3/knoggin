@@ -1,3 +1,4 @@
+from __future__ import annotations
 from redis import asyncio
 import threading
 from collections import defaultdict
@@ -8,10 +9,11 @@ from loguru import logger
 from rapidfuzz import fuzz, process
 
 from common.schema.dtypes import FactRecord
+from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import is_substring_match
 from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
-from infrastructure.database.memgraph_client import MemgraphClient
+from infrastructure.memgraph_client import MemgraphClient
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 
 
@@ -49,26 +51,13 @@ class EntityManager:
     def resolution_lock(self) -> asyncio.Lock:
         return self._resolution_lock
 
-    def update_settings(
-        self,
-        fuzzy_substring_threshold: Optional[int] = None,
-        fuzzy_non_substring_threshold: Optional[int] = None,
-        generic_token_freq: Optional[int] = None,
-        candidate_fuzzy_threshold: Optional[int] = None,
-        candidate_vector_threshold: Optional[float] = None,
-    ):
+    def update_settings(self, config: EntityResolutionSettings):
         """Update resolution thresholds on the fly."""
-        if fuzzy_substring_threshold is not None:
-            self.fuzzy_substring_threshold = fuzzy_substring_threshold
-        if fuzzy_non_substring_threshold is not None:
-            self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
-        if generic_token_freq is not None:
-            self.generic_token_freq = generic_token_freq
-
-        if candidate_fuzzy_threshold is not None:
-            self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
-        if candidate_vector_threshold is not None:
-            self.candidate_vector_threshold = candidate_vector_threshold
+        self.fuzzy_substring_threshold = config.fuzzy_substring_threshold
+        self.fuzzy_non_substring_threshold = config.fuzzy_non_substring_threshold
+        self.generic_token_freq = config.generic_token_freq
+        self.candidate_fuzzy_threshold = config.candidate_fuzzy_threshold
+        self.candidate_vector_threshold = config.candidate_vector_threshold
 
         logger.info(
             f"EntityManager settings updated: sub={self.fuzzy_substring_threshold}, non-sub={self.fuzzy_non_substring_threshold}, freq={self.generic_token_freq}"
