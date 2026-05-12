@@ -24,6 +24,9 @@ class AsyncRedisClient:
     @classmethod
     def _get_lock(cls) -> asyncio.Lock:
         if cls._lock is None:
+            # This is safe within a single event loop thread.
+            # For multi-threaded safety, we'd need a threading.Lock,
+            # but since this is for asyncio.Lock creation, we stay in asyncio land.
             cls._lock = asyncio.Lock()
         return cls._lock
 
@@ -100,6 +103,31 @@ class RedisKeys:
     """Centralized Redis key patterns - session-scoped by default."""
 
     # ============ SESSION-SCOPED ============
+
+    @staticmethod
+    def get_session_scoped_keys(user: str, session: str) -> list[str]:
+        """Returns all Redis keys that are scoped to a specific session."""
+        return [
+            RedisKeys.global_next_turn_id(user, session),
+            RedisKeys.buffer(user, session),
+            RedisKeys.checkpoint(user, session),
+            RedisKeys.message_content(user, session),
+            RedisKeys.dirty_entities(user, session),
+            RedisKeys.profile_complete(user, session),
+            RedisKeys.merge_queue(user, session),
+            RedisKeys.dlq(user, session),
+            RedisKeys.dlq_parked(user, session),
+            RedisKeys.last_processed(user, session),
+            RedisKeys.conversation(user, session),
+            RedisKeys.recent_conversation(user, session),
+            RedisKeys.msg_to_turn_lookup(user, session),
+            RedisKeys.last_activity(user, session),
+            RedisKeys.merge_proposals(user, session),
+            RedisKeys.merge_intents_index(user, session),
+            RedisKeys.user_profile_ran(user, session),
+            RedisKeys.heartbeat_counter(user, session),
+        ]
+
 
     @staticmethod
     def global_next_turn_id(user: str, session: str) -> str:

@@ -1,11 +1,27 @@
+from __future__ import annotations
+
 import json
-from typing import Dict, List
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from infrastructure.database.memgraph_client import MemgraphClient
+    from knoggin.knowledge.services.embedding_service import EmbeddingService
+    from knoggin.knowledge.services.entity_service import EntityManager
 
 from common.utils.data_utils import cosine_similarity
 from infrastructure.redis.redis_client import RedisKeys
 
 
 class GraphTools:
+    # Attributes provided by the composed Tools class
+    memgraph: MemgraphClient
+    entities: EntityManager
+    embedding_service: EmbeddingService
+    active_topics: Optional[List[str]]
+    search_cfg: Dict
+    user_name: str
+    session_id: str
+
     async def get_connections(self, entity_name: str) -> List[Dict]:
         """
         Get the full relationship network for an entity.
@@ -23,7 +39,7 @@ class GraphTools:
             return [{"error": f"Entity not found: '{entity_name}'"}]
 
         results = await self.memgraph.get_related_entities(
-            [canonical], active_topics=self.active_topics
+            [canonical], active_topics=self.active_topics, limit=50
         )
 
         if results:

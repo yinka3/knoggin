@@ -40,7 +40,7 @@ class BatchConsumer:
         self.redis = redis
 
         # callbacks
-        self.get_session_ctx = get_session_context
+        self.get_session_context = get_session_context
         self.run_session_jobs = run_session_jobs
         self.write_to_graph = write_to_graph
 
@@ -212,7 +212,7 @@ class BatchConsumer:
 
                 messages = [json.loads(m) for m in raw]
 
-                conversation = await self.get_session_ctx(
+                conversation = await self.get_session_context(
                     self.session_window, messages[0]["id"]
                 )
                 session_text = self._format_session_text(conversation)

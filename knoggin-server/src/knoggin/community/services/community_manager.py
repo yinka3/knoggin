@@ -30,8 +30,24 @@ class CommunityManager:
     def __init__(self, resources: ResourceManager, user_name: str):
         self.resources = resources
         self.user_name = user_name
-        self._active_discussion_id = None
-        self._discussion_task = None
+        self._active_discussion_id: Optional[str] = None
+        self._discussion_task: Optional[asyncio.Task] = None
+
+    async def _get_agent_working_memory(self, agent_id: str) -> Dict[str, List[str]]:
+        """Fetch and safely parse an agent's working memory (rules, preferences, icks)."""
+        memory = {"rules": [], "preferences": [], "icks": []}
+        for category in memory.keys():
+            key = RedisKeys.agent_working_memory(agent_id, category)
+            raw = await self.resources.redis.hgetall(key)
+            if raw:
+                for v in raw.values():
+                    try:
+                        parsed = json.loads(v)
+                        if "content" in parsed:
+                            memory[category].append(parsed["content"])
+                    except json.JSONDecodeError:
+                        continue
+        return memory
 
     async def _is_discussion_active(self) -> bool:
         return await self.resources.redis.exists(
@@ -68,7 +84,7 @@ class CommunityManager:
             model=llm_config.agent_model,
         )
 
-    async def trigger_discussion(self):
+    async def trigger_discussion(self) -> None:
         """Main entry point called by scheduler."""
         if await self._is_discussion_active():
             logger.info("AAC: Discussion already in progress, skipping.")
@@ -120,7 +136,15 @@ class CommunityManager:
                     RedisKeys.community_discussion_active()
                 )
                 self._active_discussion_id = None
-                await self.resources.memgraph.community.close_discussion(discussion_id)
+                try:
+                    await self.resources.memgraph.community.close_discussion(
+                        discussion_id
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"AAC: Failed to close discussion {discussion_id} in DB: {e}"
+                    )
+
                 await emit_community(
                     self.user_name,
                     "community",
@@ -132,7 +156,7 @@ class CommunityManager:
 
     async def _run_loop(
         self, discussion_id: str, topic: str, initial_agent_ids: List[str]
-    ):
+    ) -> None:
         assembler = SessionAssembler(self.user_name, self.resources)
         # We use a system-level topic config for community discussions
         ctx = await assembler.assemble(session_id=f"aac_{discussion_id}")
@@ -221,29 +245,10 @@ class CommunityManager:
         agent_state = AgentState()
         evidence = RetrievedEvidence()
 
-        agent_rules = None
-        agent_preferences = None
-        agent_icks = None
-
-        for category in ["rules", "preferences", "icks"]:
-            key = RedisKeys.agent_working_memory(agent.id, category)
-            raw = await self.resources.redis.hgetall(key)
-            entries = []
-            if raw:
-                for v in raw.values():
-                    try:
-                        parsed = json.loads(v)
-                        if "content" in parsed:
-                            entries.append(parsed["content"])
-                    except json.JSONDecodeError:
-                        continue
-            if entries:
-                if category == "rules":
-                    agent_rules = entries
-                elif category == "preferences":
-                    agent_preferences = entries
-                elif category == "icks":
-                    agent_icks = entries
+        working_memory = await self._get_agent_working_memory(agent.id)
+        agent_rules = working_memory["rules"] or None
+        agent_preferences = working_memory["preferences"] or None
+        agent_icks = working_memory["icks"] or None
 
         # Build restricted community tools
         base_tools = Tools(
@@ -363,30 +368,26 @@ class CommunityManager:
             logger.error("AAC: No seeding agent available")
             return None
 
-        memory_blocks = {}
-        for category in ["rules", "preferences", "icks"]:
-            key = RedisKeys.agent_working_memory(seeding_agent.id, category)
-            raw = await self.resources.redis.hgetall(key)
-            entries = []
-            if raw:
-                for v in raw.values():
-                    try:
-                        parsed = json.loads(v)
-                        if "content" in parsed:
-                            entries.append(parsed["content"])
-                    except json.JSONDecodeError:
-                        continue
-            memory_blocks[category] = "\n".join(entries)
+        working_memory = await self._get_agent_working_memory(seeding_agent.id)
+        rules_str = "\n".join(working_memory["rules"])
+        prefs_str = "\n".join(working_memory["preferences"])
+        icks_str = "\n".join(working_memory["icks"])
 
         comm_mem_key = RedisKeys.community_agent_memory(
             self.user_name, seeding_agent.id
         )
         raw_mem = await self.resources.redis.hgetall(comm_mem_key)
-        agent_memory_context = (
-            "\n".join(json.loads(v).get("content", "") for v in raw_mem.values())
-            if raw_mem
-            else ""
-        )
+        mem_entries = []
+        if raw_mem:
+            for v in raw_mem.values():
+                try:
+                    parsed = json.loads(v)
+                    content = parsed.get("content", "")
+                    if content:
+                        mem_entries.append(content)
+                except json.JSONDecodeError:
+                    continue
+        agent_memory_context = "\n".join(mem_entries)
 
         base_prompt = get_agent_prompt(
             user_name=self.user_name,
@@ -394,9 +395,9 @@ class CommunityManager:
             persona=seeding_agent.persona,
             agent_name=seeding_agent.name,
             memory_context=agent_memory_context,
-            agent_rules=memory_blocks.get("rules", ""),
-            agent_preferences=memory_blocks.get("preferences", ""),
-            agent_icks=memory_blocks.get("icks", ""),
+            agent_rules=rules_str,
+            agent_preferences=prefs_str,
+            agent_icks=icks_str,
             instructions=seeding_agent.instructions,
         )
 

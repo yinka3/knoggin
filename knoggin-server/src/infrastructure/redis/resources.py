@@ -1,9 +1,10 @@
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Any, Optional
 
 import chromadb
+import redis.asyncio as aioredis
 import spacy
 import torch
 from gliner import GLiNER
@@ -15,10 +16,11 @@ from common.mcp.client import MCPClientManager
 from infrastructure.database.memgraph_client import MemgraphClient
 from infrastructure.llm.llm_client import LLMService
 from infrastructure.redis.redis_client import AsyncRedisClient
+from knoggin.community.db.community_store import CommunityStore
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 from knoggin.knowledge.services.entity_service import EntityManager
-from knoggin.knowledge.services.graph_search_service import GraphSearchService
 from knoggin.knowledge.services.graph_builder_service import GraphBuilderService
+from knoggin.knowledge.services.graph_search_service import GraphSearchService
 from log.llm_trace import get_trace_logger
 
 
@@ -33,19 +35,19 @@ class ResourceManager:
         return cls._lock
 
     def __init__(self):
-        self.memgraph = None
-        self.embedding = None
-        self.redis = None
-        self.llm_service = None
-        self.executor = None
-        self.gliner = None
-        self.spacy = None
-        self.chroma = None
-        self.mcp_manager = None
-        self.active_entities = None
-        self.community_store = None
-        self.graph_search = None
-        self.graph_builder = None
+        self.memgraph: Optional[MemgraphClient] = None
+        self.embedding: Optional[EmbeddingService] = None
+        self.redis: Optional[aioredis.Redis] = None
+        self.llm_service: Optional[LLMService] = None
+        self.executor: Optional[ThreadPoolExecutor] = None
+        self.gliner: Optional[GLiNER] = None
+        self.spacy: Optional[Any] = None
+        self.chroma: Optional[Any] = None
+        self.mcp_manager: Optional[MCPClientManager] = None
+        self.active_entities: Optional[EntityManager] = None
+        self.community_store: Optional[CommunityStore] = None
+        self.graph_search: Optional[GraphSearchService] = None
+        self.graph_builder: Optional[GraphBuilderService] = None
 
     @classmethod
     async def initialize(cls, num_workers: int = 4) -> "ResourceManager":
@@ -154,46 +156,38 @@ class ResourceManager:
 
             except Exception as e:
                 logger.error(f"ResourceManager initialization failed: {e}")
-                await instance._cleanup_partial()
+                await instance._teardown(wait=False)
                 if not isinstance(e, (DependencyError, ConfigurationError)):
                     raise DependencyError(
                         f"Unexpected error during initialization: {e}"
                     )
                 raise
 
-    async def _cleanup_partial(self):
-        """Clean up partially initialized resources."""
+    async def _teardown(self, wait: bool = True):
+        """Internal helper to release all managed resources."""
         if self.executor:
-            self.executor.shutdown(wait=False)
-        if self.redis:
-            await AsyncRedisClient.close_redis()
+            self.executor.shutdown(wait=wait)
+
+        await AsyncRedisClient.close_redis()
+
         if self.memgraph:
             await self.memgraph.close()
         if self.embedding:
             self.embedding.cleanup()
         if self.mcp_manager:
             await self.mcp_manager.shutdown()
+        if self.llm_service:
+            await self.llm_service.close()
+
         self.gliner = None
         self.spacy = None
         self.chroma = None
-        logger.info("Cleaned up partial ResourceManager initialization")
+        self.redis = None
+        self.memgraph = None
 
     async def shutdown(self):
         """Release all managed resources."""
         async with self.__class__._get_lock():
-            if self.executor:
-                self.executor.shutdown(wait=True)
-            await AsyncRedisClient.close_redis()
-            if self.memgraph:
-                await self.memgraph.close()
-            if self.embedding:
-                self.embedding.cleanup()
-            if self.mcp_manager:
-                await self.mcp_manager.shutdown()
-            if self.llm_service:
-                await self.llm_service.close()
-            self.gliner = None
-            self.spacy = None
-            self.chroma = None
+            await self._teardown(wait=True)
             logger.info("ResourceManager shutdown complete")
             self.__class__._instance = None

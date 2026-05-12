@@ -182,15 +182,18 @@ class TopicConfig:
         Update config and invalidate cache.
         Logs warnings for label modifications.
         """
-        for topic_name in self._config:
-            if topic_name in new_config:
+        for topic_name, topic_cfg in new_config.items():
+            if topic_name in self._config:
                 old_labels = set(self._config[topic_name].get("labels", []))
-                new_labels = set(new_config[topic_name].get("labels", []))
+                new_labels = set(topic_cfg.get("labels", []))
                 if old_labels != new_labels:
                     logger.warning(
                         f"Labels modified for '{topic_name}': {old_labels} → {new_labels}"
                     )
-            self._config[topic_name] = new_config[topic_name]
+            else:
+                logger.info(f"Adding new topic via update: {topic_name}")
+
+            self._config[topic_name] = topic_cfg
 
         self._clear_cache()
         logger.info(f"TopicConfig updated: {list(new_config.keys())}")

@@ -393,8 +393,8 @@ class FileRAGService:
         for text, meta, score in scored_parents[:n_results]:
             norm_score = 0.5
             if isinstance(score, (int, float)):
-                clamped_score = max(min(-score, 500.0), -500.0)
-                norm_score = 1.0 / (1.0 + math.exp(clamped_score))
+                clamped_score = max(min(score, 500.0), -500.0)
+                norm_score = 1.0 / (1.0 + math.exp(-clamped_score))
 
             output.append(
                 {

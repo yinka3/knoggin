@@ -394,11 +394,7 @@ class ProfileRefinementJob(BaseJob):
             logger.warning("User profile refinement: empty conversation text")
             return False
 
-        # Get current message ID for checkpoint
-        current_msg_id = await self.redis.get(
-            RedisKeys.last_processed(ctx.user_name, ctx.session_id)
-        )
-        current_msg_id = int(current_msg_id) if current_msg_id else 0
+        current_msg_id = curr_msg_id
 
         # Fetch existing facts from DB
         existing_facts = await self.memgraph.get_facts_for_entity(
@@ -471,11 +467,14 @@ class ProfileRefinementJob(BaseJob):
             if turn.get("user_msg_id") is not None
         }
 
-        final_active_facts, failed_invalidations = await FactResolutionUtils.apply_fact_changes(
-            user_id, 
-            merge_result, 
-            existing_facts, 
-            valid_msg_ids, 
+        (
+            final_active_facts,
+            failed_invalidations,
+        ) = await FactResolutionUtils.apply_fact_changes(
+            user_id,
+            merge_result,
+            existing_facts,
+            valid_msg_ids,
             ctx.session_id,
             self.memgraph,
             self.embedding_service,
@@ -658,8 +657,6 @@ class ProfileRefinementJob(BaseJob):
         )
         current_msg_id = int(current_msg_id) if current_msg_id else 0
 
-        asyncio.get_running_loop()
-
         valid_entities = []
         for ent_id in entity_ids:
             profile = self.entities.entity_profiles.get(ent_id)
@@ -762,8 +759,6 @@ class ProfileRefinementJob(BaseJob):
                 successful_entity_ids.extend(batch_ents)
 
         return all_updates, successful_entity_ids
-
-
 
     async def _update_entity_embedding(
         self,

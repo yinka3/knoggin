@@ -1,4 +1,3 @@
-import asyncio
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -31,14 +30,11 @@ async def write_batch_to_graph(
     Args:
         batch: The BatchResult from processor.run()
         memgraph: Memgraph memgraph instance
-        executor: Thread pool for blocking graph ops
         entities: Entity entities (for profiles, embeddings, aliases)
         session_id: Current session ID
         user_name: For dirty entity tracking (optional)
         redis_client: For dirty entity tracking (optional)
     """
-    asyncio.get_running_loop()
-
     entity_ids = batch.entity_ids
     new_entity_ids = batch.new_entity_ids
     alias_updated_ids = batch.alias_updated_ids

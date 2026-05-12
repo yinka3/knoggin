@@ -1,5 +1,4 @@
-import logging
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from infrastructure.jobs.scheduler import Scheduler
 from knoggin.ingestion.jobs.archive_job import FactArchivalJob
@@ -8,8 +7,6 @@ from knoggin.ingestion.jobs.dlq_job import DLQReplayJob
 from knoggin.knowledge.jobs.merge_job import MergeDetectionJob
 from knoggin.knowledge.jobs.profile_job import ProfileRefinementJob
 from knoggin.knowledge.jobs.topics_job import TopicConfigJob
-
-logger = logging.getLogger(__name__)
 
 
 def build_scheduler(
@@ -27,7 +24,7 @@ def build_scheduler(
     write_to_graph_callback: Optional[Callable] = None,
     update_topics_callback: Optional[Callable] = None,
     nlp_config: Optional[dict] = None,
-    custom_jobs: list = None,
+    custom_jobs: Optional[List] = None,
 ) -> Scheduler:
     """Build a Scheduler and register configured jobs."""
     scheduler = Scheduler(user_name, session_id, redis_client)
@@ -75,7 +72,7 @@ def build_scheduler(
             )
         )
 
-    # LLM jobs(might want to remove profile and merger since those are session jobs and not scheduled jobs)
+    # LLM jobs
     if llm and getattr(llm, "is_configured", True):
         if memgraph and entities and executor and embedding_service:
             prof_cfg = jobs_cfg.get("profile", {})

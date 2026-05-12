@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from loguru import logger
 
@@ -19,7 +19,9 @@ from knoggin.agent.tools.registry import TOOL_DISPATCH, Tools
 from knoggin.agent.types import AgentContext, RetrievedEvidence
 
 
-def build_user_message(ctx: AgentContext, last_result=None) -> str:
+def build_user_message(
+    ctx: AgentContext, last_result: Optional[Union[Dict, List[Dict]]] = None
+) -> str:
     msg = ""
 
     if ctx.history:
@@ -91,7 +93,9 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
     return msg
 
 
-def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
+def _format_evidence(
+    evidence: RetrievedEvidence, last_result: Optional[Union[Dict, List[Dict]]] = None
+) -> str:
     """
     Format evidence with full detail for new results,
     compact summary for previously seen data.

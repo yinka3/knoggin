@@ -172,7 +172,7 @@ class TextProcessor:
     ) -> List[Tuple[int, str, str, str]]:
         """
         Extracts entities via PhraseMatcher (known) + GLiNER (labeled) + VP-01 (catch-all).
-        Returns: List[(name, type, topic)]
+        Returns: List[(msg_id, name, type, topic)]
         """
         if not messages:
             return []

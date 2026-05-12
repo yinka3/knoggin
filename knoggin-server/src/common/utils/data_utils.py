@@ -64,7 +64,7 @@ def process_extracted_facts(
 ) -> FactMergeResult:
     """
     Process structured LLM-extracted facts against existing FactRecord nodes.
-    Returns IDs to invalidate and new content strings (Fact objects).
+    Returns IDs to invalidate and new Fact objects to be inserted.
     """
     if not new_facts:
         return FactMergeResult(to_invalidate=[], new_contents=[])

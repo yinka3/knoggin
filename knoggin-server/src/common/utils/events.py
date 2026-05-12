@@ -29,44 +29,123 @@ class Subscriber:
         return id(self)
 
 
-class DebugEventEmitter:
-    """Session-scoped event emitter for debug WebSocket streaming."""
+class BaseEventEmitter:
+    """Base class for session or user scoped event emitters."""
 
-    def __init__(self):
+    def __init__(self, history_maxlen: int = 5):
         self._emit_count = 0
         self._subscribers: Dict[str, Set[Subscriber]] = {}
         self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
+        self._history_maxlen = history_maxlen
+
+    async def subscribe(self, scope_id: str) -> asyncio.Queue:
+        async with self._lock:
+            if scope_id not in self._subscribers:
+                self._subscribers[scope_id] = set()
+            queue = asyncio.Queue(maxsize=500)
+            for evt in self._history.get(scope_id, []):
+                queue.put_nowait(evt)
+            sub = Subscriber(queue=queue, last_active=asyncio.get_running_loop().time())
+            self._subscribers[scope_id].add(sub)
+            return queue
+
+    async def unsubscribe(self, scope_id: str, queue: asyncio.Queue):
+        async with self._lock:
+            if scope_id in self._subscribers:
+                self._subscribers[scope_id] = {
+                    s for s in self._subscribers[scope_id] if s.queue is not queue
+                }
+                if not self._subscribers[scope_id]:
+                    del self._subscribers[scope_id]
+
+    def has_subscribers(self, scope_id: str) -> bool:
+        return (
+            scope_id in self._subscribers and len(self._subscribers[scope_id]) > 0
+        )
+
+    async def _emit_to_subs(self, scope_id: str, event_obj: Any):
+        """Internal helper to push events to all subscribers in a scope."""
+        if scope_id not in self._history:
+            self._history[scope_id] = deque(maxlen=self._history_maxlen)
+        self._history[scope_id].append(event_obj)
+
+        if not self.has_subscribers(scope_id):
+            return
+
+        async with self._lock:
+            subs = self._subscribers.get(scope_id, set())
+            to_remove = set()
+
+            for sub in subs:
+                try:
+                    sub.queue.put_nowait(event_obj)
+                    sub.failed_emits = 0
+                except asyncio.QueueFull:
+                    sub.failed_emits += 1
+                    if sub.failed_emits > 50:
+                        to_remove.add(sub)
+                        continue
+                    try:
+                        sub.queue.get_nowait()
+                        sub.queue.put_nowait(event_obj)
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
+                        pass
+
+            if to_remove:
+                self._subscribers[scope_id] = subs - to_remove
+                logger.warning(
+                    f"Dropped {len(to_remove)} stale subscribers for scope {scope_id}"
+                )
+
+    async def cleanup_scope(self, scope_id: str):
+        async with self._lock:
+            self._history.pop(scope_id, None)
+            self._subscribers.pop(scope_id, None)
+
+    async def _base_cleanup(self, max_age_hours: int = 24):
+        """Shared stale history cleanup logic."""
+        async with self._lock:
+            stale = []
+            now = datetime.now(timezone.utc)
+
+            for scope_id, history in self._history.items():
+                if scope_id in self._subscribers and self._subscribers[scope_id]:
+                    continue
+                if not history:
+                    stale.append(scope_id)
+                    continue
+
+                last_event = history[-1]
+                ts_str = last_event.ts if hasattr(last_event, "ts") else last_event.get("ts", "")
+
+                try:
+                    last_ts = datetime.fromisoformat(ts_str)
+                    if (now - last_ts).total_seconds() > max_age_hours * 3600:
+                        stale.append(scope_id)
+                except (ValueError, AttributeError):
+                    stale.append(scope_id)
+
+            for scope_id in stale:
+                self._history.pop(scope_id, None)
+
+            return stale
+
+
+class DebugEventEmitter(BaseEventEmitter):
+    """Session-scoped event emitter for debug WebSocket streaming."""
+
+    def __init__(self):
+        super().__init__(history_maxlen=5)
 
     @classmethod
     def get(cls) -> "DebugEventEmitter":
         return _DEBUG_EMITTER
 
     async def subscribe(self, session_id: str) -> asyncio.Queue:
-        async with self._lock:
-            if session_id not in self._subscribers:
-                self._subscribers[session_id] = set()
-            queue = asyncio.Queue(maxsize=500)
-            for evt in self._history.get(session_id, []):
-                queue.put_nowait(evt)
-            sub = Subscriber(queue=queue, last_active=asyncio.get_event_loop().time())
-            self._subscribers[session_id].add(sub)
-            logger.debug(f"Debug subscriber added for session {session_id}")
-            return queue
-
-    async def unsubscribe(self, session_id: str, queue: asyncio.Queue):
-        async with self._lock:
-            if session_id in self._subscribers:
-                self._subscribers[session_id] = {
-                    s for s in self._subscribers[session_id] if s.queue is not queue
-                }
-                if not self._subscribers[session_id]:
-                    del self._subscribers[session_id]
-
-    def has_subscribers(self, session_id: str) -> bool:
-        return (
-            session_id in self._subscribers and len(self._subscribers[session_id]) > 0
-        )
+        # Override to use loguru context or just for naming
+        logger.debug(f"Debug subscriber added for session {session_id}")
+        return await super().subscribe(session_id)
 
     async def emit(
         self,
@@ -85,106 +164,27 @@ class DebugEventEmitter:
             verbose_only=verbose_only,
         )
 
-        if session_id not in self._history:
-            self._history[session_id] = deque(maxlen=5)
-        self._history[session_id].append(evt)
-
-        if not self.has_subscribers(session_id):
-            return
-
-        async with self._lock:
-            subs = self._subscribers.get(session_id, set())
-            to_remove = set()
-
-            for sub in subs:
-                try:
-                    sub.queue.put_nowait(evt)
-                    sub.failed_emits = 0
-                except asyncio.QueueFull:
-                    sub.failed_emits += 1
-                    if sub.failed_emits > 50:
-                        to_remove.add(sub)
-                        continue
-                    try:
-                        sub.queue.get_nowait()
-                        sub.queue.put_nowait(evt)
-                    except (asyncio.QueueEmpty, asyncio.QueueFull):
-                        pass
-
-            if to_remove:
-                self._subscribers[session_id] = subs - to_remove
-                logger.warning(
-                    f"Dropped {len(to_remove)} stale subscribers for session {session_id}"
-                )
+        await self._emit_to_subs(session_id, evt)
 
         self._emit_count += 1
         if self._emit_count % 100 == 0:
             asyncio.create_task(self.cleanup_stale_sessions())
 
-    async def cleanup_session(self, session_id: str):
-        async with self._lock:
-            self._history.pop(session_id, None)
-            self._subscribers.pop(session_id, None)
-
     async def cleanup_stale_sessions(self, max_age_hours: int = 24):
-        """Remove history for sessions with no subscribers and old events."""
-        async with self._lock:
-            stale = []
-            now = datetime.now(timezone.utc)
-
-            for session_id, history in self._history.items():
-                if session_id in self._subscribers and self._subscribers[session_id]:
-                    continue
-                if not history:
-                    stale.append(session_id)
-                    continue
-                last_event = history[-1]
-                try:
-                    last_ts = datetime.fromisoformat(last_event.ts)
-                    if (now - last_ts).total_seconds() > max_age_hours * 3600:
-                        stale.append(session_id)
-                except (ValueError, AttributeError):
-                    stale.append(session_id)
-
-            for session_id in stale:
-                self._history.pop(session_id, None)
-
-            if stale:
-                logger.debug(f"Pruned {len(stale)} stale debug event histories")
+        stale = await self._base_cleanup(max_age_hours)
+        if stale:
+            logger.debug(f"Pruned {len(stale)} stale debug event histories")
 
 
-class CommunityEventEmitter:
+class CommunityEventEmitter(BaseEventEmitter):
     """Global (user-scoped) event emitter for Community live streaming."""
 
     def __init__(self):
-        self._emit_count = 0
-        self._subscribers: Dict[str, Set[Subscriber]] = {}
-        self._history: Dict[str, deque] = {}
-        self._lock = asyncio.Lock()
+        super().__init__(history_maxlen=20)
 
     @classmethod
     def get(cls) -> "CommunityEventEmitter":
         return _COMMUNITY_EMITTER
-
-    async def subscribe(self, user_name: str) -> asyncio.Queue:
-        async with self._lock:
-            if user_name not in self._subscribers:
-                self._subscribers[user_name] = set()
-            queue = asyncio.Queue(maxsize=500)
-            for evt in self._history.get(user_name, []):
-                queue.put_nowait(evt)
-            sub = Subscriber(queue=queue, last_active=asyncio.get_event_loop().time())
-            self._subscribers[user_name].add(sub)
-            return queue
-
-    async def unsubscribe(self, user_name: str, queue: asyncio.Queue):
-        async with self._lock:
-            if user_name in self._subscribers:
-                self._subscribers[user_name] = {
-                    s for s in self._subscribers[user_name] if s.queue is not queue
-                }
-                if not self._subscribers[user_name]:
-                    del self._subscribers[user_name]
 
     async def emit(
         self, user_name: str, component: str, event: str, data: Dict[str, Any] = None
@@ -197,25 +197,7 @@ class CommunityEventEmitter:
             "data": data or {},
         }
 
-        if user_name not in self._history:
-            self._history[user_name] = deque(maxlen=20)
-        self._history[user_name].append(evt)
-
-        async with self._lock:
-            subs = self._subscribers.get(user_name, set())
-            to_remove = set()
-            for sub in subs:
-                try:
-                    sub.queue.put_nowait(evt)
-                except asyncio.QueueFull:
-                    try:
-                        sub.queue.get_nowait()
-                        sub.queue.put_nowait(evt)
-                    except (asyncio.QueueEmpty, asyncio.QueueFull):
-                        pass
-
-            if to_remove:
-                self._subscribers[user_name] = subs - to_remove
+        await self._emit_to_subs(user_name, evt)
 
         try:
             await AsyncRedisClient.publish(RedisKeys.community_pubsub_channel(), evt)
@@ -227,30 +209,19 @@ class CommunityEventEmitter:
             asyncio.create_task(self.cleanup())
 
     async def cleanup(self, max_age_hours: int = 24):
-        """Remove history for users with no subscribers and old events."""
+        stale = await self._base_cleanup(max_age_hours)
+        if stale:
+            logger.debug(f"Pruned {len(stale)} stale community event histories")
+
+    async def shutdown(self):
         async with self._lock:
-            stale = []
-            now = datetime.now(timezone.utc)
-
-            for user_name, history in self._history.items():
-                if user_name in self._subscribers and self._subscribers[user_name]:
-                    continue
-                if not history:
-                    stale.append(user_name)
-                    continue
-                last_event = history[-1]
-                try:
-                    last_ts = datetime.fromisoformat(last_event.get("ts", ""))
-                    if (now - last_ts).total_seconds() > max_age_hours * 3600:
-                        stale.append(user_name)
-                except (ValueError, AttributeError):
-                    stale.append(user_name)
-
-            for user_name in stale:
-                self._history.pop(user_name, None)
-
-            if stale:
-                logger.debug(f"Pruned {len(stale)} stale community event histories")
+            for scope_id, subs in self._subscribers.items():
+                for sub in subs:
+                    # Best effort cleanup
+                    pass
+            self._subscribers.clear()
+            self._history.clear()
+        logger.info("[MCP] Manager shutdown complete")
 
 
 _DEBUG_EMITTER = DebugEventEmitter()

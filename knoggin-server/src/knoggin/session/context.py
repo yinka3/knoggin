@@ -4,7 +4,7 @@ import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
 from loguru import logger
@@ -47,28 +47,28 @@ class Context:
     def __init__(self, user_name: str, topics: List[str], redis_client):
         self.user_name: str = user_name
         self.active_topics: List[str] = topics
-        self.resources: ResourceManager = None
-        self.scheduler: Scheduler = None
+        self.resources: Optional[ResourceManager] = None
+        self.scheduler: Optional[Scheduler] = None
         self.redis_client: aioredis.Redis = redis_client
         self.model: Optional[str] = None
-        self.llm: LLMService = None
-        self.file_rag: FileRAGService = None
-        self.mcp_manager = None
+        self.llm: Optional[LLMService] = None
+        self.file_rag: Optional[FileRAGService] = None
+        self.mcp_manager: Optional[Any] = None
 
-        self.memgraph: MemgraphClient = None
-        self.processor: TextProcessor = None
-        self.embedding_service: EmbeddingService = None
-        self.entities: EntityManager = None
-        self.session_id: str = None
-        self.topic_config: TopicConfig = None
+        self.memgraph: Optional[MemgraphClient] = None
+        self.processor: Optional[TextProcessor] = None
+        self.embedding_service: Optional[EmbeddingService] = None
+        self.entities: Optional[EntityManager] = None
+        self.session_id: Optional[str] = None
+        self.topic_config: Optional[TopicConfig] = None
         self._max_conversation_history: int = 10000
 
-        self.executor: ThreadPoolExecutor = None
-        self.batch_processor: BatchProcessor = None
-        self.consumer: BatchConsumer = None
-        self.profile_job: BaseJob = None
-        self.merge_job: BaseJob = None
-        self._background_tasks: set = set()
+        self.executor: Optional[ThreadPoolExecutor] = None
+        self.batch_processor: Optional[BatchProcessor] = None
+        self.consumer: Optional[BatchConsumer] = None
+        self.profile_job: Optional[BaseJob] = None
+        self.merge_job: Optional[BaseJob] = None
+        self._background_tasks: set[asyncio.Task] = set()
 
     @classmethod
     async def create(
@@ -241,8 +241,8 @@ class Context:
         role: str,
         content: str,
         timestamp: datetime,
-        user_msg_id: int = None,
-        metadata: dict = None,
+        user_msg_id: Optional[int] = None,
+        metadata: Optional[dict] = None,
     ):
         turn_id = await self.get_next_turn_id()
         turn_key = f"turn_{turn_id}"
@@ -317,8 +317,8 @@ class Context:
         self,
         content: str,
         timestamp: datetime,
-        metadata: dict = None,
-        user_msg_id: int = None,
+        metadata: Optional[dict] = None,
+        user_msg_id: Optional[int] = None,
     ):
         """Add assistant turn to conversation log."""
         if metadata is None:
@@ -356,6 +356,7 @@ class Context:
         system_prompt = "You are a knowledge extractor. Be precise and concise."
         user_prompt = get_lightweight_extraction_prompt(content)
 
+        config = get_config()
         try:
             result: EntityProfilesResult = await self.llm.call_llm(
                 system=system_prompt,
@@ -394,7 +395,6 @@ class Context:
                 )
 
                 target_id = None
-                config = get_config()
                 threshold = (
                     config.developer_settings.entity_resolution.resolution_threshold
                 )
@@ -500,7 +500,7 @@ class Context:
                     )
 
     async def get_conversation_context(
-        self, num_turns: int, up_to_msg_id: int = None
+        self, num_turns: int, up_to_msg_id: Optional[int] = None
     ) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
         turns = await fetch_conversation_turns(
@@ -682,29 +682,8 @@ class Context:
     async def refresh_session_ttls(self):
         """Refresh TTLs on all session-scoped Redis keys. Call on activity."""
         ttl = SESSION_KEY_TTL
-        u, s = self.user_name, self.session_id
 
-        keys = [
-            RedisKeys.buffer(u, s),
-            RedisKeys.checkpoint(u, s),
-            RedisKeys.message_content(u, s),
-            RedisKeys.dirty_entities(u, s),
-            RedisKeys.profile_complete(u, s),
-            RedisKeys.merge_queue(u, s),
-            RedisKeys.dlq(u, s),
-            RedisKeys.dlq_parked(u, s),
-            RedisKeys.last_processed(u, s),
-            RedisKeys.conversation(u, s),
-            RedisKeys.recent_conversation(u, s),
-            RedisKeys.msg_to_turn_lookup(u, s),
-            RedisKeys.last_activity(u, s),
-            RedisKeys.merge_proposals(u, s),
-            RedisKeys.merge_intents_index(u, s),
-            RedisKeys.user_profile_ran(u, s),
-            RedisKeys.heartbeat_counter(u, s),
-            RedisKeys.global_next_turn_id(u, s),
-        ]
-
+        keys = RedisKeys.get_session_scoped_keys(self.user_name, self.session_id)
         pipe = self.redis_client.pipeline()
         for key in keys:
             pipe.expire(key, ttl)
@@ -728,4 +707,4 @@ class Context:
                 for task in pending:
                     task.cancel()
         await emit(self.session_id, "system", "session_shutdown", {})
-        await DebugEventEmitter.get().cleanup_session(self.session_id)
+        await DebugEventEmitter.get().cleanup_scope(self.session_id)

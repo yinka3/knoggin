@@ -27,11 +27,11 @@ class LLMService:
         self,
         api_key: str = None,
         base_url: str = None,
-        trace_logger=None,
+        trace_logger: Optional[Any] = None,
         agent_model: str = "google/gemini-3-flash-preview",
         extraction_model: str = "google/gemini-2.5-flash",
         merge_model: str = "google/gemini-2.5-pro",
-        redis_client: aioredis.Redis = None,
+        redis_client: Optional[aioredis.Redis] = None,
     ):
         self._api_key = api_key
         self._base_url = base_url or OPENROUTER_BASE_URL
@@ -44,7 +44,7 @@ class LLMService:
         self._client = None
         self._raw_client = None
         self._http_client = httpx.AsyncClient(timeout=10.0)
-        self._background_tasks: set = set()
+        self._background_tasks: set[asyncio.Task] = set()
         self._model_prices: Dict[str, Dict[str, float]] = FALLBACK_COSTS.copy()
         self._prices_fetched = False
         self._tokenizer = None
@@ -106,23 +106,25 @@ class LLMService:
 
     def update_settings(
         self,
-        api_key: str = None,
-        base_url: str = None,
-        agent_model: str = None,
-        extraction_model: str = None,
-        merge_model: str = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        agent_model: Optional[str] = None,
+        extraction_model: Optional[str] = None,
+        merge_model: Optional[str] = None,
     ):
-        if api_key and api_key != self._api_key:
-            self._api_key = api_key
+        if (api_key and api_key != self._api_key) or (base_url and base_url != self._base_url):
+            if api_key:
+                self._api_key = api_key
             if base_url:
                 self._base_url = base_url
                 self._is_openrouter = "openrouter.ai" in self._base_url
+
             client = AsyncOpenAI(
                 base_url=self._base_url, api_key=self._api_key, timeout=60.0
             )
             self._raw_client = client
             self._client = instructor.from_openai(client)
-            logger.info("LLMService: API key updated")
+            logger.info(f"LLMService: API configuration updated ({self._base_url})")
 
         if agent_model:
             logger.info(f"LLMService: agent model {self._agent_model} -> {agent_model}")
@@ -146,20 +148,16 @@ class LLMService:
                 "require_parameters": True,
             }
             # Add prompt caching for Anthropic/Gemini
-            # By default OpenRouter uses 5m, we can keep it as is or specify
             body["cache_control"] = {"type": "ephemeral"}
 
             if reasoning == "high":
                 body["reasoning"] = {"max_tokens": 4096}
             elif reasoning == "medium":
                 body["reasoning"] = {"max_tokens": 1024}
-            elif reasoning == "low":
-                # Default reasoning, no specific max_tokens
+            elif reasoning and reasoning != "low":
+                # For any other custom reasoning if needed, but ensure it's a dict or valid config
                 pass
-            elif reasoning:  # For any other custom reasoning string
-                body["reasoning"] = reasoning
-        # Cast to ensure Pyre2 doesn't specialize the dict too early
-        return dict(body)
+        return body
 
     async def _fetch_model_prices(self):
         """Fetch live model pricing from OpenRouter."""
@@ -167,23 +165,22 @@ class LLMService:
             return
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{OPENROUTER_BASE_URL}/models", timeout=10.0
-                )
-                if response.status_code == 200:
-                    data = response.json().get("data", [])
-                    for m in data:
-                        m_id = m.get("id")
-                        pricing = m.get("pricing", {})
-                        if m_id and pricing:
-                            # OpenRouter gives per-token. Convert to per-1M for internal table
-                            self._model_prices[m_id] = {
-                                "input": float(pricing.get("prompt", 0)) * 1_000_000,
-                                "output": float(pricing.get("completion", 0))
-                                * 1_000_000,
-                            }
-                    logger.info(f"Refreshed pricing for {len(data)} OpenRouter models.")
+            response = await self._http_client.get(
+                f"{OPENROUTER_BASE_URL}/models", timeout=10.0
+            )
+            if response.status_code == 200:
+                data = response.json().get("data", [])
+                for m in data:
+                    m_id = m.get("id")
+                    pricing = m.get("pricing", {})
+                    if m_id and pricing:
+                        # OpenRouter gives per-token. Convert to per-1M for internal table
+                        self._model_prices[m_id] = {
+                            "input": float(pricing.get("prompt", 0)) * 1_000_000,
+                            "output": float(pricing.get("completion", 0))
+                            * 1_000_000,
+                        }
+                logger.info(f"Refreshed pricing for {len(data)} OpenRouter models.")
         except Exception as e:
             logger.error(f"Failed to refresh model prices: {e}")
 
@@ -250,10 +247,10 @@ class LLMService:
         response_model: Optional[type] = None,
         reasoning: Optional[str] = None,
         mode: Optional[instructor.Mode] = None,
-    ) -> Optional[object]:
+    ) -> Any:
         """
         Basic completion for pipeline tasks.
-        Defaults to EXTRACTION_MODEL. Callers can override for specific use cases.
+        Defaults to extraction_model. Callers can override for specific use cases.
         """
         self._ensure_client()
         await self._ensure_prices()
@@ -291,21 +288,9 @@ class LLMService:
                     ) = await self._client.chat.completions.create_with_completion(
                         **create_kwargs
                     )
-
-                    if completion and completion.usage:
-                        task = asyncio.create_task(
-                            self._record_local_usage(
-                                model,
-                                completion.usage.prompt_tokens,
-                                completion.usage.completion_tokens,
-                            )
-                        )
-                        self._background_tasks.add(task)
-                        task.add_done_callback(self._background_tasks.discard)
-
-                    return response
-
-                response = await self._client.chat.completions.create(**create_kwargs)
+                else:
+                    # Use raw client for non-structured calls to avoid instructor overhead/interference
+                    response = await self._raw_client.chat.completions.create(**create_kwargs)
 
                 if not response.choices:
                     return None

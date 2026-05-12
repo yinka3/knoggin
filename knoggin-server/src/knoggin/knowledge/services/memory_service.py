@@ -1,7 +1,7 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional
 
 import redis.asyncio as aioredis
 from loguru import logger
@@ -22,6 +22,13 @@ from infrastructure.redis.redis_client import RedisKeys
 
 
 class WorkingMemoryStrings(NamedTuple):
+    rules: str
+    preferences: str
+    icks: str
+
+
+class PromptStrings(NamedTuple):
+    memory_ctx: str
     rules: str
     preferences: str
     icks: str
@@ -356,10 +363,10 @@ class MemoryManager:
     async def load_prompt_strings(
         self,
         hot_topics: List[str] = None,
-    ) -> Tuple[str, str, str, str]:
+    ) -> PromptStrings:
         """Load all memory as formatted strings for prompt injection.
 
-        Returns (memory_ctx, rules, prefs, icks).
+        Returns PromptStrings(memory_ctx, rules, prefs, icks).
         Caller wraps these into whatever context object they need
         (SDK uses PromptContext, server uses loose variables).
         """
@@ -377,7 +384,9 @@ class MemoryManager:
 
         rules, prefs, icks = await self._load_working_memory_strings()
 
-        return memory_ctx, rules, prefs, icks
+        return PromptStrings(
+            memory_ctx=memory_ctx, rules=rules, preferences=prefs, icks=icks
+        )
 
     async def _load_working_memory_strings(self) -> WorkingMemoryStrings:
         result = {}

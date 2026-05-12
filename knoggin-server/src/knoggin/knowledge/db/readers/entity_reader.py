@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
@@ -416,12 +417,12 @@ class EntityReader:
             logger.error(f"Failed to get relationships for entity {entity_id}: {e}")
             return []
 
-    async def get_recently_active_entities(self, days: int = 7, limit: int = 10) -> List[Dict]:
+    async def get_recently_active_entities(
+        self, days: int = 7, limit: int = 10
+    ) -> List[Dict]:
         """Get entities with recent fact activity."""
-        from datetime import datetime, timezone, timedelta
-        
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        
+
         query = """
         MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
         WHERE f.valid_at > $cutoff

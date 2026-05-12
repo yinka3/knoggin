@@ -217,7 +217,7 @@ class BatchProcessor:
     async def _extract_mentions(
         self, messages: List[Dict], session_id: str
     ) -> List[Tuple[int, str, str, str]]:
-        """Run NER across all messages."""
+        """Run NER across all messages. Returns List[(msg_id, name, type, topic)]."""
 
         mentions = await self.processor.extract_mentions(
             self.user_name, messages, session_id
@@ -517,8 +517,7 @@ class BatchProcessor:
                 overlap = batch_matched_ids & neighbors
                 if overlap:
                     score += min(len(overlap) * 0.03, 0.05)
-
-            results[candidate_id] = max(results.get(candidate_id, 0), base_score)
+            results[candidate_id] = max(results.get(candidate_id, 0), score)
 
         return results
 
@@ -626,9 +625,10 @@ class BatchProcessor:
             "messages": messages,
         }
 
-        if stage == "processing" and session_text is not None:
+        if stage in ["processing", "message_log"] and session_text is not None:
             entry["session_text"] = session_text
-        elif stage == "graph_write" and batch_result is not None:
+        
+        if stage in ["graph_write", "message_log"] and batch_result is not None:
             entry["batch_result"] = batch_result.to_dict()
 
         try:

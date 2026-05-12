@@ -9,7 +9,7 @@ from neo4j import AsyncGraphDatabase
 
 from common.schema.dtypes import FactRecord
 from knoggin.community.db.community_store import CommunityStore
-from knoggin.knowledge.db.knowledge_queries import GraphToolQueries
+from knoggin.knowledge.db.tool_queries import GraphToolQueries
 from knoggin.knowledge.db.readers.entity_reader import EntityReader
 from knoggin.knowledge.db.readers.fact_reader import FactReader
 from knoggin.knowledge.db.readers.graph_reader import GraphReader
@@ -24,7 +24,7 @@ MEMGRAPH_PORT = os.environ.get("MEMGRAPH_PORT", "7687")
 
 
 class MemgraphClient:
-    def __init__(self, uri: str = None):
+    def __init__(self, uri: Optional[str] = None):
         if uri is None:
             uri = f"bolt://{MEMGRAPH_HOST}:{MEMGRAPH_PORT}"
         self.driver = AsyncGraphDatabase.driver(uri)
@@ -305,7 +305,7 @@ class MemgraphClient:
             limit, offset, topic, entity_type, search
         )
 
-    async def get_entity_by_id(self, entity_id: int):
+    async def get_entity_by_id(self, entity_id: int) -> Optional[Dict]:
         return await self._entity_reader.get_entity_by_id(entity_id=entity_id)
 
     async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:
@@ -390,6 +390,6 @@ class MemgraphClient:
         active_topics: List[str] = None,
         max_depth: int = 4,
     ) -> Tuple[List[Dict], bool]:
-        return await self._tools._find_path_filtered(
+        return await self._tools.find_path_filtered(
             start_name, end_name, active_topics, max_depth
         )

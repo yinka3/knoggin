@@ -101,6 +101,7 @@ class SessionAssembler:
         ctx.executor = self.resources.executor
         ctx.embedding_service = self.resources.embedding
         ctx.mcp_manager = self.resources.mcp_manager
+        ctx.resources = self.resources
 
         if ctx.consumer:
             ctx.consumer.get_session_context = ctx.get_conversation_context

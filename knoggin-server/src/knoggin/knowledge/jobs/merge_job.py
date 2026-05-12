@@ -1,6 +1,6 @@
+from knoggin.knowledge.services import graph_builder_service
 import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -37,7 +37,6 @@ class MergeDetectionJob(BaseJob):
         memgraph: MemgraphClient,
         llm_client: LLMService,
         topic_config: TopicConfig,
-        executor: ThreadPoolExecutor,
         redis_client: aioredis.Redis,
         auto_threshold: float = 0.93,
         hitl_threshold: float = 0.65,
@@ -51,7 +50,6 @@ class MergeDetectionJob(BaseJob):
         self.redis = redis_client
         self.llm = llm_client
         self.topic_config = topic_config
-        self.executor = executor
 
         self.auto_threshold = auto_threshold
         self.hitl_threshold = hitl_threshold
@@ -259,19 +257,18 @@ class MergeDetectionJob(BaseJob):
 
             if db_success:
                 await self._finalize_merge(ctx, item)
+            elif item.get("db_merge_completed"):
+                logger.info(
+                    f"Recovery: DB merge flag set for {p_id} <- {s_id}. "
+                    f"Merge succeeded before crash, finalizing."
+                )
+                await self._finalize_merge(ctx, item)
             else:
-                # If s_id is missing but p_id exists, the DB merge likely succeeded just before the crash!
-                s_exists = await self.memgraph.get_entity_by_id(s_id)
-                p_exists = await self.memgraph.get_entity_by_id(p_id)
-                if p_exists and not s_exists:
-                    logger.info(
-                        f"Recovery: Secondary {s_id} missing. Assuming DB merge succeeded previously. Finalizing..."
-                    )
-                    await self._finalize_merge(ctx, item)
-                else:
-                    logger.error(
-                        f"Recovery: Aborted merge finalization for {p_id} <- {s_id} due to DB failure."
-                    )
+                logger.warning(
+                    f"Recovery: DB merge failed for {p_id} <- {s_id} and no completion flag. "
+                    f"Secondary may have been deleted by cleanup or absorbed by another merge. "
+                    f"Skipping finalization to avoid data corruption."
+                )
 
             # Clean up
             await self.redis.delete(key)
@@ -519,7 +516,6 @@ class MergeDetectionJob(BaseJob):
             p_id: int = item_dict["primary_id"]
             s_id: int = item_dict["secondary_id"]
 
-            # 1. Record Intent
             intent_key = RedisKeys.merge_intent(
                 ctx.user_name, ctx.session_id, p_id, s_id
             )
@@ -531,11 +527,12 @@ class MergeDetectionJob(BaseJob):
             )
 
             if db_success:
-                # 3. Finalize
+                item_dict["db_merge_completed"] = True
+                await self.redis.set(intent_key, json.dumps(item_dict))
+
                 await self._finalize_merge(ctx, item_dict)
                 successful += 1
 
-                # Intent tracking cleanup
                 await self.redis.delete(intent_key)
                 await self.redis.srem(index_key, intent_key)
             else:
@@ -700,8 +697,8 @@ class MergeDetectionJob(BaseJob):
                     )
                     return None
 
-                duplicate_ids = await asyncio.get_running_loop().run_in_executor(
-                    self.executor, find_duplicate_facts, facts_a, facts_b
+                duplicate_ids = await asyncio.to_thread(
+                    find_duplicate_facts, facts_a, facts_b
                 )
 
                 return {

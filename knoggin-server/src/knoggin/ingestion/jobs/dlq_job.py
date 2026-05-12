@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from typing import Awaitable, Callable, Optional
@@ -140,8 +141,6 @@ class DLQReplayJob(BaseJob):
 
     async def _retry_message_log(self, entry: dict, ctx: JobContext) -> bool:
         """Retry saving message logs and subsequently the graph write."""
-        import asyncio
-
         try:
             messages = entry.get("messages", [])
             if not messages:

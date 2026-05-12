@@ -1,13 +1,17 @@
+from typing import Optional
+
 import httpx
 import redis.asyncio as aioredis
-from knoggin.knowledge.services.entity_service import EntityManager
 
 from common.conf.topics_config import TopicConfig
+from common.mcp.client import MCPClientManager
 from infrastructure.database.memgraph_client import MemgraphClient
 from knoggin.agent.tools.graph import GraphTools
 from knoggin.agent.tools.memory import MemoryTools
 from knoggin.agent.tools.search import SearchTools
+from knoggin.knowledge.services.entity_service import EntityManager
 from knoggin.knowledge.services.file_rag import FileRAGService
+from knoggin.knowledge.services.memory_service import MemoryManager
 
 TOOL_DISPATCH = {
     "search_messages": ("search_messages", ["query", "limit"]),
@@ -39,11 +43,11 @@ class Tools(SearchTools, GraphTools, MemoryTools):
         entities: EntityManager,
         redis_client: aioredis.Redis,
         session_id: str,
-        topic_config: TopicConfig = None,
-        search_config: dict = None,
-        file_rag: FileRAGService = None,
-        mcp_manager=None,
-        memory=None,
+        topic_config: Optional[TopicConfig] = None,
+        search_config: Optional[dict] = None,
+        file_rag: Optional[FileRAGService] = None,
+        mcp_manager: Optional[MCPClientManager] = None,
+        memory: Optional[MemoryManager] = None,
     ):
         self.session_id = session_id
         self.memgraph = memgraph

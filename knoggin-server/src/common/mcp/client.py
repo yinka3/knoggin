@@ -229,7 +229,7 @@ class MCPClientManager:
         except TimeoutError:
             logger.error(f"[MCP] Tool call timed out after 30s — {server_name}.{tool_name}")
             conn.last_error = "Tool call timed out"
-            return {"error": f"MCP tool call timed out after 30s"}
+            return {"error": "MCP tool call timed out after 30s"}
 
         except (ConnectionError, BrokenPipeError, EOFError, OSError) as e:
             logger.error(f"[MCP] Connection lost to '{server_name}': {e}")

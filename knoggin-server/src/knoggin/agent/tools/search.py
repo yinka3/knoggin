@@ -1,9 +1,19 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import re
 from datetime import datetime, timezone
 from functools import partial
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    import redis.asyncio as aioredis
+
+    from infrastructure.database.memgraph_client import MemgraphClient
+    from knoggin.knowledge.services.embedding_service import EmbeddingService
+    from knoggin.knowledge.services.entity_service import EntityManager
+    from knoggin.knowledge.services.file_rag import FileRAGService
 
 import httpx
 from loguru import logger
@@ -12,6 +22,17 @@ from infrastructure.redis.redis_client import RedisKeys
 
 
 class SearchTools:
+    # Attributes provided by the composed Tools class
+    redis: aioredis.Redis
+    memgraph: MemgraphClient
+    embedding_service: EmbeddingService
+    search_cfg: Dict
+    file_rag: Optional[FileRAGService]
+    user_name: str
+    session_id: str
+    active_topics: Optional[List[str]]
+    entities: EntityManager
+
     async def search_messages(self, query: str, limit: int = None) -> List[Dict]:
         """
         Search the user's actual messages by keyword or phrase.
@@ -237,7 +258,7 @@ class SearchTools:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
         return await self.entities.resolve_entity_name(entity)
 
-    async def _search_messages(self, query: str, k: int) -> list[tuple[str, float]]:
+    async def _search_messages(self, query: str, k: int) -> List[Tuple[str, float]]:
         """
         Asynchronous internal method executing hybrid vector + FTS search over messages,
         followed by an optional cross-encoder reranking step if candidates exceed 1.
@@ -279,7 +300,11 @@ class SearchTools:
 
         try:
             if len(results) > 1:
-                candidate_keys = list(results.keys())[:rerank_candidates]
+                # Sort by combined score and take top candidates for reranking
+                sorted_candidates = sorted(
+                    results.items(), key=lambda x: x[1][1], reverse=True
+                )[:rerank_candidates]
+                candidate_keys = [k for k, _ in sorted_candidates]
 
                 hydrated = await self._hydrate_evidence(candidate_keys)
                 text_map = {h["id"]: h.get("message", "") for h in hydrated}
@@ -300,8 +325,8 @@ class SearchTools:
         return [(key, score) for key, (_, score) in sorted_results]
 
     async def _hydrate_evidence(
-        self, evidence_ids: list[str], timeout: float = 5.0
-    ) -> list[dict]:
+        self, evidence_ids: List[str], timeout: float = 5.0
+    ) -> List[Dict]:
         """
         Fetch full message payloads from Redis for a list of string evidence IDs.
         Falls back to PostgreSQL lookup if Redis cache misses.

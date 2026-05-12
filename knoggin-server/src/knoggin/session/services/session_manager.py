@@ -3,7 +3,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
@@ -15,11 +15,11 @@ from knoggin.session.context import Context
 
 
 class SessionManager:
-    def __init__(self, resources, user_name, active_sessions):
+    def __init__(self, resources: Any, user_name: str, active_sessions: Dict[str, Context]):
         self.resources = resources
         self.user_name = user_name
         self.active_sessions = active_sessions
-        self._session_locks = {}
+        self._session_locks: Dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
     async def list_sessions(self) -> Dict[str, dict]:
@@ -37,7 +37,11 @@ class SessionManager:
             raise
 
     async def create_session(
-        self, topics_config=None, model=None, agent_id=None, enabled_tools=None
+        self,
+        topics_config: Optional[dict] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
     ) -> Context:
         session_id = str(uuid.uuid4())
 
@@ -190,26 +194,7 @@ class SessionManager:
         user = self.user_name
         redis = self.resources.redis
 
-        direct_keys = [
-            RedisKeys.global_next_turn_id(user, session_id),
-            RedisKeys.buffer(user, session_id),
-            RedisKeys.checkpoint(user, session_id),
-            RedisKeys.message_content(user, session_id),
-            RedisKeys.dirty_entities(user, session_id),
-            RedisKeys.profile_complete(user, session_id),
-            RedisKeys.merge_queue(user, session_id),
-            RedisKeys.dlq(user, session_id),
-            RedisKeys.dlq_parked(user, session_id),
-            RedisKeys.last_processed(user, session_id),
-            RedisKeys.conversation(user, session_id),
-            RedisKeys.recent_conversation(user, session_id),
-            RedisKeys.msg_to_turn_lookup(user, session_id),
-            RedisKeys.last_activity(user, session_id),
-            RedisKeys.merge_proposals(user, session_id),
-            RedisKeys.merge_intents_index(user, session_id),
-            RedisKeys.user_profile_ran(user, session_id),
-            RedisKeys.heartbeat_counter(user, session_id),
-        ]
+        direct_keys = RedisKeys.get_session_scoped_keys(user, session_id)
 
         memory_pattern = f"memory:{user}:{session_id}:*"
         cursor = 0

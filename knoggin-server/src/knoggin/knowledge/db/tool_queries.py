@@ -392,7 +392,7 @@ class GraphToolQueries:
             logger.error(f"Failed to find active-only path: {e}")
             return None
 
-    async def _find_path_filtered(
+    async def find_path_filtered(
         self,
         start_name: str,
         end_name: str,

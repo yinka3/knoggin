@@ -1,7 +1,24 @@
-from typing import Dict, List
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+if TYPE_CHECKING:
+    import redis.asyncio as aioredis
+
+    from infrastructure.database.memgraph_client import MemgraphClient
+    from knoggin.knowledge.services.entity_service import EntityManager
+    from knoggin.knowledge.services.memory_service import MemoryManager
 
 
 class MemoryTools:
+    # Attributes provided by the composed Tools class
+    redis: aioredis.Redis
+    memgraph: MemgraphClient
+    entities: EntityManager
+    memory: Optional[MemoryManager]
+    user_name: str
+    session_id: str
+
     async def save_memory(self, content: str, topic: str = "General") -> Dict:
         """Save a note to persistent session memory."""
         if self.memory:

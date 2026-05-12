@@ -20,12 +20,11 @@ class Scheduler:
     JOB_EXECUTION_TIMEOUT = 300
 
     def __init__(
-        self, user_name: str, session_id: str, redis: aioredis.Redis, resources=None
+        self, user_name: str, session_id: str, redis: aioredis.Redis
     ):
         self.user_name = user_name
         self.session_id = session_id
         self.redis = redis
-        self.resources = resources
         self._jobs: Dict[str, BaseJob] = {}
         self._last_runs: Dict[str, datetime] = {}
         self._running_tasks: Dict[str, asyncio.Task] = {}

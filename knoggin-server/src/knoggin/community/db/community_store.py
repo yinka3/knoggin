@@ -11,7 +11,7 @@ class CommunityStore:
 
     async def create_discussion(
         self, discussion_id: str, topic: str, agent_ids: List[str]
-    ):
+    ) -> None:
         query = """
         CREATE (d:AAC_Discussion {
             id: $id, topic: $topic, agent_ids: $agent_ids,
@@ -37,7 +37,7 @@ class CommunityStore:
 
     async def add_message(
         self, discussion_id: str, agent_id: str, content: str, role: str = "agent"
-    ):
+    ) -> None:
         query = """
         MATCH (d:AAC_Discussion {id: $discussion_id})
         CREATE (m:AAC_Message {agent_id: $agent_id, content: $content, role: $role, timestamp: $ts})
@@ -61,7 +61,7 @@ class CommunityStore:
             logger.error(f"Failed to add_message in discussion {discussion_id}: {e}")
             raise
 
-    async def close_discussion(self, discussion_id: str):
+    async def close_discussion(self, discussion_id: str) -> None:
         query = """
         MATCH (d:AAC_Discussion {id: $id})
         SET d.status = 'closed', d.closed_at = $ts
@@ -81,7 +81,7 @@ class CommunityStore:
 
     async def register_agent_spawn(
         self, parent_id: str, child_id: str, detail: str = ""
-    ):
+    ) -> None:
         query = """
         MERGE (p:AAC_Agent {id: $parent_id})
         MERGE (c:AAC_Agent {id: $child_id})

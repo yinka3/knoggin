@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from loguru import logger
@@ -34,9 +35,7 @@ class FactReader:
 
         try:
             async with self.driver.session() as session:
-                result = await session.run(
-                    query, {"entity_id": entity_id, "active_only": active_only}
-                )
+                result = await session.run(query, {"entity_id": entity_id})
                 records = await result.data()
                 return [self._hydrate_fact(record) for record in records]
         except Exception as e:
@@ -147,10 +146,8 @@ class FactReader:
 
     async def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
         """Get recently created facts."""
-        from datetime import datetime, timezone, timedelta
-        
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        
+
         query = """
         MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
         WHERE f.valid_at > $cutoff

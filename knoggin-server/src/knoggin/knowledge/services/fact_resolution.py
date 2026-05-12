@@ -16,7 +16,7 @@ from knoggin.knowledge.services.embedding_service import EmbeddingService
 
 class FactResolutionUtils:
     """
-    Stateless utility container for complex fact resolution, 
+    Stateless utility container for complex fact resolution,
     contradiction detection, and graph mutation logic.
     """
 
@@ -105,29 +105,12 @@ class FactResolutionUtils:
 
         if facts_to_create:
             try:
-                count = await memgraph.create_facts_batch(
-                    entity_id, facts_to_create
-                )
+                count = await memgraph.create_facts_batch(entity_id, facts_to_create)
                 logger.debug(f"Created {count} facts for entity {entity_id}")
 
-                failed_invalidations = []
-                for fact_id in to_invalidate:
-                    try:
-                        await memgraph.invalidate_fact(fact_id, now)
-                    except Exception as e:
-                        logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
-                        failed_invalidations.append(fact_id)
-
-                if failed_invalidations:
-                    await emit(
-                        session_id,
-                        "job",
-                        "invalidation_failures",
-                        {
-                            "entity_id": entity_id,
-                            "failed_fact_ids": failed_invalidations,
-                        },
-                    )
+                failed_invalidations = await FactResolutionUtils._invalidate_facts(
+                    to_invalidate, entity_id, session_id, memgraph, now
+                )
 
                 await emit(
                     session_id,
@@ -161,21 +144,9 @@ class FactResolutionUtils:
                     to_invalidate
                 )
         elif to_invalidate:
-            failed_invalidations = []
-            for fact_id in to_invalidate:
-                try:
-                    await memgraph.invalidate_fact(fact_id, now)
-                except Exception as e:
-                    logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
-                    failed_invalidations.append(fact_id)
-
-            if failed_invalidations:
-                await emit(
-                    session_id,
-                    "job",
-                    "invalidation_failures",
-                    {"entity_id": entity_id, "failed_fact_ids": failed_invalidations},
-                )
+            failed_invalidations = await FactResolutionUtils._invalidate_facts(
+                to_invalidate, entity_id, session_id, memgraph, now
+            )
 
             await emit(
                 session_id,
@@ -194,6 +165,35 @@ class FactResolutionUtils:
         return active_existing, []
 
     @staticmethod
+    async def _invalidate_facts(
+        fact_ids: set,
+        entity_id: int,
+        session_id: str,
+        memgraph: MemgraphClient,
+        now: datetime,
+    ) -> List[str]:
+        """Helper to batch invalidate facts and emit failures."""
+        failed_invalidations = []
+        for fact_id in fact_ids:
+            try:
+                await memgraph.invalidate_fact(fact_id, now)
+            except Exception as e:
+                logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
+                failed_invalidations.append(fact_id)
+
+        if failed_invalidations:
+            await emit(
+                session_id,
+                "job",
+                "invalidation_failures",
+                {
+                    "entity_id": entity_id,
+                    "failed_fact_ids": failed_invalidations,
+                },
+            )
+        return failed_invalidations
+
+    @staticmethod
     async def detect_contradictions(
         new_content: str,
         new_embedding: List[float],
@@ -209,7 +209,7 @@ class FactResolutionUtils:
         """
         Find existing fact that new fact contradicts.
         Uses embedding filter + LLM judgment.
-        Returns fact ID to invalidate, or None.
+        Returns list of fact IDs to invalidate.
         """
         if not existing_facts:
             return []
@@ -258,10 +258,10 @@ class FactResolutionUtils:
             pairs = [(fact.content, new_content) for fact, _ in batch]
 
             judgments = await FactResolutionUtils.llm_judge_contradiction(
-                pairs=pairs, 
-                llm=llm, 
+                pairs=pairs,
+                llm=llm,
                 session_id=session_id,
-                contradiction_prompt=contradiction_prompt
+                contradiction_prompt=contradiction_prompt,
             )
 
             for idx, is_contradiction in judgments.items():
@@ -289,10 +289,10 @@ class FactResolutionUtils:
 
     @staticmethod
     async def llm_judge_contradiction(
-        pairs: List[Tuple[str, str]], 
+        pairs: List[Tuple[str, str]],
         llm: LLMService,
         session_id: str,
-        contradiction_prompt: Optional[str] = None
+        contradiction_prompt: Optional[str] = None,
     ) -> Dict[int, bool]:
         """
         Ask LLM if new facts contradict existing facts.

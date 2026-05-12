@@ -17,7 +17,15 @@ load_dotenv()
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
 CONFIG_FILE = CONFIG_DIR / "knoggin.json"
 
-GLOBAL_CONFIG_LOCK = asyncio.Lock()
+_global_config_lock: Optional[asyncio.Lock] = None
+
+
+def get_config_lock() -> asyncio.Lock:
+    """Lazy initialization of the global config lock."""
+    global _global_config_lock
+    if _global_config_lock is None:
+        _global_config_lock = asyncio.Lock()
+    return _global_config_lock
 
 _config_lock = threading.Lock()
 _config_cache: Optional[dict] = None
@@ -267,7 +275,7 @@ def save_config(data: dict) -> bool:
 
 async def async_save_config(config: dict) -> bool:
     """Async wrapper for save_config with global locking."""
-    async with GLOBAL_CONFIG_LOCK:
+    async with get_config_lock():
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, save_config, config)
 
@@ -321,21 +329,27 @@ def update_config_value(key: str, updates: dict) -> bool:
 
     return save_config(config)
 
+def _redact(val: Optional[str]) -> str:
+    if not val:
+        return "***"
+    return f"...{val[-4:]}" if len(val) > 4 else "***"
+
+
 def redact_config(config: dict) -> dict:
     out = copy.deepcopy(config)
 
     if "llm" in out and isinstance(out["llm"], dict):
         api_key = out["llm"].get("api_key")
         if api_key:
-            out["llm"]["api_key"] = f"...{api_key[-4:]}" if len(api_key) > 4 else "***"
+            out["llm"]["api_key"] = _redact(api_key)
 
     if "search" in out and isinstance(out["search"], dict):
         brave_key = out["search"].get("brave_api_key")
         if brave_key:
-            out["search"]["brave_api_key"] = f"...{brave_key[-4:]}" if len(brave_key) > 4 else "***"
+            out["search"]["brave_api_key"] = _redact(brave_key)
         tavily_key = out["search"].get("tavily_api_key")
         if tavily_key:
-            out["search"]["tavily_api_key"] = f"...{tavily_key[-4:]}" if len(tavily_key) > 4 else "***"
+            out["search"]["tavily_api_key"] = _redact(tavily_key)
 
     if "mcp" in out and isinstance(out["mcp"], dict):
         servers = out["mcp"].get("servers", {})
@@ -344,8 +358,6 @@ def redact_config(config: dict) -> dict:
                 env = server_cfg["env"]
                 if isinstance(env, dict):
                     for key in env:
-                        val = env[key]
-                        if val:
-                            env[key] = f"...{val[-4:]}" if len(val) > 4 else "***"
+                        env[key] = _redact(env[key])
 
     return out

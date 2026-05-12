@@ -309,7 +309,9 @@ class GraphReader:
             logger.error(f"Failed to get graph stats: {e}")
             return {"entities": 0, "facts": 0, "relationships": 0}
 
-    async def get_neighbor_ids_batch(self, entity_ids: List[int]) -> Dict[int, set[int]]:
+    async def get_neighbor_ids_batch(
+        self, entity_ids: List[int]
+    ) -> Dict[int, set[int]]:
         """Batch fetch neighbor IDs for multiple entities."""
         if not entity_ids:
             return {}

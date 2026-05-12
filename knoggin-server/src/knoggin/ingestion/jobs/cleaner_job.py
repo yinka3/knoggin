@@ -84,6 +84,17 @@ class EntityCleanupJob(BaseJob):
                 user_id, orphan_cutoff, junk_cutoff
             )
 
+            merge_key = RedisKeys.merge_queue(self.user_name, ctx.session_id)
+            pending_merge = await self.redis.smembers(merge_key)
+            if pending_merge:
+                pending_ids = {int(eid) for eid in pending_merge}
+                protected = set(orphan_ids) & pending_ids
+                if protected:
+                    logger.info(
+                        f"Cleanup: Skipping {len(protected)} orphans pending merge evaluation"
+                    )
+                    orphan_ids = [eid for eid in orphan_ids if eid not in pending_ids]
+
             if not orphan_ids:
                 await self.redis.set(
                     RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id),

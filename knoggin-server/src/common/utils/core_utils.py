@@ -98,7 +98,7 @@ def is_covered(candidate: str, covered_texts: set[str]) -> bool:
 
 
 def validate_entity(
-    name: str, topic: str, topic_config: TopicConfig, label: str = None
+    name: str, topic: str, topic_config: TopicConfig, label: Optional[str] = None
 ) -> bool:
     """Filter invalid mentions before resolution."""
 

@@ -14,11 +14,7 @@ from typing import Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 
 # ── Re-export Domain Primitives ──────────────────────────────────
-from common.schema.primitives import (
-    Connection,
-    Entity,
-    ProfileUpdate,
-)
+from common.schema.primitives import Connection, Entity, Fact, ProfileUpdate
 
 # ═══════════════════════════════════════════════════════════════════
 #  LLM EXTRACTION COLLECTION WRAPPERS
@@ -114,7 +110,7 @@ class TopicConfigResult(BaseModel):
 @dataclass
 class FactMergeResult:
     to_invalidate: List[str]
-    new_contents: List[str]
+    new_contents: List[Fact]
 
 
 @dataclass

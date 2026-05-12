@@ -1,5 +1,6 @@
 import json
 import re
+from typing import Awaitable, Callable
 
 import redis.asyncio as aioredis
 from loguru import logger
@@ -24,7 +25,7 @@ class TopicConfigJob(BaseJob):
         self,
         llm: LLMService,
         topic_config: TopicConfig,
-        update_callback,
+        update_callback: Callable[[dict], Awaitable[None]],
         redis_client: aioredis.Redis,
         interval_msgs: int = 40,
         conversation_window: int = 50,
