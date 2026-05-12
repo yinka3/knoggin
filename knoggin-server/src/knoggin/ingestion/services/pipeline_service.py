@@ -245,155 +245,156 @@ class BatchProcessor:
         Deterministic entity resolution using 4 scoring signals.
         Replaces VP-02 LLM disambiguation.
         """
+        async with self.entities.resolution_lock:
 
-        msg_text_map = {m["id"]: m["message"] for m in messages}
+            msg_text_map = {m["id"]: m["message"] for m in messages}
 
-        entity_ids = []
-        new_ids = set()
-        alias_ids = set()
-        entity_msg_map: Dict[int, List[int]] = {}
-        created_in_batch: Dict[str, int] = {}
-        alias_updates: Dict[int, List[str]] = {}
-        batch_matched_ids: Set[int] = set()
+            entity_ids = []
+            new_ids = set()
+            alias_ids = set()
+            entity_msg_map: Dict[int, List[int]] = {}
+            created_in_batch: Dict[str, int] = {}
+            alias_updates: Dict[int, List[str]] = {}
+            batch_matched_ids: Set[int] = set()
 
-        # Precompute embeddings for unique mention names
-        unique_names = list({name for _, name, _, _ in mentions if name})
-        embedding_map = {}
-        if unique_names:
-            embeddings_array = await self.entities.embedding_service.encode(
-                unique_names
-            )
-            embedding_map = {
-                name: emb for name, emb in zip(unique_names, embeddings_array)
-            }
+            # Precompute embeddings for unique mention names
+            unique_names = list({name for _, name, _, _ in mentions if name})
+            embedding_map = {}
+            if unique_names:
+                embeddings_array = await self.entities.embedding_service.encode(
+                    unique_names
+                )
+                embedding_map = {
+                    name: emb for name, emb in zip(unique_names, embeddings_array)
+                }
 
-        # First pass: collect base candidates for all mentions
-        mention_candidates = []
-        first_pass_results = {}
-        for msg_id, name, typ, topic in mentions:
-            if not name:
-                mention_candidates.append(None)
-                continue
+            # First pass: collect base candidates for all mentions
+            mention_candidates = []
+            first_pass_results = {}
+            for msg_id, name, typ, topic in mentions:
+                if not name:
+                    mention_candidates.append(None)
+                    continue
 
-            canonical_lower = name.strip().lower()
+                canonical_lower = name.strip().lower()
 
-            if canonical_lower in first_pass_results:
-                mention_candidates.append(first_pass_results[canonical_lower])
-                continue
+                if canonical_lower in first_pass_results:
+                    mention_candidates.append(first_pass_results[canonical_lower])
+                    continue
 
-            precomputed = embedding_map.get(name)
-            candidates = await self.entities.get_candidate_ids(
-                name, precomputed_embedding=precomputed
-            )
+                precomputed = embedding_map.get(name)
+                candidates = await self.entities.get_candidate_ids(
+                    name, precomputed_embedding=precomputed
+                )
 
-            if candidates:
-                top_id, top_score = candidates[0]
-                entry = ("candidate", top_id, top_score)
-                if top_score >= self.resolution_threshold:
-                    batch_matched_ids.add(top_id)
-            else:
-                entry = ("new", None)
-
-            first_pass_results[canonical_lower] = entry
-            mention_candidates.append(entry)
-
-        # Second pass: batch-boost all candidates with graph signals
-        pairs_to_boost = []
-        boost_indices = []
-
-        for i, entry in enumerate(mention_candidates):
-            if entry and entry[0] == "candidate":
-                _, top_id, top_score = entry
-                msg_id = mentions[i][0]
-                pairs_to_boost.append((top_id, top_score, msg_id))
-                boost_indices.append(i)
-
-        boosted_scores = {}
-        if pairs_to_boost:
-            boosted_scores = await self._boost_candidates(
-                pairs_to_boost, msg_text_map, batch_matched_ids
-            )
-
-        for i, (msg_id, name, typ, topic) in enumerate(mentions):
-            if not name:
-                continue
-
-            entry = mention_candidates[i]
-            if entry is None:
-                continue
-
-            canonical_lower = name.strip().lower()
-            ent_id = None
-
-            # Batch dedup
-            if entry[0] == "batch_dedup":
-                ent_id = entry[1]
-                entity_ids.append(ent_id)
-                if ent_id not in entity_msg_map:
-                    entity_msg_map[ent_id] = []
-                entity_msg_map[ent_id].append(msg_id)
-                continue
-
-            # Candidate match
-            if entry[0] == "candidate":
-                top_id = entry[1]
-                boosted = boosted_scores.get(top_id, entry[2])
-
-                if boosted >= self.resolution_threshold:
-                    ent_id = top_id
-                    batch_matched_ids.add(ent_id)
-
-                    profile = await self.entities.get_profile(ent_id)
-                    if profile:
-                        existing_id, aliases_added, new_aliases = (
-                            self.entities.validate_existing(
-                                profile["canonical_name"], [name.strip()]
-                            )
-                        )
-                        if existing_id and aliases_added:
-                            self.entities.commit_new_aliases(existing_id, new_aliases)
-                            alias_ids.add(existing_id)
-                            if existing_id not in alias_updates:
-                                alias_updates[existing_id] = []
-                            alias_updates[existing_id].extend(new_aliases)
-
-            if ent_id is None:
-                if canonical_lower in created_in_batch:
-                    ent_id = created_in_batch[canonical_lower]
+                if candidates:
+                    top_id, top_score = candidates[0]
+                    entry = ("candidate", top_id, top_score)
+                    if top_score >= self.resolution_threshold:
+                        batch_matched_ids.add(top_id)
                 else:
-                    try:
-                        ent_id = await self.get_next_ent_id()
-                        source_context = msg_text_map.get(msg_id)
+                    entry = ("new", None)
 
-                        await self.entities.register_entity(
-                            ent_id,
-                            name.strip(),
-                            [name.strip()],
-                            typ,
-                            topic,
-                            self.session_id,
-                            source_context,
-                        )
-                        new_ids.add(ent_id)
-                        created_in_batch[canonical_lower] = ent_id
-                        batch_matched_ids.add(ent_id)
-                    except Exception as e:
-                        logger.error(f"Failed to register entity '{name}': {e}")
-                        ent_id = None
+                first_pass_results[canonical_lower] = entry
+                mention_candidates.append(entry)
 
-            if ent_id is not None:
-                if ent_id not in entity_msg_map:
-                    entity_msg_map[ent_id] = []
+            # Second pass: batch-boost all candidates with graph signals
+            pairs_to_boost = []
+            boost_indices = []
+
+            for i, entry in enumerate(mention_candidates):
+                if entry and entry[0] == "candidate":
+                    _, top_id, top_score = entry
+                    msg_id = mentions[i][0]
+                    pairs_to_boost.append((top_id, top_score, msg_id))
+                    boost_indices.append(i)
+
+            boosted_scores = {}
+            if pairs_to_boost:
+                boosted_scores = await self._boost_candidates(
+                    pairs_to_boost, msg_text_map, batch_matched_ids
+                )
+
+            for i, (msg_id, name, typ, topic) in enumerate(mentions):
+                if not name:
+                    continue
+
+                entry = mention_candidates[i]
+                if entry is None:
+                    continue
+
+                canonical_lower = name.strip().lower()
+                ent_id = None
+
+                # Batch dedup
+                if entry[0] == "batch_dedup":
+                    ent_id = entry[1]
                     entity_ids.append(ent_id)
-                entity_msg_map[ent_id].append(msg_id)
+                    if ent_id not in entity_msg_map:
+                        entity_msg_map[ent_id] = []
+                    entity_msg_map[ent_id].append(msg_id)
+                    continue
 
-        return ResolutionResult(
-            entity_ids=entity_ids,
-            new_ids=new_ids,
-            alias_ids=alias_ids,
-            entity_msg_map=entity_msg_map,
-            alias_updates=alias_updates,
-        )
+                # Candidate match
+                if entry[0] == "candidate":
+                    top_id = entry[1]
+                    boosted = boosted_scores.get(top_id, entry[2])
+
+                    if boosted >= self.resolution_threshold:
+                        ent_id = top_id
+                        batch_matched_ids.add(ent_id)
+
+                        profile = await self.entities.get_profile(ent_id)
+                        if profile:
+                            existing_id, aliases_added, new_aliases = (
+                                self.entities.validate_existing(
+                                    profile["canonical_name"], [name.strip()]
+                                )
+                            )
+                            if existing_id and aliases_added:
+                                self.entities.commit_new_aliases(existing_id, new_aliases)
+                                alias_ids.add(existing_id)
+                                if existing_id not in alias_updates:
+                                    alias_updates[existing_id] = []
+                                alias_updates[existing_id].extend(new_aliases)
+
+                if ent_id is None:
+                    if canonical_lower in created_in_batch:
+                        ent_id = created_in_batch[canonical_lower]
+                    else:
+                        try:
+                            ent_id = await self.get_next_ent_id()
+                            source_context = msg_text_map.get(msg_id)
+
+                            await self.entities.register_entity(
+                                ent_id,
+                                name.strip(),
+                                [name.strip()],
+                                typ,
+                                topic,
+                                self.session_id,
+                                source_context,
+                            )
+                            new_ids.add(ent_id)
+                            created_in_batch[canonical_lower] = ent_id
+                            batch_matched_ids.add(ent_id)
+                        except Exception as e:
+                            logger.error(f"Failed to register entity '{name}': {e}")
+                            ent_id = None
+
+                if ent_id is not None:
+                    if ent_id not in entity_msg_map:
+                        entity_msg_map[ent_id] = []
+                        entity_ids.append(ent_id)
+                    entity_msg_map[ent_id].append(msg_id)
+
+            return ResolutionResult(
+                entity_ids=entity_ids,
+                new_ids=new_ids,
+                alias_ids=alias_ids,
+                entity_msg_map=entity_msg_map,
+                alias_updates=alias_updates,
+            )
 
     async def _boost_candidates(
         self,

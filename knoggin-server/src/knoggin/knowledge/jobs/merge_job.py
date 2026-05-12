@@ -103,7 +103,7 @@ class MergeDetectionJob(BaseJob):
             logger.info(f"Processing {len(candidates)} merge candidates")
 
             # Recovery: check for lingering merge intents from a previous crashed run
-            await self._recover_pending_merges(ctx)
+            await self.recover_pending_merges(ctx)
 
             merge_summary = await self._process_merges(ctx, candidates)
             hierarchy_summary = await self._detect_hierarchy(ctx)
@@ -219,7 +219,7 @@ class MergeDetectionJob(BaseJob):
 
         return False
 
-    async def _recover_pending_merges(self, ctx: JobContext):
+    async def recover_pending_merges(self, ctx: JobContext):
         """Scan Redis for intents that didn't complete and finish them."""
         index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.session_id)
         intent_keys = await self.redis.smembers(index_key)
@@ -275,53 +275,62 @@ class MergeDetectionJob(BaseJob):
             await self.redis.srem(index_key, key)
 
     async def _finalize_merge(self, ctx: JobContext, merge_info: dict):
-        p_id = merge_info["primary_id"]
-        s_id = merge_info["secondary_id"]
-        p_name = merge_info["primary_name"]
-        s_name = merge_info["secondary_name"]
-        suggested_name = merge_info.get("suggested_name")
+        """
+        Finalizes the merge operation by updating entity metadata and clearing resolver data.
 
-        try:
-            self._sync_resolver(p_id, s_id)
+        IMPORTANT: This function is called *after* a successful database merge operation.
+        Its purpose is strictly to clean up transient state and ensure the Resolver cache
+        considers the merge complete. It does NOT perform the DB merge itself.
+        """
 
-            if suggested_name and suggested_name != p_name:
-                logger.info(
-                    f"Renaming merged entity {p_id}: {p_name} -> {suggested_name}"
-                )
-                await self.memgraph.update_entity_canonical_name(p_id, suggested_name)
-                p_name = suggested_name
+        async with self.entities.resolution_lock:
+            p_id = merge_info["primary_id"]
+            s_id = merge_info["secondary_id"]
+            p_name = merge_info["primary_name"]
+            s_name = merge_info["secondary_name"]
+            suggested_name = merge_info.get("suggested_name")
 
-            all_facts = await self.memgraph.get_facts_for_entity(p_id, True)
-            if all_facts:
-                resolution_text = f"{p_name}. " + " ".join(
-                    [f.content for f in all_facts]
-                )
-            else:
-                resolution_text = f"{p_name} (merged with {s_name})"
+            try:
+                self._sync_resolver(p_id, s_id)
 
-            new_embedding = await self.entities.compute_embedding(p_id, resolution_text)
-            await self.memgraph.update_entity_embedding(p_id, new_embedding)
+                if suggested_name and suggested_name != p_name:
+                    logger.info(
+                        f"Renaming merged entity {p_id}: {p_name} -> {suggested_name}"
+                    )
+                    await self.memgraph.update_entity_canonical_name(p_id, suggested_name)
+                    p_name = suggested_name
 
-        except Exception as e:
-            logger.exception(f"Finalize merge failed for {p_id}<-{s_id}: {e}")
-        finally:
-            # Always mark dirty so profile refinement picks up any incomplete work
-            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-            await self.redis.sadd(dirty_key, str(p_id))
+                all_facts = await self.memgraph.get_facts_for_entity(p_id, True)
+                if all_facts:
+                    resolution_text = f"{p_name}. " + " ".join(
+                        [f.content for f in all_facts]
+                    )
+                else:
+                    resolution_text = f"{p_name} (merged with {s_name})"
 
-        await emit(
-            ctx.session_id,
-            "job",
-            "entities_merged",
-            {
-                "primary": p_name,
-                "secondary": s_name,
-                "duplicate_facts_removed": len(
-                    merge_info.get("duplicate_fact_ids", [])
-                ),
-            },
-            verbose_only=True,
-        )
+                new_embedding = await self.entities.compute_embedding(p_id, resolution_text)
+                await self.memgraph.update_entity_embedding(p_id, new_embedding)
+
+            except Exception as e:
+                logger.exception(f"Finalize merge failed for {p_id}<-{s_id}: {e}")
+            finally:
+                # Always mark dirty so profile refinement picks up any incomplete work
+                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
+                await self.redis.sadd(dirty_key, str(p_id))
+
+            await emit(
+                ctx.session_id,
+                "job",
+                "entities_merged",
+                {
+                    "primary": p_name,
+                    "secondary": s_name,
+                    "duplicate_facts_removed": len(
+                        merge_info.get("duplicate_fact_ids", [])
+                    ),
+                },
+                verbose_only=True,
+            )
 
     def _sync_resolver(self, primary_id: int, secondary_id: int):
         """Update EntityManager after merge."""

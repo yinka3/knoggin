@@ -1,3 +1,4 @@
+from redis import asyncio
 import threading
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -36,12 +37,17 @@ class EntityManager:
         self._name_to_id = LRUCache(maxsize=3000000)
         self._id_to_names = LRUCache(maxsize=1000000)
         self._lock = threading.RLock()
+        self._resolution_lock = asyncio.Lock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
         self.candidate_vector_threshold = candidate_vector_threshold
         self.fuzzy_substring_threshold = fuzzy_substring_threshold
         self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
         self.generic_token_freq = generic_token_freq
+    
+    @property
+    def resolution_lock(self) -> asyncio.Lock:
+        return self._resolution_lock
 
     def update_settings(
         self,

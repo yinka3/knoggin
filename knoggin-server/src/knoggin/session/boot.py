@@ -18,6 +18,7 @@ from knoggin.ingestion.jobs.dlq_job import DLQReplayJob
 from knoggin.ingestion.services.batch_consumer import BatchConsumer
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
 from knoggin.ingestion.services.processor import TextProcessor
+from infrastructure.jobs.base import JobContext
 from knoggin.knowledge.jobs.merge_job import MergeDetectionJob
 from knoggin.knowledge.jobs.profile_job import ProfileRefinementJob
 from knoggin.knowledge.jobs.topics_job import TopicConfigJob
@@ -25,6 +26,13 @@ from knoggin.knowledge.services.entity_service import EntityManager
 from knoggin.knowledge.services.file_rag import FileRAGService
 from knoggin.session.context import Context
 
+LUA_SYNC_COUNTER_SCRIPT = """
+local current = tonumber(redis.call('GET', KEYS[1])) or 0
+local proposed = tonumber(ARGV[1])
+if proposed > current then
+    redis.call('SET', KEYS[1], ARGV[1])
+end
+"""
 
 class SessionAssembler:
     """
@@ -122,7 +130,36 @@ class SessionAssembler:
         return ctx
 
     async def launch(self, ctx: Context):
-        """Starts background tasks for the context."""
+        """Starts background tasks and jobs for the context."""
+        if ctx.consumer:
+            if ctx.consumer.get_session_context is None:
+                raise RuntimeError("consumer.get_session_context callback not wired")
+            if ctx.consumer.run_session_jobs is None:
+                raise RuntimeError("consumer.run_session_jobs callback not wired")
+            if ctx.consumer.write_to_graph is None:
+                raise RuntimeError("consumer.write_to_graph callback not wired")
+
+        if ctx.batch_processor:
+            if ctx.batch_processor._get_next_ent_id is None:
+                raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
+
+        if ctx.scheduler:
+            dlq_job = ctx.scheduler._jobs.get("dlq_auto_replay")
+            if dlq_job and dlq_job.write_to_graph is None:
+                raise RuntimeError("dlq_job.write_to_graph callback not wired")
+
+            topic_job = ctx.scheduler._jobs.get("topic_config")
+            if topic_job and topic_job.update_callback is None:
+                raise RuntimeError("topic_job.update_callback callback not wired")
+
+        if ctx.merge_job:
+            job_ctx = JobContext(
+                user_name=ctx.user_name,
+                session_id=ctx.session_id,
+                idle_seconds=0,
+            )
+            await ctx.merge_job.recover_pending_merges(job_ctx)
+
         if ctx.scheduler:
             await ctx.scheduler.start()
         if ctx.consumer:
@@ -149,10 +186,9 @@ class SessionAssembler:
 
     async def _sync_entity_counters(self):
         max_id = (await self.resources.memgraph.get_max_entity_id()) or 0
-        current_redis = await self.resources.redis.get(RedisKeys.global_next_ent_id())
-        # Set to max_id so next INCR returns max_id + 1 (first unused ID)
-        if not current_redis or int(current_redis) < max_id:
-            await self.resources.redis.set(RedisKeys.global_next_ent_id(), max_id)
+        await self.resources.redis.eval(
+            LUA_SYNC_COUNTER_SCRIPT, 1, RedisKeys.global_next_ent_id(), max_id
+        )
 
     def _init_entity_resolver(
         self, session_id: str, topic_config: TopicConfig
