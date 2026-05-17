@@ -29,6 +29,7 @@ class EntityWriter:
                     MERGE (e:Entity {id: data.id})
                     ON CREATE SET
                         e.session_id = data.session_id,
+                        e.project_id = data.project_id,
                         e.canonical_name = data.canonical_name,
                         e.aliases = data.aliases,
                         e.type = data.type,

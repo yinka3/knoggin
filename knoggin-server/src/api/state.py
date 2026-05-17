@@ -6,6 +6,7 @@ from infrastructure.resources import ResourceManager
 from knoggin.agent.services.agent_manager import AgentManager
 from knoggin.session.context import Context
 from knoggin.session.services.session_manager import SessionManager
+from knoggin.project.services.project_manager import ProjectManager
 
 
 class AppState:
@@ -21,6 +22,7 @@ class AppState:
 
         self.session_manager = SessionManager(resources, user_name, active_sessions)
         self.agent_manager = AgentManager(resources, user_name, active_sessions)
+        self.project_manager = ProjectManager(resources, user_name)
 
         self.global_scheduler = None
 

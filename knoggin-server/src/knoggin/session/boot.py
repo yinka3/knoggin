@@ -51,9 +51,10 @@ class SessionAssembler:
         topics_config: Optional[dict] = None,
         session_id: Optional[str] = None,
         model: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> Context:
         """Perform the multi-phase boot sequence: assemble + launch."""
-        ctx = await self.assemble(topics_config, session_id, model)
+        ctx = await self.assemble(topics_config, session_id, model, project_id)
         await self.launch(ctx)
         return ctx
 
@@ -62,6 +63,7 @@ class SessionAssembler:
         topics_config: Optional[dict] = None,
         session_id: Optional[str] = None,
         model: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> Context:
         """
         Wires together services and infrastructure into a Context.
@@ -72,7 +74,7 @@ class SessionAssembler:
         topic_config = await self._init_topic_config(session_id, topics_config)
         await self._sync_entity_counters()
 
-        entities = self._init_entity_resolver(session_id, topic_config)
+        entities = self._init_entity_resolver(session_id, topic_config, project_id)
         self.resources.active_entities = entities
 
         pipeline = await self._init_nlp_pipeline(entities, topic_config)
@@ -93,6 +95,7 @@ class SessionAssembler:
             self.user_name, list(topic_config.raw.keys()), self.resources.redis
         )
         ctx.session_id = session_id
+        ctx.project_id = project_id
         ctx.topic_config = topic_config
         ctx.entities = entities
         ctx.processor = pipeline
@@ -191,11 +194,12 @@ class SessionAssembler:
         )
 
     def _init_entity_resolver(
-        self, session_id: str, topic_config: TopicConfig
+        self, session_id: str, topic_config: TopicConfig, project_id: Optional[str] = None
     ) -> EntityManager:
         er_cfg = self.dev_settings.entity_resolution
         return EntityManager(
             session_id=session_id,
+            project_id=project_id,
             memgraph=self.resources.memgraph,
             embedding_service=self.resources.embedding,
             hierarchy_config=topic_config.hierarchy,

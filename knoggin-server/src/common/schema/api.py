@@ -22,6 +22,37 @@ class ErrorResponse(BaseModel):
     error: ErrorDetail
 
 
+# --- Project Models ---
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    access_mode: str = "open"  # "open" or "pooled"
+    allowed_projects: Optional[List[str]] = None  # only for pooled
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ProjectDetail(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    access_mode: str = "open"
+    allowed_projects: Optional[List[str]] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    session_count: int = 0
+
+
+class ProjectListResponse(BaseModel):
+    projects: List[ProjectDetail]
+    total: int
+
+
 # --- Session Models ---
 
 
@@ -31,6 +62,7 @@ class SessionListItem(BaseModel):
     created_at: Optional[datetime] = None
     last_active: Optional[datetime] = None
     is_active: bool = False
+    project_id: Optional[str] = None
 
 
 class SessionListResponse(BaseModel):
@@ -50,6 +82,7 @@ class SessionDetail(BaseModel):
     agent_id: Optional[str] = None
     enabled_tools: Optional[List[str]] = None
     is_active: bool = False
+    project_id: Optional[str] = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -57,6 +90,7 @@ class CreateSessionResponse(BaseModel):
     created_at: datetime
     model: Optional[str] = None
     agent_id: Optional[str] = None
+    project_id: Optional[str] = None
 
 
 # --- Agent Models ---

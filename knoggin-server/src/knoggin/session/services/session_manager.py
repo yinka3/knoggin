@@ -42,6 +42,7 @@ class SessionManager:
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
+        project_id: Optional[str] = None,
     ) -> Context:
         session_id = str(uuid.uuid4())
 
@@ -56,6 +57,7 @@ class SessionManager:
                 topics_config=topics_config,
                 session_id=session_id,
                 model=model,
+                project_id=project_id,
             )
 
             metadata = {
@@ -65,6 +67,7 @@ class SessionManager:
                 "model": model,
                 "agent_id": agent_id,
                 "enabled_tools": enabled_tools,
+                "project_id": project_id,
             }
 
             await self.resources.redis.hset(
@@ -116,6 +119,7 @@ class SessionManager:
                 topics_config=topics_to_use,
                 session_id=session_id,
                 model=metadata.get("model"),
+                project_id=metadata.get("project_id"),
             )
 
             self.active_sessions[session_id] = context

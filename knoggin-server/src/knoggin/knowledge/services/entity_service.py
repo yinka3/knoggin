@@ -23,6 +23,7 @@ class EntityManager:
         memgraph: "MemgraphClient",
         embedding_service: EmbeddingService,
         session_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         hierarchy_config: Optional[dict] = None,
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
@@ -34,6 +35,7 @@ class EntityManager:
         self.memgraph = memgraph
         self.hierarchy_config = hierarchy_config or {}
         self.session_id = session_id
+        self.project_id = project_id
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
         self._name_to_id = LRUCache(maxsize=3000000)
@@ -73,6 +75,7 @@ class EntityManager:
             "type": entity.get("type"),
             "topic": entity.get("topic", "General"),
             "session_id": entity.get("session_id"),
+            "project_id": entity.get("project_id"),
             "embedding": entity.get("embedding"),
         }
 
@@ -290,6 +293,7 @@ class EntityManager:
         entity_type: str,
         topic: str,
         session_id: str = None,
+        project_id: str = None,
         source_context: str = None,
     ) -> List[float]:
         """
@@ -297,6 +301,7 @@ class EntityManager:
         """
 
         session_id = session_id or self.session_id
+        project_id = project_id or self.project_id
         text_to_embed = None
         if source_context:
             text_to_embed = (
@@ -317,6 +322,7 @@ class EntityManager:
                 "type": entity_type,
                 "topic": topic or "General",
                 "session_id": session_id,
+                "project_id": project_id,
                 "embedding": embedding,
             }
 

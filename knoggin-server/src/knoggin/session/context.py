@@ -64,6 +64,7 @@ class Context:
         self.embedding_service: Optional[EmbeddingService] = None
         self.entities: Optional[EntityManager] = None
         self.session_id: Optional[str] = None
+        self.project_id: Optional[str] = None
         self.topic_config: Optional[TopicConfig] = None
         self._max_conversation_history: int = 10000
 
@@ -83,12 +84,13 @@ class Context:
         topics_config: dict = None,
         session_id: str = None,
         model: str = None,
+        project_id: str = None,
     ) -> "Context":
         """Assembles and launches a new session context."""
         from knoggin.session.boot import SessionAssembler
 
         assembler = SessionAssembler(user_name, resources)
-        ctx = await assembler.bootstrap(topics_config, session_id, model)
+        ctx = await assembler.bootstrap(topics_config, session_id, model, project_id)
 
         await ctx._verify_user_entity(user_name)
 

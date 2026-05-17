@@ -86,6 +86,7 @@ async def write_batch_to_graph(
                     "embedding": await entities.get_embedding_for_id(eid),
                     "aliases": entities.get_mentions_for_id(eid),
                     "session_id": profile.get("session_id") or session_id,
+                    "project_id": profile.get("project_id") or entities.project_id,
                 }
             )
 
@@ -107,6 +108,7 @@ async def write_batch_to_graph(
                     "embedding": await entities.get_embedding_for_id(eid),
                     "aliases": entities.get_mentions_for_id(eid),
                     "session_id": profile.get("session_id") or session_id,
+                    "project_id": profile.get("project_id") or entities.project_id,
                 }
             )
 

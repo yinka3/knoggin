@@ -24,6 +24,7 @@ from api.routers.memory import router as memory_router
 from api.routers.models import router as models_router
 from api.routers.onboarding import router as onboarding_router
 from api.routers.profiles import router as profiles_router
+from api.routers.projects import router as projects_router
 from api.routers.proposals import router as proposals_router
 from api.routers.sessions import router as sessions_router
 from api.routers.stats import router as stats_router
@@ -137,6 +138,7 @@ v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(onboarding_router, prefix="/onboarding", tags=["onboarding"])
 v1_router.include_router(health_router, tags=["health"])
 v1_router.include_router(sessions_router, prefix="/sessions", tags=["sessions"])
+v1_router.include_router(projects_router, prefix="/projects", tags=["projects"])
 v1_router.include_router(chat_router, prefix="/chat", tags=["chat"])
 v1_router.include_router(topics_router, prefix="/topics", tags=["topics"])
 v1_router.include_router(profiles_router, prefix="/profiles", tags=["profiles"])

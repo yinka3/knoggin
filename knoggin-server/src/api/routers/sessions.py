@@ -10,6 +10,7 @@ from api.deps import (
     get_agent_manager,
     get_app_state,
     get_memory_manager,
+    get_project_manager,
     get_session_manager,
 )
 from api.state import AppState
@@ -25,6 +26,7 @@ from common.schema.dtypes import Message
 from common.schema.tool_schema import ALL_TOOL_NAMES
 from knoggin.agent.services.agent_manager import AgentManager
 from knoggin.knowledge.services.memory_service import MemoryManager
+from knoggin.project.services.project_manager import ProjectManager
 from knoggin.session.services.session_manager import SessionManager
 
 router = APIRouter()
@@ -35,6 +37,7 @@ class CreateSessionRequest(BaseModel):
     model: Optional[str] = None
     agent_id: Optional[str] = None
     enabled_tools: Optional[List[str]] = None
+    project_id: Optional[str] = None
 
 
 class UpdateSessionRequest(BaseModel):
@@ -88,6 +91,7 @@ async def list_sessions(
 async def create_session(
     body: CreateSessionRequest = CreateSessionRequest(),
     session_manager: SessionManager = Depends(get_session_manager),
+    project_manager: ProjectManager = Depends(get_project_manager),
     agent_manager: AgentManager = Depends(get_agent_manager),
     state: AppState = Depends(get_app_state),
 ):
@@ -105,7 +109,11 @@ async def create_session(
         model=body.model,
         agent_id=agent_id,
         enabled_tools=body.enabled_tools,
+        project_id=body.project_id,
     )
+
+    if body.project_id:
+        await project_manager.add_session(body.project_id, context.session_id)
 
     await state.resources.redis.delete(f"topic_gen_count:{state.user_name}")
 
@@ -119,6 +127,7 @@ async def create_session(
         created_at=datetime.now(timezone.utc),
         model=body.model,
         agent_id=agent_id,
+        project_id=body.project_id,
     )
 
 

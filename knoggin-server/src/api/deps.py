@@ -6,12 +6,14 @@ from common.conf.topics_config import TopicConfig
 from knoggin.agent.services.agent_manager import AgentManager
 from knoggin.knowledge.services.memory_service import MemoryManager
 from knoggin.session.services.session_manager import SessionManager
+from knoggin.project.services.project_manager import ProjectManager
 
 # --- Validated Parameter Types ---
 
 # UUID-like or hex strings of reasonable length
 SessionID = Annotated[str, Path(description="The unique identifier for the session", min_length=8, pattern=r"^[a-zA-Z0-9_\-]+$")]
 AgentID = Annotated[str, Path(description="The unique identifier for the agent", min_length=4, pattern=r"^[a-zA-Z0-9_\-]+$")]
+ProjectID = Annotated[str, Path(description="The unique identifier for the project", min_length=8, pattern=r"^[a-zA-Z0-9_\-]+$")]
 
 # --- Dependencies ---
 
@@ -21,6 +23,10 @@ def get_app_state(request: Request) -> AppState:
 
 def get_session_manager(state: AppState = Depends(get_app_state)) -> SessionManager:
     return state.session_manager
+
+
+def get_project_manager(state: AppState = Depends(get_app_state)) -> ProjectManager:
+    return state.project_manager
 
 
 def get_agent_manager(state: AppState = Depends(get_app_state)) -> AgentManager:

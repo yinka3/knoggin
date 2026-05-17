@@ -226,6 +226,18 @@ class AsyncRedisClient:
 class RedisKeys:
     """Centralized Redis key patterns - session-scoped by default."""
 
+    # ============ PROJECT-SCOPED ============
+
+    @staticmethod
+    def projects(user: str) -> str:
+        """Hash: project_id → JSON metadata"""
+        return f"projects:{user}"
+
+    @staticmethod
+    def project_sessions(user: str, project_id: str) -> str:
+        """Set of session_ids belonging to a project"""
+        return f"project_sessions:{user}:{project_id}"
+
     # ============ SESSION-SCOPED ============
 
     @staticmethod
