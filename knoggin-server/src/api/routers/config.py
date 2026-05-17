@@ -190,9 +190,7 @@ async def update_config(body: ConfigUpdate, state: AppState = Depends(get_app_st
             merge_model=llm_cfg.get("merge_model"),
         )
 
-    active_count = 0
-    for _, context in state.active_sessions.items():
+    for context in state.active_sessions.values():
         await context.update_runtime_settings(merged_config)
-        active_count += 1
 
     return redact_config(merged_config)

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 
-from api.deps import get_app_state
+from api.deps import get_app_state, SessionID
 from api.state import AppState
 from common.conf.topics_config import TopicConfig
 from knoggin.knowledge.services.topic_manager import generate_topics
@@ -34,7 +34,7 @@ class GenerateFromDescriptionRequest(BaseModel):
     description: str
 
 
-async def get_topic_config(session_id: str, state: AppState) -> TopicConfig:
+async def get_topic_config(session_id: SessionID, state: AppState) -> TopicConfig:
     """Load TopicConfig for a session."""
     sessions = await state.session_manager.list_sessions()
     if session_id not in sessions:
@@ -93,7 +93,7 @@ async def generate_topics_from_description(
 
 
 @router.get("/{session_id}")
-async def list_topics(session_id: str, state: AppState = Depends(get_app_state)):
+async def list_topics(session_id: SessionID, state: AppState = Depends(get_app_state)):
     topic_config = await get_topic_config(session_id, state)
 
     return {
@@ -105,7 +105,7 @@ async def list_topics(session_id: str, state: AppState = Depends(get_app_state))
 
 @router.post("/{session_id}")
 async def create_topic(
-    session_id: str, body: CreateTopicRequest, state: AppState = Depends(get_app_state)
+    session_id: SessionID, body: CreateTopicRequest, state: AppState = Depends(get_app_state)
 ):
     topic_config = await get_topic_config(session_id, state)
 
@@ -134,7 +134,7 @@ async def create_topic(
 
 @router.get("/{session_id}/{topic_name}")
 async def get_topic(
-    session_id: str, topic_name: str, state: AppState = Depends(get_app_state)
+    session_id: SessionID, topic_name: str, state: AppState = Depends(get_app_state)
 ):
     topic_config = await get_topic_config(session_id, state)
 
@@ -150,7 +150,7 @@ async def get_topic(
 
 @router.patch("/{session_id}/{topic_name}")
 async def update_topic(
-    session_id: str,
+    session_id: SessionID,
     topic_name: str,
     body: UpdateTopicRequest,
     state: AppState = Depends(get_app_state),
@@ -185,7 +185,7 @@ async def update_topic(
 
 @router.delete("/{session_id}/{topic_name}")
 async def delete_topic(
-    session_id: str,
+    session_id: SessionID,
     topic_name: str,
     confirm: bool = False,
     state: AppState = Depends(get_app_state),

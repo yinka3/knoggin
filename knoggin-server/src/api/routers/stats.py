@@ -6,7 +6,7 @@ from loguru import logger
 
 from api.deps import get_app_state
 from api.state import AppState
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 _stats_cache = {"data": None, "ts": 0}
 _breakdown_cache = {"data": None, "ts": 0}
@@ -58,7 +58,6 @@ async def get_stats_breakdown(state: AppState = Depends(get_app_state)):
     if _breakdown_cache["data"] and now - _breakdown_cache["ts"] < CACHE_TTL:
         return _breakdown_cache["data"]
 
-    asyncio.get_running_loop()
 
     try:
         by_type, by_topic, top_connected = await asyncio.gather(

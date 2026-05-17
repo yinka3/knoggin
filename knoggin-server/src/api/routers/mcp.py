@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 
+from api.deps import get_app_state
 from api.state import AppState
 from common.conf.base import (
     async_save_config,
@@ -21,9 +22,8 @@ async def get_mcp_presets():
 
 
 @router.get("/servers")
-async def get_mcp_servers(request: Request):
+async def get_mcp_servers(state: AppState = Depends(get_app_state)):
     """Return all configured MCP servers with live connection status."""
-    state: AppState = request.app.state.app_state
     mcp = state.resources.mcp_manager
 
     if not mcp:
@@ -54,9 +54,8 @@ async def get_mcp_servers(request: Request):
 
 
 @router.post("/servers")
-async def add_mcp_server(body: MCPServerCreate, request: Request):
+async def add_mcp_server(body: MCPServerCreate, state: AppState = Depends(get_app_state)):
     """Add a new MCP server, save to config, and optionally connect."""
-    state: AppState = request.app.state.app_state
     mcp = state.resources.mcp_manager
 
     if not mcp:
@@ -88,9 +87,8 @@ async def add_mcp_server(body: MCPServerCreate, request: Request):
 
 
 @router.delete("/servers/{name}")
-async def remove_mcp_server(name: str, request: Request):
+async def remove_mcp_server(name: str, state: AppState = Depends(get_app_state)):
     """Disconnect and remove an MCP server."""
-    state: AppState = request.app.state.app_state
     mcp = state.resources.mcp_manager
 
     if not mcp:
@@ -110,9 +108,8 @@ async def remove_mcp_server(name: str, request: Request):
 
 
 @router.post("/servers/{name}/toggle")
-async def toggle_mcp_server(name: str, request: Request):
+async def toggle_mcp_server(name: str, state: AppState = Depends(get_app_state)):
     """Enable or disable an MCP server."""
-    state: AppState = request.app.state.app_state
     mcp = state.resources.mcp_manager
 
     if not mcp:

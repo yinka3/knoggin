@@ -1,22 +1,23 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from common.conf.base import get_config, update_config_value
 from common.utils.events import CommunityEventEmitter
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 from knoggin.community.services.community_manager import CommunityManager
+from api.deps import get_app_state
+from api.state import AppState
 
 router = APIRouter()
 
 
-def _get_community_store(request: Request):
+def _get_community_store(app_state: AppState):
     """Lazy singleton community memgraph on app_state."""
-    app_state = request.app.state.app_state
     if not hasattr(app_state, "_community_store"):
-        from db.community_store import CommunityStore
+        from knoggin.community.db.community_store import CommunityStore
 
         app_state._community_store = CommunityStore(app_state.resources.memgraph.driver)
     return app_state._community_store
@@ -32,25 +33,22 @@ async def toggle_community(request: Request, enabled: bool):
 
 
 @router.get("/discussions")
-async def list_discussions(request: Request):
-    memgraph = _get_community_store(request)
-    asyncio.get_running_loop()
+async def list_discussions(app_state: AppState = Depends(get_app_state)):
+    memgraph = _get_community_store(app_state)
     discussions = await memgraph.get_discussions()
     return {"discussions": discussions}
 
 
 @router.get("/discussions/{discussion_id}")
-async def get_discussion_history(discussion_id: str, request: Request):
-    memgraph = _get_community_store(request)
-    asyncio.get_running_loop()
+async def get_discussion_history(discussion_id: str, app_state: AppState = Depends(get_app_state)):
+    memgraph = _get_community_store(app_state)
     messages = await memgraph.get_discussion_history(discussion_id)
     return {"discussion_id": discussion_id, "messages": messages}
 
 
 @router.get("/hierarchy")
-async def get_agent_hierarchy(request: Request):
-    memgraph = _get_community_store(request)
-    asyncio.get_running_loop()
+async def get_agent_hierarchy(app_state: AppState = Depends(get_app_state)):
+    memgraph = _get_community_store(app_state)
     hierarchy = await memgraph.get_agent_hierarchy()
     return {"hierarchy": hierarchy}
 
@@ -77,8 +75,7 @@ async def community_stream(websocket: WebSocket):
 
 
 @router.get("/stats")
-async def get_community_status(request: Request):
-    app_state = request.app.state.app_state
+async def get_community_status(app_state: AppState = Depends(get_app_state)):
     redis = app_state.resources.redis
 
     active_id = await redis.get(RedisKeys.community_discussion_active())
@@ -98,8 +95,7 @@ async def get_community_status(request: Request):
 
 
 @router.get("/agents/{agent_id}/memory")
-async def get_community_agent_memory(agent_id: str, request: Request):
-    app_state = request.app.state.app_state
+async def get_community_agent_memory(agent_id: str, app_state: AppState = Depends(get_app_state)):
     redis = app_state.resources.redis
     user_name = app_state.user_name
 
@@ -127,17 +123,15 @@ async def get_community_agent_memory(agent_id: str, request: Request):
 
 
 @router.get("/insights")
-async def get_insights(request: Request, limit: int = 10):
-    memgraph = _get_community_store(request)
-    asyncio.get_running_loop()
+async def get_insights(limit: int = 10, app_state: AppState = Depends(get_app_state)):
+    memgraph = _get_community_store(app_state)
     insights = await memgraph.get_discussion_insights(limit)
     return {"insights": insights}
 
 
 @router.post("/trigger")
-async def trigger_discussion_manual(request: Request):
+async def trigger_discussion_manual(app_state: AppState = Depends(get_app_state)):
     """Manually trigger an AAC discussion for testing."""
-    app_state = request.app.state.app_state
 
     config = get_config()
     comm_cfg = config.developer_settings.community
@@ -176,9 +170,8 @@ async def trigger_discussion_manual(request: Request):
 
 
 @router.post("/close")
-async def close_discussion_manual(request: Request):
+async def close_discussion_manual(app_state: AppState = Depends(get_app_state)):
     """Manually end the active AAC discussion."""
-    app_state = request.app.state.app_state
 
     try:
         active_id = await app_state.resources.redis.get(

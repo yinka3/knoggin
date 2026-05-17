@@ -39,21 +39,6 @@ class AppState:
         await self.global_scheduler.start()
         logger.info(f"Global scheduler started lazily for user: {self.user_name}")
 
-    async def get_or_resume_session(self, session_id: str) -> Optional[Context]:
-        """Delegate shortcut for backwards compatibility in deps."""
-        return await self.session_manager.get_or_resume_session(session_id)
-
-    async def list_sessions(self) -> Dict[str, dict]:
-        """Delegate shortcut for backwards compatibility in deps."""
-        return await self.session_manager.list_sessions()
-
-    async def get_default_agent_id(self) -> str:
-        """Delegate shortcut for backwards compatibility in deps."""
-        return await self.agent_manager.get_default_agent_id()
-
-    async def get_agent(self, agent_id: str):
-        """Delegate shortcut for backwards compatibility."""
-        return await self.agent_manager.get_agent(agent_id)
 
     async def shutdown(self):
         if self.global_scheduler:

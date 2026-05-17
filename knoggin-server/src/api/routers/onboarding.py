@@ -28,16 +28,13 @@ class QAPair(BaseModel):
     answer: str
 
 
-class GenerateTopicsRequest(BaseModel):
+class QAResponsesRequest(BaseModel):
     responses: List[QAPair]
 
 
 class SaveTopicsRequest(BaseModel):
     topics: dict
 
-
-class ExtractRequest(BaseModel):
-    responses: List[QAPair]
 
 
 ONBOARDING_QUESTIONS = {
@@ -80,7 +77,7 @@ ONBOARDING_QUESTIONS = {
 
 @router.post("/generate-topics")
 async def generate_topics(
-    body: GenerateTopicsRequest, state: AppState = Depends(get_app_state)
+    body: QAResponsesRequest, state: AppState = Depends(get_app_state)
 ):
     if not body.responses:
         raise HTTPException(status_code=400, detail="No responses provided")
@@ -132,7 +129,7 @@ async def save_topics(
 
 
 @router.post("/extract")
-async def extract(body: ExtractRequest, state: AppState = Depends(get_app_state)):
+async def extract(body: QAResponsesRequest, state: AppState = Depends(get_app_state)):
     if not body.responses:
         raise HTTPException(status_code=400, detail="No responses provided")
 

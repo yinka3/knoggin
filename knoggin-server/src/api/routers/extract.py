@@ -1,7 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import get_app_state
+from api.deps import get_app_state, SessionID
 from api.state import AppState
 
 router = APIRouter()
@@ -14,7 +14,7 @@ class ExtractFactsRequest(BaseModel):
 
 @router.post("/{session_id}")
 async def extract_message_facts(
-    session_id: str,
+    session_id: SessionID,
     body: ExtractFactsRequest,
     background_tasks: BackgroundTasks,
     state: AppState = Depends(get_app_state),

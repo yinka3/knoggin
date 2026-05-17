@@ -44,3 +44,9 @@ async def debug_stream(websocket: WebSocket, session_id: str):
         pass
     finally:
         await emitter.unsubscribe(session_id, queue)
+
+
+@router.get("/error")
+async def trigger_error():
+    """Manually trigger an unhandled exception to test the global error handler."""
+    raise ValueError("This is a manual error for testing the global exception handler.")

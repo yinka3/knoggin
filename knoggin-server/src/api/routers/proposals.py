@@ -6,30 +6,26 @@ from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 
-from api.deps import get_app_state
+from api.deps import get_app_state, SessionID
 from api.state import AppState
 from common.schema.dtypes import FactRecord
 from common.utils.events import emit
-from infrastructure.redis.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 router = APIRouter()
 
 UNDO_TTL_SECONDS = 7200
 
 
-class MergeApprovalRequest(BaseModel):
+class MergeEntityPair(BaseModel):
     primary_id: int
     secondary_id: int
 
-
-class MergeUndoRequest(BaseModel):
-    primary_id: int
-    secondary_id: int
 
 
 @router.get("/{session_id}/merges")
 async def list_merge_proposals(
-    session_id: str, state: AppState = Depends(get_app_state)
+    session_id: SessionID, state: AppState = Depends(get_app_state)
 ):
     redis = state.resources.redis
     proposals_key = RedisKeys.merge_proposals(state.user_name, session_id)
@@ -62,7 +58,7 @@ async def list_merge_proposals(
 
 @router.post("/{session_id}/merges/{index}/approve")
 async def approve_merge_proposal(
-    session_id: str,
+    session_id: SessionID,
     index: int,
     body: MergeApprovalRequest,
     state: AppState = Depends(get_app_state),
@@ -172,7 +168,7 @@ async def approve_merge_proposal(
 
 @router.post("/{session_id}/merges/{index}/reject")
 async def reject_merge_proposal(
-    session_id: str,
+    session_id: SessionID,
     index: int,
     body: MergeApprovalRequest,
     state: AppState = Depends(get_app_state),
@@ -214,7 +210,7 @@ async def reject_merge_proposal(
 
 @router.post("/{session_id}/merges/undo")
 async def undo_merge(
-    session_id: str, body: MergeUndoRequest, state: AppState = Depends(get_app_state)
+    session_id: SessionID, body: MergeEntityPair, state: AppState = Depends(get_app_state)
 ):
     redis = state.resources.redis
     memgraph = state.resources.memgraph
@@ -333,7 +329,7 @@ async def _build_merge_snapshot(
 
 
 async def _execute_undo(
-    memgraph, entities, redis, snapshot: dict, session_id: str
+    memgraph, entities, redis, snapshot: dict, session_id: SessionID
 ) -> dict:
     """Restore secondary entity from snapshot."""
     primary_id = snapshot["primary_id"]

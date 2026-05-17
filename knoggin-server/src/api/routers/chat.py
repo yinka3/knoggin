@@ -9,17 +9,22 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
-from api.deps import get_app_state
+from api.deps import (
+    SessionID,
+    get_agent_manager,
+    get_app_state,
+    get_session_manager,
+)
+from common.schema.api import HistoryMessage, HistoryResponse
 from api.state import AppState
 from common.conf.base import get_config
 from common.schema.dtypes import Message
-from infrastructure.redis.redis_client import RedisKeys
 from knoggin.agent.orchestrator import Orchestrator
+from knoggin.agent.services.agent_manager import AgentManager
+from knoggin.session.services.session_manager import SessionManager
 
 router = APIRouter()
-orchestrator = Orchestrator(
-    resources=None
-)  # Resources will be passed in at runtime via AppState
+orchestrator = Orchestrator(resources=None)
 
 
 class ChatRequest(BaseModel):
@@ -33,32 +38,36 @@ class ChatRequest(BaseModel):
 
 @router.post("/{session_id}")
 async def send_message(
-    session_id: str, body: ChatRequest, state: AppState = Depends(get_app_state)
+    session_id: SessionID, 
+    body: ChatRequest, 
+    session_manager: SessionManager = Depends(get_session_manager),
+    agent_manager: AgentManager = Depends(get_agent_manager),
+    state: AppState = Depends(get_app_state)
 ):
     # Ensure orchestrator has access to resources
     if orchestrator._resources is None:
         orchestrator._resources = state.resources
 
-    context = await state.session_manager.get_or_resume_session(session_id)
+    context = await session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    sessions = await state.session_manager.list_sessions()
+    sessions = await session_manager.list_sessions()
     session_meta = sessions.get(session_id, {})
     agent_id = (
-        session_meta.get("agent_id") or await state.agent_manager.get_default_agent_id()
+        session_meta.get("agent_id") or await agent_manager.get_default_agent_id()
     )
     enabled_tools = session_meta.get("enabled_tools")
 
-    agent = await state.agent_manager.get_agent(agent_id)
+    agent = await agent_manager.get_agent(agent_id)
     if not agent:
         logger.warning(f"Agent {agent_id} not found, falling back to default")
-        agent_id = await state.agent_manager.get_default_agent_id()
-        agent = await state.agent_manager.get_agent(agent_id)
+        agent_id = await agent_manager.get_default_agent_id()
+        agent = await agent_manager.get_agent(agent_id)
 
         session_meta["agent_id"] = agent_id
-        await state.resources.redis.hset(
-            RedisKeys.sessions(state.user_name), session_id, json.dumps(session_meta)
+        await session_manager.update_session_metadata(
+            session_id, {"agent_id": agent_id}
         )
 
     agent_persona = agent.persona if agent else ""
@@ -191,10 +200,8 @@ async def send_message(
                         if title:
                             title = title.strip('"').strip()
                             session_meta["title"] = title
-                            await state.resources.redis.hset(
-                                RedisKeys.sessions(state.user_name),
-                                session_id,
-                                json.dumps(session_meta),
+                            await session_manager.update_session_metadata(
+                                session_id, {"title": title}
                             )
                             yield f"event: session_title\ndata: {json.dumps({'title': title})}\n\n"
                     except Exception as e:
@@ -240,28 +247,32 @@ async def send_message(
     )
 
 
-@router.get("/{session_id}/history")
+@router.get("/{session_id}/history", response_model=HistoryResponse)
 async def get_history(
-    session_id: str,
+    session_id: SessionID,
     limit: int = Query(40, ge=1, le=100),
-    state: AppState = Depends(get_app_state),
+    session_manager: SessionManager = Depends(get_session_manager),
 ):
-    context = await state.session_manager.get_or_resume_session(session_id)
+    context = await session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
 
     history = await context.get_conversation_context(num_turns=limit)
 
-    return {
-        "session_id": session_id,
-        "messages": [
-            {
-                "role": turn["role"],
-                "content": turn["content"],
-                "timestamp": turn["timestamp"],
-                "msg_id": turn.get("user_msg_id"),
-                **(turn.get("metadata") or {}),
-            }
-            for turn in history
-        ],
-    }
+    messages = []
+    for turn in history:
+        meta = turn.get("metadata") or {}
+        messages.append(
+            HistoryMessage(
+                role=turn["role"],
+                content=turn["content"],
+                timestamp=turn["timestamp"],
+                msg_id=turn.get("user_msg_id"),
+                tool_calls=meta.get("tool_calls"),
+                usage=meta.get("usage"),
+                sources=meta.get("sources"),
+                total_duration=meta.get("total_duration"),
+            )
+        )
+
+    return HistoryResponse(session_id=session_id, messages=messages)

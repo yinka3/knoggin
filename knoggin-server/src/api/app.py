@@ -1,9 +1,13 @@
 import re
+import traceback
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from loguru import logger
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.mcp_server import create_mcp_app
 from api.routers.agents import router as agents_router
@@ -26,6 +30,7 @@ from api.routers.stats import router as stats_router
 from api.routers.topics import router as topics_router
 from api.state import AppState
 from common.conf.base import get_config
+from common.schema.api import ErrorDetail, ErrorResponse
 from infrastructure.redis.resources import ResourceManager
 
 
@@ -49,6 +54,52 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Knoggin", lifespan=lifespan)
 
 
+# --- Global Exception Handlers ---
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            success=False,
+            error=ErrorDetail(
+                message=exc.detail,
+                type="http_error"
+            )
+        ).model_dump()
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content=ErrorResponse(
+            success=False,
+            error=ErrorDetail(
+                message="Input validation failed",
+                type="validation_error",
+                details=exc.errors()
+            )
+        ).model_dump()
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    logger.error(f"Unhandled exception: {exc}\n{tb}")
+    
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=ErrorResponse(
+            success=False,
+            error=ErrorDetail(
+                message="An unexpected internal server error occurred",
+                type="internal_error"
+            )
+        ).model_dump()
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -63,8 +114,6 @@ async def add_logging_context(request: Request, call_next):
     path = request.url.path
     session_id = None
 
-    # Try to extract session_id from common path patterns
-    # /v1/sessions/{id}, /v1/chat/{id}, etc.
     match = re.search(
         r"/(?:sessions|chat|topics|profiles|files|memory|extract)/([^/]+)", path
     )

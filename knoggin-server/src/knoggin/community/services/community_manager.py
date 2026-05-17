@@ -22,6 +22,8 @@ from knoggin.agent.tools.community_tools import CommunityTools
 from knoggin.agent.tools.registry import Tools
 from knoggin.session.boot import SessionAssembler
 from knoggin.session.context import Context
+from common.conf.topics_config import TopicConfig
+from knoggin.knowledge.services.memory_service import MemoryManager
 
 
 class CommunityManager:
@@ -35,19 +37,21 @@ class CommunityManager:
 
     async def _get_agent_working_memory(self, agent_id: str) -> Dict[str, List[str]]:
         """Fetch and safely parse an agent's working memory (rules, preferences, icks)."""
-        memory = {"rules": [], "preferences": [], "icks": []}
-        for category in memory.keys():
-            key = RedisKeys.agent_working_memory(agent_id, category)
-            raw = await self.resources.redis.hgetall(key)
-            if raw:
-                for v in raw.values():
-                    try:
-                        parsed = json.loads(v)
-                        if "content" in parsed:
-                            memory[category].append(parsed["content"])
-                    except json.JSONDecodeError:
-                        continue
-        return memory
+        memory_mgr = MemoryManager(
+            redis=self.resources.redis,
+            user_name=self.user_name,
+            session_id="community_system",
+            agent_id=agent_id,
+            topic_config=TopicConfig(TopicConfig.DEFAULT_CONFIG),
+        )
+
+        result = await memory_mgr.list_working_memory()
+        
+        # Format for community loop (List[str] of content)
+        return {
+            cat: [e.content for e in entries]
+            for cat, entries in result.blocks.items()
+        }
 
     async def _is_discussion_active(self) -> bool:
         return await self.resources.redis.exists(

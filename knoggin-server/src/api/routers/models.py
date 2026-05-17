@@ -8,7 +8,9 @@ from common.conf.base import get_config
 
 router = APIRouter()
 
-# Module-level cache for OpenRouter models
+# Module-level cache for OpenRouter models.
+# Note: This is a simple in-memory cache that works well for a single-process deployment.
+# In a multi-worker setup, each worker will fetch and cache this independently.
 _models_cache = None
 _models_cache_expiry = None
 

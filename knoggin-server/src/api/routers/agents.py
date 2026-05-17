@@ -1,14 +1,19 @@
-import json
-import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import get_app_state
-from api.state import AppState
-from infrastructure.redis.redis_client import RedisKeys
+from api.deps import AgentID, SessionID, get_agent_manager, get_memory_manager, get_working_memory_manager
+from common.schema.api import (
+    AgentDetail,
+    AgentListResponse,
+    GenericSuccess,
+    SessionMemoryResponse,
+    WorkingMemoryItem,
+    WorkingMemoryResponse,
+)
+from knoggin.agent.services.agent_manager import AgentManager
+from knoggin.knowledge.services.memory_service import MemoryManager
 
 router = APIRouter()
 
@@ -16,19 +21,19 @@ router = APIRouter()
 class CreateAgentRequest(BaseModel):
     name: str
     persona: str
-    instructions: Optional[str] = None
-    model: Optional[str] = None
-    temperature: Optional[float] = 0.7
-    enabled_tools: Optional[list[str]] = None
+    instructions: str = ""
+    model: str = None
+    temperature: float = 0.7
+    enabled_tools: list[str] = None
 
 
 class UpdateAgentRequest(BaseModel):
-    name: Optional[str] = None
-    persona: Optional[str] = None
-    instructions: Optional[str] = None
-    model: Optional[str] = None
-    temperature: Optional[float] = None
-    enabled_tools: Optional[list[str]] = None
+    name: str = None
+    persona: str = None
+    instructions: str = None
+    model: str = None
+    temperature: float = None
+    enabled_tools: list[str] = None
 
 
 class AgentMemoryEntry(BaseModel):
@@ -36,30 +41,29 @@ class AgentMemoryEntry(BaseModel):
 
 
 @router.get("/defaults")
-async def get_agent_defaults(state: AppState = Depends(get_app_state)):
+async def get_agent_defaults():
     return {
         "default_persona": "Warm and direct. Match their energy. No corporate filler.",
         "default_instructions": "",
     }
 
 
-@router.get("/")
-async def list_agents(state: AppState = Depends(get_app_state)):
-    agents = await state.agent_manager.list_agents()
-    return {"agents": [a.to_dict() for a in agents]}
+@router.get("/", response_model=AgentListResponse)
+async def list_agents(agent_manager: AgentManager = Depends(get_agent_manager)):
+    agents = await agent_manager.list_agents()
+    return AgentListResponse(agents=[a.to_dict() for a in agents])
 
 
-@router.post("/")
+@router.post("/", response_model=AgentDetail)
 async def create_agent(
-    body: CreateAgentRequest, state: AppState = Depends(get_app_state)
+    body: CreateAgentRequest, 
+    agent_manager: AgentManager = Depends(get_agent_manager)
 ):
-    existing = await state.agent_manager.get_agent_by_name(body.name)
+    existing = await agent_manager.get_agent_by_name(body.name)
     if existing:
-        raise HTTPException(
-            status_code=400, detail="Agent with this name already exists"
-        )
+        raise HTTPException(status_code=400, detail="Agent with this name already exists")
 
-    agent = await state.agent_manager.create_agent(
+    agent = await agent_manager.create_agent(
         name=body.name,
         persona=body.persona,
         instructions=body.instructions,
@@ -67,38 +71,43 @@ async def create_agent(
         temperature=body.temperature,
         enabled_tools=body.enabled_tools,
     )
+    return AgentDetail(**agent.to_dict())
 
-    return agent.to_dict()
 
-
-@router.get("/by-name/{name}")
-async def get_agent_by_name(name: str, state: AppState = Depends(get_app_state)):
-    agent = await state.agent_manager.get_agent_by_name(name)
+@router.get("/by-name/{name}", response_model=AgentDetail)
+async def get_agent_by_name(
+    name: str, 
+    agent_manager: AgentManager = Depends(get_agent_manager)
+):
+    agent = await agent_manager.get_agent_by_name(name)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return agent.to_dict()
+    return AgentDetail(**agent.to_dict())
 
 
-@router.get("/{agent_id}")
-async def get_agent(agent_id: str, state: AppState = Depends(get_app_state)):
-    agent = await state.agent_manager.get_agent(agent_id)
+@router.get("/{agent_id}", response_model=AgentDetail)
+async def get_agent(
+    agent_id: AgentID, 
+    agent_manager: AgentManager = Depends(get_agent_manager)
+):
+    agent = await agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return agent.to_dict()
+    return AgentDetail(**agent.to_dict())
 
 
-@router.patch("/{agent_id}")
+@router.patch("/{agent_id}", response_model=AgentDetail)
 async def update_agent(
-    agent_id: str, body: UpdateAgentRequest, state: AppState = Depends(get_app_state)
+    agent_id: AgentID, 
+    body: UpdateAgentRequest, 
+    agent_manager: AgentManager = Depends(get_agent_manager)
 ):
     if body.name:
-        existing = await state.agent_manager.get_agent_by_name(body.name)
+        existing = await agent_manager.get_agent_by_name(body.name)
         if existing and existing.id != agent_id:
-            raise HTTPException(
-                status_code=400, detail="Agent with this name already exists"
-            )
+            raise HTTPException(status_code=400, detail="Agent with this name already exists")
 
-    agent = await state.agent_manager.update_agent(
+    agent = await agent_manager.update_agent(
         agent_id=agent_id,
         name=body.name,
         persona=body.persona,
@@ -107,142 +116,88 @@ async def update_agent(
         temperature=body.temperature,
         enabled_tools=body.enabled_tools,
     )
-
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    return AgentDetail(**agent.to_dict())
 
-    return agent.to_dict()
 
-
-@router.delete("/{agent_id}")
-async def delete_agent(agent_id: str, state: AppState = Depends(get_app_state)):
-    agent = await state.agent_manager.get_agent(agent_id)
+@router.delete("/{agent_id}", response_model=GenericSuccess)
+async def delete_agent(
+    agent_id: AgentID, 
+    agent_manager: AgentManager = Depends(get_agent_manager)
+):
+    agent = await agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     if agent.is_default:
         raise HTTPException(status_code=400, detail="Cannot delete default agent")
 
-    success = await state.agent_manager.delete_agent(agent_id)
-    return {"success": success}
+    success = await agent_manager.delete_agent(agent_id)
+    return GenericSuccess(success=success, message="Agent deleted successfully")
 
 
-@router.post("/{agent_id}/set-default")
-async def set_default_agent(agent_id: str, state: AppState = Depends(get_app_state)):
-    success = await state.agent_manager.set_default_agent(agent_id)
+@router.post("/{agent_id}/set-default", response_model=GenericSuccess)
+async def set_default_agent(
+    agent_id: AgentID, 
+    agent_manager: AgentManager = Depends(get_agent_manager)
+):
+    success = await agent_manager.set_default_agent(agent_id)
     if not success:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return {"success": True}
+    return GenericSuccess(success=True, message="Default agent updated")
 
 
-@router.get("/memory/{session_id}")
-async def get_session_memory(session_id: str, state: AppState = Depends(get_app_state)):
-    context = await state.session_manager.get_or_resume_session(session_id)
-    if not context:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    topics = list(context.topic_config.raw.keys()) + ["General"]
-    blocks = {}
-
-    for topic in topics:
-        key = RedisKeys.agent_memory(context.user_name, session_id, topic)
-        raw = await context.redis_client.hgetall(key)
-        if raw:
-            entries = []
-            for mem_id, payload in raw.items():
-                try:
-                    data = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                entries.append(
-                    {
-                        "id": mem_id,
-                        "content": data.get("content", ""),
-                        "topic": data.get("topic", topic),
-                        "created_at": data.get("created_at", ""),
-                    }
-                )
-            entries.sort(key=lambda x: x["created_at"])
-            blocks[topic] = entries
-
-    total = sum(len(v) for v in blocks.values())
-    return {"blocks": blocks, "total": total}
+@router.get("/memory/{session_id}", response_model=SessionMemoryResponse)
+async def get_session_memory(session_id: SessionID, memory_mgr: MemoryManager = Depends(get_memory_manager)):
+    """Read agent-saved memory notes for a session."""
+    result = await memory_mgr.get_memory_blocks()
+    return SessionMemoryResponse(memories=result.blocks, total=result.total)
 
 
-@router.get("/{agent_id}/memory")
-async def get_agent_memory(agent_id: str, state: AppState = Depends(get_app_state)):
-    agent = await state.agent_manager.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    categories = ["rules", "preferences", "icks"]
-    blocks = {}
-
-    for category in categories:
-        key = RedisKeys.agent_working_memory(agent_id, category)
-        raw = await state.resources.redis.hgetall(key)
-
-        entries = []
-        if raw:
-            for mem_id, payload in raw.items():
-                try:
-                    data = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                data["id"] = mem_id
-                entries.append(data)
-
-            entries.sort(key=lambda x: x.get("created_at", ""))
-
-        blocks[category] = entries
-
-    return blocks
+@router.get("/{agent_id}/memory", response_model=WorkingMemoryResponse)
+async def get_agent_memory(agent_id: AgentID, memory_mgr: MemoryManager = Depends(get_working_memory_manager)):
+    """Read agent-level working memory (rules, preferences, icks)."""
+    result = await memory_mgr.list_working_memory()
+    
+    formatted = {}
+    for cat, entries in result.blocks.items():
+        formatted[cat] = [
+            WorkingMemoryItem(id=e.id, content=e.content, created_at=e.created_at)
+            for e in entries
+        ]
+    return WorkingMemoryResponse(**formatted)
 
 
-@router.post("/{agent_id}/memory/{category}")
+@router.post("/{agent_id}/memory/{category}", response_model=WorkingMemoryItem)
 async def add_agent_memory(
-    agent_id: str,
+    agent_id: AgentID,
     category: str,
     body: AgentMemoryEntry,
-    state: AppState = Depends(get_app_state),
+    memory_mgr: MemoryManager = Depends(get_working_memory_manager),
 ):
-    agent = await state.agent_manager.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    """Add an entry to agent-level working memory."""
+    result = await memory_mgr.add_working_memory(category=category, content=body.content)
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.error)
 
-    if category not in ["rules", "preferences", "icks"]:
-        raise HTTPException(status_code=400, detail="Invalid memory category")
-
-    key = RedisKeys.agent_working_memory(agent_id, category)
-
-    mem_id = f"mem_{str(uuid.uuid4().hex)[:8]}"
-    payload = json.dumps(
-        {"content": body.content, "created_at": datetime.now(timezone.utc).isoformat()}
+    return WorkingMemoryItem(
+        id=result.memory_id, 
+        content=result.content, 
+        created_at=datetime.now(timezone.utc).isoformat() # We don't have it in result yet, but good for schema
     )
 
-    await state.resources.redis.hset(key, mem_id, payload)
 
-    return {"id": mem_id, "content": body.content, "category": category}
-
-
-@router.delete("/{agent_id}/memory/{category}/{memory_id}")
+@router.delete("/{agent_id}/memory/{category}/{memory_id}", response_model=GenericSuccess)
 async def delete_agent_memory(
-    agent_id: str,
+    agent_id: AgentID,
     category: str,
     memory_id: str,
-    state: AppState = Depends(get_app_state),
+    memory_mgr: MemoryManager = Depends(get_working_memory_manager),
 ):
-    agent = await state.agent_manager.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    """Remove an entry from agent-level working memory."""
+    result = await memory_mgr.remove_working_memory(category=category, memory_id=memory_id)
+    if not result.success:
+        raise HTTPException(status_code=404, detail=result.error)
 
-    if category not in ["rules", "preferences", "icks"]:
-        raise HTTPException(status_code=400, detail="Invalid memory category")
-
-    key = RedisKeys.agent_working_memory(agent_id, category)
-
-    deleted = await state.resources.redis.hdel(key, memory_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Memory entry not found")
-
-    return {"success": True}
+    return GenericSuccess(success=True)

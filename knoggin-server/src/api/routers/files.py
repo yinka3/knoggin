@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from loguru import logger
 
-from api.deps import get_app_state
+from api.deps import get_app_state, SessionID
 from api.state import AppState
 from knoggin.knowledge.services.file_rag import ALLOWED_EXTENSIONS, MAX_FILE_SIZE
 
@@ -15,7 +15,7 @@ router = APIRouter()
 
 @router.post("/{session_id}/upload")
 async def upload_file(
-    session_id: str,
+    session_id: SessionID,
     file: UploadFile = File(...),
     state: AppState = Depends(get_app_state),
 ):
@@ -79,7 +79,7 @@ async def upload_file(
 
 
 @router.get("/{session_id}")
-async def list_files(session_id: str, state: AppState = Depends(get_app_state)):
+async def list_files(session_id: SessionID, state: AppState = Depends(get_app_state)):
     context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -93,7 +93,7 @@ async def list_files(session_id: str, state: AppState = Depends(get_app_state)):
 
 @router.delete("/{session_id}/{file_id}")
 async def delete_file(
-    session_id: str, file_id: str, state: AppState = Depends(get_app_state)
+    session_id: SessionID, file_id: str, state: AppState = Depends(get_app_state)
 ):
     context = await state.session_manager.get_or_resume_session(session_id)
     if not context:
