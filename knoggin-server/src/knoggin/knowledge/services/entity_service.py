@@ -22,7 +22,6 @@ class EntityManager:
         self,
         memgraph: "MemgraphClient",
         embedding_service: EmbeddingService,
-        session_id: Optional[str] = None,
         project_id: Optional[str] = None,
         hierarchy_config: Optional[dict] = None,
         fuzzy_substring_threshold: int = 75,
@@ -34,7 +33,6 @@ class EntityManager:
 
         self.memgraph = memgraph
         self.hierarchy_config = hierarchy_config or {}
-        self.session_id = session_id
         self.project_id = project_id
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
@@ -74,7 +72,6 @@ class EntityManager:
             "canonical_name": canonical,
             "type": entity.get("type"),
             "topic": entity.get("topic", "General"),
-            "session_id": entity.get("session_id"),
             "project_id": entity.get("project_id"),
             "embedding": entity.get("embedding"),
         }
@@ -300,7 +297,6 @@ class EntityManager:
         Register new entity: update all indexes and return embedding.
         """
 
-        session_id = session_id or self.session_id
         project_id = project_id or self.project_id
         text_to_embed = None
         if source_context:
@@ -321,7 +317,6 @@ class EntityManager:
                 "canonical_name": canonical_name,
                 "type": entity_type,
                 "topic": topic or "General",
-                "session_id": session_id,
                 "project_id": project_id,
                 "embedding": embedding,
             }
@@ -385,7 +380,7 @@ class EntityManager:
                 f"Merged entity {secondary_id} into {primary_id}, transferred {len(secondary_aliases)} aliases"
             )
             emit_sync(
-                self.session_id,
+                self.project_id,
                 "entities",
                 "entity_merged",
                 {
@@ -496,7 +491,7 @@ class EntityManager:
         if removed > 0:
             logger.info(f"Removed {removed} entities from entities")
             emit_sync(
-                self.session_id,
+                self.project_id,
                 "entities",
                 "entities_removed",
                 {"requested": len(entity_ids), "removed": removed},
@@ -630,8 +625,6 @@ class EntityManager:
             "secondary_name": profile_b.get("canonical_name", "Unknown"),
             "primary_type": type_a,
             "secondary_type": type_b,
-            "primary_session": profile_a.get("session_id"),
-            "secondary_session": profile_b.get("session_id"),
             "topic_a": topic_a,
             "topic_b": topic_b,
             "facts_a": facts_by_entity.get(id_a, []),

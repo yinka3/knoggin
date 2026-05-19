@@ -38,7 +38,6 @@ class CommunityTools(Tools):
             topic_config=base_tools.topic_config,
             search_config=base_tools.search_cfg,
             file_rag=base_tools.file_rag,
-            mcp_manager=base_tools.mcp_manager,
             memory=memory_mgr,
         )
         self.community_store = community_store

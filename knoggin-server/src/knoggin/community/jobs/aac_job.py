@@ -3,9 +3,9 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from common.conf.base import get_config
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
+from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
-from infrastructure.redis.resources import ResourceManager
+from infrastructure.resources import ResourceManager
 from knoggin.community.services.community_manager import CommunityManager
 
 

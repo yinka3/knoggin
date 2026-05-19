@@ -1,10 +1,9 @@
-from common.schema.settings import JobSettings
+
 from __future__ import annotations
 import asyncio
 import hashlib
 import json
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,7 +11,6 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.conf.base import deep_merge, get_config
-from common.conf.topics_config import TopicConfig
 from common.schema.settings import RootConfig
 from common.schema.dtypes import BatchResult, EntityProfilesResult, FactRecord, Message
 from common.utils.core_utils import (
@@ -20,24 +18,19 @@ from common.utils.core_utils import (
     handle_background_task_result,
     safe_update,
 )
+from common.schema.settings import JobSettings
 from common.utils.events import DebugEventEmitter, emit
-from infrastructure.memgraph_client import MemgraphClient
-from infrastructure.jobs.base import BaseJob, JobContext
-from infrastructure.jobs.scheduler import Scheduler
-from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.agent.prompts import get_lightweight_extraction_prompt
 from knoggin.ingestion.services.batch_consumer import BatchConsumer
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
-from knoggin.ingestion.services.processor import TextProcessor
 from knoggin.knowledge.db.write_graph_db import (
     write_batch_callback,
     write_batch_to_graph,
 )
-from knoggin.knowledge.services.embedding_service import EmbeddingService
-from knoggin.knowledge.services.entity_service import EntityManager
 from knoggin.knowledge.services.file_rag import FileRAGService
+from knoggin.project.state import ProjectState
 
 SESSION_KEY_TTL = 72 * 3600
 
@@ -52,29 +45,38 @@ class Context:
         self.user_name: str = user_name
         self.active_topics: List[str] = topics
         self.resources: Optional[ResourceManager] = None
-        self.scheduler: Optional[Scheduler] = None
         self.redis_client: aioredis.Redis = redis_client
         self.model: Optional[str] = None
-        self.llm: Optional[LLMService] = None
         self.file_rag: Optional[FileRAGService] = None
-        self.mcp_manager: Optional[Any] = None
 
-        self.memgraph: Optional[MemgraphClient] = None
-        self.processor: Optional[TextProcessor] = None
-        self.embedding_service: Optional[EmbeddingService] = None
-        self.entities: Optional[EntityManager] = None
         self.session_id: Optional[str] = None
         self.project_id: Optional[str] = None
-        self.topic_config: Optional[TopicConfig] = None
+        self.project: Optional[ProjectState] = None
+
         self._max_conversation_history: int = 10000
 
-        self.executor: Optional[ThreadPoolExecutor] = None
         self.batch_processor: Optional[BatchProcessor] = None
         self.consumer: Optional[BatchConsumer] = None
-        self.profile_job: Optional[BaseJob] = None
-        self.merge_job: Optional[BaseJob] = None
         self._background_tasks: set[asyncio.Task] = set()
         self.current_config: RootConfig = get_config()
+
+
+
+    @property
+    def memgraph(self):
+        return self.resources.memgraph if self.resources else None
+
+    @property
+    def llm(self):
+        return self.resources.llm_service if self.resources else None
+
+    @property
+    def embedding_service(self):
+        return self.resources.embedding if self.resources else None
+
+    @property
+    def executor(self):
+        return self.resources.executor if self.resources else None
 
     @classmethod
     async def create(
@@ -84,15 +86,13 @@ class Context:
         topics_config: dict = None,
         session_id: str = None,
         model: str = None,
-        project_id: str = None,
+        project_state: ProjectState = None,
     ) -> "Context":
         """Assembles and launches a new session context."""
         from knoggin.session.boot import SessionAssembler
 
         assembler = SessionAssembler(user_name, resources)
-        ctx = await assembler.bootstrap(topics_config, session_id, model, project_id)
-
-        await ctx._verify_user_entity(user_name)
+        ctx = await assembler.bootstrap(project_state, session_id, model)
 
         return ctx
 
@@ -107,94 +107,6 @@ class Context:
             RedisKeys.global_next_turn_id(self.user_name, self.session_id)
         )
 
-    async def update_topics_config(self, new_config: dict):
-        self.topic_config.update(new_config)
-        await self.topic_config.save(self.redis_client, self.user_name, self.session_id)
-        self.entities.hierarchy_config = self.topic_config.hierarchy
-        self.processor.refresh_topic_mappings()
-        await emit(
-            self.session_id,
-            "system",
-            "topics_updated",
-            {"topics": list(new_config.keys())},
-        )
-
-    async def _verify_user_entity(self, user_name: str):
-        user_id = await self.entities.get_id(user_name)
-        if user_id is None:
-            logger.critical(
-                f"User entity not found for '{user_name}' in entities. Onboarding may not have completed."
-            )
-            return
-
-        entity = await self.memgraph.get_entity_by_id(user_id)
-
-        if not entity or entity.get("canonical_name") != user_name:
-            logger.critical(
-                f"User entity lookup mismatch for '{user_name}' (id={user_id}). "
-                f"Onboarding may not have completed."
-            )
-            return
-
-        profile = self.entities.entity_profiles.get(user_id)
-        if profile and profile["canonical_name"] == user_name:
-            logger.info(f"User entity verified: {user_name} (id={user_id})")
-            await emit(
-                self.session_id,
-                "system",
-                "user_entity_verified",
-                {"user_name": user_name, "entity_id": user_id},
-            )
-            return
-
-        logger.warning(
-            "User entity exists in graph but missing from entities, backfilling"
-        )
-        all_aliases = entity.get("aliases") or [user_name]
-        await self.entities.register_entity(
-            user_id, user_name, all_aliases, "person", "Identity"
-        )
-        await emit(
-            self.session_id, "system", "user_entity_recovered", {"user_name": user_name}
-        )
-
-    async def _run_session_jobs(self):
-        await emit(self.session_id, "job", "session_jobs_started", {})
-        ctx = JobContext(
-            user_name=self.user_name, session_id=self.session_id, idle_seconds=0
-        )
-
-        # 1. Profile Refinement (Primary focus for consistent views)
-        if await self.profile_job.should_run(ctx):
-            await self.profile_job.execute(ctx)
-
-        # 2. Merger (Uses refined profiles)
-        # Targeted Flush: If we have pending merges, only force refinement for
-        # entities that are actively in the merge queue and also dirty.
-        is_merge_pending = getattr(
-            self.merge_job, "enabled", True
-        ) and await self.merge_job.should_run(ctx)
-
-        if is_merge_pending:
-            merge_key = RedisKeys.merge_queue(self.user_name, self.session_id)
-            dirty_key = RedisKeys.dirty_entities(self.user_name, self.session_id)
-
-            # Fetch both sets to find intersection
-            merge_ids = await self.redis_client.smembers(merge_key)
-            dirty_ids = await self.redis_client.smembers(dirty_key)
-
-            if merge_ids and dirty_ids:
-                intersection = merge_ids.intersection(dirty_ids)
-                if intersection:
-                    target_ids = [int(eid) for eid in intersection]
-                    logger.info(
-                        f"Targeted profile flush for {len(target_ids)} entities involved in pending merges"
-                    )
-                    await self.profile_job.execute(ctx, target_ids=target_ids)
-
-            await self.merge_job.execute(ctx)
-
-        await emit(self.session_id, "job", "session_jobs_complete", {})
 
     async def add(self, msg: Message) -> Message:
         # Deterministic ID: same content + session + timestamp_ns = same ID
@@ -239,7 +151,7 @@ class Context:
             ),
         )
 
-        await self.scheduler.record_activity()
+        await self.project.scheduler.record_activity()
         self.consumer.signal()
         await self.refresh_session_ttls()
         return msg
@@ -372,7 +284,7 @@ class Context:
                 subject = subject_names[i]
                 subject_emb = subject_embeddings[i]
 
-                candidates = await self.entities.get_candidate_ids(
+                candidates = await self.project.entities.get_candidate_ids(
                     subject, precomputed_embedding=subject_emb
                 )
 
@@ -452,7 +364,7 @@ class Context:
 
         for attempt in range(max_retries):
             try:
-                embedding_list = await self.entities.compute_batch_embeddings([content])
+                embedding_list = await self.project.entities.compute_batch_embeddings([content])
                 embedding_vector = embedding_list[0]
 
                 graph_id = turn_id + 1_000_000_000
@@ -524,8 +436,9 @@ class Context:
         await write_batch_to_graph(
             batch,
             memgraph=self.memgraph,
-            entities=self.entities,
+            entities=self.project.entities,
             session_id=self.session_id,
+            project_id=self.project_id,
             user_name=self.user_name,
             redis_client=self.redis_client,
         )
@@ -536,8 +449,9 @@ class Context:
         return await write_batch_callback(
             result,
             memgraph=self.memgraph,
-            entities=self.entities,
+            entities=self.project.entities,
             session_id=self.session_id,
+            project_id=self.project_id,
             user_name=self.user_name,
             redis_client=self.redis_client,
         )
@@ -564,7 +478,16 @@ class Context:
 
         # 2. Dispatch updates using safe_update to prevent crashes from signature drift
         if new_config.default_topics != self.current_config.default_topics:
-            await self.update_topics_config(updated_data.get("default_topics", {}))
+            topics_dict = updated_data.get("default_topics", {})
+            await self.project.update_topics_config(topics_dict)
+            if self.batch_processor:
+                self.batch_processor.refresh_topic_mappings()
+            await emit(
+                self.session_id,
+                "system",
+                "topics_updated",
+                {"topics": list(topics_dict.keys())},
+            )
 
         if dev_settings.ingestion != old_dev.ingestion and self.consumer:
             safe_update(self.consumer.update_settings, dev_settings.ingestion)
@@ -572,11 +495,11 @@ class Context:
         if dev_settings.jobs != old_dev.jobs:
             self._update_job_settings(dev_settings.jobs, old_dev.jobs)
 
-        if dev_settings.entity_resolution != old_dev.entity_resolution and self.entities:
-            safe_update(self.entities.update_settings, dev_settings.entity_resolution)
+        if dev_settings.entity_resolution != old_dev.entity_resolution and self.project and self.project.entities:
+            safe_update(self.project.entities.update_settings, dev_settings.entity_resolution)
 
-        if dev_settings.nlp_pipeline != old_dev.nlp_pipeline and self.processor:
-            safe_update(self.processor.update_settings, dev_settings.nlp_pipeline)
+        if dev_settings.nlp_pipeline != old_dev.nlp_pipeline and self.project and self.project.pipeline:
+            safe_update(self.project.pipeline.update_settings, dev_settings.nlp_pipeline)
 
         self.current_config = new_config
 
@@ -590,34 +513,32 @@ class Context:
 
     def _update_job_settings(self, new_jobs: JobSettings, old_jobs: JobSettings):
         """Update job-specific settings if they changed."""
-        from common.schema.settings import JobSettings
+        if new_jobs.profile != old_jobs.profile and self.project.profile_job:
+            safe_update(self.project.profile_job.update_settings, new_jobs.profile)
 
-        if new_jobs.profile != old_jobs.profile and self.profile_job:
-            safe_update(self.profile_job.update_settings, new_jobs.profile)
+        if new_jobs.merger != old_jobs.merger and self.project.merge_job:
+            safe_update(self.project.merge_job.update_settings, new_jobs.merger)
 
-        if new_jobs.merger != old_jobs.merger and self.merge_job:
-            safe_update(self.merge_job.update_settings, new_jobs.merger)
-
-        if self.scheduler:
+        if self.project and self.project.scheduler:
             if new_jobs.cleaner != old_jobs.cleaner:
-                cleaner = self.scheduler._jobs.get("entity_cleanup")
+                cleaner = self.project.scheduler._jobs.get("entity_cleanup")
                 if cleaner:
                     cleaner.enabled = new_jobs.cleaner.enabled
                     safe_update(cleaner.update_settings, new_jobs.cleaner)
 
             if new_jobs.dlq != old_jobs.dlq:
-                dlq = self.scheduler._jobs.get("dlq_auto_replay")
+                dlq = self.project.scheduler._jobs.get("dlq_auto_replay")
                 if dlq:
                     safe_update(dlq.update_settings, new_jobs.dlq)
 
             if new_jobs.archival != old_jobs.archival:
-                archiver = self.scheduler._jobs.get("fact_archival")
+                archiver = self.project.scheduler._jobs.get("fact_archival")
                 if archiver:
                     archiver.enabled = new_jobs.archival.enabled
                     safe_update(archiver.update_settings, new_jobs.archival)
 
             if new_jobs.topic_config != old_jobs.topic_config:
-                tconfig = self.scheduler._jobs.get("topic_config")
+                tconfig = self.project.scheduler._jobs.get("topic_config")
                 if tconfig:
                     tconfig.enabled = new_jobs.topic_config.enabled
 

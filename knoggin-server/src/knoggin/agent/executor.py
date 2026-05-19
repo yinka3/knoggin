@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from common.errors.exceptions import ToolExecutionError
-from common.mcp.bridge import mcp_tools_to_schemas
 from common.schema.tool_schema import get_filtered_schemas
 from common.utils.events import emit
 from infrastructure.llm_client import LLMService
@@ -260,10 +259,7 @@ class AgentExecutor:
         active_schemas = get_filtered_schemas(enabled_tools)
         if client_tools:
             active_schemas = active_schemas + client_tools
-        if self.tools.mcp_manager:
-            active_schemas = active_schemas + mcp_tools_to_schemas(
-                self.tools.mcp_manager.get_all_tools()
-            )
+
 
         pending_tool_calls = []
         content_accumulator = ""

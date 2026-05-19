@@ -12,8 +12,7 @@ from .managers import (
     AgentManager, 
     SessionManager, 
     TopicManager, 
-    FileManager, 
-    MCPManager
+    FileManager
 )
 
 class KnogginExtractor:
@@ -266,7 +265,6 @@ class KnogginClient:
         self.sessions = SessionManager(self)
         self.topics = TopicManager(self)
         self.files = FileManager(self)
-        self.mcp = MCPManager(self)
         self._handlers = {}
 
     @classmethod

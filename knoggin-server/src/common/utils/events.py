@@ -137,10 +137,24 @@ class DebugEventEmitter(BaseEventEmitter):
 
     def __init__(self):
         super().__init__(history_maxlen=5)
+        self.project_sessions: Dict[str, Set[str]] = {}
 
     @classmethod
     def get(cls) -> "DebugEventEmitter":
         return _DEBUG_EMITTER
+
+    def register_session(self, project_id: str, session_id: str):
+        if project_id not in self.project_sessions:
+            self.project_sessions[project_id] = set()
+        self.project_sessions[project_id].add(session_id)
+        logger.debug(f"Registered session {session_id} to project {project_id} in emitter")
+
+    def unregister_session(self, project_id: str, session_id: str):
+        if project_id in self.project_sessions:
+            self.project_sessions[project_id].discard(session_id)
+            if not self.project_sessions[project_id]:
+                del self.project_sessions[project_id]
+        logger.debug(f"Unregistered session {session_id} from project {project_id} in emitter")
 
     async def subscribe(self, session_id: str) -> asyncio.Queue:
         # Override to use loguru context or just for naming
@@ -155,16 +169,29 @@ class DebugEventEmitter(BaseEventEmitter):
         data: Dict[str, Any] = None,
         verbose_only: bool = False,
     ):
-        evt = DebugEvent(
-            ts=datetime.now(timezone.utc).isoformat(),
-            session_id=session_id,
-            component=component,
-            event=event,
-            data=data or {},
-            verbose_only=verbose_only,
-        )
-
-        await self._emit_to_subs(session_id, evt)
+        # If session_id is a registered project_id, fan out to all its active sessions
+        if session_id in self.project_sessions:
+            active_sess_list = list(self.project_sessions[session_id])
+            for active_sess in active_sess_list:
+                evt = DebugEvent(
+                    ts=datetime.now(timezone.utc).isoformat(),
+                    session_id=active_sess,
+                    component=component,
+                    event=event,
+                    data=data or {},
+                    verbose_only=verbose_only,
+                )
+                await self._emit_to_subs(active_sess, evt)
+        else:
+            evt = DebugEvent(
+                ts=datetime.now(timezone.utc).isoformat(),
+                session_id=session_id,
+                component=component,
+                event=event,
+                data=data or {},
+                verbose_only=verbose_only,
+            )
+            await self._emit_to_subs(session_id, evt)
 
         self._emit_count += 1
         if self._emit_count % 100 == 0:
@@ -221,7 +248,7 @@ class CommunityEventEmitter(BaseEventEmitter):
                     pass
             self._subscribers.clear()
             self._history.clear()
-        logger.info("[MCP] Manager shutdown complete")
+        logger.info("Community event emitter shutdown complete")
 
 
 _DEBUG_EMITTER = DebugEventEmitter()

@@ -14,6 +14,7 @@ async def write_batch_to_graph(
     memgraph: MemgraphClient,
     entities: EntityManager,
     session_id: str,
+    project_id: str,
     user_name: str = None,
     redis_client: aioredis.Redis = None,
 ) -> None:
@@ -32,6 +33,7 @@ async def write_batch_to_graph(
         memgraph: Memgraph memgraph instance
         entities: Entity entities (for profiles, embeddings, aliases)
         session_id: Current session ID
+        project_id: Current project ID
         user_name: For dirty entity tracking (optional)
         redis_client: For dirty entity tracking (optional)
     """
@@ -187,9 +189,9 @@ async def write_batch_to_graph(
 
     # ── Dirty entity tracking (for profile refinement) ──────
     if redis_client and user_name and safe_ids:
-        dirty_key = RedisKeys.dirty_entities(user_name, session_id)
+        dirty_key = RedisKeys.dirty_entities(user_name, project_id)
         await redis_client.sadd(dirty_key, *[str(eid) for eid in safe_ids])
-        await redis_client.delete(RedisKeys.profile_complete(user_name, session_id))
+        await redis_client.delete(RedisKeys.profile_complete(user_name, project_id))
 
     zombies_filtered = len(existing_candidates) - len(valid_existing_ids)
 
@@ -205,6 +207,7 @@ async def write_batch_callback(
     memgraph: MemgraphClient,
     entities: EntityManager,
     session_id: str,
+    project_id: str,
     user_name: str = None,
     redis_client: aioredis.Redis = None,
 ) -> tuple[bool, Optional[str]]:
@@ -226,9 +229,10 @@ async def write_batch_callback(
             batch,
             memgraph,
             entities,
-            session_id,
-            user_name,
-            redis_client,
+            session_id=session_id,
+            project_id=project_id,
+            user_name=user_name,
+            redis_client=redis_client,
         )
         return True, None
     except Exception as e:

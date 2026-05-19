@@ -9,8 +9,8 @@ from common.conf.base import get_config
 from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import ConnectionsResult, EntityProfilesResult, FactRecord
 from common.utils.core_utils import format_vp02_input, format_vp04_input
-from infrastructure.redis.redis_client import RedisKeys
-from infrastructure.redis.resources import ResourceManager
+from infrastructure.redis_client import RedisKeys
+from infrastructure.resources import ResourceManager
 from knoggin.agent.prompts import (
     get_connection_reasoning_prompt,
     get_profile_extraction_prompt,

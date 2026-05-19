@@ -12,15 +12,12 @@ from loguru import logger
 
 from common.conf.base import get_config
 from common.errors.exceptions import ConfigurationError, DependencyError
-from common.mcp.client import MCPClientManager
 from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import AsyncRedisClient
 from knoggin.community.db.community_store import CommunityStore
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 from knoggin.knowledge.services.entity_service import EntityManager
-from knoggin.knowledge.services.graph_builder_service import GraphBuilderService
-from knoggin.knowledge.services.graph_search_service import GraphSearchService
 from log.llm_trace import get_trace_logger
 
 
@@ -43,11 +40,8 @@ class ResourceManager:
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
         self.chroma: Optional[Any] = None
-        self.mcp_manager: Optional[MCPClientManager] = None
         self.active_entities: Optional[EntityManager] = None
         self.community_store: Optional[CommunityStore] = None
-        self.graph_search: Optional[GraphSearchService] = None
-        self.graph_builder: Optional[GraphBuilderService] = None
 
     @classmethod
     async def initialize(cls, num_workers: int = 4) -> "ResourceManager":
@@ -128,28 +122,12 @@ class ResourceManager:
                 )
                 instance.chroma = chromadb.PersistentClient(path=chroma_path)
 
-                mcp_config = config.mcp
-                instance.mcp_manager = await MCPClientManager.create(
-                    mcp_config.model_dump()
-                )
-
                 await instance.memgraph.initialize()
                 instance.community_store = instance.memgraph.community
                 instance.active_entities = EntityManager(
                     memgraph=instance.memgraph,
                     embedding_service=instance.embedding
                 )
-                instance.graph_search = GraphSearchService(
-                    memgraph=instance.memgraph,
-                    embedding_service=instance.embedding
-                )
-                instance.graph_builder = GraphBuilderService(
-                    memgraph=instance.memgraph,
-                    embedding_service=instance.embedding,
-                    redis=instance.redis,
-                    entities_manager=instance.active_entities
-                )
-
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
                 return instance
@@ -174,8 +152,6 @@ class ResourceManager:
             await self.memgraph.close()
         if self.embedding:
             self.embedding.cleanup()
-        if self.mcp_manager:
-            await self.mcp_manager.shutdown()
         if self.llm_service:
             await self.llm_service.close()
 

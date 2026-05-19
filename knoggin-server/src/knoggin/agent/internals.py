@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from loguru import logger
 
 from common.errors.exceptions import ToolExecutionError
-from common.mcp.bridge import parse_mcp_tool_name
+
 from knoggin.agent.formatters import (
     format_entity_results,
     format_fact_results,
@@ -274,28 +274,6 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
     elif tool_name == "news_search":
         if isinstance(data, list):
             _merge_unique(ctx.evidence.sources, data, lambda x: x.get("url"))
-    elif tool_name.startswith("mcp__"):
-        content = (
-            data
-            if isinstance(data, str)
-            else json.dumps(data, default=str)
-            if data
-            else ""
-        )
-        ctx.evidence.messages.append(
-            {
-                "id": f"mcp_{ctx.state.call_count}",
-                "score": 0.5,
-                "context": [
-                    {
-                        "role": "tool",
-                        "content": content[:2000],
-                        "timestamp": "",
-                        "is_hit": True,
-                    }
-                ],
-            }
-        )
     elif tool_name in ("save_memory", "forget_memory"):
         pass
 
@@ -342,30 +320,10 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Found {count} relevant chunks", count
         return "No results", 0
 
-    if tool_name.startswith("mcp__"):
-        if isinstance(data, str):
-            preview = data[:100] + "..." if len(data) > 100 else data
-            return f"MCP result: {preview}", 1
-        return (
-            f"MCP result: {len(data)} items"
-            if isinstance(data, list)
-            else "MCP completed"
-        ), 1
-
     return "Completed", 1
 
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
-    parsed = parse_mcp_tool_name(name)
-    if parsed:
-        server_name, tool_name = parsed
-        if not tools.mcp_manager:
-            raise ToolExecutionError(name, "MCP not configured")
-        logger.info(f"[MCP TOOL CALL] {server_name}.{tool_name}: {json.dumps(args)}")
-        try:
-            return await tools.mcp_manager.call_tool(server_name, tool_name, args)
-        except Exception as e:
-            raise ToolExecutionError(name, str(e))
 
     if name == "request_clarification":
         return {"clarification": args.get("question", "Could you clarify?")}

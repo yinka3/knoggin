@@ -31,93 +31,6 @@ _config_lock = threading.Lock()
 _config_cache: Optional[dict] = None
 _config_mtime: Optional[float] = None
 
-MCP_SERVER_PRESETS = [
-    {
-        "id": "google-workspace",
-        "name": "Google Workspace",
-        "description": "Gmail, Calendar, Drive & Docs",
-        "command": "uvx",
-        "args": ["google-workspace-mcp"],
-        "env_vars": [
-            {"key": "GOOGLE_CLIENT_ID", "label": "Client ID", "placeholder": "your-client-id.apps.googleusercontent.com"},
-            {"key": "GOOGLE_CLIENT_SECRET", "label": "Client Secret", "placeholder": "GOCSPX-..."},
-            {"key": "GOOGLE_REFRESH_TOKEN", "label": "Refresh Token", "placeholder": "1//0..."},
-        ],
-        "tags": ["gmail", "calendar", "drive", "docs", "google"],
-        "risk": "moderate",
-        "risk_note": "Can read emails, calendar events, and drive files. Write access depends on OAuth scopes granted.",
-        "help_url": "https://console.cloud.google.com/apis/credentials",
-        "help_label": "Google Cloud Console → Create OAuth credentials",
-    },
-    {
-        "id": "google-maps",
-        "name": "Google Maps",
-        "description": "Location search, directions & geocoding",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-google-maps"],
-        "env_vars": [
-            {"key": "GOOGLE_MAPS_API_KEY", "label": "Maps API Key", "placeholder": "AIza..."},
-        ],
-        "tags": ["maps", "location", "directions", "google"],
-        "risk": "safe",
-        "risk_note": "Read-only location lookups and directions. No destructive operations.",
-        "help_url": "https://console.cloud.google.com/apis/credentials",
-        "help_label": "Google Cloud Console → Create API key with Maps enabled",
-    },
-    {
-        "id": "github",
-        "name": "GitHub",
-        "description": "Repos, issues, PRs & code search",
-        "command": "uvx",
-        "args": ["mcp-server-github"],
-        "env_vars": [
-            {"key": "GITHUB_TOKEN", "label": "Personal Access Token", "placeholder": "ghp_..."},
-        ],
-        "tags": ["github", "git", "code", "repos"],
-        "risk": "moderate",
-        "risk_note": "Can read repos, issues, and PRs. Write access (creating issues, PRs) depends on token scopes.",
-        "allowed_tools": [
-            "search_repositories", "get_file_contents", "search_code",
-            "list_issues", "get_issue", "list_commits",
-            "get_pull_request", "list_pull_requests"
-        ],
-        "help_url": "https://github.com/settings/tokens",
-        "help_label": "GitHub → Settings → Developer settings → Personal access tokens",
-    },
-
-    {
-        "id": "filesystem",
-        "name": "Filesystem",
-        "description": "Read, write & search local files",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home"],
-        "env_vars": [],
-        "tags": ["files", "filesystem", "local"],
-        "risk": "destructive",
-        "risk_note": "Can read, write, and delete files on your system. Restricted to read-only by default.",
-        "allowed_tools": ["read_file", "list_directory", "search_files", "get_file_info"],
-    },
-    {
-        "id": "slack",
-        "name": "Slack",
-        "description": "Channels, messages & users",
-        "command": "uvx",
-        "args": ["mcp-server-slack"],
-        "env_vars": [
-            {"key": "SLACK_BOT_TOKEN", "label": "Bot Token", "placeholder": "xoxb-..."},
-        ],
-        "tags": ["slack", "messaging", "chat"],
-        "risk": "moderate",
-        "risk_note": "Can read channels and messages. Write access depends on bot token scopes.",
-        "allowed_tools": [
-            "slack_list_channels", "slack_get_channel_history",
-            "slack_get_users", "slack_get_thread_replies"
-        ],
-        "help_url": "https://api.slack.com/apps",
-        "help_label": "Slack API → Create app → Bot token",
-    },
-]
-
 def get_default_config() -> dict:
     """Get system default configuration from RootConfig model."""
     return RootConfig().model_dump()
@@ -351,13 +264,5 @@ def redact_config(config: dict) -> dict:
         if tavily_key:
             out["search"]["tavily_api_key"] = _redact(tavily_key)
 
-    if "mcp" in out and isinstance(out["mcp"], dict):
-        servers = out["mcp"].get("servers", {})
-        for _, server_cfg in servers.items():
-            if isinstance(server_cfg, dict) and "env" in server_cfg:
-                env = server_cfg["env"]
-                if isinstance(env, dict):
-                    for key in env:
-                        env[key] = _redact(env[key])
 
     return out

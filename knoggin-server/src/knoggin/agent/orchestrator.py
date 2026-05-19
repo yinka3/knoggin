@@ -242,7 +242,6 @@ class Orchestrator:
             topic_config=topic_config,
             search_config=search_cfg,
             file_rag=file_rag,
-            mcp_manager=self._resources.mcp_manager,
             memory=memory_mgr,
         )
 

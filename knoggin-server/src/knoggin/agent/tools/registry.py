@@ -4,7 +4,6 @@ import httpx
 import redis.asyncio as aioredis
 
 from common.conf.topics_config import TopicConfig
-from common.mcp.client import MCPClientManager
 from infrastructure.memgraph_client import MemgraphClient
 from knoggin.agent.tools.graph import GraphTools
 from knoggin.agent.tools.memory import MemoryTools
@@ -46,7 +45,6 @@ class Tools(SearchTools, GraphTools, MemoryTools):
         topic_config: Optional[TopicConfig] = None,
         search_config: Optional[dict] = None,
         file_rag: Optional[FileRAGService] = None,
-        mcp_manager: Optional[MCPClientManager] = None,
         memory: Optional[MemoryManager] = None,
     ):
         self.session_id = session_id
@@ -59,7 +57,6 @@ class Tools(SearchTools, GraphTools, MemoryTools):
         self.file_rag = file_rag
         self.active_topics = topic_config.active_topics if topic_config else None
         self.search_cfg = search_config or {}
-        self.mcp_manager = mcp_manager
         self.memory = memory
 
         self._http_client = httpx.AsyncClient(timeout=10.0)

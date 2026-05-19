@@ -40,11 +40,6 @@ class EventsConfig:
     enabled: bool = False
     callback: Optional[str] = None
 
-@dataclass
-class MCPConfig:
-    servers: dict = field(default_factory=dict)
-    tool_timeout: float = 15.0
-    max_mcp_calls_per_run: int = 3
 
 @dataclass
 class KnogginConfig:
@@ -54,4 +49,3 @@ class KnogginConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
     events: EventsConfig = field(default_factory=EventsConfig)
-    mcp: MCPConfig = field(default_factory=MCPConfig)

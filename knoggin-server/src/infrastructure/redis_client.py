@@ -238,6 +238,34 @@ class RedisKeys:
         """Set of session_ids belonging to a project"""
         return f"project_sessions:{user}:{project_id}"
 
+    @staticmethod
+    def dirty_entities(user: str, project_id: str) -> str:
+        return f"dirty_entities:{user}:{project_id}"
+
+    @staticmethod
+    def merge_queue(user_name: str, project_id: str) -> str:
+        return f"merge_queue:{user_name}:{project_id}"
+
+    @staticmethod
+    def merge_proposals(user: str, project_id: str) -> str:
+        return f"merge_proposals:{user}:{project_id}"
+
+    @staticmethod
+    def dlq(user: str, project_id: str) -> str:
+        return f"dlq:{user}:{project_id}"
+
+    @staticmethod
+    def dlq_parked(user: str, project_id: str) -> str:
+        return f"dlq:parked:{user}:{project_id}"
+
+    @staticmethod
+    def last_profile_update(user: str, project_id: str, entity_id: int) -> str:
+        return f"last_profile_update:{user}:{project_id}:{entity_id}"
+
+    @staticmethod
+    def profile_complete(user: str, project_id: str) -> str:
+        return f"profile_complete:{user}:{project_id}"
+
     # ============ SESSION-SCOPED ============
 
     @staticmethod
@@ -248,18 +276,12 @@ class RedisKeys:
             RedisKeys.buffer(user, session),
             RedisKeys.checkpoint(user, session),
             RedisKeys.message_content(user, session),
-            RedisKeys.dirty_entities(user, session),
             RedisKeys.profile_complete(user, session),
-            RedisKeys.merge_queue(user, session),
-            RedisKeys.dlq(user, session),
-            RedisKeys.dlq_parked(user, session),
             RedisKeys.last_processed(user, session),
             RedisKeys.conversation(user, session),
             RedisKeys.recent_conversation(user, session),
             RedisKeys.msg_to_turn_lookup(user, session),
             RedisKeys.last_activity(user, session),
-            RedisKeys.merge_proposals(user, session),
-            RedisKeys.merge_intents_index(user, session),
             RedisKeys.user_profile_ran(user, session),
             RedisKeys.heartbeat_counter(user, session),
         ]
@@ -281,29 +303,7 @@ class RedisKeys:
     def message_content(user: str, session: str) -> str:
         return f"message_content:{user}:{session}"
 
-    @staticmethod
-    def dirty_entities(user: str, session: str) -> str:
-        return f"dirty_entities:{user}:{session}"
 
-    @staticmethod
-    def last_profile_update(user: str, session: str, entity_id: int) -> str:
-        return f"last_profile_update:{user}:{session}:{entity_id}"
-
-    @staticmethod
-    def profile_complete(user: str, session: str) -> str:
-        return f"profile_complete:{user}:{session}"
-
-    @staticmethod
-    def merge_queue(user_name: str, session: str) -> str:
-        return f"merge_queue:{user_name}:{session}"
-
-    @staticmethod
-    def dlq(user: str, session: str) -> str:
-        return f"dlq:{user}:{session}"
-
-    @staticmethod
-    def dlq_parked(user: str, session: str) -> str:
-        return f"dlq:parked:{user}:{session}"
 
     @staticmethod
     def last_processed(user: str, session: str) -> str:
@@ -325,9 +325,7 @@ class RedisKeys:
     def last_activity(user: str, session: str) -> str:
         return f"last_activity:{user}:{session}"
 
-    @staticmethod
-    def merge_proposals(user: str, session: str) -> str:
-        return f"merge_proposals:{user}:{session}"
+
 
     @staticmethod
     def merge_undo(session: str, primary_id: int, secondary_id: int) -> str:

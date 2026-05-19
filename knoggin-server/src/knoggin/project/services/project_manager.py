@@ -7,6 +7,23 @@ from loguru import logger
 
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
+from knoggin.project.state import ProjectState
+from common.conf.base import get_config, get_dev_settings
+from common.conf.topics_config import TopicConfig
+from knoggin.knowledge.services.entity_service import EntityManager
+from knoggin.ingestion.services.processor import TextProcessor
+from knoggin.ingestion.services.pipeline_service import BatchProcessor
+from knoggin.knowledge.jobs.merge_job import MergeDetectionJob
+from knoggin.knowledge.jobs.profile_job import ProfileRefinementJob
+from knoggin.knowledge.jobs.topics_job import TopicConfigJob
+from knoggin.ingestion.jobs.cleaner_job import EntityCleanupJob
+from knoggin.ingestion.jobs.archive_job import FactArchivalJob
+from knoggin.ingestion.jobs.dlq_job import DLQReplayJob
+from infrastructure.job.scheduler import Scheduler
+import asyncio
+from functools import partial
+
+from knoggin.knowledge.db.write_graph_db import write_batch_callback
 
 
 class ProjectManager:
@@ -15,6 +32,9 @@ class ProjectManager:
     def __init__(self, resources: ResourceManager, user_name: str):
         self.resources = resources
         self.user_name = user_name
+        self.active_projects: Dict[str, ProjectState] = {}
+        self.config = get_config()
+        self.dev_settings = get_dev_settings()
 
     async def create_project(
         self,
@@ -129,3 +149,244 @@ class ProjectManager:
         """Get all session IDs belonging to a project."""
         key = RedisKeys.project_sessions(self.user_name, project_id)
         return list(await self.resources.redis.smembers(key))
+
+    async def get_or_start_project(self, project_id: str) -> ProjectState:
+        """Get an existing ProjectState or bootstrap a new one."""
+        if project_id in self.active_projects:
+            self.active_projects[project_id].active_sessions_count += 1
+            return self.active_projects[project_id]
+
+        logger.info(f"Bootstrapping ProjectState for project_id: {project_id}")
+        
+        # 1. Topic Config
+        topics_config_dict = self.config.default_topics
+        # Since project topics might be stored separately eventually, for now we just use default
+        # But we need to save it to Redis so TopicConfig.load works
+        await self.resources.redis.hset(
+            RedisKeys.session_config(self.user_name),
+            project_id,
+            json.dumps(topics_config_dict),
+        )
+        t_config = await TopicConfig.load(
+            self.resources.redis, self.user_name, project_id
+        )
+        await t_config.save(self.resources.redis, self.user_name, project_id)
+
+        # 2. Entity Manager
+        er_cfg = self.dev_settings.entity_resolution
+        entities = EntityManager(
+            project_id=project_id,
+            memgraph=self.resources.memgraph,
+            embedding_service=self.resources.embedding,
+            hierarchy_config=t_config.hierarchy,
+            fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
+            fuzzy_non_substring_threshold=er_cfg.fuzzy_non_substring_threshold,
+            generic_token_freq=er_cfg.generic_token_freq,
+            candidate_fuzzy_threshold=er_cfg.candidate_fuzzy_threshold,
+            candidate_vector_threshold=er_cfg.candidate_vector_threshold,
+        )
+
+        # 3. NLP Pipeline
+        nlp_cfg = self.dev_settings.nlp_pipeline
+        pipeline = await asyncio.get_running_loop().run_in_executor(
+            self.resources.executor,
+            partial(
+                TextProcessor,
+                llm=self.resources.llm_service,
+                topic_config=t_config,
+                get_known_aliases=entities.get_known_aliases,
+                get_profile=entities.get_profile,
+                gliner=self.resources.gliner,
+                spacy=self.resources.spacy,
+                gliner_threshold=nlp_cfg.gliner_threshold,
+                vp01_min_confidence=nlp_cfg.vp01_min_confidence,
+            ),
+        )
+
+        # 4. Project-Level Batch Processor (for DLQ Replay)
+        project_processor = BatchProcessor(
+            session_id=project_id,
+            redis_client=self.resources.redis,
+            llm=self.resources.llm_service,
+            entities=entities,
+            processor=pipeline,
+            memgraph=self.resources.memgraph,
+            cpu_executor=self.resources.executor,
+            user_name=self.user_name,
+            topic_config=t_config,
+            get_next_ent_id=lambda: self.resources.redis.incr(RedisKeys.global_next_ent_id()),
+            resolution_threshold=er_cfg.resolution_threshold,
+        )
+
+        await self._verify_user_entity(entities)
+
+        # 5. Scheduler & Background Jobs
+        scheduler = Scheduler(self.user_name, project_id, self.resources.redis)
+        profile_job = self._init_profile_job(entities)
+        merge_job = self._init_merge_job(entities, t_config)
+        self._register_background_jobs(
+            scheduler, entities, project_processor, t_config, profile_job, merge_job, project_id
+        )
+
+        project_state = ProjectState(
+            project_id=project_id,
+            topic_config=t_config,
+            entities=entities,
+            pipeline=pipeline,
+            scheduler=scheduler,
+        )
+        project_state.active_sessions_count = 1
+        self.active_projects[project_id] = project_state
+
+        return project_state
+
+    async def release_project(self, project_id: str):
+        """Decrement session count and shutdown ProjectState if no sessions left."""
+        if project_id not in self.active_projects:
+            return
+
+        state = self.active_projects[project_id]
+        state.active_sessions_count -= 1
+
+        if state.active_sessions_count <= 0:
+            await state.shutdown()
+            del self.active_projects[project_id]
+            logger.info(f"Released ProjectState for project_id: {project_id}")
+
+    async def _verify_user_entity(self, entities: EntityManager) -> None:
+        user_id = await entities.get_id(self.user_name)
+        if user_id is None:
+            user_id = await entities.add_entity(self.user_name, "Identity")
+        entity = await self.resources.memgraph.get_entity(user_id)
+        if entity:
+            logger.info(f"User entity verified: {self.user_name} (id={user_id})")
+            return
+
+        logger.warning("User entity exists in graph but missing from entities, backfilling")
+        all_aliases = entity.get("aliases") or [self.user_name] if entity else [self.user_name]
+        await entities.register_entity(user_id, self.user_name, all_aliases, "person", "Identity")
+
+    def _init_profile_job(self, entities: EntityManager) -> ProfileRefinementJob:
+        jobs_cfg = self.dev_settings.jobs
+        nlp_cfg = self.dev_settings.nlp_pipeline
+        prof_cfg = jobs_cfg.profile
+
+        return ProfileRefinementJob(
+            llm=self.resources.llm_service,
+            entities=entities,
+            memgraph=self.resources.memgraph,
+            executor=self.resources.executor,
+            embedding_service=self.resources.embedding,
+            redis_client=self.resources.redis,
+            msg_window=prof_cfg.msg_window,
+            volume_threshold=prof_cfg.volume_threshold,
+            idle_threshold=prof_cfg.idle_threshold,
+            profile_batch_size=prof_cfg.profile_batch_size,
+            contradiction_sim_low=prof_cfg.contradiction_sim_low,
+            contradiction_sim_high=prof_cfg.contradiction_sim_high,
+            contradiction_batch_size=prof_cfg.contradiction_batch_size,
+            profile_prompt=nlp_cfg.profile_prompt,
+            contradiction_prompt=nlp_cfg.contradiction_prompt,
+        )
+
+    def _init_merge_job(
+        self, entities: EntityManager, topic_config: TopicConfig
+    ) -> MergeDetectionJob:
+        jobs_cfg = self.dev_settings.jobs
+        nlp_cfg = self.dev_settings.nlp_pipeline
+        merge_cfg = jobs_cfg.merger
+
+        return MergeDetectionJob(
+            user_name=self.user_name,
+            entities=entities,
+            memgraph=self.resources.memgraph,
+            llm_client=self.resources.llm_service,
+            topic_config=topic_config,
+            redis_client=self.resources.redis,
+            auto_threshold=merge_cfg.auto_threshold,
+            hitl_threshold=merge_cfg.hitl_threshold,
+            cosine_threshold=merge_cfg.cosine_threshold,
+            merge_prompt=nlp_cfg.merge_prompt,
+        )
+
+    def _register_background_jobs(
+        self,
+        scheduler: Scheduler,
+        entities: EntityManager,
+        processor: BatchProcessor,
+        topic_config: TopicConfig,
+        profile_job: ProfileRefinementJob,
+        merge_job: MergeDetectionJob,
+        project_id: str,
+    ):
+        jobs_cfg = self.dev_settings.jobs
+
+        async def _dlq_write_callback(result):
+            return await write_batch_callback(
+                result,
+                memgraph=self.resources.memgraph,
+                entities=entities,
+                session_id=project_id,
+                project_id=project_id,
+                user_name=self.user_name,
+                redis_client=self.resources.redis,
+            )
+
+        async def _update_topics_callback(new_config: dict):
+            topic_config.update(new_config)
+            await topic_config.save(self.resources.redis, self.user_name, project_id)
+            entities.hierarchy_config = topic_config.hierarchy
+            processor.refresh_topic_mappings()
+
+        scheduler.register(profile_job)
+        scheduler.register(merge_job)
+
+        dlq_cfg = jobs_cfg.dlq
+        scheduler.register(
+            DLQReplayJob(
+                entities=entities,
+                processor=processor,
+                write_to_graph=_dlq_write_callback,
+                redis_client=self.resources.redis,
+                interval=dlq_cfg.interval_seconds,
+                batch_size=dlq_cfg.batch_size,
+                max_attempts=dlq_cfg.max_attempts,
+            )
+        )
+
+        clean_cfg = jobs_cfg.cleaner
+        scheduler.register(
+            EntityCleanupJob(
+                user_name=self.user_name,
+                memgraph=self.resources.memgraph,
+                entities=entities,
+                redis_client=self.resources.redis,
+                interval_hours=clean_cfg.interval_hours,
+                orphan_age_hours=clean_cfg.orphan_age_hours,
+                stale_junk_days=clean_cfg.stale_junk_days,
+            )
+        )
+
+        arch_cfg = jobs_cfg.archival
+        scheduler.register(
+            FactArchivalJob(
+                user_name=self.user_name,
+                memgraph=self.resources.memgraph,
+                redis_client=self.resources.redis,
+                retention_days=arch_cfg.retention_days,
+                fallback_interval_hours=arch_cfg.fallback_interval_hours,
+            )
+        )
+
+        topic_cfg = jobs_cfg.topic_config
+        scheduler.register(
+            TopicConfigJob(
+                llm=self.resources.llm_service,
+                topic_config=topic_config,
+                update_callback=_update_topics_callback,
+                redis_client=self.resources.redis,
+                interval_msgs=topic_cfg.interval_msgs,
+                conversation_window=topic_cfg.conversation_window,
+            )
+        )
+

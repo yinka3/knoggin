@@ -1,4 +1,3 @@
-from knoggin.knowledge.services import graph_builder_service
 import asyncio
 import json
 from datetime import datetime, timezone

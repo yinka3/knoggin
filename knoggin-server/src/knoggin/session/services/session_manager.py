@@ -12,13 +12,15 @@ from common.conf.topics_config import TopicConfig
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.file_rag import FileRAGService
 from knoggin.session.context import Context
+from knoggin.project.services.project_manager import ProjectManager
 
 
 class SessionManager:
-    def __init__(self, resources: Any, user_name: str, active_sessions: Dict[str, Context]):
+    def __init__(self, resources: Any, user_name: str, active_sessions: Dict[str, Context], project_manager: ProjectManager):
         self.resources = resources
         self.user_name = user_name
         self.active_sessions = active_sessions
+        self.project_manager = project_manager
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
@@ -51,13 +53,17 @@ class SessionManager:
             topics_config = config.default_topics
 
         async with self._lock:
+            # Phase 1B: Ensure project exists and get its runtime state
+            # If no project_id provided, we use a global fallback for now (or raise error if strict)
+            actual_project_id = project_id or "global"
+            project_state = await self.project_manager.get_or_start_project(actual_project_id)
+
             context = await Context.create(
                 user_name=self.user_name,
                 resources=self.resources,
-                topics_config=topics_config,
                 session_id=session_id,
                 model=model,
-                project_id=project_id,
+                project_state=project_state,
             )
 
             metadata = {
@@ -103,23 +109,15 @@ class SessionManager:
                 logger.warning(f"Malformed session data for {session_id}")
                 return None
 
-            current_topics = await TopicConfig.load(
-                self.resources.redis, self.user_name, session_id
-            )
-
-            topics_to_use = (
-                current_topics.raw
-                if current_topics.raw != TopicConfig.DEFAULT_CONFIG
-                else metadata.get("topics_config")
-            )
+            actual_project_id = metadata.get("project_id") or "global"
+            project_state = await self.project_manager.get_or_start_project(actual_project_id)
 
             context = await Context.create(
                 user_name=self.user_name,
                 resources=self.resources,
-                topics_config=topics_to_use,
                 session_id=session_id,
                 model=metadata.get("model"),
-                project_id=metadata.get("project_id"),
+                project_state=project_state,
             )
 
             self.active_sessions[session_id] = context
@@ -140,7 +138,14 @@ class SessionManager:
             context = self.active_sessions.pop(session_id)
             self._session_locks.pop(session_id, None)
 
-        await context.shutdown()
+        if context.project_id:
+            from common.utils.events import DebugEventEmitter
+            DebugEventEmitter.get().unregister_session(context.project_id, session_id)
+            await self.project_manager.release_project(context.project_id)
+
+        # Context shutdown is now lightweight (batch consumer, file_rag)
+        if hasattr(context, "shutdown"):
+            await context.shutdown()
 
         raw = await self.resources.redis.hget(
             RedisKeys.sessions(self.user_name), session_id

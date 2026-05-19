@@ -22,7 +22,7 @@ class BatchConsumer:
         processor: BatchProcessor,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
-        run_session_jobs: Callable[[], Awaitable[None]],
+
         write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
         batch_size: int = 8,
         batch_timeout: float = 360.0,
@@ -42,7 +42,7 @@ class BatchConsumer:
 
         # callbacks
         self.get_session_context = get_session_context
-        self.run_session_jobs = run_session_jobs
+
         self.write_to_graph = write_to_graph
 
         self._wake_event = asyncio.Event()
@@ -173,7 +173,7 @@ class BatchConsumer:
         logger.info("BatchConsumer shutting down, final drain...")
         try:
             await self._drain_buffer(flush_partial=True)
-            await self.run_session_jobs()
+
             logger.info("BatchConsumer shutdown complete")
         except Exception as e:
             logger.error(f"BatchConsumer shutdown sequence failed: {e}")
@@ -328,7 +328,7 @@ class BatchConsumer:
                                 "checkpoint_reached",
                                 {"message_count": count},
                             )
-                            await self.run_session_jobs()
+
                             await self.redis.set(self._checkpoint_key, 0)
 
                         if messages:

@@ -61,21 +61,6 @@ class TopicConfigSettings(BaseModel):
     conversation_window: int = Field(50, ge=5)
 
 
-class MCPServerSettings(BaseModel):
-    command: str = Field("uvx")
-    args: List[Any] = Field(default_factory=list)
-    env: Dict[str, str] = Field(default_factory=dict)
-    enabled: bool = Field(True)
-    auto_extract: bool = Field(False)
-    allowed_tools: Optional[List[str]] = Field(None)
-
-
-class MCPSettings(BaseModel):
-    servers: Dict[str, MCPServerSettings] = Field(default_factory=dict)
-    tool_timeout: float = Field(15.0, ge=1.0)
-    max_mcp_calls_per_run: int = Field(3, ge=1)
-
-
 class JobSettings(BaseModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     profile: ProfileSettings = Field(default_factory=ProfileSettings)
@@ -255,7 +240,6 @@ class RootConfig(BaseModel):
     )
     llm: LLMSettings = Field(default_factory=LLMSettings)
     search: SearchAPIKeySettings = Field(default_factory=SearchAPIKeySettings)
-    mcp: MCPSettings = Field(default_factory=MCPSettings)
     default_topics: Dict[str, Any] = Field(
         default_factory=lambda: {
             "General": {"active": True, "labels": [], "hierarchy": {}, "aliases": []},
@@ -296,10 +280,3 @@ class ConfigUpdate(BaseModel):
         return v.strip() if v else v
 
 
-class MCPServerCreate(BaseModel):
-    name: str
-    command: str = "uvx"
-    args: List[Any] = Field(default_factory=list)
-    env: Optional[Dict[str, str]] = None
-    enabled: bool = True
-    allowed_tools: Optional[List[str]] = None
