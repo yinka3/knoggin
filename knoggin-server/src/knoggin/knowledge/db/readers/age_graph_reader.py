@@ -11,12 +11,9 @@ class AgeGraphReader:
         self.client = client
         self.graph_name = graph_name
 
-    def _build_cypher(self, cypher_query: str, return_types: str) -> str:
-        return f"SELECT * FROM cypher('{self.graph_name}', $${cypher_query}$$, %s) AS ({return_types})"
-
     async def get_message_text(self, message_id: int) -> str:
         cypher = "MATCH (m:Message {id: $id}) RETURN m.content"
-        query = self._build_cypher(cypher, "content agtype")
+        query = self.client.build_cypher(cypher, "content agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"id": message_id}),))
             if not res:
@@ -36,7 +33,7 @@ class AgeGraphReader:
         RETURN m.id, m.role, m.content, m.timestamp
         ORDER BY m.id ASC
         """
-        query = self._build_cypher(cypher, "id agtype, role agtype, content agtype, timestamp agtype")
+        query = self.client.build_cypher(cypher, "id agtype, role agtype, content agtype, timestamp agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"ids": ids}),))
             return [
@@ -84,8 +81,8 @@ class AgeGraphReader:
             LIMIT $limit
             """
             
-            back_q = self._build_cypher(back_cypher, "id agtype, role agtype, content agtype, timestamp agtype")
-            fwd_q = self._build_cypher(fwd_cypher, "id agtype, role agtype, content agtype, timestamp agtype")
+            back_q = self.client.build_cypher(back_cypher, "id agtype, role agtype, content agtype, timestamp agtype")
+            fwd_q = self.client.build_cypher(fwd_cypher, "id agtype, role agtype, content agtype, timestamp agtype")
             
             back_data = await self.client.execute_read(back_q, (json.dumps({"ts": target_ts, "id": message_id, "limit": back_limit}),))
             fwd_data = await self.client.execute_read(fwd_q, (json.dumps({"ts": target_ts, "id": message_id, "limit": forward}),))
@@ -108,7 +105,7 @@ class AgeGraphReader:
 
     async def get_neighbor_ids(self, entity_id: int) -> set[int]:
         cypher = "MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity) RETURN neighbor.id"
-        query = self._build_cypher(cypher, "neighbor_id agtype")
+        query = self.client.build_cypher(cypher, "neighbor_id agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
             return {int(row["neighbor_id"]) for row in res}
@@ -122,7 +119,7 @@ class AgeGraphReader:
         OPTIONAL MATCH (parent)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL
         RETURN parent.id, parent.canonical_name, parent.type, collect(f.content) as facts
         """
-        query = self._build_cypher(cypher, "id agtype, canonical_name agtype, type agtype, facts agtype")
+        query = self.client.build_cypher(cypher, "id agtype, canonical_name agtype, type agtype, facts agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
             return [{
@@ -142,7 +139,7 @@ class AgeGraphReader:
         ORDER BY neighbor.last_mentioned DESC
         LIMIT $limit
         """
-        query = self._build_cypher(cypher, "id agtype, name agtype")
+        query = self.client.build_cypher(cypher, "id agtype, name agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id, "limit": limit}),))
             return [{"id": int(r["id"]), "name": r["name"]} for r in res]
@@ -156,7 +153,7 @@ class AgeGraphReader:
         OPTIONAL MATCH (child)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL
         RETURN child.id, child.canonical_name, child.type, collect(f.content) as facts
         """
-        query = self._build_cypher(cypher, "id agtype, canonical_name agtype, type agtype, facts agtype")
+        query = self.client.build_cypher(cypher, "id agtype, canonical_name agtype, type agtype, facts agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
             return [{
@@ -171,7 +168,7 @@ class AgeGraphReader:
 
     async def has_direct_edge(self, id_a: int, id_b: int) -> bool:
         cypher = "MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b}) RETURN count(r) > 0 as connected"
-        query = self._build_cypher(cypher, "connected agtype")
+        query = self.client.build_cypher(cypher, "connected agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"id_a": id_a, "id_b": id_b}),))
             return bool(res[0]["connected"]) if res else False
@@ -185,7 +182,7 @@ class AgeGraphReader:
         WHERE (a)-[:PART_OF]->(b) OR (b)-[:PART_OF]->(a)
         RETURN count(a) > 0 as exists
         """
-        query = self._build_cypher(cypher, "exists agtype")
+        query = self.client.build_cypher(cypher, "exists agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"id_a": id_a, "id_b": id_b}),))
             return bool(res[0]["exists"]) if res else False
@@ -215,7 +212,7 @@ class AgeGraphReader:
         AND NOT (child)-[:PART_OF]->(parent)
         RETURN parent.id, parent.canonical_name, child.id, child.canonical_name, r.weight
         """
-        query = self._build_cypher(cypher, "parent_id agtype, parent_name agtype, child_id agtype, child_name agtype, weight agtype")
+        query = self.client.build_cypher(cypher, "parent_id agtype, parent_name agtype, child_id agtype, child_name agtype, weight agtype")
         try:
             graph_res = await self.client.execute_read(query, (json.dumps({
                 "topic": topic, "parent_type": parent_type, "child_types": child_types, "min_weight": min_weight
@@ -251,7 +248,7 @@ class AgeGraphReader:
         RETURN p.id, p.content, p.kind, p.created_at
         ORDER BY p.created_at DESC
         """
-        query = self._build_cypher(cypher, "id agtype, content agtype, kind agtype, created_at agtype")
+        query = self.client.build_cypher(cypher, "id agtype, content agtype, kind agtype, created_at agtype")
         params = {"session_id": session_id}
         if kind:
             params["kind"] = kind
@@ -275,7 +272,7 @@ class AgeGraphReader:
         MATCH ()-[r:RELATED_TO]->() WITH entities, facts, count(r) as relationships
         RETURN entities, facts, relationships
         """
-        query = self._build_cypher(cypher, "entities agtype, facts agtype, relationships agtype")
+        query = self.client.build_cypher(cypher, "entities agtype, facts agtype, relationships agtype")
         try:
             res = await self.client.execute_read(query, ("{}",))
             if not res:
@@ -297,7 +294,7 @@ class AgeGraphReader:
         WHERE e.id IN $ids
         RETURN e.id as entity_id, collect(neighbor.id) as neighbor_ids
         """
-        query = self._build_cypher(cypher, "entity_id agtype, neighbor_ids agtype")
+        query = self.client.build_cypher(cypher, "entity_id agtype, neighbor_ids agtype")
         try:
             res = await self.client.execute_read(query, (json.dumps({"ids": entity_ids}),))
             result_map = {eid: set() for eid in entity_ids}

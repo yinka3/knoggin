@@ -13,9 +13,6 @@ class AgeFactWriter:
         self.client = client
         self.graph_name = graph_name
 
-    def _build_cypher(self, cypher_query: str) -> str:
-        return f"SELECT * FROM cypher('{self.graph_name}', $${cypher_query}$$, %s) AS (result agtype)"
-
     async def create_facts_batch(self, entity_id: int, facts: List[FactRecord]) -> int:
         if not facts:
             return 0
@@ -62,7 +59,7 @@ class AgeFactWriter:
                     """
                     
                     res = await self.client.execute_read(
-                        self._build_cypher(cypher.replace("RETURN count(f)", "RETURN count(f)")), 
+                        self.client.build_cypher(cypher.replace("RETURN count(f)", "RETURN count(f)")), 
                         (json.dumps({"entity_id": entity_id, "batch": fact_params}),)
                     )
                     # Note: We used execute_read above just to get the returned rows from Cypher easily, 
@@ -71,7 +68,7 @@ class AgeFactWriter:
                     # Wait! I should use `cur.execute` inside this block to guarantee transaction scope!
                     
                     await cur.execute(
-                        f"SELECT * FROM cypher('{self.graph_name}', $${cypher}$$, %s) AS (created_count agtype)", 
+                        self.client.build_cypher(cypher, "created_count agtype"), 
                         (json.dumps({"entity_id": entity_id, "batch": fact_params}),)
                     )
                     record = await cur.fetchone()
@@ -109,7 +106,7 @@ class AgeFactWriter:
                     # 1. Update Graph
                     cypher = "MATCH (f:Fact {id: $fact_id}) SET f.invalid_at = $invalid_at RETURN f.id"
                     await cur.execute(
-                        f"SELECT * FROM cypher('{self.graph_name}', $${cypher}$$, %s) AS (id agtype)",
+                        self.client.build_cypher(cypher, "id agtype"),
                         (json.dumps({"fact_id": fact_id, "invalid_at": invalid_at.isoformat()}),)
                     )
                     record = await cur.fetchone()
@@ -137,7 +134,7 @@ class AgeFactWriter:
                     """
                     # We return the IDs to delete them from Postgres table easily
                     await cur.execute(
-                        f"SELECT * FROM cypher('{self.graph_name}', $${cypher}$$, %s) AS (fact_id agtype)",
+                        self.client.build_cypher(cypher, "fact_id agtype"),
                         (json.dumps({"cutoff": cutoff.isoformat()}),)
                     )
                     records = await cur.fetchall()

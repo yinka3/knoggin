@@ -117,12 +117,10 @@ class PostgresClient:
     # --- Cypher Helpers ---
     
     @staticmethod
-    def format_cypher_query(graph_name: str, cypher: str) -> str:
+    def build_cypher(cypher_query: str, return_types: str = "result agtype", graph_name: str = "knoggin_graph") -> str:
         """
         Wraps a Cypher query in the required Apache AGE SQL syntax.
-        Note: Parameters must be passed natively to psycopg.
+        Parameters should be passed to psycopg execution as `%s` (a JSON string).
+        `return_types` dictates the expected output columns, e.g., 'id agtype, name agtype'.
         """
-        # Usage example: 
-        # SELECT * FROM cypher('knoggin_graph', $$ MATCH (n) RETURN n $$) AS (n agtype);
-        # We leave the AS (...) casting to the caller since it varies by query return shape.
-        return f"SELECT * FROM cypher('{graph_name}', $${cypher}$$)"
+        return f"SELECT * FROM cypher('{graph_name}', $${cypher_query}$$, %s) AS ({return_types})"

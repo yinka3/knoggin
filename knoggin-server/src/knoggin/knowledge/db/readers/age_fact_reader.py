@@ -13,9 +13,6 @@ class AgeFactReader:
         self.client = client
         self.graph_name = graph_name
 
-    def _build_cypher(self, cypher_query: str, return_types: str) -> str:
-        return f"SELECT * FROM cypher('{self.graph_name}', $${cypher_query}$$, %s) AS ({return_types})"
-
     def _hydrate_fact(self, record, embedding: List[float] = None) -> FactRecord:
         """Convert DB record to FactRecord."""
         # Handle datetime parsing from ISO strings returned by AGE
@@ -58,7 +55,7 @@ class AgeFactReader:
         ORDER BY f.created_at DESC
         """
         
-        query = self._build_cypher(
+        query = self.client.build_cypher(
             cypher,
             "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype, created_at agtype"
         )
@@ -90,7 +87,7 @@ class AgeFactReader:
         ORDER BY f.created_at DESC
         """
         
-        query = self._build_cypher(
+        query = self.client.build_cypher(
             cypher,
             "entity_id agtype, id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype, created_at agtype"
         )
@@ -136,7 +133,7 @@ class AgeFactReader:
             OPTIONAL MATCH (f)-[:EXTRACTED_FROM]->(m:Message)
             RETURN f.id, f.source_entity_id, f.content, f.valid_at, f.invalid_at, f.confidence, f.source, m.id as source_msg_id
             """
-            query = self._build_cypher(
+            query = self.client.build_cypher(
                 cypher,
                 "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype"
             )
@@ -165,7 +162,7 @@ class AgeFactReader:
         MATCH (f:Fact)-[:EXTRACTED_FROM]->(m:Message {id: $msg_id})
         RETURN f.id, f.source_entity_id, f.content, f.valid_at, f.invalid_at, f.confidence, f.source, m.id as source_msg_id
         """
-        query = self._build_cypher(
+        query = self.client.build_cypher(
             cypher,
             "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype"
         )
@@ -186,7 +183,7 @@ class AgeFactReader:
         ORDER BY f.valid_at DESC
         LIMIT $limit
         """
-        query = self._build_cypher(
+        query = self.client.build_cypher(
             cypher,
             "id agtype, content agtype, created_at agtype, entity_name agtype, entity_type agtype"
         )

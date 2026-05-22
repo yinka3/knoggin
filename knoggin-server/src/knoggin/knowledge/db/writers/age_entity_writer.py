@@ -12,13 +12,6 @@ class AgeEntityWriter:
         self.client = client
         self.graph_name = graph_name
 
-    def _build_cypher(self, cypher_query: str) -> str:
-        # For write queries, we don't always need to RETURN something.
-        # But AGE requires a SELECT * FROM cypher(...) if we use it, 
-        # or we can just SELECT cypher(...).
-        # Standard way for write-only:
-        return f"SELECT * FROM cypher('{self.graph_name}', $${cypher_query}$$, %s) AS (result agtype)"
-
     def _current_time_ms(self) -> int:
         return int(time.time() * 1000)
 
@@ -76,7 +69,7 @@ class AgeEntityWriter:
                         RETURN e.id
                         """
                         # We run the graph query
-                        await cur.execute(self._build_cypher(cypher_e), (json.dumps({"batch": entity_params}),))
+                        await cur.execute(self.client.build_cypher(cypher_e), (json.dumps({"batch": entity_params}),))
                         
                         # 2. Write Hybrid Search Data (Vectors)
                         for e in entities:
@@ -130,7 +123,7 @@ class AgeEntityWriter:
                         """
                         # Note: message_ids append for ON MATCH SET is omitted here because agtype list append 
                         # can be problematic. We handle complex edge updates in merge_entities.
-                        await cur.execute(self._build_cypher(cypher_r), (json.dumps({"batch": rel_params}),))
+                        await cur.execute(self.client.build_cypher(cypher_r), (json.dumps({"batch": rel_params}),))
                         
         return True
 
@@ -153,7 +146,7 @@ class AgeEntityWriter:
                         e.last_profiled_msg_id = $last_msg_id
                     RETURN e.id
                     """
-                    await cur.execute(self._build_cypher(cypher), (json.dumps({
+                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({
                         "id": entity_id, "canonical_name": canonical_name, 
                         "now": now_ms, "last_msg_id": last_msg_id
                     }),))
@@ -176,7 +169,7 @@ class AgeEntityWriter:
                 async with conn.cursor() as cur:
                     # Update Graph
                     cypher = "MATCH (e:Entity {id: $id}) SET e.canonical_name = $canonical_name, e.last_updated = $now RETURN e.id"
-                    await cur.execute(self._build_cypher(cypher), (json.dumps({"id": entity_id, "canonical_name": canonical_name, "now": now_ms}),))
+                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({"id": entity_id, "canonical_name": canonical_name, "now": now_ms}),))
                     
                     # Update Vector Table
                     await cur.execute("UPDATE entity_search SET canonical_name = %s WHERE entity_id = %s", (canonical_name, entity_id))
@@ -188,14 +181,14 @@ class AgeEntityWriter:
                 async with conn.cursor() as cur:
                     # Mark updated in Graph
                     cypher = "MATCH (e:Entity {id: $id}) SET e.last_updated = $now RETURN e.id"
-                    await cur.execute(self._build_cypher(cypher), (json.dumps({"id": entity_id, "now": now_ms}),))
+                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({"id": entity_id, "now": now_ms}),))
                     
                     # Update Vector Table
                     await cur.execute("UPDATE entity_search SET embedding = %s::vector WHERE entity_id = %s", (embedding, entity_id))
 
     async def update_entity_checkpoint(self, entity_id: int, last_msg_id: int) -> None:
         cypher = "MATCH (e:Entity {id: $id}) SET e.last_profiled_msg_id = $last_msg_id RETURN e.id"
-        await self.client.execute_write(self._build_cypher(cypher), (json.dumps({"id": entity_id, "last_msg_id": last_msg_id}),))
+        await self.client.execute_write(self.client.build_cypher(cypher), (json.dumps({"id": entity_id, "last_msg_id": last_msg_id}),))
 
     async def update_entity_aliases(self, alias_updates: Dict[int, List[str]]):
         if not alias_updates:
@@ -209,7 +202,7 @@ class AgeEntityWriter:
                     for eid, new_aliases in alias_updates.items():
                         # Read existing
                         read_cyp = "MATCH (e:Entity {id: $id}) RETURN e.aliases"
-                        res = await self.client.execute_read(self._build_cypher(read_cyp, "aliases agtype"), (json.dumps({"id": eid}),))
+                        res = await self.client.execute_read(self.client.build_cypher(read_cyp, "aliases agtype"), (json.dumps({"id": eid}),))
                         
                         existing = []
                         if res and res[0]["aliases"]:
@@ -219,7 +212,7 @@ class AgeEntityWriter:
                         
                         # Write back
                         write_cyp = "MATCH (e:Entity {id: $id}) SET e.aliases = $aliases, e.last_updated = $now RETURN e.id"
-                        await cur.execute(self._build_cypher(write_cyp), (json.dumps({"id": eid, "aliases": combined, "now": self._current_time_ms()}),))
+                        await cur.execute(self.client.build_cypher(write_cyp), (json.dumps({"id": eid, "aliases": combined, "now": self._current_time_ms()}),))
                         
         logger.debug(f"Updated aliases for {len(alias_updates)} entities")
 
@@ -230,7 +223,7 @@ class AgeEntityWriter:
         DETACH DELETE e
         RETURN count(e)
         """
-        res = await self.client.execute_read(self._build_cypher(cypher, "deleted agtype"), ("{}",))
+        res = await self.client.execute_read(self.client.build_cypher(cypher, "deleted agtype"), ("{}",))
         return int(res[0]["deleted"]) if res else 0
 
     async def delete_entity(self, entity_id: int) -> bool:
@@ -244,7 +237,7 @@ class AgeEntityWriter:
                     DETACH DELETE e, f
                     RETURN count(e)
                     """
-                    await cur.execute(self._build_cypher(cypher), (json.dumps({"id": entity_id}),))
+                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({"id": entity_id}),))
                     
                     # Delete from Vector Table
                     await cur.execute("DELETE FROM entity_search WHERE entity_id = %s", (entity_id,))
@@ -265,7 +258,7 @@ class AgeEntityWriter:
                     DETACH DELETE e, f
                     RETURN count(DISTINCT e)
                     """
-                    res = await self.client.execute_read(self._build_cypher(cypher, "deleted agtype"), (json.dumps({"ids": entity_ids}),))
+                    res = await self.client.execute_read(self.client.build_cypher(cypher, "deleted agtype"), (json.dumps({"ids": entity_ids}),))
                     deleted = int(res[0]["deleted"]) if res else 0
                     
                     # Delete from Vector Table
