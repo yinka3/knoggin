@@ -18,9 +18,10 @@ from common.utils.data_utils import (
     process_extracted_facts,
 )
 from common.utils.events import emit
-from infrastructure.memgraph_client import MemgraphClient
+from common.utils.time_utils import parse_iso_time
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
+from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import (
     get_profile_extraction_prompt,
@@ -178,7 +179,7 @@ class ProfileRefinementJob(BaseJob):
 
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
-            ts = datetime.fromisoformat(turn["timestamp"])
+            ts = parse_iso_time(turn["timestamp"])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
 
             if turn["role"] == "user" and turn.get("user_msg_id") is not None:

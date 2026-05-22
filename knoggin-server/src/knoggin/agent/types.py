@@ -28,7 +28,8 @@ class AgentRunConfig:
         ("save_memory", 4),
         ("save_insight", 4),
         ("forget_memory", 4),
-        ("spawn_specialist", 2)
+        ("spawn_specialist", 2),
+        ("request_replanning", 2)
     )
 
     def get_tool_limit(self, tool_name: str, default: int = 6) -> int:

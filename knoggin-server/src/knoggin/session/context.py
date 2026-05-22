@@ -1,25 +1,25 @@
 
 from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import redis.asyncio as aioredis
 from loguru import logger
 
 from common.conf.base import deep_merge, get_config
-from common.schema.settings import RootConfig
 from common.schema.dtypes import BatchResult, EntityProfilesResult, FactRecord, Message
+from common.schema.settings import JobSettings, RootConfig
 from common.utils.core_utils import (
     fetch_conversation_turns,
-    handle_background_task_result,
     safe_update,
 )
-from common.schema.settings import JobSettings
 from common.utils.events import DebugEventEmitter, emit
+from common.utils.tasks import BackgroundTaskGroup
+from common.utils.time_utils import parse_iso_time
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.agent.prompts import get_lightweight_extraction_prompt
@@ -37,15 +37,20 @@ SESSION_KEY_TTL = 72 * 3600
 
 class Context:
     """
-    Context represents the state of an active user session.
-    Initialization and wiring logic is encapsulated in SessionAssembler.
+    Context represents the state and lifecycle container for an active user session.
+    
+    It serves as the root orchestration point for a session, binding together user 
+    state, background ingestion workers, and dynamic configuration. It deliberately 
+    holds references to the ingestion pipeline (`BatchProcessor`, `BatchConsumer`) 
+    so it can gracefully orchestrate the shutdown of all asynchronous session tasks.
+    
+    Initialization and wiring logic is encapsulated in SessionAssembler to decouple
+    the construction of these services from the state container itself.
     """
 
-    def __init__(self, user_name: str, topics: List[str], redis_client):
+    def __init__(self, user_name: str, topics: List[str]):
         self.user_name: str = user_name
         self.active_topics: List[str] = topics
-        self.resources: Optional[ResourceManager] = None
-        self.redis_client: aioredis.Redis = redis_client
         self.model: Optional[str] = None
         self.file_rag: Optional[FileRAGService] = None
 
@@ -57,26 +62,28 @@ class Context:
 
         self.batch_processor: Optional[BatchProcessor] = None
         self.consumer: Optional[BatchConsumer] = None
-        self._background_tasks: set[asyncio.Task] = set()
+        self.task_group = BackgroundTaskGroup("ContextTasks")
         self.current_config: RootConfig = get_config()
 
-
+    @property
+    def redis_client(self):
+        return ResourceManager.get().redis
 
     @property
     def memgraph(self):
-        return self.resources.memgraph if self.resources else None
+        return ResourceManager.get().memgraph
 
     @property
     def llm(self):
-        return self.resources.llm_service if self.resources else None
+        return ResourceManager.get().llm_service
 
     @property
     def embedding_service(self):
-        return self.resources.embedding if self.resources else None
+        return ResourceManager.get().embedding
 
     @property
     def executor(self):
-        return self.resources.executor if self.resources else None
+        return ResourceManager.get().executor
 
     @classmethod
     async def create(
@@ -226,15 +233,9 @@ class Context:
             user_msg_id=user_msg_id,
         )
 
-        task = asyncio.create_task(
-            self._persist_assistant_embedding(turn_id, content, timestamp)
-        )
-        self._background_tasks.add(task)
-        task.add_done_callback(
-            lambda t: (
-                self._background_tasks.discard(t),
-                handle_background_task_result(t),
-            )
+        self.task_group.create_task(
+            self._persist_assistant_embedding(turn_id, content, timestamp),
+            name=f"persist_assistant_embedding_{turn_id}"
         )
 
     async def _maybe_extract_llm(self, content: str, user_msg_id: int) -> bool:
@@ -404,7 +405,7 @@ class Context:
         results = []
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
-            ts = datetime.fromisoformat(turn["timestamp"])
+            ts = parse_iso_time(turn["timestamp"])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append(
                 {
@@ -551,19 +552,7 @@ class Context:
     async def shutdown(self):
         if self.consumer:
             await self.consumer.stop()
-        if self.scheduler:
-            await self.scheduler.stop()
-        if self.resources:
-            self.resources.active_entities = None
 
-        if self._background_tasks:
-            logger.info(f"Awaiting {len(self._background_tasks)} background tasks...")
-            done, pending = await asyncio.wait(self._background_tasks, timeout=10.0)
-            if pending:
-                logger.warning(
-                    f"Cancelling {len(pending)} background tasks that did not complete in time"
-                )
-                for task in pending:
-                    task.cancel()
+        await self.task_group.shutdown(timeout=10.0)
         await emit(self.session_id, "system", "session_shutdown", {})
         await DebugEventEmitter.get().cleanup_scope(self.session_id)

@@ -238,6 +238,10 @@ async def write_batch_callback(
     except Exception as e:
         logger.error(f"Graph write callback failed: {e}")
         if batch.new_entity_ids:
+            # We must aggressively purge these newly created entities from the cache.
+            # If we leave them, the live pipeline might resolve future mentions to these
+            # "phantom" IDs before the DLQ can retry. This would cause the live pipeline
+            # to trip the zombie check (trying to write facts to an ID that doesn't exist in the DB).
             entities.remove_entities(list(batch.new_entity_ids))
             logger.info(
                 f"Cleaned {len(batch.new_entity_ids)} phantom entities from entities"

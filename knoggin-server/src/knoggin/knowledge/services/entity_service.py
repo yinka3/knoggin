@@ -1,5 +1,5 @@
 from __future__ import annotations
-from redis import asyncio
+
 import threading
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from cachetools import LRUCache, TTLCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
+from redis import asyncio
 
 from common.schema.dtypes import FactRecord
 from common.schema.settings import EntityResolutionSettings
@@ -46,7 +47,7 @@ class EntityManager:
         self.fuzzy_substring_threshold = fuzzy_substring_threshold
         self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
         self.generic_token_freq = generic_token_freq
-    
+
     @property
     def resolution_lock(self) -> asyncio.Lock:
         return self._resolution_lock
@@ -153,6 +154,14 @@ class EntityManager:
             return []
 
         return await self.embedding_service.encode(texts)
+
+    async def get_neighbor_ids_batch(self, candidate_ids: List[int]) -> Dict[int, set[int]]:
+        """Fetch neighbors for a batch of candidates."""
+        return await self.memgraph.get_neighbor_ids_batch(candidate_ids)
+
+    async def search_relevant_facts(self, entity_id: int, embedding: List[float], limit: int = 5) -> List[FactRecord]:
+        """Search relevant facts for a specific entity."""
+        return await self.memgraph.search_relevant_facts(entity_id, embedding, limit)
 
     def validate_existing(
         self, canonical_name: str, mentions: List[str]

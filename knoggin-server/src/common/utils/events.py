@@ -6,6 +6,7 @@ from typing import Any, Dict, Set
 
 from loguru import logger
 
+from common.utils.time_utils import parse_iso_time
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 
 
@@ -120,10 +121,10 @@ class BaseEventEmitter:
                 ts_str = last_event.ts if hasattr(last_event, "ts") else last_event.get("ts", "")
 
                 try:
-                    last_ts = datetime.fromisoformat(ts_str)
+                    last_ts = parse_iso_time(ts_str)
                     if (now - last_ts).total_seconds() > max_age_hours * 3600:
                         stale.append(scope_id)
-                except (ValueError, AttributeError):
+                except Exception:
                     stale.append(scope_id)
 
             for scope_id in stale:

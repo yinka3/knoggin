@@ -1,5 +1,4 @@
 import asyncio
-import json
 from typing import Awaitable, Callable, Dict, List, Optional
 
 import redis.asyncio as aioredis
@@ -8,6 +7,7 @@ from loguru import logger
 from common.schema.dtypes import BatchResult
 from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
+from common.utils.json_utils import safe_json_loads
 from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.redis_client import RedisKeys
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
@@ -201,7 +201,11 @@ class BatchConsumer:
                     self.session_id, "pipeline", "buffer_draining", {"queued": len(raw)}
                 )
 
-                messages = [json.loads(m) for m in raw]
+                messages = [safe_json_loads(m) for m in raw]
+                messages = [m for m in messages if m]
+
+                if not messages:
+                    break
 
                 conversation = await self.get_session_context(
                     self.session_window, messages[0]["id"]

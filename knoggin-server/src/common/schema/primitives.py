@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from common.utils.time_utils import parse_iso_time
+
 # ═══════════════════════════════════════════════════════════════════
 #  ENTITY — any discrete concept in the knowledge graph
 # ═══════════════════════════════════════════════════════════════════
@@ -104,7 +106,7 @@ class Fact(BaseModel):
 def _parse_dt(val) -> datetime:
     """Parse a datetime from various formats (ISO string, unix timestamp, or datetime)."""
     if isinstance(val, str):
-        return datetime.fromisoformat(val)
+        return parse_iso_time(val)
     if isinstance(val, (int, float)):
         return datetime.fromtimestamp(val, tz=timezone.utc)
     if isinstance(val, datetime):

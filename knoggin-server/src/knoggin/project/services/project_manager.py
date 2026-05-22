@@ -1,29 +1,30 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
+from functools import partial
 from typing import Dict, List, Optional
 
 from loguru import logger
 
-from infrastructure.redis_client import RedisKeys
-from infrastructure.resources import ResourceManager
-from knoggin.project.state import ProjectState
 from common.conf.base import get_config, get_dev_settings
 from common.conf.topics_config import TopicConfig
-from knoggin.knowledge.services.entity_service import EntityManager
-from knoggin.ingestion.services.processor import TextProcessor
+from common.utils.json_utils import safe_json_loads
+from infrastructure.job.scheduler import Scheduler
+from infrastructure.redis_client import RedisKeys
+from infrastructure.resources import ResourceManager
+from knoggin.community.jobs.aac_job import AACJob
+from knoggin.ingestion.jobs.archive_job import FactArchivalJob
+from knoggin.ingestion.jobs.cleaner_job import EntityCleanupJob
+from knoggin.ingestion.jobs.dlq_job import DLQReplayJob
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
+from knoggin.ingestion.services.processor import TextProcessor
+from knoggin.knowledge.db.write_graph_db import write_batch_callback
 from knoggin.knowledge.jobs.merge_job import MergeDetectionJob
 from knoggin.knowledge.jobs.profile_job import ProfileRefinementJob
 from knoggin.knowledge.jobs.topics_job import TopicConfigJob
-from knoggin.ingestion.jobs.cleaner_job import EntityCleanupJob
-from knoggin.ingestion.jobs.archive_job import FactArchivalJob
-from knoggin.ingestion.jobs.dlq_job import DLQReplayJob
-from infrastructure.job.scheduler import Scheduler
-import asyncio
-from functools import partial
-
-from knoggin.knowledge.db.write_graph_db import write_batch_callback
+from knoggin.knowledge.services.entity_service import EntityManager
+from knoggin.project.state import ProjectState
 
 
 class ProjectManager:
@@ -45,7 +46,7 @@ class ProjectManager:
     ) -> dict:
         """Create a new project and store its metadata in Redis."""
         project_id = str(uuid.uuid4())
-        
+
         metadata = {
             "id": project_id,
             "name": name,
@@ -69,7 +70,9 @@ class ProjectManager:
         projects = []
         for pid, data in raw_projects.items():
             try:
-                meta = json.loads(data)
+                meta = safe_json_loads(data)
+                if not meta:
+                    continue
                 session_count = await self.resources.redis.scard(
                     RedisKeys.project_sessions(self.user_name, pid)
                 )
@@ -88,7 +91,9 @@ class ProjectManager:
         data = await self.resources.redis.hget(key, project_id)
         if not data:
             return None
-        meta = json.loads(data)
+        meta = safe_json_loads(data)
+        if not meta:
+            return None
         meta["session_count"] = await self.resources.redis.scard(
             RedisKeys.project_sessions(self.user_name, project_id)
         )
@@ -157,7 +162,7 @@ class ProjectManager:
             return self.active_projects[project_id]
 
         logger.info(f"Bootstrapping ProjectState for project_id: {project_id}")
-        
+
         # 1. Topic Config
         topics_config_dict = self.config.default_topics
         # Since project topics might be stored separately eventually, for now we just use default
@@ -224,9 +229,6 @@ class ProjectManager:
         scheduler = Scheduler(self.user_name, project_id, self.resources.redis)
         profile_job = self._init_profile_job(entities)
         merge_job = self._init_merge_job(entities, t_config)
-        self._register_background_jobs(
-            scheduler, entities, project_processor, t_config, profile_job, merge_job, project_id
-        )
 
         project_state = ProjectState(
             project_id=project_id,
@@ -234,6 +236,14 @@ class ProjectManager:
             entities=entities,
             pipeline=pipeline,
             scheduler=scheduler,
+            user_name=self.user_name,
+            redis_client=self.resources.redis,
+        )
+        project_state.profile_job = profile_job
+        project_state.merge_job = merge_job
+
+        self._register_background_jobs(
+            project_state, entities, project_processor, profile_job, merge_job
         )
         project_state.active_sessions_count = 1
         self.active_projects[project_id] = project_state
@@ -311,14 +321,15 @@ class ProjectManager:
 
     def _register_background_jobs(
         self,
-        scheduler: Scheduler,
+        project_state: ProjectState,
         entities: EntityManager,
         processor: BatchProcessor,
-        topic_config: TopicConfig,
         profile_job: ProfileRefinementJob,
         merge_job: MergeDetectionJob,
-        project_id: str,
     ):
+        scheduler = project_state.scheduler
+        project_id = project_state.project_id
+        topic_config = project_state.topic_config
         jobs_cfg = self.dev_settings.jobs
 
         async def _dlq_write_callback(result):
@@ -389,4 +400,7 @@ class ProjectManager:
                 conversation_window=topic_cfg.conversation_window,
             )
         )
+
+        # Register the Autonomous Agent Community Job (AACJob)
+        scheduler.register(AACJob(project_state))
 

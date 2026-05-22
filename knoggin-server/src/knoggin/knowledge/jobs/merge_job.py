@@ -14,8 +14,8 @@ from common.utils.data_utils import (
     find_duplicate_facts,
     format_vp05_input,
     has_sufficient_facts,
-)
 from common.utils.events import emit
+from common.utils.json_utils import safe_json_loads
 from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
@@ -233,9 +233,8 @@ class MergeDetectionJob(BaseJob):
                 await self.redis.srem(index_key, key)
                 continue
 
-            try:
-                item = json.loads(data_raw)
-            except json.JSONDecodeError:
+            item = safe_json_loads(data_raw)
+            if not item or not isinstance(item, dict):
                 logger.error(
                     f"Recovery: Corrupt merge intent for key {key}, discarding"
                 )

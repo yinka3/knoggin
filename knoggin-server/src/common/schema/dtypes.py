@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 # ── Re-export Domain Primitives ──────────────────────────────────
 from common.schema.primitives import Connection, Entity, Fact, ProfileUpdate
+from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import parse_iso_time
 
 # ═══════════════════════════════════════════════════════════════════
 #  LLM EXTRACTION COLLECTION WRAPPERS
@@ -193,7 +195,10 @@ class DLQEntry:
 
     @classmethod
     def from_json(cls, raw: str) -> "DLQEntry":
-        data = json.loads(raw)
+        data = safe_json_loads(raw)
+        if not data:
+            # Handle fallback or raise error
+            raise ValueError("Failed to parse DLQEntry")
         data.pop("batch_size", None)
         return cls(**data)
 
@@ -239,7 +244,7 @@ class AgentConfig:
     def from_dict(cls, data: Dict) -> "AgentConfig":
         created = data.get("created_at")
         if isinstance(created, str):
-            created = datetime.fromisoformat(created)
+            created = parse_iso_time(created)
         return cls(
             id=data["id"],
             name=data["name"],

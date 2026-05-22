@@ -1,9 +1,7 @@
 import asyncio
 import inspect
-import json
 import re
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
 from loguru import logger
@@ -12,6 +10,8 @@ from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
+from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import parse_iso_time
 from infrastructure.redis_client import RedisKeys
 
 PRONOUNS = {
@@ -178,12 +178,13 @@ async def fetch_conversation_turns(
                 latest_turn_data = await redis_client.hget(conv_key, latest_turn_ids[0])
                 if latest_turn_data:
                     try:
-                        parsed = json.loads(latest_turn_data)
-                        latest_msg_id = parsed.get("user_msg_id")
-                        if latest_msg_id is not None and int(latest_msg_id) >= int(
-                            up_to_msg_id
-                        ):
-                            is_dlq_retry = True
+                        parsed = safe_json_loads(latest_turn_data)
+                        if parsed:
+                            latest_msg_id = parsed.get("user_msg_id")
+                            if latest_msg_id is not None and int(latest_msg_id) >= int(
+                                up_to_msg_id
+                            ):
+                                is_dlq_retry = True
                     except (ValueError, TypeError, Exception) as e:
                         logger.warning(
                             f"Failed to unpack latest turn for DLQ guard: {e}"
@@ -217,7 +218,9 @@ async def fetch_conversation_turns(
         if not data:
             continue
         try:
-            parsed = json.loads(data)
+            parsed = safe_json_loads(data)
+            if not parsed:
+                continue
             results.append(
                 {
                     "turn_id": turn_id,
@@ -240,9 +243,9 @@ def format_recorded_date(recorded: str) -> str:
     if not recorded:
         return "unknown"
     try:
-        dt = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+        dt = parse_iso_time(recorded)
         return dt.strftime("%Y-%m-%d")
-    except (ValueError, AttributeError):
+    except Exception:
         return str(recorded)[:10]
 
 

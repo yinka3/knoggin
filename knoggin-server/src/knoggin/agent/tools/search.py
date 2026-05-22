@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from datetime import datetime, timezone
 from functools import partial
@@ -18,6 +17,7 @@ if TYPE_CHECKING:
 import httpx
 from loguru import logger
 
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 
 
@@ -103,9 +103,8 @@ class SearchTools:
             if msg_key.startswith("msg_"):
                 raw = user_contents.get(msg_key)
                 if raw:
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
+                    data = safe_json_loads(raw)
+                    if not data or not isinstance(data, dict):
                         continue
                     output.append(
                         {
@@ -120,9 +119,8 @@ class SearchTools:
             else:
                 raw = assistant_contents.get(msg_key)
                 if raw:
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
+                    data = safe_json_loads(raw)
+                    if not data or not isinstance(data, dict):
                         continue
                     output.append(
                         {
@@ -357,8 +355,8 @@ class SearchTools:
 
         for msg_id, raw in zip(evidence_ids, raw_results):
             if raw:
-                try:
-                    data = json.loads(raw)
+                data = safe_json_loads(raw)
+                if data and isinstance(data, dict):
                     results.append(
                         {
                             "id": msg_id,
@@ -366,7 +364,7 @@ class SearchTools:
                             "timestamp": data.get("timestamp", ""),
                         }
                     )
-                except json.JSONDecodeError:
+                else:
                     logger.warning(f"Malformed evidence data for {msg_id}")
             else:
                 if msg_id.startswith("msg_"):
@@ -486,9 +484,8 @@ class SearchTools:
             if tid not in raw_map:
                 continue
 
-            try:
-                data = json.loads(raw_map[tid])
-            except json.JSONDecodeError:
+            data = safe_json_loads(raw_map[tid])
+            if not data or not isinstance(data, dict):
                 continue
 
             role = data.get("role", "unknown")
@@ -509,8 +506,8 @@ class SearchTools:
 
         pre_context.reverse()
 
-        try:
-            tgt_data = json.loads(raw_map[target_turn_id])
+        tgt_data = safe_json_loads(raw_map[target_turn_id])
+        if tgt_data and isinstance(tgt_data, dict):
             target_msg = {
                 "role": tgt_data.get("role", "unknown"),
                 "timestamp": tgt_data.get("timestamp", ""),
@@ -518,7 +515,7 @@ class SearchTools:
                 "id": target_turn_id,
                 "is_hit": True,
             }
-        except json.JSONDecodeError:
+        else:
             target_msg = {
                 "role": "unknown",
                 "timestamp": "",
@@ -534,9 +531,8 @@ class SearchTools:
             if tid not in raw_map:
                 continue
 
-            try:
-                data = json.loads(raw_map[tid])
-            except json.JSONDecodeError:
+            data = safe_json_loads(raw_map[tid])
+            if not data or not isinstance(data, dict):
                 continue
             post_context.append(
                 {

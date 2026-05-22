@@ -6,6 +6,7 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
+from common.utils.time_utils import parse_iso_time
 from infrastructure.jobs.base import BaseJob, JobContext
 from infrastructure.redis_client import RedisKeys
 
@@ -110,7 +111,7 @@ class Scheduler:
         )
         if not last_activity:
             return 0.0
-        last_ts = datetime.fromisoformat(last_activity)
+        last_ts = parse_iso_time(last_activity)
         return (datetime.now(timezone.utc) - last_ts).total_seconds()
 
     async def _run_pending_checks(self):

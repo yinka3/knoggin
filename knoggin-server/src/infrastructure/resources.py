@@ -12,8 +12,8 @@ from loguru import logger
 
 from common.conf.base import get_config
 from common.errors.exceptions import ConfigurationError, DependencyError
-from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.llm_client import LLMService
+from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.redis_client import AsyncRedisClient
 from knoggin.community.db.community_store import CommunityStore
 from knoggin.knowledge.services.embedding_service import EmbeddingService
@@ -30,6 +30,12 @@ class ResourceManager:
         if cls._lock is None:
             cls._lock = asyncio.Lock()
         return cls._lock
+
+    @classmethod
+    def get(cls) -> "ResourceManager":
+        if cls._instance is None:
+            raise RuntimeError("ResourceManager not initialized")
+        return cls._instance
 
     def __init__(self):
         self.memgraph: Optional[MemgraphClient] = None

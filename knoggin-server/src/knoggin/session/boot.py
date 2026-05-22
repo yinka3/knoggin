@@ -1,6 +1,6 @@
 
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 from loguru import logger
 
@@ -13,8 +13,8 @@ from knoggin.ingestion.services.pipeline_service import BatchProcessor
 from knoggin.ingestion.services.processor import TextProcessor
 from knoggin.knowledge.services.entity_service import EntityManager
 from knoggin.knowledge.services.file_rag import FileRAGService
-from knoggin.session.context import Context
 from knoggin.project.state import ProjectState
+from knoggin.session.context import Context
 
 LUA_SYNC_COUNTER_SCRIPT = """
 local current = tonumber(redis.call('GET', KEYS[1])) or 0
@@ -63,13 +63,12 @@ class SessionAssembler:
 
         # 1. Instantiate Context shell first
         ctx = Context(
-            self.user_name, list(project_state.topic_config.raw.keys()), self.resources.redis
+            self.user_name, list(project_state.topic_config.raw.keys())
         )
         ctx.session_id = session_id
         ctx.project_id = project_state.project_id
         ctx.project = project_state
         ctx.model = model
-        ctx.resources = self.resources
 
         # 2. Initialize Batch Processor
         processor = self._init_batch_processor(
@@ -109,8 +108,8 @@ class SessionAssembler:
                 raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
 
         # Start the project scheduler if not already running
-        if ctx.scheduler and not ctx.scheduler.running:
-            await ctx.scheduler.start()
+        if ctx.project and ctx.project.scheduler and not ctx.project.scheduler.running:
+            await ctx.project.scheduler.start()
 
         if ctx.consumer:
             ctx.consumer.start()
@@ -137,7 +136,6 @@ class SessionAssembler:
             llm=self.resources.llm_service,
             entities=entities,
             processor=pipeline,
-            memgraph=self.resources.memgraph,
             cpu_executor=self.resources.executor,
             user_name=self.user_name,
             topic_config=topic_config,

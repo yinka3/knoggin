@@ -198,17 +198,17 @@ class MemoryManager:
 
             entries = []
             for mem_id, payload in raw.items():
-                try:
-                    data = json.loads(payload)
+                data = safe_json_loads(payload)
+                if data and isinstance(data, dict):
                     entries.append(
                         MemoryEntry(
                             id=mem_id,
-                            content=data["content"],
+                            content=data.get("content", ""),
                             topic=data.get("topic", topic),
                             created_at=data.get("created_at", ""),
                         )
                     )
-                except json.JSONDecodeError:
+                else:
                     logger.warning(f"Corrupt memory block {mem_id} in {topic}")
             entries.sort(key=lambda e: e.created_at)
             blocks[topic] = entries
@@ -318,16 +318,16 @@ class MemoryManager:
             entries = []
             if raw:
                 for mem_id, payload in raw.items():
-                    try:
-                        data = json.loads(payload)
+                    data = safe_json_loads(payload)
+                    if data and isinstance(data, dict):
                         entries.append(
                             WorkingMemoryEntry(
                                 id=mem_id,
-                                content=data["content"],
+                                content=data.get("content", ""),
                                 created_at=data.get("created_at", ""),
                             )
                         )
-                    except json.JSONDecodeError:
+                    else:
                         logger.warning(f"Corrupt working memory {mem_id} in {cat}")
                 entries.sort(key=lambda e: e.created_at)
             blocks[cat] = entries

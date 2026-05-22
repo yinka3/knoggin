@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from common.errors.exceptions import DependencyError
+from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import parse_iso_time
 
 load_dotenv()
 
@@ -24,9 +26,6 @@ class AsyncRedisClient:
     @classmethod
     def _get_lock(cls) -> asyncio.Lock:
         if cls._lock is None:
-            # This is safe within a single event loop thread.
-            # For multi-threaded safety, we'd need a threading.Lock,
-            # but since this is for asyncio.Lock creation, we stay in asyncio land.
             cls._lock = asyncio.Lock()
         return cls._lock
 
@@ -128,8 +127,7 @@ class AsyncRedisClient:
         if timestamp:
             try:
                 if isinstance(timestamp, str):
-                    from datetime import datetime
-                    score = datetime.fromisoformat(timestamp).timestamp()
+                    score = parse_iso_time(timestamp).timestamp()
             except Exception:
                 pass
         pipe.zadd(recent_key, {turn_key: score})
@@ -138,7 +136,7 @@ class AsyncRedisClient:
         # We check card before executing to keep pipe simple,
         # but for true atomicity we can just always run the remrange
         pipe.zremrangebyrank(recent_key, 0, -(max_history + 1))
-        
+
         await pipe.execute()
 
         # 4. Secondary Cleanup: Remove Hash entries that were pruned from ZSet
@@ -165,7 +163,7 @@ class AsyncRedisClient:
             pipe.hset(lookup_key, str(msg_id), str(turn_id))
         if content is not None:
             pipe.hset(content_key, str(msg_id), content)
-        
+
         await pipe.execute()
 
     @classmethod
@@ -173,7 +171,7 @@ class AsyncRedisClient:
         """Refreshes TTLs for all session-scoped keys in a single pipeline."""
         redis = await cls.get_instance()
         keys = RedisKeys.get_session_scoped_keys(user_name, session_id)
-        
+
         pipe = redis.pipeline()
         for key in keys:
             pipe.expire(key, ttl)
@@ -192,34 +190,35 @@ class AsyncRedisClient:
         pipe = redis.pipeline()
         for cat in categories:
             pipe.hgetall(RedisKeys.agent_working_memory(agent_id, cat))
-        
+
         raw_results = await pipe.execute()
         formatted = {}
-        
+
         for i, raw in enumerate(raw_results):
             cat = categories[i]
             if not raw:
                 formatted[cat] = ""
                 continue
-            
+
             lines = []
             # Sort by timestamp if available in payload
             parsed = []
             for v in raw.values():
                 try:
-                    data = json.loads(v)
-                    parsed.append(data)
+                    data = safe_json_loads(v)
+                    if data:
+                        parsed.append(data)
                 except Exception:
                     continue
-            
+
             # Sort by created_at
             parsed.sort(key=lambda x: x.get("created_at", ""))
-            
+
             for item in parsed:
                 lines.append(f"- {item['content']}")
-            
+
             formatted[cat] = "\n".join(lines)
-            
+
         return formatted
 
 

@@ -10,6 +10,16 @@ class GraphToolQueries:
     def __init__(self, driver: AsyncDriver):
         self.driver = driver
 
+    async def _execute_read_query(self, query: str, parameters: dict = None) -> List[Dict]:
+        """Execute a read query and return the data as a list of dictionaries."""
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(query, parameters or {})
+                return await result.data()
+        except Exception as e:
+            logger.error(f"Memgraph query failed: {e}")
+            return []
+
     def _build_path_data(
         self, names: List[str], topics: List[str], evidence: List[List[str]]
     ) -> List[Dict]:
@@ -54,21 +64,16 @@ class GraphToolQueries:
             flat_msgs[..$msg_limit] as message_ids
         """
 
-        try:
-            async with self.driver.session() as session:
-                result = await session.run(
-                    query, {"hot_topics": hot_topic_names, "msg_limit": msg_limit}
-                )
-                return {
-                    record["topic"]: {
-                        "entities": record["entities"],
-                        "message_ids": record["message_ids"] or [],
-                    }
-                    async for record in result
-                }
-        except Exception as e:
-            logger.error(f"Failed to get hot topic context: {e}")
-            return {}
+        data = await self._execute_read_query(
+            query, {"hot_topics": hot_topic_names, "msg_limit": msg_limit}
+        )
+        return {
+            row["topic"]: {
+                "entities": row["entities"],
+                "message_ids": row["message_ids"] or [],
+            }
+            for row in data
+        }
 
     @staticmethod
     def _sanitize_fts_query(query: str) -> str:
@@ -97,13 +102,8 @@ class GraphToolQueries:
         ORDER BY score DESC LIMIT $limit
         """
 
-        try:
-            async with self.driver.session() as session:
-                result = await session.run(cypher, {"q": sanitized, "limit": limit})
-                return [(record["id"], record["score"]) async for record in result]
-        except Exception as e:
-            logger.error(f"FTS Message search failed: {e}")
-            return []
+        data = await self._execute_read_query(cypher, {"q": sanitized, "limit": limit})
+        return [(row["id"], row["score"]) for row in data]
 
     async def search_entity(
         self,
@@ -161,51 +161,45 @@ class GraphToolQueries:
             "filter_topics": active_topics is not None,
         }
 
-        try:
-            async with self.driver.session() as session:
-                result = await session.run(cypher, params)
+        data = await self._execute_read_query(cypher, params)
+        entities: Dict[int, Any] = {}
+        for row in data:
+            eid = row["id"]
 
-                entities: Dict[int, Any] = {}
-                async for row in result:
-                    eid = row["id"]
+            if eid not in entities:
+                entities[eid] = {
+                    "id": eid,
+                    "canonical_name": row["canonical_name"],
+                    "aliases": row["aliases"] or [],
+                    "type": row["type"],
+                    "facts": row["facts"] or [],
+                    "topic": row["topic"],
+                    "last_mentioned": row["last_mentioned"],
+                    "last_updated": row["last_updated"],
+                    "top_connections": [],
+                    "hierarchy": {
+                        "parent": row["parent_name"],
+                        "children_count": row["children_count"],
+                    },
+                }
 
-                    if eid not in entities:
-                        entities[eid] = {
-                            "id": eid,
-                            "canonical_name": row["canonical_name"],
-                            "aliases": row["aliases"] or [],
-                            "type": row["type"],
-                            "facts": row["facts"] or [],
-                            "topic": row["topic"],
-                            "last_mentioned": row["last_mentioned"],
-                            "last_updated": row["last_updated"],
-                            "top_connections": [],
-                            "hierarchy": {
-                                "parent": row["parent_name"],
-                                "children_count": row["children_count"],
-                            },
-                        }
-
-                    if (
-                        row["conn_name"]
-                        and len(entities[eid]["top_connections"]) < connections_limit
-                    ):
-                        entities[eid]["top_connections"].append(
-                            {
-                                "canonical_name": row["conn_name"],
-                                "aliases": row["conn_aliases"] or [],
-                                "facts": row["conn_facts"] or [],
-                                "weight": row["conn_weight"],
-                                "context": row["conn_context"],
-                                "evidence_ids": list(row["evidence_ids"] or [])[
-                                    :evidence_limit
-                                ],
-                            }
-                        )
-                return list(entities.values())
-        except Exception as e:
-            logger.error(f"Entity search failed: {e}")
-            return []
+            if (
+                row["conn_name"]
+                and len(entities[eid]["top_connections"]) < connections_limit
+            ):
+                entities[eid]["top_connections"].append(
+                    {
+                        "canonical_name": row["conn_name"],
+                        "aliases": row["conn_aliases"] or [],
+                        "facts": row["conn_facts"] or [],
+                        "weight": row["conn_weight"],
+                        "context": row["conn_context"],
+                        "evidence_ids": list(row["evidence_ids"] or [])[
+                            :evidence_limit
+                        ],
+                    }
+                )
+        return list(entities.values())
 
     async def get_related_entities(
         self,
@@ -245,13 +239,7 @@ class GraphToolQueries:
             "filter_topics": active_topics is not None,
             "limit": limit,
         }
-        try:
-            async with self.driver.session() as session:
-                result = await session.run(query, params)
-                return [record.data() async for record in result]
-        except Exception as e:
-            logger.error(f"Failed to get related entities: {e}")
-            return []
+        return await self._execute_read_query(query, params)
 
     async def get_recent_activity(
         self,
@@ -280,14 +268,7 @@ class GraphToolQueries:
             "active_topics": active_topics if active_topics is not None else [],
             "filter_topics": active_topics is not None,
         }
-
-        try:
-            async with self.driver.session() as session:
-                result = await session.run(query, params)
-                return [record.data() async for record in result]
-        except Exception as e:
-            logger.error(f"Failed to get recent activity for {entity_name}: {e}")
-            return []
+        return await self._execute_read_query(query, params)
 
     async def _find_shortest_path(
         self,
@@ -324,21 +305,11 @@ class GraphToolQueries:
             "filter_topics": active_topics is not None,
         }
 
-        try:
-            async with self.driver.session() as session:
-                result = await session.run(query, params)
-                record = await result.single()
-                if not record:
-                    return None
-                return (
-                    record["names"],
-                    record["node_topics"],
-                    record["evidence_ids"],
-                    record["has_inactive"],
-                )
-        except Exception as e:
-            logger.error(f"Shortest path search failed: {e}")
+        data = await self._execute_read_query(query, params)
+        if not data:
             return None
+        row = data[0]
+        return (row["names"], row["node_topics"], row["evidence_ids"], row["has_inactive"])
 
     async def _find_active_only_path(
         self,
@@ -381,16 +352,11 @@ class GraphToolQueries:
             "active_topics": active_topics,
         }
 
-        try:
-            async with self.driver.session() as session:
-                result = await session.run(query, params)
-                record = await result.single()
-                if not record:
-                    return None
-                return record["names"], record["node_topics"], record["evidence_ids"]
-        except Exception as e:
-            logger.error(f"Failed to find active-only path: {e}")
+        data = await self._execute_read_query(query, params)
+        if not data:
             return None
+        row = data[0]
+        return (row["names"], row["node_topics"], row["evidence_ids"])
 
     async def find_path_filtered(
         self,

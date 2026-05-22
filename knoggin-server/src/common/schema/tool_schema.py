@@ -211,7 +211,11 @@ TOOL_SCHEMAS = [
                     "content": {
                         "type": "string",
                         "description": "The fact or note to remember.",
-                    }
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "The topic to group this memory under. Match an active topic if possible, otherwise use 'General'.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -293,6 +297,27 @@ TOOL_SCHEMAS = [
             },
             "tags": ["external:search", "core"],
         },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_replanning",
+            "description": (
+                "Escalate back to the Architect for a new strategy. Use this when the current plan has failed or search results are dead-ended."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional explanation of why you are escalating or what failed."
+                    }
+                },
+                "required": [],
+            },
+            "tags": ["core"],
+        },
     },
 ]
 
@@ -315,7 +340,7 @@ def get_filtered_schemas(
 
     for schema in TOOL_SCHEMAS:
         name = schema["function"]["name"]
-        if name == "request_clarification":
+        if name in ("request_clarification", "request_replanning"):
             filtered.append(schema)
             continue
 

@@ -11,6 +11,7 @@ import chromadb
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from loguru import logger
 
+from common.utils.json_utils import safe_json_loads
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 
 LANGUAGE_MAP = {
@@ -122,12 +123,14 @@ class FileRAGService:
         if self._manifest_cache is not None:
             return self._manifest_cache
         if self.manifest_path.exists():
-            try:
-                with open(self.manifest_path, "r") as f:
-                    self._manifest_cache = json.load(f)
+            with open(self.manifest_path, "r") as f:
+                content = f.read()
+                parsed = safe_json_loads(content)
+                if parsed is not None:
+                    self._manifest_cache = parsed
                     return self._manifest_cache
-            except json.JSONDecodeError as e:
-                logger.warning(f"Corrupt manifest file {self.manifest_path}: {e}")
+                else:
+                    logger.warning(f"Corrupt manifest file {self.manifest_path}")
         self._manifest_cache = {}
         return self._manifest_cache
 
@@ -141,12 +144,14 @@ class FileRAGService:
         if self._parent_cache is not None:
             return self._parent_cache
         if self.parents_path.exists():
-            try:
-                with open(self.parents_path, "r") as f:
-                    self._parent_cache = json.load(f)
+            with open(self.parents_path, "r") as f:
+                content = f.read()
+                parsed = safe_json_loads(content)
+                if parsed is not None:
+                    self._parent_cache = parsed
                     return self._parent_cache
-            except json.JSONDecodeError as e:
-                logger.warning(f"Corrupt parent chunks file {self.parents_path}: {e}")
+                else:
+                    logger.warning(f"Corrupt parent chunks file {self.parents_path}")
         self._parent_cache = {}
         return self._parent_cache
 

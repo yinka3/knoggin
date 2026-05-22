@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 import redis.asyncio as aioredis
 from loguru import logger
 
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 
 
@@ -77,7 +78,9 @@ class TopicConfig:
         raw = await redis_client.hget(RedisKeys.session_config(user_name), session_id)
         if raw:
             try:
-                config = json.loads(raw)
+                config = safe_json_loads(raw)
+                if not config:
+                    config = copy.deepcopy(cls.DEFAULT_CONFIG)
             except Exception as e:
                 logger.error(f"Failed to decode topic config from Redis: {e}")
                 config = copy.deepcopy(cls.DEFAULT_CONFIG)

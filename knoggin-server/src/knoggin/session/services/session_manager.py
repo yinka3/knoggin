@@ -8,11 +8,11 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from common.conf.base import get_config
-from common.conf.topics_config import TopicConfig
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.file_rag import FileRAGService
-from knoggin.session.context import Context
 from knoggin.project.services.project_manager import ProjectManager
+from knoggin.session.context import Context
 
 
 class SessionManager:
@@ -29,10 +29,9 @@ class SessionManager:
             raw = await self.resources.redis.hgetall(RedisKeys.sessions(self.user_name))
             result = {}
             for sid, data in raw.items():
-                try:
-                    result[sid] = json.loads(data)
-                except json.JSONDecodeError:
-                    logger.warning(f"Malformed session data for {sid}")
+                parsed = safe_json_loads(data)
+                if parsed is not None:
+                    result[sid] = parsed
             return result
         except Exception as e:
             logger.error(f"Failed to list sessions (check Redis connection): {e}")
@@ -103,10 +102,8 @@ class SessionManager:
             if not raw:
                 return None
 
-            try:
-                metadata = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning(f"Malformed session data for {session_id}")
+            metadata = safe_json_loads(raw)
+            if not metadata:
                 return None
 
             actual_project_id = metadata.get("project_id") or "global"
@@ -151,14 +148,12 @@ class SessionManager:
             RedisKeys.sessions(self.user_name), session_id
         )
         if raw:
-            try:
-                metadata = json.loads(raw)
+            metadata = safe_json_loads(raw, {})
+            if metadata:
                 metadata["last_active"] = datetime.now(timezone.utc).isoformat()
                 await self.resources.redis.hset(
                     RedisKeys.sessions(self.user_name), session_id, json.dumps(metadata)
                 )
-            except json.JSONDecodeError:
-                pass
 
         logger.info(f"Closed session: {session_id}")
         return True
@@ -180,9 +175,8 @@ class SessionManager:
         for raw in turn_data:
             if not raw:
                 continue
-            try:
-                parsed = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
+            parsed = safe_json_loads(raw)
+            if not parsed or not isinstance(parsed, dict):
                 logger.warning("Skipping corrupted turn in readonly history")
                 continue
             turns.append(
@@ -250,10 +244,7 @@ class SessionManager:
         )
         metadata = {}
         if raw:
-            try:
-                metadata = json.loads(raw)
-            except json.JSONDecodeError:
-                pass
+            metadata = safe_json_loads(raw, {})
 
         metadata.update(new_data)
         await self.resources.redis.hset(

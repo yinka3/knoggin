@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -9,6 +8,7 @@ if TYPE_CHECKING:
     from knoggin.knowledge.services.entity_service import EntityManager
 
 from common.utils.data_utils import cosine_similarity
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 
 
@@ -344,13 +344,11 @@ class GraphTools:
                 messages = []
                 for msg_id, raw_msg in zip(msg_ids, raw_msgs):
                     if raw_msg:
-                        try:
-                            parsed = json.loads(raw_msg)
+                        parsed = safe_json_loads(raw_msg)
+                        if parsed and isinstance(parsed, dict):
                             messages.append(
                                 {"id": msg_id, "message": parsed.get("message", "")}
                             )
-                        except json.JSONDecodeError:
-                            continue
                 data["messages"] = messages
             else:
                 data["messages"] = []

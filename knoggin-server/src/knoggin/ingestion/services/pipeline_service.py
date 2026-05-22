@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import json
 import time
@@ -19,7 +20,6 @@ from common.schema.dtypes import (
 )
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
-from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import get_connection_reasoning_prompt
@@ -49,7 +49,6 @@ class BatchProcessor:
         llm: LLMService,
         entities: EntityManager,
         processor: TextProcessor,
-        memgraph: MemgraphClient,
         cpu_executor: ThreadPoolExecutor,
         user_name: str,
         topic_config: TopicConfig,
@@ -62,7 +61,6 @@ class BatchProcessor:
         self.llm = llm
         self.entities = entities
         self.processor = processor
-        self.memgraph = memgraph
         self.executor = cpu_executor
         self.user_name = user_name
         self.topic_config = topic_config
@@ -412,7 +410,7 @@ class BatchProcessor:
 
         # ── Vector Embed Messages and Query Neighbors ──
         all_candidate_ids = list({cid for cid, _, _ in candidate_pairs})
-        neighbors_by_entity = await self.memgraph.get_neighbor_ids_batch(
+        neighbors_by_entity = await self.entities.get_neighbor_ids_batch(
             all_candidate_ids
         )
 
@@ -438,7 +436,7 @@ class BatchProcessor:
                 return cid, b_score, m_text, []
 
             # Vector search facts for this specific entity against the message
-            facts = await self.memgraph.search_relevant_facts(
+            facts = await self.entities.search_relevant_facts(
                 cid, msg_embeddings[m_id], limit=5
             )
             return cid, b_score, m_text, facts
@@ -629,7 +627,7 @@ class BatchProcessor:
 
         if stage in ["processing", "message_log"] and session_text is not None:
             entry["session_text"] = session_text
-        
+
         if stage in ["graph_write", "message_log"] and batch_result is not None:
             entry["batch_result"] = batch_result.to_dict()
 

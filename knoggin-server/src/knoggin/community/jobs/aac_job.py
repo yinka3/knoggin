@@ -3,17 +3,20 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from common.conf.base import get_config
+from common.utils.time_utils import parse_iso_time
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.community.services.community_manager import CommunityManager
+from knoggin.project.state import ProjectState
 
 
 class AACJob(BaseJob):
     """Job that periodically triggers the Autonomous Agent Community discussions."""
 
-    def __init__(self, resources: ResourceManager):
-        self.resources = resources
+    def __init__(self, project_state: ProjectState):
+        self.project_state = project_state
+        self.resources = ResourceManager.get()
 
     @property
     def name(self) -> str:
@@ -27,28 +30,29 @@ class AACJob(BaseJob):
 
         interval_min = comm_cfg.interval_minutes
         last_run = await self.resources.redis.get(
-            RedisKeys.job_last_run(self.name, ctx.user_name, "global")
+            RedisKeys.job_last_run(self.name, ctx.user_name, self.project_state.project_id)
         )
 
         if not last_run:
             return True
 
-        last_dt = datetime.fromisoformat(last_run)
+        last_dt = parse_iso_time(last_run)
         now = datetime.now(timezone.utc)
 
         return (now - last_dt).total_seconds() >= (interval_min * 60)
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        logger.info(f"AAC: Starting scheduled discussion for {ctx.user_name}")
+        logger.info(f"AAC: Starting scheduled discussion for {ctx.user_name} on project {self.project_state.project_id}")
 
-        manager = CommunityManager(self.resources, ctx.user_name)
+        manager = CommunityManager(self.project_state, ctx.user_name)
         try:
             await manager.trigger_discussion()
 
-            await manager.memgraph.delete_old_discussions(30)
+            if self.resources.community_store:
+                await self.resources.community_store.delete_old_discussions(30)
 
             await self.resources.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, "global"),
+                RedisKeys.job_last_run(self.name, ctx.user_name, self.project_state.project_id),
                 datetime.now(timezone.utc).isoformat(),
             )
 

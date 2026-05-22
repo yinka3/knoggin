@@ -5,8 +5,8 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
-from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
+from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.entity_service import EntityManager
 

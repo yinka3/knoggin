@@ -9,10 +9,10 @@ from neo4j import AsyncGraphDatabase
 
 from common.schema.dtypes import FactRecord
 from knoggin.community.db.community_store import CommunityStore
-from knoggin.knowledge.db.tool_queries import GraphToolQueries
 from knoggin.knowledge.db.readers.entity_reader import EntityReader
 from knoggin.knowledge.db.readers.fact_reader import FactReader
 from knoggin.knowledge.db.readers.graph_reader import GraphReader
+from knoggin.knowledge.db.tool_queries import GraphToolQueries
 from knoggin.knowledge.db.writers.entity_writer import EntityWriter
 from knoggin.knowledge.db.writers.fact_writer import FactWriter
 from knoggin.knowledge.db.writers.graph_writer import GraphWriter

@@ -31,9 +31,7 @@ class CommunityTools(Tools):
     ):
         super().__init__(
             user_name=user_name,
-            memgraph=base_tools.memgraph,
             entities=base_tools.entities,
-            redis_client=base_tools.redis,
             session_id=base_tools.session_id,
             topic_config=base_tools.topic_config,
             search_config=base_tools.search_cfg,

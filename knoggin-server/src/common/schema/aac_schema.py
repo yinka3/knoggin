@@ -36,7 +36,11 @@ AAC_SPECIFIC_SCHEMAS = [
                     "content": {
                         "type": "string",
                         "description": "The fact or note to remember.",
-                    }
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "The topic to group this memory under. Match an active topic if possible, otherwise use 'General'.",
+                    },
                 },
                 "required": ["content"],
             },
