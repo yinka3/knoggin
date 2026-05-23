@@ -1,11 +1,12 @@
 
-import os
+import uuid
 from typing import Callable, Optional
 
 from loguru import logger
 
 from common.conf.base import get_config
 from common.conf.topics_config import TopicConfig
+from common.utils.events import DebugEventEmitter
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.ingestion.services.batch_consumer import BatchConsumer
@@ -90,7 +91,6 @@ class SessionAssembler:
         ctx.file_rag = file_rag
 
         # Register session to emitter for project event propagation
-        from common.utils.events import DebugEventEmitter
         DebugEventEmitter.get().register_session(project_state.project_id, session_id)
 
         return ctx
@@ -173,10 +173,7 @@ class SessionAssembler:
         )
 
     def _init_file_rag(self, session_id: str) -> FileRAGService:
-        upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
         return FileRAGService(
             session_id=session_id,
-            chroma_client=self.resources.chroma,
             embedding_service=self.resources.embedding,
-            upload_dir=upload_dir,
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from infrastructure.database.memgraph_client import MemgraphClient
+    from infrastructure.graph_client import GraphClient
     from knoggin.knowledge.services.embedding_service import EmbeddingService
     from knoggin.knowledge.services.entity_service import EntityManager
 
@@ -14,7 +14,7 @@ from infrastructure.redis_client import RedisKeys
 
 class GraphTools:
     # Attributes provided by the composed Tools class
-    memgraph: MemgraphClient
+    memgraph: GraphClient
     entities: EntityManager
     embedding_service: EmbeddingService
     active_topics: Optional[List[str]]

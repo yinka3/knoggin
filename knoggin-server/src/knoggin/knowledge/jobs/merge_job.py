@@ -14,10 +14,11 @@ from common.utils.data_utils import (
     find_duplicate_facts,
     format_vp05_input,
     has_sufficient_facts,
+)
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
-from infrastructure.memgraph_client import MemgraphClient
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
+from infrastructure.graph_client import GraphClient
+from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import get_merge_judgment_prompt
@@ -33,7 +34,7 @@ class MergeDetectionJob(BaseJob):
         self,
         user_name: str,
         entities: EntityManager,
-        memgraph: MemgraphClient,
+        memgraph: GraphClient,
         llm_client: LLMService,
         topic_config: TopicConfig,
         redis_client: aioredis.Redis,

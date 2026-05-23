@@ -1,45 +1,50 @@
+import json
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
-from neo4j import AsyncDriver
+
+from infrastructure.postgres_client import PostgresClient
 
 
 class GraphReader:
-    def __init__(self, driver: AsyncDriver):
-        self.driver = driver
+    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+        self.client = client
+        self.graph_name = graph_name
 
     async def get_message_text(self, message_id: int) -> str:
-        """
-        Fetch message text on demand.
-        """
-        query = "MATCH (m:Message {id: $id}) RETURN m.content as content"
-
+        cypher = "MATCH (m:Message {id: $id}) RETURN m.content"
+        query = self.client.build_cypher(cypher, "content agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, {"id": int(message_id)})
-                record = await result.single()
-                return record["content"] if record else ""
+            res = await self.client.execute_read(query, (json.dumps({"id": message_id}),))
+            if not res:
+                return ""
+            content = res[0]["content"]
+            return content.strip('"') if isinstance(content, str) else content
         except Exception as e:
             logger.error(f"Failed to get message text for {message_id}: {e}")
             return ""
 
     async def get_messages_by_ids(self, ids: List[int]) -> List[Dict]:
-        """Batch fetch messages by their IDs."""
         if not ids:
             return []
-        query = """
+        cypher = """
         MATCH (m:Message)
         WHERE m.id IN $ids
-        RETURN m.id as id,
-               m.role as role,
-               m.content as content,
-               m.timestamp as timestamp
-        ORDER BY id ASC
+        RETURN m.id, m.role, m.content, m.timestamp
+        ORDER BY m.id ASC
         """
+        query = self.client.build_cypher(cypher, "id agtype, role agtype, content agtype, timestamp agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, {"ids": ids})
-                return await result.data()
+            res = await self.client.execute_read(query, (json.dumps({"ids": ids}),))
+            return [
+                {
+                    "id": int(row["id"]),
+                    "role": row["role"].strip('"') if isinstance(row["role"], str) else row["role"],
+                    "content": row["content"].strip('"') if isinstance(row["content"], str) else row["content"],
+                    "timestamp": row["timestamp"]
+                }
+                for row in res
+            ]
         except Exception as e:
             logger.error(f"Failed to fetch messages by ids: {e}")
             return []
@@ -47,190 +52,157 @@ class GraphReader:
     async def get_surrounding_messages(
         self, message_id: int, forward: int = 3, target_total: int = 10
     ) -> List[Dict]:
-        """Fetch surrounding messages for context from Memgraph."""
         back_limit = max(0, target_total - forward - 1)
-
-        safe_query = """
-        MATCH (target:Message {id: $msg_id})
-        WITH target.timestamp AS target_ts, target
-
-        CALL {
-            WITH target_ts, target
-            MATCH (prev:Message)
-            WHERE prev.timestamp <= target_ts AND prev.id <> target.id
-            RETURN prev
-            ORDER BY prev.timestamp DESC
-            LIMIT $back_limit
-        }
-        WITH target_ts, target, collect(prev) AS prev_msgs
-
-        CALL {
-            WITH target_ts, target
-            MATCH (next:Message)
-            WHERE next.timestamp >= target_ts AND next.id <> target.id
-            RETURN next
-            ORDER BY next.timestamp ASC
-            LIMIT $forward_limit
-        }
-        WITH target, prev_msgs, collect(next) AS next_msgs
-
-        UNWIND (prev_msgs + [target] + next_msgs) AS m
-        WITH m WHERE m IS NOT NULL
-        RETURN m.id as id,
-               m.role as role,
-               m.content as content,
-               m.timestamp as timestamp
-        ORDER BY timestamp ASC
-        """
+        
+        # In AGE, complex correlated CALL subqueries can be brittle.
+        # It's cleaner and safer to do the backwards/forwards search sequentially in python, 
+        # or use simple independent Cypher fetches. 
+        # We will fetch the target first.
         try:
-            async with self.driver.session() as session:
-                result = await session.run(
-                    safe_query,
-                    {
-                        "msg_id": message_id,
-                        "back_limit": back_limit,
-                        "forward_limit": forward,
-                    },
-                )
-                return await result.data()
+            target_res = await self.get_messages_by_ids([message_id])
+            if not target_res:
+                return []
+            target = target_res[0]
+            target_ts = target["timestamp"]
+            
+            back_cypher = """
+            MATCH (prev:Message)
+            WHERE prev.timestamp <= $ts AND prev.id <> $id
+            RETURN prev.id, prev.role, prev.content, prev.timestamp
+            ORDER BY prev.timestamp DESC
+            LIMIT $limit
+            """
+            
+            fwd_cypher = """
+            MATCH (next:Message)
+            WHERE next.timestamp >= $ts AND next.id <> $id
+            RETURN next.id, next.role, next.content, next.timestamp
+            ORDER BY next.timestamp ASC
+            LIMIT $limit
+            """
+            
+            back_q = self.client.build_cypher(back_cypher, "id agtype, role agtype, content agtype, timestamp agtype")
+            fwd_q = self.client.build_cypher(fwd_cypher, "id agtype, role agtype, content agtype, timestamp agtype")
+            
+            back_data = await self.client.execute_read(back_q, (json.dumps({"ts": target_ts, "id": message_id, "limit": back_limit}),))
+            fwd_data = await self.client.execute_read(fwd_q, (json.dumps({"ts": target_ts, "id": message_id, "limit": forward}),))
+            
+            def parse(row):
+                return {
+                    "id": int(row["id"]),
+                    "role": row["role"].strip('"') if isinstance(row["role"], str) else row["role"],
+                    "content": row["content"].strip('"') if isinstance(row["content"], str) else row["content"],
+                    "timestamp": row["timestamp"]
+                }
+            
+            prev_msgs = [parse(r) for r in reversed(back_data)]
+            next_msgs = [parse(r) for r in fwd_data]
+            
+            return prev_msgs + [target] + next_msgs
         except Exception as e:
             logger.error(f"Failed to fetch surrounding messages for {message_id}: {e}")
             return []
 
     async def get_neighbor_ids(self, entity_id: int) -> set[int]:
-        query = """
-        MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity)
-        RETURN neighbor.id as neighbor_id
-        """
+        cypher = "MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity) RETURN neighbor.id"
+        query = self.client.build_cypher(cypher, "neighbor_id agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, {"entity_id": entity_id})
-                records = await result.data()
-                return {record["neighbor_id"] for record in records}
+            res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
+            return {int(row["neighbor_id"]) for row in res}
         except Exception as e:
             logger.error(f"Failed to get neighbor IDs for {entity_id}: {e}")
             return set()
 
     async def get_parent_entities(self, entity_id: int) -> List[Dict]:
-        """Get entities this one is PART_OF."""
-        query = """
+        cypher = """
         MATCH (child:Entity {id: $entity_id})-[:PART_OF]->(parent:Entity)
-        RETURN parent.id as id,
-            parent.canonical_name as canonical_name,
-            parent.type as type,
-           [(parent)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as facts
+        OPTIONAL MATCH (parent)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL
+        RETURN parent.id, parent.canonical_name, parent.type, collect(f.content) as facts
         """
-
+        query = self.client.build_cypher(cypher, "id agtype, canonical_name agtype, type agtype, facts agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, {"entity_id": entity_id})
-                return await result.data()
-
+            res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
+            return [{
+                "id": int(r["id"]),
+                "canonical_name": r["canonical_name"],
+                "type": r["type"],
+                "facts": r["facts"] or []
+            } for r in res]
         except Exception as e:
             logger.error(f"Failed to get parents for entity {entity_id}: {e}")
             return []
 
     async def get_neighbor_entities(self, entity_id: int, limit: int = 5) -> List[Dict]:
-        """Get canonical names of connected entities."""
-        query = """
+        cypher = """
         MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity)
-        RETURN neighbor.id as id, neighbor.canonical_name as name
+        RETURN neighbor.id, neighbor.canonical_name
         ORDER BY neighbor.last_mentioned DESC
         LIMIT $limit
         """
+        query = self.client.build_cypher(cypher, "id agtype, name agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(
-                    query, {"entity_id": entity_id, "limit": limit}
-                )
-                records = await result.data()
-                return [
-                    {"id": record["id"], "name": record["name"]} for record in records
-                ]
+            res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id, "limit": limit}),))
+            return [{"id": int(r["id"]), "name": r["name"]} for r in res]
         except Exception as e:
             logger.error(f"Failed to get neighbor entities for {entity_id}: {e}")
             return []
 
     async def get_child_entities(self, entity_id: int) -> List[Dict]:
-        """Get entities that are PART_OF this one."""
-        query = """
+        cypher = """
         MATCH (child:Entity)-[:PART_OF]->(parent:Entity {id: $entity_id})
-        RETURN child.id as id,
-            child.canonical_name as canonical_name,
-            child.type as type,
-            [(child)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as facts
+        OPTIONAL MATCH (child)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL
+        RETURN child.id, child.canonical_name, child.type, collect(f.content) as facts
         """
-
+        query = self.client.build_cypher(cypher, "id agtype, canonical_name agtype, type agtype, facts agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, {"entity_id": entity_id})
-                return await result.data()
-
+            res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
+            return [{
+                "id": int(r["id"]),
+                "canonical_name": r["canonical_name"],
+                "type": r["type"],
+                "facts": r["facts"] or []
+            } for r in res]
         except Exception as e:
             logger.error(f"Failed to get children for entity {entity_id}: {e}")
             return []
 
     async def has_direct_edge(self, id_a: int, id_b: int) -> bool:
-        query = """
-        MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b})
-        RETURN count(r) > 0 as connected
-        """
+        cypher = "MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b}) RETURN count(r) > 0 as connected"
+        query = self.client.build_cypher(cypher, "connected agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, {"id_a": id_a, "id_b": id_b})
-                record = await result.single()
-                return record["connected"] if record else False
+            res = await self.client.execute_read(query, (json.dumps({"id_a": id_a, "id_b": id_b}),))
+            return bool(res[0]["connected"]) if res else False
         except Exception as e:
             logger.error(f"Failed to check direct edge between {id_a} and {id_b}: {e}")
             return False
 
     async def has_hierarchy_edge(self, id_a: int, id_b: int) -> bool:
-        """Check if PART_OF relationship exists in either direction."""
-        query = """
+        cypher = """
         MATCH (a:Entity {id: $id_a}), (b:Entity {id: $id_b})
         WHERE (a)-[:PART_OF]->(b) OR (b)-[:PART_OF]->(a)
-        RETURN true as exists
-        LIMIT 1
+        RETURN count(a) > 0 as exists
         """
+        query = self.client.build_cypher(cypher, "exists agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, {"id_a": id_a, "id_b": id_b})
-                return await result.single() is not None
+            res = await self.client.execute_read(query, (json.dumps({"id_a": id_a, "id_b": id_b}),))
+            return bool(res[0]["exists"]) if res else False
         except Exception as e:
-            logger.error(
-                f"Failed to check hierarchy edge between {id_a} and {id_b}: {e}"
-            )
+            logger.error(f"Failed to check hierarchy edge between {id_a} and {id_b}: {e}")
             return False
 
-    async def search_messages_vector(
-        self, query_embedding: List[float], limit: int = 50
-    ) -> List[Tuple[int, float]]:
-        query = """
-        CALL vector_search.search('message_vec', $limit, $embedding)
-        YIELD node, similarity
-        WITH node, similarity
-        RETURN node.id as id, similarity
-        """
-
-        try:
-            async with self.driver.session() as session:
-                result = await session.run(
-                    query, {"embedding": query_embedding, "limit": limit}
-                )
-                records = await result.data()
-                return [(r["id"], r["similarity"]) for r in records]
-        except Exception as e:
-            logger.error(f"Failed to search messages by vector: {e}")
-            return []
+    async def search_messages_vector(self, query_embedding: List[float], limit: int = 50) -> List[Tuple[int, float]]:
+        # The new architecture drops vector search on messages in favor of FTS, 
+        # so this method might be deprecated or map to FTS in the future.
+        # Returning empty to prevent crashes until the caller is updated in Phase 4.
+        logger.warning("search_messages_vector is deprecated in Postgres migration. Use search_messages_fts.")
+        return []
 
     async def get_hierarchy_candidates(
         self, topic: str, parent_type: str, child_types: List[str], min_weight: int = 2
     ) -> List[Dict]:
-        """
-        Get candidate pairs for hierarchy detection.
-        Returns pairs where RELATED_TO exists but PART_OF doesn't.
-        """
-        query = """
+        
+        # 1. Fetch graph candidates
+        cypher = """
         MATCH (parent:Entity)-[:BELONGS_TO]->(t:Topic {name: $topic})
         MATCH (child:Entity)-[:BELONGS_TO]->(t)
         MATCH (parent)-[r:RELATED_TO]-(child)
@@ -238,96 +210,98 @@ class GraphReader:
         AND child.type IN $child_types
         AND r.weight >= $min_weight
         AND NOT (child)-[:PART_OF]->(parent)
-        RETURN
-        parent.id AS parent_id,
-        parent.canonical_name AS parent_name,
-        parent.embedding AS parent_embedding,
-        child.id AS child_id,
-        child.canonical_name AS child_name,
-        child.embedding AS child_embedding,
-        r.weight AS weight
+        RETURN parent.id, parent.canonical_name, child.id, child.canonical_name, r.weight
         """
-
+        query = self.client.build_cypher(cypher, "parent_id agtype, parent_name agtype, child_id agtype, child_name agtype, weight agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(
-                    query,
-                    {
-                        "topic": topic,
-                        "parent_type": parent_type,
-                        "child_types": child_types,
-                        "min_weight": min_weight,
-                    },
-                )
-                return await result.data()
+            graph_res = await self.client.execute_read(query, (json.dumps({
+                "topic": topic, "parent_type": parent_type, "child_types": child_types, "min_weight": min_weight
+            }),))
+            
+            if not graph_res:
+                return []
+                
+            # 2. Fetch embeddings from relational table for those candidates
+            entity_ids = list({int(r["parent_id"]) for r in graph_res} | {int(r["child_id"]) for r in graph_res})
+            emb_res = await self.client.execute_read("SELECT entity_id, embedding FROM entity_search WHERE entity_id = ANY(%s)", (entity_ids,))
+            embs = {r["entity_id"]: (r["embedding"].tolist() if hasattr(r["embedding"], "tolist") else list(r["embedding"])) for r in emb_res}
+            
+            return [{
+                "parent_id": int(r["parent_id"]),
+                "parent_name": r["parent_name"],
+                "parent_embedding": embs.get(int(r["parent_id"]), []),
+                "child_id": int(r["child_id"]),
+                "child_name": r["child_name"],
+                "child_embedding": embs.get(int(r["child_id"]), []),
+                "weight": r["weight"]
+            } for r in graph_res]
+            
         except Exception as e:
             logger.error(f"Hierarchy candidate query failed: {e}")
             return []
 
-    async def list_preferences(
-        self, session_id: str, kind: Optional[str] = None
-    ) -> List[Dict]:
+    async def list_preferences(self, session_id: str, kind: Optional[str] = None) -> List[Dict]:
         where_kind = "AND p.kind = $kind" if kind else ""
-        query = f"""
+        cypher = f"""
         MATCH (p:Preference {{session_id: $session_id}})
         WHERE true {where_kind}
-        RETURN p.id AS id, p.content AS content, p.kind AS kind, p.created_at AS created_at
+        RETURN p.id, p.content, p.kind, p.created_at
         ORDER BY p.created_at DESC
         """
+        query = self.client.build_cypher(cypher, "id agtype, content agtype, kind agtype, created_at agtype")
         params = {"session_id": session_id}
         if kind:
             params["kind"] = kind
-
+            
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, params)
-                return await result.data()
+            res = await self.client.execute_read(query, (json.dumps(params),))
+            return [{
+                "id": r["id"].strip('"') if isinstance(r["id"], str) else r["id"],
+                "content": r["content"].strip('"') if isinstance(r["content"], str) else r["content"],
+                "kind": r["kind"].strip('"') if isinstance(r["kind"], str) else r["kind"],
+                "created_at": r["created_at"]
+            } for r in res]
         except Exception as e:
             logger.error(f"Failed to list preferences: {e}")
             return []
 
     async def get_graph_stats(self) -> Dict[str, int]:
-        """Get aggregate counts for dashboard."""
-        query = """
+        cypher = """
         MATCH (e:Entity) WITH count(e) as entities
         MATCH (f:Fact) WHERE f.invalid_at IS NULL WITH entities, count(f) as facts
         MATCH ()-[r:RELATED_TO]->() WITH entities, facts, count(r) as relationships
         RETURN entities, facts, relationships
         """
+        query = self.client.build_cypher(cypher, "entities agtype, facts agtype, relationships agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query)
-                record = await result.single()
-                if not record:
-                    return {"entities": 0, "facts": 0, "relationships": 0}
-                return {
-                    "entities": record["entities"] or 0,
-                    "facts": record["facts"] or 0,
-                    "relationships": record["relationships"] or 0,
-                }
+            res = await self.client.execute_read(query, ("{}",))
+            if not res:
+                return {"entities": 0, "facts": 0, "relationships": 0}
+            return {
+                "entities": int(res[0]["entities"] or 0),
+                "facts": int(res[0]["facts"] or 0),
+                "relationships": int(res[0]["relationships"] or 0),
+            }
         except Exception as e:
             logger.error(f"Failed to get graph stats: {e}")
             return {"entities": 0, "facts": 0, "relationships": 0}
 
-    async def get_neighbor_ids_batch(
-        self, entity_ids: List[int]
-    ) -> Dict[int, set[int]]:
-        """Batch fetch neighbor IDs for multiple entities."""
+    async def get_neighbor_ids_batch(self, entity_ids: List[int]) -> Dict[int, set[int]]:
         if not entity_ids:
             return {}
-        query = """
+        cypher = """
         MATCH (e:Entity)-[:RELATED_TO]-(neighbor:Entity)
         WHERE e.id IN $ids
         RETURN e.id as entity_id, collect(neighbor.id) as neighbor_ids
         """
+        query = self.client.build_cypher(cypher, "entity_id agtype, neighbor_ids agtype")
         try:
-            async with self.driver.session() as session:
-                result = await session.run(query, {"ids": entity_ids})
-                records = await result.data()
-                result_map = {eid: set() for eid in entity_ids}
-                for record in records:
-                    result_map[record["entity_id"]] = set(record["neighbor_ids"])
-                return result_map
+            res = await self.client.execute_read(query, (json.dumps({"ids": entity_ids}),))
+            result_map = {eid: set() for eid in entity_ids}
+            for row in res:
+                if row["neighbor_ids"]:
+                    result_map[int(row["entity_id"])] = {int(x) for x in row["neighbor_ids"]}
+            return result_map
         except Exception as e:
             logger.error(f"Failed to batch fetch neighbor IDs: {e}")
             return {eid: set() for eid in entity_ids}

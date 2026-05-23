@@ -8,8 +8,8 @@ from loguru import logger
 from common.schema.dtypes import BulkContradictionResult, FactRecord
 from common.utils.data_utils import extract_fact_with_source
 from common.utils.events import emit
+from infrastructure.graph_client import GraphClient
 from infrastructure.llm_client import LLMService
-from infrastructure.memgraph_client import MemgraphClient
 from knoggin.agent.prompts import get_contradiction_judgment_prompt
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 
@@ -27,7 +27,7 @@ class FactResolutionUtils:
         existing_facts: List[FactRecord],
         valid_msg_ids: Optional[set],
         session_id: str,
-        memgraph: MemgraphClient,
+        memgraph: GraphClient,
         embedding_service: EmbeddingService,
         llm: LLMService,
         contradiction_sim_low: float = 0.70,
@@ -169,7 +169,7 @@ class FactResolutionUtils:
         fact_ids: set,
         entity_id: int,
         session_id: str,
-        memgraph: MemgraphClient,
+        memgraph: GraphClient,
         now: datetime,
     ) -> List[str]:
         """Helper to batch invalidate facts and emit failures."""

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from common.conf.base import get_config
+from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 from common.schema.dtypes import AgentConfig
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
@@ -18,6 +19,7 @@ from knoggin.agent.internals import (
     AgentState,
     RetrievedEvidence,
 )
+from knoggin.agent.system_prompt import get_agent_prompt
 from knoggin.agent.tools.community_tools import CommunityTools
 from knoggin.agent.tools.registry import Tools
 from knoggin.knowledge.services.memory_service import MemoryManager
@@ -302,8 +304,6 @@ class CommunityManager:
             memory_mgr=None,
         )
 
-        from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
-
         community_enabled_tools = [
             "search_entity",
             "get_connections",
@@ -355,8 +355,6 @@ class CommunityManager:
 
     async def _seed_discussion(self) -> Optional[Dict]:
         """Use seeding agent to analyze graph and initiate a discussion."""
-        from agent.system_prompt import get_agent_prompt
-
         config = get_config()
         comm_cfg = config.developer_settings.community
         seeding_agent_id = comm_cfg.seeding_agent_id

@@ -5,8 +5,8 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
+from infrastructure.graph_client import GraphClient
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.redis_client import RedisKeys
 
 
@@ -19,7 +19,7 @@ class FactArchivalJob(BaseJob):
     def __init__(
         self,
         user_name: str,
-        memgraph: MemgraphClient,
+        memgraph: GraphClient,
         redis_client: aioredis.Redis,
         retention_days: int = 14,
         fallback_interval_hours: float = 24,

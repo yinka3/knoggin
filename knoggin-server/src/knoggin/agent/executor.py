@@ -15,6 +15,7 @@ from common.utils.json_utils import safe_json_loads
 from infrastructure.llm_client import LLMService
 from knoggin.agent.formatters import (
     format_entity_results,
+    format_files_context,
     format_graph_results,
     format_retrieved_messages,
 )
@@ -80,8 +81,6 @@ class AgentExecutor:
 
         files_context = ""
         if self.tools.file_rag:
-            from knoggin.agent.formatters import format_files_context
-
             manifest = self.tools.get_file_manifest()
             if manifest:
                 files_context = format_files_context(manifest)

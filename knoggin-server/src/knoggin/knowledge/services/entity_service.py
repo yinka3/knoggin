@@ -14,14 +14,14 @@ from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import is_substring_match
 from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
-from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.graph_client import GraphClient
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 
 
 class EntityManager:
     def __init__(
         self,
-        memgraph: "MemgraphClient",
+        memgraph: "GraphClient",
         embedding_service: EmbeddingService,
         project_id: Optional[str] = None,
         hierarchy_config: Optional[dict] = None,

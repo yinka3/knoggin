@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 import redis.asyncio as aioredis
 from loguru import logger
 
+from common.conf.base import get_config
 from common.schema.dtypes import AgentConfig
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys

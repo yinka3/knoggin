@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
-    from infrastructure.database.memgraph_client import MemgraphClient
+    from infrastructure.graph_client import GraphClient
     from knoggin.knowledge.services.entity_service import EntityManager
     from knoggin.knowledge.services.memory_service import MemoryManager
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class MemoryTools:
     # Attributes provided by the composed Tools class
     redis: aioredis.Redis
-    memgraph: MemgraphClient
+    memgraph: GraphClient
     entities: EntityManager
     memory: Optional[MemoryManager]
     user_name: str

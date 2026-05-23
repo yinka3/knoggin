@@ -19,6 +19,7 @@ from common.schema.memory import (
     WorkingMemoryRemoveResult,
 )
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from knoggin.agent.formatters import format_memory_context
 
 
 class WorkingMemoryStrings(NamedTuple):
@@ -370,8 +371,6 @@ class MemoryManager:
         Caller wraps these into whatever context object they need
         (SDK uses PromptContext, server uses loose variables).
         """
-        from agent.formatters import format_memory_context
-
         blocks = await self.get_memory_blocks(hot_topics)
         raw_blocks = {
             topic: [

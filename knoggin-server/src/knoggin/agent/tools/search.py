@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
-    from infrastructure.database.memgraph_client import MemgraphClient
+    from infrastructure.graph_client import GraphClient
     from knoggin.knowledge.services.embedding_service import EmbeddingService
     from knoggin.knowledge.services.entity_service import EntityManager
     from knoggin.knowledge.services.file_rag import FileRAGService
@@ -20,11 +20,16 @@ from loguru import logger
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    DDGS = None
+
 
 class SearchTools:
     # Attributes provided by the composed Tools class
     redis: aioredis.Redis
-    memgraph: MemgraphClient
+    memgraph: GraphClient
     embedding_service: EmbeddingService
     search_cfg: Dict
     file_rag: Optional[FileRAGService]
@@ -551,8 +556,8 @@ class SearchTools:
         """Free web search via DuckDuckGo — no API key required."""
         loop = asyncio.get_running_loop()
         try:
-            from duckduckgo_search import DDGS
-
+            if DDGS is None:
+                return [{"title": "Search Error", "url": "", "snippet": "duckduckgo_search is not installed"}]
             ddgs = DDGS()
             timelimit = {"pd": "d", "pw": "w", "pm": "m", "py": "y"}.get(freshness)
 

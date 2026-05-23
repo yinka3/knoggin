@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -8,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from common.conf.base import get_config
+from common.utils.events import DebugEventEmitter
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.file_rag import FileRAGService
@@ -136,7 +136,6 @@ class SessionManager:
             self._session_locks.pop(session_id, None)
 
         if context.project_id:
-            from common.utils.events import DebugEventEmitter
             DebugEventEmitter.get().unregister_session(context.project_id, session_id)
             await self.project_manager.release_project(context.project_id)
 
@@ -214,12 +213,9 @@ class SessionManager:
             if ctx.file_rag:
                 ctx.file_rag.cleanup_session()
         else:
-            upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
             temp_rag = FileRAGService(
                 session_id=session_id,
-                chroma_client=self.resources.chroma,
                 embedding_service=self.resources.embedding,
-                upload_dir=upload_dir,
             )
             temp_rag.cleanup_session()
 

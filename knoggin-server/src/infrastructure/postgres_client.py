@@ -1,7 +1,8 @@
 import asyncio
-from typing import Any, Dict, List, Optional, Tuple
-from loguru import logger
+from typing import Any, Dict, List, Optional
+
 import psycopg
+from loguru import logger
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, ConnectionPool
 

@@ -5,8 +5,8 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
+from infrastructure.graph_client import GraphClient
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.entity_service import EntityManager
 
@@ -23,7 +23,7 @@ class EntityCleanupJob(BaseJob):
     def __init__(
         self,
         user_name: str,
-        memgraph: MemgraphClient,
+        memgraph: GraphClient,
         entities: EntityManager,
         redis_client: aioredis.Redis,
         interval_hours: int = 24,

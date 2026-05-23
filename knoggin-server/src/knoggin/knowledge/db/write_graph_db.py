@@ -4,14 +4,14 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.schema.dtypes import BatchResult
-from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.graph_client import GraphClient
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.entity_service import EntityManager
 
 
 async def write_batch_to_graph(
     batch: BatchResult,
-    memgraph: MemgraphClient,
+    memgraph: GraphClient,
     entities: EntityManager,
     session_id: str,
     project_id: str,
@@ -204,7 +204,7 @@ async def write_batch_to_graph(
 
 async def write_batch_callback(
     batch: BatchResult,
-    memgraph: MemgraphClient,
+    memgraph: GraphClient,
     entities: EntityManager,
     session_id: str,
     project_id: str,

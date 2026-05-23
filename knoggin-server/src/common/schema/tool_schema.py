@@ -297,7 +297,6 @@ TOOL_SCHEMAS = [
             },
             "tags": ["external:search", "core"],
         },
-        },
     },
     {
         "type": "function",

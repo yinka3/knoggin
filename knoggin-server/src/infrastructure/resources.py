@@ -3,7 +3,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-import chromadb
 import redis.asyncio as aioredis
 import spacy
 import torch
@@ -12,8 +11,9 @@ from loguru import logger
 
 from common.conf.base import get_config
 from common.errors.exceptions import ConfigurationError, DependencyError
+from infrastructure.graph_client import GraphClient
 from infrastructure.llm_client import LLMService
-from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient
 from knoggin.community.db.community_store import CommunityStore
 from knoggin.knowledge.services.embedding_service import EmbeddingService
@@ -38,14 +38,14 @@ class ResourceManager:
         return cls._instance
 
     def __init__(self):
-        self.memgraph: Optional[MemgraphClient] = None
+        self.postgres: Optional[PostgresClient] = None
+        self.memgraph: Optional[GraphClient] = None
         self.embedding: Optional[EmbeddingService] = None
         self.redis: Optional[aioredis.Redis] = None
         self.llm_service: Optional[LLMService] = None
         self.executor: Optional[ThreadPoolExecutor] = None
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
-        self.chroma: Optional[Any] = None
         self.active_entities: Optional[EntityManager] = None
         self.community_store: Optional[CommunityStore] = None
 
@@ -74,7 +74,12 @@ class ResourceManager:
                     device = torch.device("cpu")
 
                 instance.executor = ThreadPoolExecutor(max_workers=num_workers)
-                instance.memgraph = MemgraphClient()
+
+                dsn = os.environ.get("DATABASE_URL")
+                if not dsn:
+                    raise ConfigurationError("DATABASE_URL environment variable is not set")
+                instance.postgres = PostgresClient(dsn=dsn)
+                instance.memgraph = GraphClient(postgres_client=instance.postgres)
                 instance.redis = await AsyncRedisClient.get_instance()
 
                 config = get_config()
@@ -123,13 +128,12 @@ class ResourceManager:
                         details={"original_error": str(e)},
                     )
 
-                chroma_path = os.path.join(
-                    os.getenv("CONFIG_DIR", "./config"), "chroma_db"
-                )
-                instance.chroma = chromadb.PersistentClient(path=chroma_path)
 
-                await instance.memgraph.initialize()
-                instance.community_store = instance.memgraph.community
+                await instance.postgres.connect()
+                
+
+                instance.community_store = CommunityStore(client=instance.postgres)
+                
                 instance.active_entities = EntityManager(
                     memgraph=instance.memgraph,
                     embedding_service=instance.embedding
@@ -155,7 +159,9 @@ class ResourceManager:
         await AsyncRedisClient.close_redis()
 
         if self.memgraph:
-            await self.memgraph.close()
+            self.memgraph = None
+        if self.postgres:
+            await self.postgres.close()
         if self.embedding:
             self.embedding.cleanup()
         if self.llm_service:
@@ -163,8 +169,8 @@ class ResourceManager:
 
         self.gliner = None
         self.spacy = None
-        self.chroma = None
         self.redis = None
+        self.postgres = None
         self.memgraph = None
 
     async def shutdown(self):

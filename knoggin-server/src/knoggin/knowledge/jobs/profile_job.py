@@ -19,9 +19,9 @@ from common.utils.data_utils import (
 )
 from common.utils.events import emit
 from common.utils.time_utils import parse_iso_time
+from infrastructure.graph_client import GraphClient
 from infrastructure.jobs.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
-from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import (
     get_profile_extraction_prompt,
@@ -45,7 +45,7 @@ class ProfileRefinementJob(BaseJob):
         self,
         llm: LLMService,
         entities: EntityManager,
-        memgraph: MemgraphClient,
+        memgraph: GraphClient,
         executor: ThreadPoolExecutor,
         embedding_service: EmbeddingService,
         redis_client: aioredis.Redis,

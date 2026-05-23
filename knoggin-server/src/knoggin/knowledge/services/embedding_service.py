@@ -16,8 +16,8 @@ class EmbeddingService:
 
     def __init__(
         self,
-        embedding_model: str = "dunzhang/stella_en_400M_v5",
-        reranker_model: str = "BAAI/bge-reranker-base",
+        embedding_model: str = "dunzhang/stella_en_1.5B_v5",
+        reranker_model: str = "BAAI/bge-reranker-large",
         device: str = None,
         batch_size: int = 64,
     ):

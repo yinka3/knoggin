@@ -1,118 +1,38 @@
-import asyncio
-import os
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from dotenv import load_dotenv
 from loguru import logger
-from neo4j import AsyncGraphDatabase
 
 from common.schema.dtypes import FactRecord
+from infrastructure.postgres_client import PostgresClient
 from knoggin.community.db.community_store import CommunityStore
 from knoggin.knowledge.db.readers.entity_reader import EntityReader
 from knoggin.knowledge.db.readers.fact_reader import FactReader
 from knoggin.knowledge.db.readers.graph_reader import GraphReader
-from knoggin.knowledge.db.tool_queries import GraphToolQueries
+from knoggin.knowledge.db.tool_queries import ToolQueries
 from knoggin.knowledge.db.writers.entity_writer import EntityWriter
 from knoggin.knowledge.db.writers.fact_writer import FactWriter
 from knoggin.knowledge.db.writers.graph_writer import GraphWriter
 
-load_dotenv()
 
-MEMGRAPH_HOST = os.environ.get("MEMGRAPH_HOST", "localhost")
-MEMGRAPH_PORT = os.environ.get("MEMGRAPH_PORT", "7687")
-
-
-class MemgraphClient:
-    def __init__(self, uri: Optional[str] = None):
-        if uri is None:
-            uri = f"bolt://{MEMGRAPH_HOST}:{MEMGRAPH_PORT}"
-        self.driver = AsyncGraphDatabase.driver(uri)
-        self._entity_writer = EntityWriter(self.driver)
-        self._fact_writer = FactWriter(self.driver)
-        self._graph_writer = GraphWriter(self.driver)
-        self._entity_reader = EntityReader(self.driver)
-        self._fact_reader = FactReader(self.driver)
-        self._graph_reader = GraphReader(self.driver)
-        self._tools = GraphToolQueries(self.driver)
-        self._community = CommunityStore(self.driver)
-        logger.info("Graph memgraph initialized (Async)")
+class GraphClient:
+    def __init__(self, postgres_client: PostgresClient):
+        self.postgres_client = postgres_client
+        self._entity_writer = EntityWriter(self.postgres_client)
+        self._fact_writer = FactWriter(self.postgres_client)
+        self._graph_writer = GraphWriter(self.postgres_client)
+        self._entity_reader = EntityReader(self.postgres_client)
+        self._fact_reader = FactReader(self.postgres_client)
+        self._graph_reader = GraphReader(self.postgres_client)
+        self._tools = ToolQueries(self.postgres_client)
+        self._community = CommunityStore(self.postgres_client)
+        logger.info("GraphClient initialized with Postgres/AGE backend")
 
     @property
     def community(self) -> CommunityStore:
         return self._community
 
-    async def initialize(self):
-        """Async initialization for connectivity and schema."""
-        await self._verify_conn()
-        await self._setup_schema()
 
-    async def close(self):
-        if self.driver:
-            await self.driver.close()
-
-    async def _verify_conn(self):
-        max_retries = 5
-        for i in range(max_retries):
-            try:
-                await self.driver.verify_connectivity()
-                return
-            except Exception as e:
-                if i == max_retries - 1:
-                    raise e
-                logger.warning(f"Waiting for Memgraph... ({e})")
-                await asyncio.sleep(2)
-
-    async def _setup_schema(self):
-        """
-        Create indices and constraints using Memgraph syntax.
-        """
-        constraints = [
-            "CREATE CONSTRAINT ON (e:Entity) ASSERT e.id IS UNIQUE;",
-            "CREATE CONSTRAINT ON (t:Topic) ASSERT t.name IS UNIQUE;",
-            "CREATE CONSTRAINT ON (m:Message) ASSERT m.id IS UNIQUE;",
-            "CREATE CONSTRAINT ON (f:Fact) ASSERT f.id IS UNIQUE;",
-        ]
-
-        indices = [
-            "CREATE INDEX ON :Fact(invalid_at);",
-            "CREATE INDEX ON :Fact(created_at);",
-            "CREATE INDEX ON :Message(timestamp);",
-            "CREATE INDEX ON :Entity(canonical_name);",
-            "CREATE INDEX ON :Entity(last_mentioned);",
-            "CREATE INDEX ON :AAC_Discussion(created_at);",
-            "CREATE INDEX ON :AAC_Discussion(status);",
-            "CREATE INDEX ON :AAC_Message(timestamp);",
-        ]
-
-        vector_indices = [
-            """
-            CREATE VECTOR INDEX entity_vec ON :Entity(embedding)
-            WITH CONFIG {"dimension": 1024, "capacity": 500000, "metric": "cos"}
-            """,
-            """
-            CREATE VECTOR INDEX fact_vec ON :Fact(embedding)
-            WITH CONFIG {"dimension": 1024, "capacity": 5000000, "metric": "cos"}
-            """,
-            """
-            CREATE VECTOR INDEX message_vec ON :Message(embedding)
-            WITH CONFIG {"dimension": 1024, "capacity": 5000000, "metric": "cos"}
-            """,
-        ]
-
-        text_indices = [
-            "CREATE TEXT INDEX message_search ON :Message(content)",
-            "CREATE TEXT INDEX entity_search ON :Entity(canonical_name, aliases)",
-        ]
-
-        async with self.driver.session() as session:
-            for q in constraints + indices + vector_indices + text_indices:
-                try:
-                    await session.run(q)
-                except Exception as e:
-                    logger.debug(f"Schema setup note: {e}")
-
-        logger.info("Memgraph schema indices verified.")
 
     # ===== WRITER DELEGATIONS =====
 
