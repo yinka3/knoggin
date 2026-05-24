@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import threading
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -5,37 +7,40 @@ from typing import Dict, List, Optional, Tuple
 from cachetools import LRUCache, TTLCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
+from redis import asyncio
 
 from common.schema.dtypes import FactRecord
+from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import is_substring_match
+from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.jobs.utils import cosine_similarity
+from infrastructure.graph_client import GraphClient
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 
 
 class EntityManager:
     def __init__(
         self,
-        memgraph: "MemgraphClient",
+        graph_client: "GraphClient",
         embedding_service: EmbeddingService,
-        session_id: str = None,
-        hierarchy_config: dict = None,
+        project_id: Optional[str] = None,
+        hierarchy_config: Optional[dict] = None,
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
         generic_token_freq: int = 10,
         candidate_fuzzy_threshold: int = 85,
-        candidate_vector_threshold: int = 0.85,
+        candidate_vector_threshold: float = 0.85,
     ):
 
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.hierarchy_config = hierarchy_config or {}
-        self.session_id = session_id
+        self.project_id = project_id
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
         self._name_to_id = LRUCache(maxsize=3000000)
         self._id_to_names = LRUCache(maxsize=1000000)
         self._lock = threading.RLock()
+        self._resolution_lock = asyncio.Lock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
         self.candidate_vector_threshold = candidate_vector_threshold
@@ -43,30 +48,54 @@ class EntityManager:
         self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
         self.generic_token_freq = generic_token_freq
 
-    def update_settings(
-        self,
-        fuzzy_substring_threshold: int = None,
-        fuzzy_non_substring_threshold: int = None,
-        generic_token_freq: int = None,
-        candidate_fuzzy_threshold: int = None,
-        candidate_vector_threshold: float = None,
-    ):
-        """Update resolution thresholds on the fly."""
-        if fuzzy_substring_threshold is not None:
-            self.fuzzy_substring_threshold = fuzzy_substring_threshold
-        if fuzzy_non_substring_threshold is not None:
-            self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
-        if generic_token_freq is not None:
-            self.generic_token_freq = generic_token_freq
+    @property
+    def resolution_lock(self) -> asyncio.Lock:
+        return self._resolution_lock
 
-        if candidate_fuzzy_threshold is not None:
-            self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
-        if candidate_vector_threshold is not None:
-            self.candidate_vector_threshold = candidate_vector_threshold
+    def update_settings(self, config: EntityResolutionSettings):
+        """Update resolution thresholds on the fly."""
+        self.fuzzy_substring_threshold = config.fuzzy_substring_threshold
+        self.fuzzy_non_substring_threshold = config.fuzzy_non_substring_threshold
+        self.generic_token_freq = config.generic_token_freq
+        self.candidate_fuzzy_threshold = config.candidate_fuzzy_threshold
+        self.candidate_vector_threshold = config.candidate_vector_threshold
 
         logger.info(
             f"EntityManager settings updated: sub={self.fuzzy_substring_threshold}, non-sub={self.fuzzy_non_substring_threshold}, freq={self.generic_token_freq}"
         )
+
+    def _populate_cache(self, entity: dict) -> dict:
+        """Shared helper to hydrate internal indexes from a GraphClient entity record."""
+        eid = entity["id"]
+        canonical = entity.get("canonical_name")
+
+        profile = {
+            "canonical_name": canonical,
+            "type": entity.get("type"),
+            "topic": entity.get("topic", "General"),
+            "project_id": entity.get("project_id"),
+            "embedding": entity.get("embedding"),
+        }
+
+        with self._lock:
+            self.entity_profiles[eid] = profile
+
+            if canonical:
+                lower_canonical = canonical.lower()
+                self._name_to_id[lower_canonical] = eid
+                if eid not in self._id_to_names:
+                    self._id_to_names[eid] = set()
+                self._id_to_names[eid].add(lower_canonical)
+
+            aliases = entity.get("aliases") or []
+            for a in aliases:
+                lower_a = a.lower()
+                self._name_to_id[lower_a] = eid
+                if eid not in self._id_to_names:
+                    self._id_to_names[eid] = set()
+                self._id_to_names[eid].add(lower_a)
+
+        return profile
 
     async def get_id(self, name: str) -> Optional[int]:
         if not name:
@@ -78,31 +107,11 @@ class EntityManager:
             stored_id = self._name_to_id.get(lower_name)
             if stored_id is not None:
                 return stored_id
-        found = await self.memgraph.get_entities_by_names([name])
+        found = await self.graph_client.get_entities_by_names([name])
         if found:
             entity = found[0]
-            eid = entity["id"]
-
-            with self._lock:
-                self._name_to_id[lower_name] = eid
-                if eid not in self._id_to_names:
-                    self._id_to_names[eid] = set()
-                self._id_to_names[eid].add(lower_name)
-
-                if entity.get("aliases"):
-                    for a in entity["aliases"]:
-                        self._name_to_id[a.lower()] = eid
-                        self._id_to_names[eid].add(a.lower())
-
-                if eid not in self.entity_profiles:
-                    self.entity_profiles[eid] = {
-                        "canonical_name": entity.get("canonical_name", name),
-                        "type": entity.get("type"),
-                        "topic": "General",
-                        "session_id": None,
-                    }
-
-            return eid
+            self._populate_cache(entity)
+            return entity["id"]
         return None
 
     async def get_profile(self, entity_id: int) -> Optional[dict]:
@@ -111,36 +120,10 @@ class EntityManager:
             if profile:
                 return profile
 
-        # Cache miss: fetch from memgraph
-        entity = await self.memgraph.get_entity_by_id(entity_id)
+        # Cache miss: fetch from graph_client
+        entity = await self.graph_client.get_entity_by_id(entity_id)
         if entity:
-            eid = entity["id"]
-            canonical = entity.get("canonical_name")
-
-            with self._lock:
-                profile = {
-                    "canonical_name": canonical,
-                    "type": entity.get("type"),
-                    "topic": entity.get("topic", "General"),
-                    "session_id": entity.get("session_id"),
-                    "embedding": entity.get("embedding"),
-                }
-                self.entity_profiles[eid] = profile
-
-                if canonical:
-                    lower_canonical = canonical.lower()
-                    self._name_to_id[lower_canonical] = eid
-                    if eid not in self._id_to_names:
-                        self._id_to_names[eid] = set()
-                    self._id_to_names[eid].add(lower_canonical)
-
-                aliases = entity.get("aliases") or []
-                for a in aliases:
-                    lower_a = a.lower()
-                    self._name_to_id[lower_a] = eid
-                    self._id_to_names[eid].add(lower_a)
-
-                return profile
+            return self._populate_cache(entity)
         return None
 
     def get_profiles(self) -> Dict[int, Dict]:
@@ -161,7 +144,7 @@ class EntityManager:
             profile = self.entity_profiles.get(entity_id)
             if profile and profile.get("embedding"):
                 return profile["embedding"]
-        return await self.memgraph.get_entity_embedding(entity_id)
+        return await self.graph_client.get_entity_embedding(entity_id)
 
     async def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -171,6 +154,20 @@ class EntityManager:
             return []
 
         return await self.embedding_service.encode(texts)
+
+    async def get_neighbor_ids_batch(
+        self, candidate_ids: List[int]
+    ) -> Dict[int, set[int]]:
+        """Fetch neighbors for a batch of candidates."""
+        return await self.graph_client.get_neighbor_ids_batch(candidate_ids)
+
+    async def search_relevant_facts(
+        self, entity_id: int, embedding: List[float], limit: int = 5
+    ) -> List[FactRecord]:
+        """Search relevant facts for a specific entity."""
+        return await self.graph_client.search_relevant_facts(
+            entity_id, embedding, limit
+        )
 
     def validate_existing(
         self, canonical_name: str, mentions: List[str]
@@ -282,7 +279,7 @@ class EntityManager:
         vector_results = []
         if vector:
             try:
-                vector_results = await self.memgraph.search_entities_by_embedding(
+                vector_results = await self.graph_client.search_entities_by_embedding(
                     vector, limit=5, score_threshold=self.candidate_vector_threshold
                 )
             except Exception as e:
@@ -308,13 +305,14 @@ class EntityManager:
         entity_type: str,
         topic: str,
         session_id: str = None,
+        project_id: str = None,
         source_context: str = None,
     ) -> List[float]:
         """
         Register new entity: update all indexes and return embedding.
         """
 
-        session_id = session_id or self.session_id
+        project_id = project_id or self.project_id
         text_to_embed = None
         if source_context:
             text_to_embed = (
@@ -334,7 +332,7 @@ class EntityManager:
                 "canonical_name": canonical_name,
                 "type": entity_type,
                 "topic": topic or "General",
-                "session_id": session_id,
+                "project_id": project_id,
                 "embedding": embedding,
             }
 
@@ -397,7 +395,7 @@ class EntityManager:
                 f"Merged entity {secondary_id} into {primary_id}, transferred {len(secondary_aliases)} aliases"
             )
             emit_sync(
-                self.session_id,
+                self.project_id,
                 "entities",
                 "entity_merged",
                 {
@@ -474,7 +472,7 @@ class EntityManager:
             entity_ids.add(id_a)
             entity_ids.add(id_b)
 
-        facts_by_entity = await self.memgraph.get_facts_for_entities(
+        facts_by_entity = await self.graph_client.get_facts_for_entities(
             list(entity_ids), active_only=True
         )
 
@@ -488,7 +486,7 @@ class EntityManager:
         return candidates
 
     def remove_entities(self, entity_ids: List[int]) -> int:
-        """Remove entities from entities indexes. Call after Memgraph deletion."""
+        """Remove entities from entities indexes. Call after GraphClient deletion."""
         if not entity_ids:
             return 0
 
@@ -508,7 +506,7 @@ class EntityManager:
         if removed > 0:
             logger.info(f"Removed {removed} entities from entities")
             emit_sync(
-                self.session_id,
+                self.project_id,
                 "entities",
                 "entities_removed",
                 {"requested": len(entity_ids), "removed": removed},
@@ -531,7 +529,7 @@ class EntityManager:
 
             primary_name = primary_profile["canonical_name"]
 
-            neighbors = await self.memgraph.search_similar_entities(
+            neighbors = await self.graph_client.search_similar_entities(
                 primary_id, limit=50
             )
 
@@ -596,10 +594,10 @@ class EntityManager:
         Evaluate one pair for merge or hierarchy relationship.
         Returns candidate dict or None to skip.
         """
-        direct_edge = await self.memgraph.has_direct_edge(id_a, id_b)
+        direct_edge = await self.graph_client.has_direct_edge(id_a, id_b)
         if direct_edge:
             return None
-        hierarchy_edge = await self.memgraph.has_hierarchy_edge(id_a, id_b)
+        hierarchy_edge = await self.graph_client.has_hierarchy_edge(id_a, id_b)
         if hierarchy_edge:
             return None
 
@@ -619,13 +617,16 @@ class EntityManager:
             if not (fuzz_score >= 85 and type_a == type_b):
                 return None
 
-        neighbors_a = await self.memgraph.get_neighbor_ids(id_a)
-        neighbors_b = await self.memgraph.get_neighbor_ids(id_b)
+        neighbors_a = await self.graph_client.get_neighbor_ids(id_a)
+        neighbors_b = await self.graph_client.get_neighbor_ids(id_b)
         neighbors_a.discard(1)  # ignore user node
         neighbors_b.discard(1)
 
         shared_neighbors = neighbors_a & neighbors_b
         if shared_neighbors:
+            # Shared neighbors often imply these entities are already distinct
+            # and connected within the graph (e.g., co-occurring), so we require
+            # extremely high confidence to suggest a merge.
             high_confidence = (
                 fuzz_score >= 95 and type_a and type_b and type_a == type_b
             )
@@ -639,8 +640,6 @@ class EntityManager:
             "secondary_name": profile_b.get("canonical_name", "Unknown"),
             "primary_type": type_a,
             "secondary_type": type_b,
-            "primary_session": profile_a.get("session_id"),
-            "secondary_session": profile_b.get("session_id"),
             "topic_a": topic_a,
             "topic_b": topic_b,
             "facts_a": facts_by_entity.get(id_a, []),

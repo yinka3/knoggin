@@ -1,74 +1,91 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-import redis.asyncio as aioredis
 from loguru import logger
 
-from common.conf.base import get_config
-from common.conf.topics_config import TopicConfig
+from common.conf.manager import ConfigManager
 from common.schema.dtypes import BatchResult, EntityProfilesResult, FactRecord, Message
+from common.schema.settings import JobSettings, RootConfig
 from common.utils.core_utils import (
     fetch_conversation_turns,
-    handle_background_task_result,
+    safe_update,
 )
 from common.utils.events import DebugEventEmitter, emit
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.jobs.base import BaseJob, JobContext
-from infrastructure.jobs.scheduler import Scheduler
-from infrastructure.llm.llm_client import LLMService
-from infrastructure.redis.redis_client import RedisKeys
-from infrastructure.redis.resources import ResourceManager
+from common.utils.tasks import BackgroundTaskGroup
+from common.utils.time_utils import parse_iso_time, parse_iso_time_or_now
+from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from infrastructure.resources import ResourceManager
 from knoggin.agent.prompts import get_lightweight_extraction_prompt
 from knoggin.ingestion.services.batch_consumer import BatchConsumer
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
-from knoggin.ingestion.services.processor import TextProcessor
 from knoggin.knowledge.db.write_graph_db import (
     write_batch_callback,
     write_batch_to_graph,
 )
-from knoggin.knowledge.services.embedding_service import EmbeddingService
-from knoggin.knowledge.services.entity_service import EntityManager
 from knoggin.knowledge.services.file_rag import FileRAGService
+from knoggin.project.state import ProjectState
 
 SESSION_KEY_TTL = 72 * 3600
 
 
 class Context:
     """
-    Context represents the state of an active user session.
-    Initialization and wiring logic is encapsulated in SessionAssembler.
+    Context represents the state and lifecycle container for an active user session.
+
+    It serves as the root orchestration point for a session, binding together user
+    state, background ingestion workers, and dynamic configuration. It deliberately
+    holds references to the ingestion pipeline (`BatchProcessor`, `BatchConsumer`)
+    so it can gracefully orchestrate the shutdown of all asynchronous session tasks.
+
+    Initialization and wiring logic is encapsulated in SessionAssembler to decouple
+    the construction of these services from the state container itself.
     """
 
-    def __init__(self, user_name: str, topics: List[str], redis_client):
+    def __init__(self, user_name: str, topics: List[str]):
         self.user_name: str = user_name
         self.active_topics: List[str] = topics
-        self.resources: ResourceManager = None
-        self.scheduler: Scheduler = None
-        self.redis_client: aioredis.Redis = redis_client
         self.model: Optional[str] = None
-        self.llm: LLMService = None
-        self.file_rag: FileRAGService = None
-        self.mcp_manager = None
+        self.file_rag: Optional[FileRAGService] = None
 
-        self.memgraph: MemgraphClient = None
-        self.processor: TextProcessor = None
-        self.embedding_service: EmbeddingService = None
-        self.entities: EntityManager = None
-        self.session_id: str = None
-        self.topic_config: TopicConfig = None
+        self.session_id: Optional[str] = None
+        self.project_id: Optional[str] = None
+        self.project: Optional[ProjectState] = None
+
         self._max_conversation_history: int = 10000
 
-        self.executor: ThreadPoolExecutor = None
-        self.batch_processor: BatchProcessor = None
-        self.consumer: BatchConsumer = None
-        self.profile_job: BaseJob = None
-        self.merge_job: BaseJob = None
-        self._background_tasks: set = set()
+        self.batch_processor: Optional[BatchProcessor] = None
+        self.consumer: Optional[BatchConsumer] = None
+        self.task_group = BackgroundTaskGroup("ContextTasks")
+
+    @property
+    def current_config(self) -> RootConfig:
+        return ConfigManager.get().config
+
+    @property
+    def redis_client(self):
+        return ResourceManager.get().redis
+
+    @property
+    def graph_client(self):
+        return ResourceManager.get().graph_client
+
+    @property
+    def llm(self):
+        return ResourceManager.get().llm_service
+
+    @property
+    def embedding_service(self):
+        return ResourceManager.get().embedding
+
+    @property
+    def executor(self):
+        return ResourceManager.get().executor
 
     @classmethod
     async def create(
@@ -78,14 +95,13 @@ class Context:
         topics_config: dict = None,
         session_id: str = None,
         model: str = None,
+        project_state: ProjectState = None,
     ) -> "Context":
         """Assembles and launches a new session context."""
-        from core.session.boot import SessionAssembler
+        from knoggin.session.boot import SessionAssembler
 
         assembler = SessionAssembler(user_name, resources)
-        ctx = await assembler.bootstrap(topics_config, session_id, model)
-
-        await ctx._verify_user_entity(user_name)
+        ctx = await assembler.bootstrap(project_state, session_id, model)
 
         return ctx
 
@@ -100,99 +116,11 @@ class Context:
             RedisKeys.global_next_turn_id(self.user_name, self.session_id)
         )
 
-    async def update_topics_config(self, new_config: dict):
-        self.topic_config.update(new_config)
-        await self.topic_config.save(self.redis_client, self.user_name, self.session_id)
-        self.entities.hierarchy_config = self.topic_config.hierarchy
-        self.processor.refresh_topic_mappings()
-        await emit(
-            self.session_id,
-            "system",
-            "topics_updated",
-            {"topics": list(new_config.keys())},
-        )
-
-    async def _verify_user_entity(self, user_name: str):
-        user_id = await self.entities.get_id(user_name)
-        if user_id is None:
-            logger.critical(
-                f"User entity not found for '{user_name}' in entities. Onboarding may not have completed."
-            )
-            return
-
-        entity = await self.memgraph.get_entity_by_id(user_id)
-
-        if not entity or entity.get("canonical_name") != user_name:
-            logger.critical(
-                f"User entity lookup mismatch for '{user_name}' (id={user_id}). "
-                f"Onboarding may not have completed."
-            )
-            return
-
-        profile = self.entities.entity_profiles.get(user_id)
-        if profile and profile["canonical_name"] == user_name:
-            logger.info(f"User entity verified: {user_name} (id={user_id})")
-            await emit(
-                self.session_id,
-                "system",
-                "user_entity_verified",
-                {"user_name": user_name, "entity_id": user_id},
-            )
-            return
-
-        logger.warning(
-            "User entity exists in graph but missing from entities, backfilling"
-        )
-        all_aliases = entity.get("aliases") or [user_name]
-        await self.entities.register_entity(
-            user_id, user_name, all_aliases, "person", "Identity"
-        )
-        await emit(
-            self.session_id, "system", "user_entity_recovered", {"user_name": user_name}
-        )
-
-    async def _run_session_jobs(self):
-        await emit(self.session_id, "job", "session_jobs_started", {})
-        ctx = JobContext(
-            user_name=self.user_name, session_id=self.session_id, idle_seconds=0
-        )
-
-        # 1. Profile Refinement (Primary focus for consistent views)
-        if await self.profile_job.should_run(ctx):
-            await self.profile_job.execute(ctx)
-
-        # 2. Merger (Uses refined profiles)
-        # Targeted Flush: If we have pending merges, only force refinement for
-        # entities that are actively in the merge queue and also dirty.
-        is_merge_pending = getattr(
-            self.merge_job, "enabled", True
-        ) and await self.merge_job.should_run(ctx)
-
-        if is_merge_pending:
-            merge_key = RedisKeys.merge_queue(self.user_name, self.session_id)
-            dirty_key = RedisKeys.dirty_entities(self.user_name, self.session_id)
-
-            # Fetch both sets to find intersection
-            merge_ids = await self.redis_client.smembers(merge_key)
-            dirty_ids = await self.redis_client.smembers(dirty_key)
-
-            if merge_ids and dirty_ids:
-                intersection = merge_ids.intersection(dirty_ids)
-                if intersection:
-                    target_ids = [int(eid) for eid in intersection]
-                    logger.info(
-                        f"Targeted profile flush for {len(target_ids)} entities involved in pending merges"
-                    )
-                    await self.profile_job.execute(ctx, target_ids=target_ids)
-
-            await self.merge_job.execute(ctx)
-
-        await emit(self.session_id, "job", "session_jobs_complete", {})
-
     async def add(self, msg: Message) -> Message:
-        # Deterministic ID: same content + session + timestamp = same ID
+        # Deterministic ID: same content + session + timestamp_ns = same ID
+        timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
         content_hash = hashlib.sha256(
-            f"{self.session_id}:{msg.content.strip()}:{msg.timestamp.isoformat()}".encode()
+            f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}".encode()
         ).hexdigest()[:12]
 
         dedup_key = f"msg_dedup:{self.session_id}:{content_hash}"
@@ -231,7 +159,7 @@ class Context:
             ),
         )
 
-        await self.scheduler.record_activity()
+        await self.project.scheduler.record_activity()
         self.consumer.signal()
         await self.refresh_session_ttls()
         return msg
@@ -241,65 +169,36 @@ class Context:
         role: str,
         content: str,
         timestamp: datetime,
-        user_msg_id: int = None,
-        metadata: dict = None,
-    ):
+        user_msg_id: Optional[int] = None,
+        metadata: Optional[dict] = None,
+    ) -> int:
+        """Saves a conversation turn to Redis via the hardened Smart Client."""
         turn_id = await self.get_next_turn_id()
-        turn_key = f"turn_{turn_id}"
 
-        payload = {"role": role, "content": content, "timestamp": timestamp.isoformat()}
-        if user_msg_id is not None:
-            payload["user_msg_id"] = user_msg_id
-        if metadata:
-            payload["metadata"] = metadata
+        payload = {
+            "role": role,
+            "role_label": "Assistant" if role == "assistant" else "User",
+            "content": content,
+            "timestamp": timestamp.isoformat(),
+            "metadata": metadata,
+            "user_msg_id": user_msg_id,
+        }
 
-        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
-        sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
-
-        await self.redis_client.hset(conv_key, turn_key, json.dumps(payload))
-        await self.redis_client.zadd(sorted_key, {turn_key: timestamp.timestamp()})
-
-        limit = self._max_conversation_history
-
-        count = await self.redis_client.zcard(sorted_key)
-        if count > limit:
-            old_turns = await self.redis_client.zrange(sorted_key, 0, -(limit + 1))
-            if old_turns:
-                old_turn_data = await self.redis_client.hmget(conv_key, *old_turns)
-                msg_keys = []
-                for data_str in old_turn_data:
-                    if data_str:
-                        turn_payload = json.loads(data_str)
-                        if "user_msg_id" in turn_payload:
-                            msg_keys.append(f"msg_{turn_payload['user_msg_id']}")
-
-                pipe = self.redis_client.pipeline()
-                pipe.zremrangebyrank(sorted_key, 0, -(limit + 1))
-                pipe.hdel(conv_key, *old_turns)
-                if msg_keys:
-                    pipe.hdel(
-                        RedisKeys.message_content(self.user_name, self.session_id),
-                        *msg_keys,
-                    )
-                    pipe.hdel(
-                        RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id),
-                        *msg_keys,
-                    )
-                await pipe.execute()
+        # Use the Smart Client to handle storage and history pruning
+        await AsyncRedisClient.log_conversation_turn(
+            user_name=self.user_name,
+            session_id=self.session_id,
+            turn_id=turn_id,
+            payload=payload,
+            max_history=self.current_config.developer_settings.limits.conversation_context_turns
+            or 100,
+        )
 
         return turn_id
 
     async def add_to_redis(self, msg: Message):
-        msg_key = f"msg_{msg.id}"
-
-        await self.redis_client.hset(
-            RedisKeys.message_content(self.user_name, self.session_id),
-            msg_key,
-            json.dumps(
-                {"message": msg.content.strip(), "timestamp": msg.timestamp.isoformat()}
-            ),
-        )
-
+        """Maps a message to a turn and stores its content via the Smart Client."""
+        # First log the conversation turn (User role)
         turn_id = await self.add_to_conversation_log(
             role="user",
             content=msg.content.strip(),
@@ -307,18 +206,21 @@ class Context:
             user_msg_id=msg.id,
         )
 
-        await self.redis_client.hset(
-            RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id),
-            msg_key,
-            f"turn_{turn_id}",
+        # Map the message ID to this turn and store content
+        await AsyncRedisClient.update_message_mapping(
+            user_name=self.user_name,
+            session_id=self.session_id,
+            msg_id=msg.id,
+            turn_id=turn_id,
+            content=msg.content.strip(),
         )
 
     async def add_assistant_turn(
         self,
         content: str,
         timestamp: datetime,
-        metadata: dict = None,
-        user_msg_id: int = None,
+        metadata: Optional[dict] = None,
+        user_msg_id: Optional[int] = None,
     ):
         """Add assistant turn to conversation log."""
         if metadata is None:
@@ -332,15 +234,9 @@ class Context:
             user_msg_id=user_msg_id,
         )
 
-        task = asyncio.create_task(
-            self._persist_assistant_embedding(turn_id, content, timestamp)
-        )
-        self._background_tasks.add(task)
-        task.add_done_callback(
-            lambda t: (
-                self._background_tasks.discard(t),
-                handle_background_task_result(t),
-            )
+        self.task_group.create_task(
+            self._persist_assistant_embedding(turn_id, content, timestamp),
+            name=f"persist_assistant_embedding_{turn_id}",
         )
 
     async def _maybe_extract_llm(self, content: str, user_msg_id: int) -> bool:
@@ -367,7 +263,7 @@ class Context:
             if not result or not result.profiles:
                 return False
 
-            # ── Pass 1: Batch-encode all subject names for resolution ──
+            # Pass 1: Batch-encode all subject names for resolution
             subject_names = []
             valid_profiles = []
             for profile in result.profiles:
@@ -382,19 +278,18 @@ class Context:
 
             subject_embeddings = await self.embedding_service.encode(subject_names)
 
-            # ── Pass 2: Resolve subjects to entities, collect fact text ──
+            # Pass 2: Resolve subjects to entities, collect fact text
             fact_work: List[Tuple[int, str]] = []  # (target_id, fact_content)
 
             for i, profile in enumerate(valid_profiles):
                 subject = subject_names[i]
                 subject_emb = subject_embeddings[i]
 
-                candidates = await self.entities.get_candidate_ids(
+                candidates = await self.project.entities.get_candidate_ids(
                     subject, precomputed_embedding=subject_emb
                 )
 
                 target_id = None
-                config = get_config()
                 threshold = (
                     config.developer_settings.entity_resolution.resolution_threshold
                 )
@@ -419,11 +314,11 @@ class Context:
             if not fact_work:
                 return False
 
-            # ── Pass 3: Batch-encode all fact contents ──
+            # Pass 3: Batch-encode all fact contents
             fact_contents = [content for _, content in fact_work]
             fact_embeddings = await self.embedding_service.encode(fact_contents)
 
-            # ── Pass 4: Build Fact objects and write ──
+            # Pass 4: Build Fact objects and write
             facts_by_entity: Dict[int, List[FactRecord]] = {}
 
             for i, (target_id, fact_content) in enumerate(fact_work):
@@ -444,7 +339,7 @@ class Context:
             total_count = 0
             for eid, facts_to_write in facts_by_entity.items():
                 try:
-                    c = await self.memgraph.create_facts_batch(eid, facts_to_write)
+                    c = await self.graph_client.create_facts_batch(eid, facts_to_write)
                     total_count += int(c)
                 except Exception as e:
                     logger.error(
@@ -470,7 +365,9 @@ class Context:
 
         for attempt in range(max_retries):
             try:
-                embedding_list = await self.entities.compute_batch_embeddings([content])
+                embedding_list = await self.project.entities.compute_batch_embeddings(
+                    [content]
+                )
                 embedding_vector = embedding_list[0]
 
                 graph_id = turn_id + 1_000_000_000
@@ -485,7 +382,7 @@ class Context:
                     }
                 ]
 
-                await self.memgraph.save_message_logs(agent_msg_batch)
+                await self.graph_client.save_message_logs(agent_msg_batch)
                 return
 
             except Exception as e:
@@ -500,7 +397,7 @@ class Context:
                     )
 
     async def get_conversation_context(
-        self, num_turns: int, up_to_msg_id: int = None
+        self, num_turns: int, up_to_msg_id: Optional[int] = None
     ) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
         turns = await fetch_conversation_turns(
@@ -510,7 +407,7 @@ class Context:
         results = []
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
-            ts = datetime.fromisoformat(turn["timestamp"])
+            ts = parse_iso_time_or_now(turn["timestamp"])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append(
                 {
@@ -541,9 +438,10 @@ class Context:
         )
         await write_batch_to_graph(
             batch,
-            memgraph=self.memgraph,
-            entities=self.entities,
+            graph_client=self.graph_client,
+            entities=self.project.entities,
             session_id=self.session_id,
+            project_id=self.project_id,
             user_name=self.user_name,
             redis_client=self.redis_client,
         )
@@ -553,179 +451,26 @@ class Context:
     ) -> tuple[bool, str | None]:
         return await write_batch_callback(
             result,
-            memgraph=self.memgraph,
-            entities=self.entities,
+            graph_client=self.graph_client,
+            entities=self.project.entities,
             session_id=self.session_id,
+            project_id=self.project_id,
             user_name=self.user_name,
             redis_client=self.redis_client,
         )
 
-    async def update_runtime_settings(self, new_config: dict):
-        """
-        Hot-reload runtime settings from the new configuration dictionary.
-        This propagates configuration changes to the active session components.
-        """
-        logger.info("Applying hot-reload of runtime settings...")
 
-        dev_settings = new_config.get("developer_settings", {})
-
-        if "default_topics" in new_config:
-            await self.update_topics_config(new_config["default_topics"])
-            logger.info(f"Topics updated: {list(new_config['default_topics'].keys())}")
-
-        ingest_cfg = dev_settings.get("ingestion", {})
-        if ingest_cfg and self.consumer:
-            b_size = ingest_cfg.get("batch_size")
-
-            if b_size:
-                current_chk = ingest_cfg.get("checkpoint_interval") or (b_size * 4)
-                current_win = ingest_cfg.get("session_window") or (b_size * 3)
-
-                self.consumer.update_ingestion_settings(
-                    batch_size=b_size,
-                    batch_timeout=ingest_cfg.get("batch_timeout"),
-                    checkpoint_interval=current_chk,
-                    session_window=current_win,
-                )
-
-        jobs_cfg = dev_settings.get("jobs", {})
-
-        if "profile" in jobs_cfg and self.profile_job:
-            self.profile_job.update_settings(
-                msg_window=jobs_cfg["profile"].get("msg_window"),
-                volume_threshold=jobs_cfg["profile"].get("volume_threshold"),
-                idle_threshold=jobs_cfg["profile"].get("idle_threshold"),
-                profile_batch_size=jobs_cfg["profile"].get("profile_batch_size"),
-                contradiction_sim_low=jobs_cfg["profile"].get("contradiction_sim_low"),
-                contradiction_sim_high=jobs_cfg["profile"].get(
-                    "contradiction_sim_high"
-                ),
-                contradiction_batch_size=jobs_cfg["profile"].get(
-                    "contradiction_batch_size"
-                ),
-            )
-
-        if "merger" in jobs_cfg and self.merge_job:
-            self.merge_job.update_settings(
-                auto_threshold=jobs_cfg["merger"].get("auto_threshold"),
-                hitl_threshold=jobs_cfg["merger"].get("hitl_threshold"),
-                cosine_threshold=jobs_cfg["merger"].get("cosine_threshold"),
-            )
-
-        if self.scheduler:
-            if "cleaner" in jobs_cfg:
-                cleaner = self.scheduler._jobs.get("entity_cleanup")
-                if cleaner:
-                    cleaner.enabled = jobs_cfg["cleaner"].get("enabled", True)
-                    cleaner.update_settings(
-                        interval_hours=jobs_cfg["cleaner"].get("interval_hours"),
-                        orphan_age_hours=jobs_cfg["cleaner"].get("orphan_age_hours"),
-                        stale_junk_days=jobs_cfg["cleaner"].get("stale_junk_days"),
-                    )
-
-            if "dlq" in jobs_cfg:
-                dlq = self.scheduler._jobs.get("dlq_auto_replay")
-                if dlq:
-                    dlq.update_settings(
-                        interval=jobs_cfg["dlq"].get("interval_seconds"),
-                        batch_size=jobs_cfg["dlq"].get("batch_size"),
-                        max_attempts=jobs_cfg["dlq"].get("max_attempts"),
-                    )
-
-            if "archival" in jobs_cfg:
-                archiver = self.scheduler._jobs.get("fact_archival")
-                if archiver:
-                    archiver.enabled = jobs_cfg["archival"].get("enabled", True)
-                    archiver.update_settings(
-                        retention_days=jobs_cfg["archival"].get("retention_days"),
-                        fallback_interval_hours=jobs_cfg["archival"].get(
-                            "fallback_interval_hours"
-                        ),
-                    )
-
-            if "topic_config" in jobs_cfg:
-                tconfig = self.scheduler._jobs.get("topic_config")
-                if tconfig:
-                    tconfig.enabled = jobs_cfg["topic_config"].get("enabled", True)
-                    # We might need to add `update_settings` to `topic_config` job later if it supports hot reload
-                    # For now just setting the feature flag is enough
-
-        er_cfg = dev_settings.get("entity_resolution", {})
-        if er_cfg and self.entities:
-            self.entities.update_settings(
-                fuzzy_substring_threshold=er_cfg.get("fuzzy_substring_threshold"),
-                fuzzy_non_substring_threshold=er_cfg.get(
-                    "fuzzy_non_substring_threshold"
-                ),
-                generic_token_freq=er_cfg.get("generic_token_freq"),
-                candidate_fuzzy_threshold=er_cfg.get("candidate_fuzzy_threshold"),
-                candidate_vector_threshold=er_cfg.get("candidate_vector_threshold"),
-            )
-
-        nlp_cfg = dev_settings.get("nlp_pipeline", {})
-        if nlp_cfg and self.processor:
-            self.processor.update_settings(
-                gliner_threshold=nlp_cfg.get("gliner_threshold"),
-                vp01_min_confidence=nlp_cfg.get("vp01_min_confidence"),
-                llm_ner=nlp_cfg.get("llm_ner"),
-            )
-
-        await emit(
-            self.session_id,
-            "system",
-            "config_updated",
-            {"keys": list(new_config.keys())},
-        )
-
-        logger.info("Runtime settings update complete.")
 
     async def refresh_session_ttls(self):
-        """Refresh TTLs on all session-scoped Redis keys. Call on activity."""
-        ttl = SESSION_KEY_TTL
-        u, s = self.user_name, self.session_id
-
-        keys = [
-            RedisKeys.buffer(u, s),
-            RedisKeys.checkpoint(u, s),
-            RedisKeys.message_content(u, s),
-            RedisKeys.dirty_entities(u, s),
-            RedisKeys.profile_complete(u, s),
-            RedisKeys.merge_queue(u, s),
-            RedisKeys.dlq(u, s),
-            RedisKeys.dlq_parked(u, s),
-            RedisKeys.last_processed(u, s),
-            RedisKeys.conversation(u, s),
-            RedisKeys.recent_conversation(u, s),
-            RedisKeys.msg_to_turn_lookup(u, s),
-            RedisKeys.last_activity(u, s),
-            RedisKeys.merge_proposals(u, s),
-            RedisKeys.merge_intents_index(u, s),
-            RedisKeys.user_profile_ran(u, s),
-            RedisKeys.heartbeat_counter(u, s),
-            RedisKeys.global_next_turn_id(u, s),
-        ]
-
-        pipe = self.redis_client.pipeline()
-        for key in keys:
-            pipe.expire(key, ttl)
-        await pipe.execute()
+        """Refresh TTLs on all session-scoped Redis keys via the Smart Client."""
+        await AsyncRedisClient.refresh_session_ttls(
+            self.user_name, self.session_id, SESSION_KEY_TTL
+        )
 
     async def shutdown(self):
         if self.consumer:
             await self.consumer.stop()
-        if self.scheduler:
-            await self.scheduler.stop()
-        if self.resources:
-            self.resources.active_entities = None
 
-        if self._background_tasks:
-            logger.info(f"Awaiting {len(self._background_tasks)} background tasks...")
-            done, pending = await asyncio.wait(self._background_tasks, timeout=10.0)
-            if pending:
-                logger.warning(
-                    f"Cancelling {len(pending)} background tasks that did not complete in time"
-                )
-                for task in pending:
-                    task.cancel()
+        await self.task_group.shutdown(timeout=10.0)
         await emit(self.session_id, "system", "session_shutdown", {})
-        await DebugEventEmitter.get().cleanup_session(self.session_id)
+        await DebugEventEmitter.get().cleanup_scope(self.session_id)

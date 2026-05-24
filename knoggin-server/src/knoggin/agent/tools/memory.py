@@ -1,7 +1,22 @@
-from typing import Dict, List
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+if TYPE_CHECKING:
+    import redis.asyncio as aioredis
+
+    from infrastructure.graph_client import GraphClient
+    from knoggin.knowledge.services.entity_service import EntityManager
+    from knoggin.knowledge.services.memory_service import MemoryManager
 
 
-class MemoryToolsMixin:
+class MemoryTools:
+    redis: aioredis.Redis
+    graph_client: GraphClient
+    entities: EntityManager
+    memory: Optional[MemoryManager]
+
+
     async def save_memory(self, content: str, topic: str = "General") -> Dict:
         """Save a note to persistent session memory."""
         if self.memory:
@@ -14,6 +29,14 @@ class MemoryToolsMixin:
         if self.memory:
             return await self.memory.forget_memory_dict(memory_id)
         return {"error": "No memory manager configured"}
+
+    async def get_memory_blocks(
+        self, hot_topics: List[str] = None
+    ) -> Dict[str, List[Dict]]:
+        """Fetch memory blocks for prompt injection."""
+        if self.memory:
+            return await self.memory.get_memory_blocks_dict(hot_topics)
+        return {}
 
     async def save_insight(self, content: str) -> Dict:
         return {"error": "save_insight is only available in community discussions."}
@@ -28,12 +51,14 @@ class MemoryToolsMixin:
     ) -> Dict:
         return {"error": "spawn_specialist is only available in community discussions."}
 
+    @staticmethod
     def _is_message_id(msg_id) -> bool:
         """Check if numeric ID belongs to message collection or turn collection."""
         if isinstance(msg_id, str):
             return msg_id.startswith("msg_")
         return msg_id < 1_000_000_000
 
+    @staticmethod
     def _format_message_id(msg_id) -> str:
         """Format an ID as a string for message/turn reference."""
         if isinstance(msg_id, str):

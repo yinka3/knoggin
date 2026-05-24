@@ -1,5 +1,6 @@
 import json
 import re
+from typing import Awaitable, Callable
 
 import redis.asyncio as aioredis
 from loguru import logger
@@ -7,9 +8,10 @@ from loguru import logger
 from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import TopicConfigResult
 from common.utils.events import emit
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.llm.llm_client import LLMService
-from infrastructure.redis.redis_client import RedisKeys
+from common.utils.json_utils import safe_json_loads
+from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.llm_client import LLMService
+from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import get_topic_evolution_prompt
 
 
@@ -24,7 +26,7 @@ class TopicConfigJob(BaseJob):
         self,
         llm: LLMService,
         topic_config: TopicConfig,
-        update_callback,
+        update_callback: Callable[[dict], Awaitable[None]],
         redis_client: aioredis.Redis,
         interval_msgs: int = 40,
         conversation_window: int = 50,
@@ -73,13 +75,12 @@ class TopicConfigJob(BaseJob):
         for turn_id, raw in zip(turn_ids, turn_data):
             if not raw:
                 continue
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
+            parsed = safe_json_loads(raw)
+            if not parsed or not isinstance(parsed, dict):
                 logger.warning(f"Corrupt turn data for {turn_id}, skipping")
                 continue
-            role = "USER" if parsed["role"] == "user" else "AGENT"
-            lines.append(f"[{role}]: {parsed['content']}")
+            role = "USER" if parsed.get("role") == "user" else "AGENT"
+            lines.append(f"[{role}]: {parsed.get('content', '')}")
 
         conversation_text = "\n".join(lines)
 

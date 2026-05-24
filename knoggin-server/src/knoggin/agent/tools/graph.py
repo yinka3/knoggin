@@ -1,13 +1,31 @@
-from typing import Dict, List
+from __future__ import annotations
 
-from infrastructure.jobs.utils import cosine_similarity
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from infrastructure.graph_client import GraphClient
+    from knoggin.knowledge.services.embedding_service import EmbeddingService
+    from knoggin.knowledge.services.entity_service import EntityManager
+
+from common.utils.data_utils import cosine_similarity
+from common.utils.json_utils import safe_json_loads
+from infrastructure.redis_client import RedisKeys
 
 
-class GraphToolsMixin:
+class GraphTools:
+    # Attributes provided by the composed Tools class
+    graph_client: GraphClient
+    entities: EntityManager
+    embedding_service: EmbeddingService
+    active_topics: Optional[List[str]]
+    search_cfg: Dict
+    user_name: str
+    session_id: str
+
     async def get_connections(self, entity_name: str) -> List[Dict]:
         """
         Get the full relationship network for an entity.
-        Returns all connections (up to 50) with evidence ΓÇö the actual messages that established each connection.
+        Returns all connections (up to 50) with evidence — the actual messages that established each connection.
         Use when you need comprehensive relationship details beyond the top 5 from search_entity.
 
         Args:
@@ -20,8 +38,8 @@ class GraphToolsMixin:
         if not canonical:
             return [{"error": f"Entity not found: '{entity_name}'"}]
 
-        results = await self.memgraph.get_related_entities(
-            [canonical], active_topics=self.active_topics
+        results = await self.graph_client.get_related_entities(
+            [canonical], active_topics=self.active_topics, limit=50
         )
 
         if results:
@@ -32,7 +50,7 @@ class GraphToolsMixin:
             return results
 
         # Try looking without topic filtering to see if it's "hidden"
-        hidden_results = await self.memgraph.get_related_entities(
+        hidden_results = await self.graph_client.get_related_entities(
             [canonical], active_topics=None
         )
 
@@ -66,7 +84,7 @@ class GraphToolsMixin:
             return [{"error": f"Entity not found: '{entity_name}'"}]
 
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
-        results = await self.memgraph.get_recent_activity(
+        results = await self.graph_client.get_recent_activity(
             canonical, active_topics=self.active_topics, hours=hours
         )
 
@@ -80,7 +98,7 @@ class GraphToolsMixin:
     async def fact_check(self, entity_name: str, query: str) -> Dict:
         """
         Retrieve and verify stored facts about a specific entity from the knowledge graph.
-        Uses a resolution cascade: exact lookup ΓåÆ vector search ΓåÆ message search fallback.
+        Uses a resolution cascade: exact lookup → vector search → message search fallback.
 
         Args:
             entity_name: The entity to look up facts for.
@@ -92,7 +110,7 @@ class GraphToolsMixin:
         entity_id = await self.entities.get_id(entity_name)
 
         if entity_id is not None:
-            facts = await self.memgraph.get_facts_for_entity(
+            facts = await self.graph_client.get_facts_for_entity(
                 entity_id, active_only=False
             )
 
@@ -112,7 +130,7 @@ class GraphToolsMixin:
 
         embedding = await self.embedding_service.encode_single(entity_name)
 
-        candidates = await self.memgraph.search_entities_by_embedding(
+        candidates = await self.graph_client.search_entities_by_embedding(
             embedding, limit=5, score_threshold=0.69
         )
 
@@ -120,7 +138,7 @@ class GraphToolsMixin:
             candidate_ids = [eid for eid, _ in candidates]
             similarity_map = {eid: sim for eid, sim in candidates}
 
-            facts_by_entity = await self.memgraph.get_facts_for_entities(
+            facts_by_entity = await self.graph_client.get_facts_for_entities(
                 candidate_ids, active_only=False
             )
 
@@ -184,7 +202,7 @@ class GraphToolsMixin:
             return [{"error": f"Entity not found: '{entity_b}'"}]
 
         # Trace path
-        path, has_inactive_shortcut = await self.memgraph.find_path_filtered(
+        path, has_inactive_shortcut = await self.graph_client.find_path_filtered(
             canonical_a, canonical_b, active_topics=self.active_topics, max_depth=4
         )
 
@@ -200,7 +218,7 @@ class GraphToolsMixin:
             return path
 
         if has_inactive_shortcut:
-            full_path, _ = await self.memgraph.find_path_filtered(
+            full_path, _ = await self.graph_client.find_path_filtered(
                 canonical_a, canonical_b, active_topics=None, max_depth=4
             )
 
@@ -268,7 +286,7 @@ class GraphToolsMixin:
         result = {"entity": canonical, "entity_id": entity_id}
 
         if direction in ("up", "both"):
-            parents = await self.memgraph.get_parent_entities(entity_id)
+            parents = await self.graph_client.get_parent_entities(entity_id)
             result["parents"] = parents
 
             if parents:
@@ -277,7 +295,9 @@ class GraphToolsMixin:
                 visited = {current_id}
 
                 while True:
-                    parent_list = await self.memgraph.get_parent_entities(current_id)
+                    parent_list = await self.graph_client.get_parent_entities(
+                        current_id
+                    )
                     if not parent_list:
                         break
                     parent = parent_list[0]  # assume single parent for now
@@ -290,7 +310,51 @@ class GraphToolsMixin:
                 result["ancestry"] = ancestry
 
         if direction in ("down", "both"):
-            children = await self.memgraph.get_child_entities(entity_id)
+            children = await self.graph_client.get_child_entities(entity_id)
             result["children"] = children
 
         return [result]
+
+    async def get_hot_topic_context(
+        self, hot_topics: List[str], slim: bool = False
+    ) -> Dict[str, Dict]:
+        """
+        Retrieve pre-cached context for frequently accessed topics.
+        Called automatically at start — you already have this data in hot_topic_context.
+        Only call manually if hot topics changed mid-conversation.
+
+        Args:
+            hot_topics: List of topic names marked as "hot"
+            slim: Returns if you want more information or not
+
+        Returns: Dict mapping topic name to list of top entities with summaries.
+        """
+        if not hot_topics:
+            return {}
+
+        # Fetch context
+        raw = await self.graph_client.get_hot_topic_context_with_messages(
+            hot_topics, msg_limit=10, slim=slim
+        )
+        content_key = RedisKeys.message_content(self.user_name, self.session_id)
+
+        for _, data in raw.items():
+            msg_ids = data.get("message_ids", [])
+
+            if msg_ids:
+                raw_msgs = await self.redis.hmget(content_key, *msg_ids)
+                messages = []
+                for msg_id, raw_msg in zip(msg_ids, raw_msgs):
+                    if raw_msg:
+                        parsed = safe_json_loads(raw_msg)
+                        if parsed and isinstance(parsed, dict):
+                            messages.append(
+                                {"id": msg_id, "message": parsed.get("message", "")}
+                            )
+                data["messages"] = messages
+            else:
+                data["messages"] = []
+
+            data.pop("message_ids", None)
+
+        return raw

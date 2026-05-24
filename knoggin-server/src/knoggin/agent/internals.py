@@ -1,11 +1,10 @@
 import json
-from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from loguru import logger
 
-from common.errors.agent import ToolExecutionError
-from common.mcp.bridge import parse_mcp_tool_name
+from common.exceptions import ToolExecutionError
+from common.utils.time_utils import parse_iso_time, parse_iso_time_or_now
 from knoggin.agent.formatters import (
     format_entity_results,
     format_fact_results,
@@ -19,7 +18,9 @@ from knoggin.agent.tools.registry import TOOL_DISPATCH, Tools
 from knoggin.agent.types import AgentContext, RetrievedEvidence
 
 
-def build_user_message(ctx: AgentContext, last_result=None) -> str:
+def build_user_message(
+    ctx: AgentContext, last_result: Optional[Union[Dict, List[Dict]]] = None
+) -> str:
     msg = ""
 
     if ctx.history:
@@ -30,7 +31,7 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
             ts = turn.get("timestamp")
             if ts:
                 try:
-                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    dt = parse_iso_time_or_now(ts)
                     msg += f"[{dt.strftime('%H:%M')}] {role}: {turn['content']}\n"
                 except Exception:
                     msg += f"{role}: {turn['content']}\n"
@@ -91,7 +92,9 @@ def build_user_message(ctx: AgentContext, last_result=None) -> str:
     return msg
 
 
-def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
+def _format_evidence(
+    evidence: RetrievedEvidence, last_result: Optional[Union[Dict, List[Dict]]] = None
+) -> str:
     """
     Format evidence with full detail for new results,
     compact summary for previously seen data.
@@ -180,15 +183,37 @@ def _format_evidence(evidence: RetrievedEvidence, last_result=None) -> str:
     if evidence.facts:
         msg += f"\n**Fact check results:**\n{format_fact_results(evidence.facts)}\n"
 
-    if evidence.summary:
-        msg += f"\n**Evidence summary (compressed):**\n{evidence.summary}\n"
-
     return msg
 
 
 def build_evidence_context(evidence: RetrievedEvidence) -> str:
     """Serialize all evidence to a string for token counting."""
     return _format_evidence(evidence, last_result=None)
+
+
+def _merge_unique(target_list: List, new_items, key_func) -> None:
+    existing_keys = {key_func(item) for item in target_list}
+    for item in new_items:
+        k = key_func(item)
+        if k not in existing_keys:
+            target_list.append(item)
+            existing_keys.add(k)
+
+
+def _normalize_file_chunks(data: List[Dict]) -> List[Dict]:
+    """Normalize search_files results into the standard message shape."""
+    return [
+        {
+            "id": f"{chunk.get('file_id', 'file')}_{chunk.get('chunk_index', 0)}",
+            "content": chunk.get("content", ""),
+            "message": chunk.get("content", ""),
+            "role": "file",
+            "score": chunk.get("score", 0.5),
+            "source": chunk.get("file_name", "uploaded file"),
+        }
+        for chunk in data
+        if "error" not in chunk
+    ]
 
 
 def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
@@ -203,97 +228,59 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
     if not data:
         return
 
-    def _merge_unique(target_list: List, new_items, key_func):
-        existing_keys = {key_func(item) for item in target_list}
-        for item in new_items:
-            k = key_func(item)
-            if k not in existing_keys:
-                target_list.append(item)
-                existing_keys.add(k)
-
-    if tool_name == "search_messages":
+    def _acc_messages(ev, data, cfg):
         _merge_unique(
-            ctx.evidence.messages,
-            data if isinstance(data, list) else [],
-            lambda x: x["id"],
+            ev.messages, data if isinstance(data, list) else [], lambda x: x["id"]
         )
-        if len(ctx.evidence.messages) > ctx.config.max_accumulated_messages:
-            ctx.evidence.messages.sort(
+        if len(ev.messages) > cfg.max_accumulated_messages:
+            ev.messages.sort(
                 key=lambda x: x.get("score") if x.get("score") is not None else 0.5,
                 reverse=True,
             )
-            ctx.evidence.messages = ctx.evidence.messages[
-                : ctx.config.max_accumulated_messages
-            ]
-    elif tool_name == "search_entity":
-        _merge_unique(
-            ctx.evidence.profiles,
-            data if isinstance(data, list) else [],
-            lambda x: x["id"],
-        )
-    elif tool_name in ("get_connections", "get_recent_activity"):
-        _merge_unique(
-            ctx.evidence.graph,
-            data if isinstance(data, list) else [],
+            ev.messages = ev.messages[: cfg.max_accumulated_messages]
+
+    def _acc_extend_or_append(target, data):
+        if isinstance(data, dict):
+            target.append(data)
+        elif isinstance(data, list):
+            target.extend(data)
+
+    strategies = {
+        "search_messages": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
+        "search_entity": lambda ev, d, cfg: _merge_unique(
+            ev.profiles, d if isinstance(d, list) else [], lambda x: x["id"]
+        ),
+        "get_connections": lambda ev, d, cfg: _merge_unique(
+            ev.graph,
+            d if isinstance(d, list) else [],
             lambda x: (x.get("source"), x.get("target")),
-        )
-    elif tool_name == "find_path":
-        ctx.evidence.paths.extend(data if isinstance(data, list) else [])
-    elif tool_name == "get_hierarchy":
-        if isinstance(data, dict):
-            ctx.evidence.hierarchy.append(data)
-        elif isinstance(data, list):
-            ctx.evidence.hierarchy.extend(data)
-    elif tool_name == "fact_check":
-        if isinstance(data, dict):
-            ctx.evidence.facts.append(data)
-        elif isinstance(data, list):
-            ctx.evidence.facts.extend(data)
-    elif tool_name == "search_files":
-        if isinstance(data, list) and data and "error" not in data[0]:
-            normalized = []
-            for chunk in data:
-                normalized.append(
-                    {
-                        "id": f"{chunk.get('file_id', 'file')}_{chunk.get('chunk_index', 0)}",
-                        "content": chunk.get("content", ""),
-                        "message": chunk.get("content", ""),
-                        "role": "file",
-                        "score": chunk.get("score", 0.5),
-                        "source": chunk.get("file_name", "uploaded file"),
-                    }
-                )
-            _merge_unique(ctx.evidence.messages, normalized, lambda x: x["id"])
-    elif tool_name == "web_search":
-        if isinstance(data, list):
-            _merge_unique(ctx.evidence.sources, data, lambda x: x.get("url"))
-    elif tool_name == "news_search":
-        if isinstance(data, list):
-            _merge_unique(ctx.evidence.sources, data, lambda x: x.get("url"))
-    elif tool_name.startswith("mcp__"):
-        content = (
-            data
-            if isinstance(data, str)
-            else json.dumps(data, default=str)
-            if data
-            else ""
-        )
-        ctx.evidence.messages.append(
-            {
-                "id": f"mcp_{ctx.state.call_count}",
-                "score": 0.5,
-                "context": [
-                    {
-                        "role": "tool",
-                        "content": content[:2000],
-                        "timestamp": "",
-                        "is_hit": True,
-                    }
-                ],
-            }
-        )
-    elif tool_name in ("save_memory", "forget_memory"):
-        pass
+        ),
+        "get_recent_activity": lambda ev, d, cfg: _merge_unique(
+            ev.graph,
+            d if isinstance(d, list) else [],
+            lambda x: (x.get("source"), x.get("target")),
+        ),
+        "find_path": lambda ev, d, cfg: ev.paths.extend(
+            d if isinstance(d, list) else []
+        ),
+        "get_hierarchy": lambda ev, d, cfg: _acc_extend_or_append(ev.hierarchy, d),
+        "fact_check": lambda ev, d, cfg: _acc_extend_or_append(ev.facts, d),
+        "search_files": lambda ev, d, cfg: _merge_unique(
+            ev.messages,
+            _normalize_file_chunks(d) if isinstance(d, list) else [],
+            lambda x: x["id"],
+        ),
+        "web_search": lambda ev, d, cfg: _merge_unique(
+            ev.sources, d if isinstance(d, list) else [], lambda x: x.get("url")
+        ),
+        "news_search": lambda ev, d, cfg: _merge_unique(
+            ev.sources, d if isinstance(d, list) else [], lambda x: x.get("url")
+        ),
+    }
+
+    strategy = strategies.get(tool_name)
+    if strategy:
+        strategy(ctx.evidence, data, ctx.config)
 
 
 def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
@@ -338,33 +325,18 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Found {count} relevant chunks", count
         return "No results", 0
 
-    if tool_name.startswith("mcp__"):
-        if isinstance(data, str):
-            preview = data[:100] + "..." if len(data) > 100 else data
-            return f"MCP result: {preview}", 1
-        return (
-            f"MCP result: {len(data)} items"
-            if isinstance(data, list)
-            else "MCP completed"
-        ), 1
+    if tool_name == "request_replanning":
+        return "Requested a new plan", 1
 
     return "Completed", 1
 
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
-    parsed = parse_mcp_tool_name(name)
-    if parsed:
-        server_name, tool_name = parsed
-        if not tools.mcp_manager:
-            raise ToolExecutionError(name, "MCP not configured")
-        logger.info(f"[MCP TOOL CALL] {server_name}.{tool_name}: {json.dumps(args)}")
-        try:
-            return await tools.mcp_manager.call_tool(server_name, tool_name, args)
-        except Exception as e:
-            raise ToolExecutionError(name, str(e))
 
     if name == "request_clarification":
         return {"clarification": args.get("question", "Could you clarify?")}
+    if name == "request_replanning":
+        return {"replanning": args.get("reason", "No reason provided")}
 
     dispatch_entry = TOOL_DISPATCH.get(name)
     if dispatch_entry is None:

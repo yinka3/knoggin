@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from knoggin.agent.prompts import (
     get_connection_reasoning_prompt,
@@ -11,9 +11,21 @@ from knoggin.agent.prompts import (
 )
 
 
+class TopicSchema(BaseModel):
+    active: bool = Field(True)
+    hot: bool = Field(False)
+    labels: List[str] = Field(default_factory=list)
+    hierarchy: Dict[str, Any] = Field(default_factory=dict)
+    aliases: List[str] = Field(default_factory=list)
+
+
+
+
 class IngestionSettings(BaseModel):
     batch_size: int = Field(8, ge=1, le=100)
     batch_timeout: float = Field(300.0, ge=10.0)
+    checkpoint_interval: int = Field(32, ge=1)
+    session_window: int = Field(24, ge=1)
 
 
 class CleanerSettings(BaseModel):
@@ -238,57 +250,10 @@ class RootConfig(BaseModel):
     )
     llm: LLMSettings = Field(default_factory=LLMSettings)
     search: SearchAPIKeySettings = Field(default_factory=SearchAPIKeySettings)
-    mcp: Dict[str, Any] = Field(
+    default_topics: Dict[str, TopicSchema] = Field(
         default_factory=lambda: {
-            "servers": {},
-            "tool_timeout": 15.0,
-            "max_mcp_calls_per_run": 3,
-        }
-    )
-    default_topics: Dict[str, Any] = Field(
-        default_factory=lambda: {
-            "General": {"active": True, "labels": [], "hierarchy": {}, "aliases": []},
-            "Identity": {
-                "active": True,
-                "labels": ["person"],
-                "hierarchy": {},
-                "aliases": [],
-            },
+            "General": TopicSchema(active=True, labels=[], hierarchy={}, aliases=[]),
+            "Identity": TopicSchema(active=True, labels=["person"], hierarchy={}, aliases=[]),
         }
     )
     developer_settings: DeveloperSettings = Field(default_factory=DeveloperSettings)
-
-
-class DeveloperModePreset(BaseModel):
-    id: str
-    name: str
-    description: str
-    settings: DeveloperSettings
-
-
-class ConfigUpdate(BaseModel):
-    user_name: Optional[str] = None
-    user_aliases: Optional[List[str]] = None
-    user_facts: Optional[List[str]] = None
-    llm: Optional[LLMSettings] = None
-    search: Optional[SearchAPIKeySettings] = None
-    default_topics: Optional[dict] = None
-    developer_settings: Optional[DeveloperSettings] = None
-    community: Optional[CommunitySettings] = None
-    curated_models: Optional[List[dict]] = None
-
-    @field_validator("user_name")
-    @classmethod
-    def validate_user_name(cls, v):
-        if v is not None and not v.strip():
-            raise ValueError("user_name cannot be empty or whitespace")
-        return v.strip() if v else v
-
-
-class MCPServerCreate(BaseModel):
-    name: str
-    command: str = "uvx"
-    args: List[Any] = Field(default_factory=list)
-    env: Optional[Dict[str, str]] = None
-    enabled: bool = True
-    allowed_tools: Optional[List[str]] = None

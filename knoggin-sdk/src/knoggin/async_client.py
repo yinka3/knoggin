@@ -8,8 +8,7 @@ from .managers import (
     AgentAsyncManager, 
     SessionAsyncManager, 
     TopicAsyncManager, 
-    FileAsyncManager, 
-    MCPAsyncManager
+    FileAsyncManager
 )
 
 class KnogginAsyncClient:
@@ -23,7 +22,6 @@ class KnogginAsyncClient:
         self.sessions = SessionAsyncManager(self)
         self.topics = TopicAsyncManager(self)
         self.files = FileAsyncManager(self)
-        self.mcp = MCPAsyncManager(self)
         self._handlers = {}
 
     @classmethod

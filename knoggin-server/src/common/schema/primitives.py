@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from common.utils.time_utils import parse_iso_time
+
 # ═══════════════════════════════════════════════════════════════════
 #  ENTITY — any discrete concept in the knowledge graph
 # ═══════════════════════════════════════════════════════════════════
@@ -104,7 +106,10 @@ class Fact(BaseModel):
 def _parse_dt(val) -> datetime:
     """Parse a datetime from various formats (ISO string, unix timestamp, or datetime)."""
     if isinstance(val, str):
-        return datetime.fromisoformat(val)
+        result = parse_iso_time(val)
+        if result is None:
+            raise ValueError(f"Cannot parse datetime from string: {val}")
+        return result
     if isinstance(val, (int, float)):
         return datetime.fromtimestamp(val, tz=timezone.utc)
     if isinstance(val, datetime):
@@ -136,7 +141,7 @@ class FactRecord(Fact):
 
     @classmethod
     def from_db_record(cls, record: dict) -> "FactRecord":
-        """Hydrate from a Memgraph query result."""
+        """Hydrate from a GraphClient query result."""
         return cls(
             id=record["id"],
             content=record["content"],

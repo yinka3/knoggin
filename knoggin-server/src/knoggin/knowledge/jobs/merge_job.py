@@ -1,6 +1,5 @@
 import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -9,18 +8,19 @@ from loguru import logger
 
 from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import FactRecord, MergeJudgment
-from common.utils.events import emit
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.jobs.utils import (
+from common.utils.data_utils import (
     cosine_similarity,
     enrich_facts_with_sources,
     find_duplicate_facts,
     format_vp05_input,
     has_sufficient_facts,
 )
-from infrastructure.llm.llm_client import LLMService
-from infrastructure.redis.redis_client import RedisKeys
+from common.utils.events import emit
+from common.utils.json_utils import safe_json_loads
+from infrastructure.graph_client import GraphClient
+from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.llm_client import LLMService
+from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import get_merge_judgment_prompt
 from knoggin.knowledge.services.entity_service import EntityManager
 
@@ -34,10 +34,9 @@ class MergeDetectionJob(BaseJob):
         self,
         user_name: str,
         entities: EntityManager,
-        memgraph: MemgraphClient,
+        graph_client: GraphClient,
         llm_client: LLMService,
         topic_config: TopicConfig,
-        executor: ThreadPoolExecutor,
         redis_client: aioredis.Redis,
         auto_threshold: float = 0.93,
         hitl_threshold: float = 0.65,
@@ -47,11 +46,10 @@ class MergeDetectionJob(BaseJob):
 
         self.user_name = user_name
         self.entities = entities
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.redis = redis_client
         self.llm = llm_client
         self.topic_config = topic_config
-        self.executor = executor
 
         self.auto_threshold = auto_threshold
         self.hitl_threshold = hitl_threshold
@@ -105,7 +103,7 @@ class MergeDetectionJob(BaseJob):
             logger.info(f"Processing {len(candidates)} merge candidates")
 
             # Recovery: check for lingering merge intents from a previous crashed run
-            await self._recover_pending_merges(ctx)
+            await self.recover_pending_merges(ctx)
 
             merge_summary = await self._process_merges(ctx, candidates)
             hierarchy_summary = await self._detect_hierarchy(ctx)
@@ -124,10 +122,10 @@ class MergeDetectionJob(BaseJob):
         system = self.merge_prompt if self.merge_prompt else get_merge_judgment_prompt()
 
         enriched_facts_a = await enrich_facts_with_sources(
-            candidate.get("facts_a", []), self.memgraph
+            candidate.get("facts_a", []), self.graph_client
         )
         enriched_facts_b = await enrich_facts_with_sources(
-            candidate.get("facts_b", []), self.memgraph
+            candidate.get("facts_b", []), self.graph_client
         )
 
         user_content = format_vp05_input(
@@ -194,13 +192,15 @@ class MergeDetectionJob(BaseJob):
 
         for attempt in range(1, max_retries + 1):
             try:
-                success = await self.memgraph.merge_entities(primary_id, secondary_id)
+                success = await self.graph_client.merge_entities(
+                    primary_id, secondary_id
+                )
 
                 if success:
                     now = datetime.now(timezone.utc)
                     for fact_id in duplicate_fact_ids:
                         try:
-                            await self.memgraph.invalidate_fact(fact_id, now)
+                            await self.graph_client.invalidate_fact(fact_id, now)
                         except Exception as e:
                             logger.warning(
                                 f"Failed to invalidate duplicate fact {fact_id} during merge: {e}"
@@ -208,7 +208,7 @@ class MergeDetectionJob(BaseJob):
                     return True
                 else:
                     logger.warning(
-                        f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): memgraph returned False"
+                        f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): graph_client returned False"
                     )
 
             except Exception as e:
@@ -221,7 +221,7 @@ class MergeDetectionJob(BaseJob):
 
         return False
 
-    async def _recover_pending_merges(self, ctx: JobContext):
+    async def recover_pending_merges(self, ctx: JobContext):
         """Scan Redis for intents that didn't complete and finish them."""
         index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.session_id)
         intent_keys = await self.redis.smembers(index_key)
@@ -236,9 +236,8 @@ class MergeDetectionJob(BaseJob):
                 await self.redis.srem(index_key, key)
                 continue
 
-            try:
-                item = json.loads(data_raw)
-            except json.JSONDecodeError:
+            item = safe_json_loads(data_raw)
+            if not item or not isinstance(item, dict):
                 logger.error(
                     f"Recovery: Corrupt merge intent for key {key}, discarding"
                 )
@@ -259,72 +258,84 @@ class MergeDetectionJob(BaseJob):
 
             if db_success:
                 await self._finalize_merge(ctx, item)
+            elif item.get("db_merge_completed"):
+                logger.info(
+                    f"Recovery: DB merge flag set for {p_id} <- {s_id}. "
+                    f"Merge succeeded before crash, finalizing."
+                )
+                await self._finalize_merge(ctx, item)
             else:
-                # If s_id is missing but p_id exists, the DB merge likely succeeded just before the crash!
-                s_exists = await self.memgraph.get_entity_by_id(s_id)
-                p_exists = await self.memgraph.get_entity_by_id(p_id)
-                if p_exists and not s_exists:
-                    logger.info(
-                        f"Recovery: Secondary {s_id} missing. Assuming DB merge succeeded previously. Finalizing..."
-                    )
-                    await self._finalize_merge(ctx, item)
-                else:
-                    logger.error(
-                        f"Recovery: Aborted merge finalization for {p_id} <- {s_id} due to DB failure."
-                    )
+                logger.warning(
+                    f"Recovery: DB merge failed for {p_id} <- {s_id} and no completion flag. "
+                    f"Secondary may have been deleted by cleanup or absorbed by another merge. "
+                    f"Skipping finalization to avoid data corruption."
+                )
 
             # Clean up
             await self.redis.delete(key)
             await self.redis.srem(index_key, key)
 
     async def _finalize_merge(self, ctx: JobContext, merge_info: dict):
-        p_id = merge_info["primary_id"]
-        s_id = merge_info["secondary_id"]
-        p_name = merge_info["primary_name"]
-        s_name = merge_info["secondary_name"]
-        suggested_name = merge_info.get("suggested_name")
+        """
+        Finalizes the merge operation by updating entity metadata and clearing resolver data.
 
-        try:
-            self._sync_resolver(p_id, s_id)
+        IMPORTANT: This function is called *after* a successful database merge operation.
+        Its purpose is strictly to clean up transient state and ensure the Resolver cache
+        considers the merge complete. It does NOT perform the DB merge itself.
+        """
 
-            if suggested_name and suggested_name != p_name:
-                logger.info(
-                    f"Renaming merged entity {p_id}: {p_name} -> {suggested_name}"
+        async with self.entities.resolution_lock:
+            p_id = merge_info["primary_id"]
+            s_id = merge_info["secondary_id"]
+            p_name = merge_info["primary_name"]
+            s_name = merge_info["secondary_name"]
+            suggested_name = merge_info.get("suggested_name")
+
+            try:
+                self._sync_resolver(p_id, s_id)
+
+                if suggested_name and suggested_name != p_name:
+                    logger.info(
+                        f"Renaming merged entity {p_id}: {p_name} -> {suggested_name}"
+                    )
+                    await self.graph_client.update_entity_canonical_name(
+                        p_id, suggested_name
+                    )
+                    p_name = suggested_name
+
+                all_facts = await self.graph_client.get_facts_for_entity(p_id, True)
+                if all_facts:
+                    resolution_text = f"{p_name}. " + " ".join(
+                        [f.content for f in all_facts]
+                    )
+                else:
+                    resolution_text = f"{p_name} (merged with {s_name})"
+
+                new_embedding = await self.entities.compute_embedding(
+                    p_id, resolution_text
                 )
-                await self.memgraph.update_entity_canonical_name(p_id, suggested_name)
-                p_name = suggested_name
+                await self.graph_client.update_entity_embedding(p_id, new_embedding)
 
-            all_facts = await self.memgraph.get_facts_for_entity(p_id, True)
-            if all_facts:
-                resolution_text = f"{p_name}. " + " ".join(
-                    [f.content for f in all_facts]
-                )
-            else:
-                resolution_text = f"{p_name} (merged with {s_name})"
+            except Exception as e:
+                logger.exception(f"Finalize merge failed for {p_id}<-{s_id}: {e}")
+            finally:
+                # Always mark dirty so profile refinement picks up any incomplete work
+                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
+                await self.redis.sadd(dirty_key, str(p_id))
 
-            new_embedding = await self.entities.compute_embedding(p_id, resolution_text)
-            await self.memgraph.update_entity_embedding(p_id, new_embedding)
-
-        except Exception as e:
-            logger.exception(f"Finalize merge failed for {p_id}<-{s_id}: {e}")
-        finally:
-            # Always mark dirty so profile refinement picks up any incomplete work
-            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
-            await self.redis.sadd(dirty_key, str(p_id))
-
-        await emit(
-            ctx.session_id,
-            "job",
-            "entities_merged",
-            {
-                "primary": p_name,
-                "secondary": s_name,
-                "duplicate_facts_removed": len(
-                    merge_info.get("duplicate_fact_ids", [])
-                ),
-            },
-            verbose_only=True,
-        )
+            await emit(
+                ctx.session_id,
+                "job",
+                "entities_merged",
+                {
+                    "primary": p_name,
+                    "secondary": s_name,
+                    "duplicate_facts_removed": len(
+                        merge_info.get("duplicate_fact_ids", [])
+                    ),
+                },
+                verbose_only=True,
+            )
 
     def _sync_resolver(self, primary_id: int, secondary_id: int):
         """Update EntityManager after merge."""
@@ -498,7 +509,7 @@ class MergeDetectionJob(BaseJob):
         all_merge_ids = []
         for c in clean_batch:
             all_merge_ids.extend([c["primary_id"], c["secondary_id"]])
-        all_merge_facts = await self.memgraph.get_facts_for_entities(
+        all_merge_facts = await self.graph_client.get_facts_for_entities(
             list(set(all_merge_ids)), active_only=False
         )
 
@@ -519,7 +530,6 @@ class MergeDetectionJob(BaseJob):
             p_id: int = item_dict["primary_id"]
             s_id: int = item_dict["secondary_id"]
 
-            # 1. Record Intent
             intent_key = RedisKeys.merge_intent(
                 ctx.user_name, ctx.session_id, p_id, s_id
             )
@@ -531,11 +541,12 @@ class MergeDetectionJob(BaseJob):
             )
 
             if db_success:
-                # 3. Finalize
+                item_dict["db_merge_completed"] = True
+                await self.redis.set(intent_key, json.dumps(item_dict))
+
                 await self._finalize_merge(ctx, item_dict)
                 successful += 1
 
-                # Intent tracking cleanup
                 await self.redis.delete(intent_key)
                 await self.redis.srem(index_key, intent_key)
             else:
@@ -575,7 +586,7 @@ class MergeDetectionJob(BaseJob):
                 continue
 
             for parent_type, child_types in type_rules.items():
-                candidates = await self.memgraph.get_hierarchy_candidates(
+                candidates = await self.graph_client.get_hierarchy_candidates(
                     topic,
                     parent_type,
                     child_types,
@@ -583,7 +594,7 @@ class MergeDetectionJob(BaseJob):
                 )
 
                 for c in candidates:
-                    success = await self.memgraph.create_hierarchy_edge(
+                    success = await self.graph_client.create_hierarchy_edge(
                         c["parent_id"], c["child_id"]
                     )
 
@@ -700,8 +711,8 @@ class MergeDetectionJob(BaseJob):
                     )
                     return None
 
-                duplicate_ids = await asyncio.get_running_loop().run_in_executor(
-                    self.executor, find_duplicate_facts, facts_a, facts_b
+                duplicate_ids = await asyncio.to_thread(
+                    find_duplicate_facts, facts_a, facts_b
                 )
 
                 return {

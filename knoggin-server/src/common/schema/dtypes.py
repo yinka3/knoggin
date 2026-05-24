@@ -14,11 +14,9 @@ from typing import Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 
 # ── Re-export Domain Primitives ──────────────────────────────────
-from common.schema.primitives import (
-    Connection,
-    Entity,
-    ProfileUpdate,
-)
+from common.schema.primitives import Connection, EntityRecord, Fact, ProfileUpdate
+from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import parse_iso_time
 
 # ═══════════════════════════════════════════════════════════════════
 #  LLM EXTRACTION COLLECTION WRAPPERS
@@ -27,8 +25,7 @@ from common.schema.primitives import (
 
 class NERResult(BaseModel):
     """Collection model for NER batch extraction."""
-
-    mentions: List[Entity] = Field(default_factory=list)
+    mentions: List[EntityRecord] = Field(default_factory=list)
 
 
 class ConnectionsResult(BaseModel):
@@ -114,7 +111,7 @@ class TopicConfigResult(BaseModel):
 @dataclass
 class FactMergeResult:
     to_invalidate: List[str]
-    new_contents: List[str]
+    new_contents: List[Fact]
 
 
 @dataclass
@@ -197,7 +194,10 @@ class DLQEntry:
 
     @classmethod
     def from_json(cls, raw: str) -> "DLQEntry":
-        data = json.loads(raw)
+        data = safe_json_loads(raw)
+        if not data:
+            # Handle fallback or raise error
+            raise ValueError("Failed to parse DLQEntry")
         data.pop("batch_size", None)
         return cls(**data)
 
@@ -243,7 +243,7 @@ class AgentConfig:
     def from_dict(cls, data: Dict) -> "AgentConfig":
         created = data.get("created_at")
         if isinstance(created, str):
-            created = datetime.fromisoformat(created)
+            created = parse_iso_time(created)
         return cls(
             id=data["id"],
             name=data["name"],

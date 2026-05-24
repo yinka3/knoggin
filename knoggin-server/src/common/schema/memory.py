@@ -1,7 +1,4 @@
-"""Memory result types — plain dataclasses with no project imports.
-
-Used by shared/memory.py, agent/tools.py, and sdk/agent_sdk.py.
-"""
+"""Memory result types — plain dataclasses with no project imports."""
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional

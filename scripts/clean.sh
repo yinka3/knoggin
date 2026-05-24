@@ -5,5 +5,5 @@ rm -f *.log
 rm -f config/knoggin.json
 rm -rf config/chroma_db
 echo "Restarting containers..."
-docker compose up -d redis memgraph memgraph-lab --wait
+docker compose up -d redis postgres --wait
 echo "Done."

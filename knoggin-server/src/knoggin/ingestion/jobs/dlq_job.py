@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from typing import Awaitable, Callable, Optional
@@ -6,8 +7,9 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
-from infrastructure.redis.redis_client import RedisKeys
+from common.utils.json_utils import safe_json_loads
+from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.redis_client import RedisKeys
 from knoggin.ingestion.services.pipeline_service import BatchProcessor, BatchResult
 from knoggin.knowledge.services.entity_service import EntityManager
 
@@ -36,7 +38,7 @@ class DLQReplayJob(BaseJob):
         "BusyLoadingError",
         # OpenRouter
         "overloaded",
-        # Memgraph
+        # GraphClient
         "serialization error",
         "conflicting transactions",
         "Cannot get shared access",
@@ -89,7 +91,10 @@ class DLQReplayJob(BaseJob):
         return any(t.lower() in error.lower() for t in self.TRANSIENT_ERRORS)
 
     def _validate_batch_result(self, result: BatchResult) -> BatchResult:
-        """Filter out entity IDs that no longer exist in entities."""
+        """
+        Filter out stale entity IDs (e.g. phantom entities purged after a failed write),
+        forcing the DLQ to fall back to a safer full reprocessing retry.
+        """
         valid_ids = [
             eid for eid in result.entity_ids if eid in self.entities.entity_profiles
         ]
@@ -140,8 +145,6 @@ class DLQReplayJob(BaseJob):
 
     async def _retry_message_log(self, entry: dict, ctx: JobContext) -> bool:
         """Retry saving message logs and subsequently the graph write."""
-        import asyncio
-
         try:
             messages = entry.get("messages", [])
             if not messages:
@@ -170,7 +173,7 @@ class DLQReplayJob(BaseJob):
             ]
 
             await asyncio.wait_for(
-                self.processor.memgraph.save_message_logs(batch), timeout=30.0
+                self.processor.graph_client.save_message_logs(batch), timeout=30.0
             )
             logger.info(
                 f"DLQ: Message log retry succeeded for {len(messages)} messages"
@@ -290,7 +293,14 @@ class DLQReplayJob(BaseJob):
             processed += 1
 
             try:
-                entry = json.loads(raw_item)
+                entry = safe_json_loads(raw_item)
+                if not entry or not isinstance(entry, dict):
+                    consecutive_failures = 0
+                    logger.error("DLQ: Corrupt entry, parking")
+                    await self.redis.rpush(park_key, raw_item)
+                    parked += 1
+                    continue
+
                 error_msg = str(entry.get("error", ""))
                 attempt = entry.get("attempt", 1)
                 stage = entry.get("stage", "processing")
@@ -353,11 +363,6 @@ class DLQReplayJob(BaseJob):
                         },
                     )
 
-            except json.JSONDecodeError:
-                consecutive_failures = 0
-                logger.error("DLQ: Corrupt entry, parking")
-                await self.redis.rpush(park_key, raw_item)
-                parked += 1
             except Exception as e:
                 consecutive_failures += 1
                 logger.error(f"DLQ: Unexpected error: {e}")

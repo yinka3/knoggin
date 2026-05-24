@@ -1,4 +1,5 @@
-import json
+from __future__ import annotations
+
 import re
 import uuid
 from datetime import datetime
@@ -7,13 +8,14 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from common.errors.agent import ToolExecutionError
-from common.mcp.bridge import mcp_tools_to_schemas
+from common.exceptions import ToolExecutionError
 from common.schema.tool_schema import get_filtered_schemas
 from common.utils.events import emit
-from infrastructure.llm.llm_client import LLMService
+from common.utils.json_utils import safe_json_loads
+from infrastructure.llm_client import LLMService
 from knoggin.agent.formatters import (
     format_entity_results,
+    format_files_context,
     format_graph_results,
     format_retrieved_messages,
 )
@@ -63,7 +65,7 @@ class AgentExecutor:
     ) -> AsyncGenerator[Dict, None]:
         """Runs the reasoning loop and yields events."""
 
-        # 1. Prepare environment
+        # Prepare environment
         tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
         current_time = simulated_date or datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
 
@@ -79,8 +81,6 @@ class AgentExecutor:
 
         files_context = ""
         if self.tools.file_rag:
-            from agent.formatters import format_files_context
-
             manifest = self.tools.get_file_manifest()
             if manifest:
                 files_context = format_files_context(manifest)
@@ -93,7 +93,7 @@ class AgentExecutor:
 
         last_result = None
 
-        # 2. Reasoning Loop
+        # Reasoning Loop
         needs_replanning = False
 
         while self.ctx.state.attempt_count < self.ctx.config.max_attempts:
@@ -129,7 +129,7 @@ class AgentExecutor:
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
 
-            # 3. Call LLM for this step
+            # Call LLM for this step
             async for event in self._step(
                 current_time,
                 current_model,
@@ -152,16 +152,6 @@ class AgentExecutor:
                 if event_type == "done":
                     # If step returned FinalResponse or Clarification, we're done
                     if isinstance(data, (FinalResponse, ClarificationRequest)):
-                        # Check for the re-planning signal in the content
-                        if isinstance(data, FinalResponse) and "I need a new plan" in (
-                            data.content or ""
-                        ):
-                            logger.warning(
-                                "AgentExecutor: Librarian requested re-planning via final response."
-                            )
-                            needs_replanning = True
-                            break
-
                         yield self._wrap_final_response(data)
                         return
 
@@ -194,16 +184,18 @@ class AgentExecutor:
                             }
                             return
 
-                        # Check if any tool call thinking contains the escalation signal
-                        if any(
-                            getattr(tc, "thinking", None)
-                            and "I need a new plan" in tc.thinking
-                            for tc in data
-                        ):
+                        # Intercept replanning request before tool execution
+                        replanning = next(
+                            (tc for tc in data if tc.name == "request_replanning"),
+                            None,
+                        )
+                        if replanning:
+                            reason = replanning.args.get("reason", "No reason provided")
                             logger.info(
-                                "AgentExecutor: Librarian requested re-planning via tool thinking."
+                                f"AgentExecutor: Librarian requested re-planning. Reason: {reason}"
                             )
                             needs_replanning = True
+                            break
 
                         async for tool_event in self._execute_tools(
                             data, current_results
@@ -216,7 +208,7 @@ class AgentExecutor:
                 else:
                     yield event
 
-        # 3. Fallback if max attempts reached
+        # Fallback if max attempts reached
         yield await self._fallback()
 
     async def _step(
@@ -252,6 +244,7 @@ class AgentExecutor:
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
             current_mode=current_mode,
+            active_topics=self.ctx.active_topics,
         )
 
         user_message = build_user_message(self.ctx, last_result)
@@ -259,10 +252,6 @@ class AgentExecutor:
         active_schemas = get_filtered_schemas(enabled_tools)
         if client_tools:
             active_schemas = active_schemas + client_tools
-        if self.tools.mcp_manager:
-            active_schemas = active_schemas + mcp_tools_to_schemas(
-                self.tools.mcp_manager.get_all_tools()
-            )
 
         pending_tool_calls = []
         content_accumulator = ""
@@ -316,23 +305,21 @@ class AgentExecutor:
     @staticmethod
     def _safe_parse_args(json_str: str) -> Dict:
         """Secure tool argument parsing using json and Pydantic validation."""
-        # 1. Try standard JSON
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
+        # Try standard JSON
+        parsed = safe_json_loads(json_str)
+        if isinstance(parsed, dict):
+            return parsed
 
-        # 2. Try to fix common LLM formatting issues (trailing commas, missing quotes)
-        # This is a bit heuristic but safer than ast.literal_eval
+        # Try to fix common LLM formatting issues (trailing commas, missing quotes)
         cleaned = json_str.strip()
-        # Remove trailing commas in objects and arrays
         cleaned = re.sub(r",\s*([\]}])", r"\1", cleaned)
 
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse tool arguments: {json_str[:200]}")
-            return {"_parse_error": True, "_raw": json_str[:500]}
+        parsed_clean = safe_json_loads(cleaned)
+        if isinstance(parsed_clean, dict):
+            return parsed_clean
+
+        logger.warning(f"Failed to parse tool arguments: {json_str[:200]}")
+        return {"_parse_error": True, "_raw": json_str[:500]}
 
     async def _execute_tools(
         self, tool_calls: List[ToolCall], results_out: List[Dict]
@@ -523,18 +510,27 @@ class AgentExecutor:
             )
 
             summary = await self._generate_evidence_summary(evidence_str)
-            if summary:
-                # Store summary and truncate raw evidence to save tokens while retaining recent IDs
-                self.ctx.evidence.summary = summary
-                self.ctx.evidence.messages = self.ctx.evidence.messages[-5:]
-                self.ctx.evidence.profiles = self.ctx.evidence.profiles[-5:]
-                self.ctx.evidence.graph = self.ctx.evidence.graph[-15:]
-                self.ctx.evidence.facts = []
-                self.ctx.evidence.paths = []
-                self.ctx.evidence.hierarchy = []
 
-                # Re-calculate token count
+            if summary:
+                self.ctx.evidence.summary = summary
+            else:
+                logger.warning(
+                    "Evidence summarization failed. Truncating raw evidence as fallback."
+                )
+
+            self.ctx.evidence.messages = self.ctx.evidence.messages[-5:]
+            self.ctx.evidence.profiles = self.ctx.evidence.profiles[-5:]
+            self.ctx.evidence.graph = self.ctx.evidence.graph[-15:]
+            self.ctx.evidence.facts = []
+            self.ctx.evidence.paths = []
+            self.ctx.evidence.hierarchy = []
+
+            # Re-calculate token count
+            if summary:
                 self.ctx.evidence.token_count = self.llm.count_tokens(summary)
+            else:
+                new_evidence_str = build_evidence_context(self.ctx.evidence)
+                self.ctx.evidence.token_count = self.llm.count_tokens(new_evidence_str)
 
     async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
         """Call LLM to condense existing evidence into a core summary."""

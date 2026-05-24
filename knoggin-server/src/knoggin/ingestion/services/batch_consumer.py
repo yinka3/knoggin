@@ -1,14 +1,15 @@
 import asyncio
-import json
 from typing import Awaitable, Callable, Dict, List, Optional
 
 import redis.asyncio as aioredis
 from loguru import logger
 
 from common.schema.dtypes import BatchResult
+from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
-from infrastructure.database.memgraph_client import MemgraphClient
-from infrastructure.redis.redis_client import RedisKeys
+from common.utils.json_utils import safe_json_loads
+from infrastructure.graph_client import GraphClient
+from infrastructure.redis_client import RedisKeys
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
 
 
@@ -17,11 +18,10 @@ class BatchConsumer:
         self,
         user_name: str,
         session_id: str,
-        memgraph: MemgraphClient,
+        graph_client: GraphClient,
         processor: BatchProcessor,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
-        run_session_jobs: Callable[[], Awaitable[None]],
         write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
         batch_size: int = 8,
         batch_timeout: float = 360.0,
@@ -31,7 +31,7 @@ class BatchConsumer:
 
         self.user_name = user_name
         self.session_id = session_id
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.processor = processor
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
@@ -40,8 +40,8 @@ class BatchConsumer:
         self.redis = redis
 
         # callbacks
-        self.get_session_ctx = get_session_context
-        self.run_session_jobs = run_session_jobs
+        self.get_session_context = get_session_context
+
         self.write_to_graph = write_to_graph
 
         self._wake_event = asyncio.Event()
@@ -124,22 +124,12 @@ class BatchConsumer:
             lines.append(f"[{turn['role_label']}]: {content}")
         return "\n".join(lines)
 
-    def update_ingestion_settings(
-        self,
-        batch_size: Optional[int] = None,
-        batch_timeout: Optional[float] = None,
-        checkpoint_interval: Optional[int] = None,
-        session_window: Optional[int] = None,
-    ):
+    def update_settings(self, config: IngestionSettings):
         """Update settings dynamically while running."""
-        if batch_size is not None:
-            self.batch_size = batch_size
-        if batch_timeout is not None:
-            self.batch_timeout = batch_timeout
-        if checkpoint_interval is not None:
-            self.checkpoint_interval = checkpoint_interval
-        if session_window is not None:
-            self.session_window = session_window
+        self.batch_size = config.batch_size
+        self.batch_timeout = config.batch_timeout
+        self.checkpoint_interval = config.checkpoint_interval
+        self.session_window = config.session_window
 
         logger.info(
             f"Consumer ingestion settings updated: batch={self.batch_size}, timeout={self.batch_timeout}"
@@ -182,7 +172,7 @@ class BatchConsumer:
         logger.info("BatchConsumer shutting down, final drain...")
         try:
             await self._drain_buffer(flush_partial=True)
-            await self.run_session_jobs()
+
             logger.info("BatchConsumer shutdown complete")
         except Exception as e:
             logger.error(f"BatchConsumer shutdown sequence failed: {e}")
@@ -210,9 +200,13 @@ class BatchConsumer:
                     self.session_id, "pipeline", "buffer_draining", {"queued": len(raw)}
                 )
 
-                messages = [json.loads(m) for m in raw]
+                messages = [safe_json_loads(m) for m in raw]
+                messages = [m for m in messages if m]
 
-                conversation = await self.get_session_ctx(
+                if not messages:
+                    break
+
+                conversation = await self.get_session_context(
                     self.session_window, messages[0]["id"]
                 )
                 session_text = self._format_session_text(conversation)
@@ -221,8 +215,6 @@ class BatchConsumer:
                     result = await self.processor.run(messages, session_text)
                 except Exception as e:
                     logger.error(f"Fatal error during BatchProcessor computation: {e}")
-                    from core.pipeline.batch_processor import BatchResult
-
                     result = BatchResult(
                         success=False, error=f"Fatal exception: {str(e)}"
                     )
@@ -261,7 +253,7 @@ class BatchConsumer:
                     ]
                     try:
                         await asyncio.wait_for(
-                            self.memgraph.save_message_logs(batch), timeout=30.0
+                            self.graph_client.save_message_logs(batch), timeout=30.0
                         )
                     except Exception as e:
                         logger.error(f"Failed to save message logs: {e}")
@@ -339,7 +331,7 @@ class BatchConsumer:
                                 "checkpoint_reached",
                                 {"message_count": count},
                             )
-                            await self.run_session_jobs()
+
                             await self.redis.set(self._checkpoint_key, 0)
 
                         if messages:
