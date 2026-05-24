@@ -9,8 +9,6 @@ __pycache__
 venv
 *.log
 redis_data/
-memgraph_data/
-memgraph_log/
 config/
 .vscode/
 *.md

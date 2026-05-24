@@ -1,5 +1,4 @@
 import asyncio
-import json
 from typing import Awaitable, Callable, Dict, List, Optional
 
 import redis.asyncio as aioredis
@@ -8,7 +7,8 @@ from loguru import logger
 from common.schema.dtypes import BatchResult
 from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
-from infrastructure.memgraph_client import MemgraphClient
+from common.utils.json_utils import safe_json_loads
+from infrastructure.graph_client import GraphClient
 from infrastructure.redis_client import RedisKeys
 from knoggin.ingestion.services.pipeline_service import BatchProcessor
 
@@ -18,11 +18,10 @@ class BatchConsumer:
         self,
         user_name: str,
         session_id: str,
-        memgraph: MemgraphClient,
+        graph_client: GraphClient,
         processor: BatchProcessor,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
-
         write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
         batch_size: int = 8,
         batch_timeout: float = 360.0,
@@ -32,7 +31,7 @@ class BatchConsumer:
 
         self.user_name = user_name
         self.session_id = session_id
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.processor = processor
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
@@ -201,7 +200,11 @@ class BatchConsumer:
                     self.session_id, "pipeline", "buffer_draining", {"queued": len(raw)}
                 )
 
-                messages = [json.loads(m) for m in raw]
+                messages = [safe_json_loads(m) for m in raw]
+                messages = [m for m in messages if m]
+
+                if not messages:
+                    break
 
                 conversation = await self.get_session_context(
                     self.session_window, messages[0]["id"]
@@ -250,7 +253,7 @@ class BatchConsumer:
                     ]
                     try:
                         await asyncio.wait_for(
-                            self.memgraph.save_message_logs(batch), timeout=30.0
+                            self.graph_client.save_message_logs(batch), timeout=30.0
                         )
                     except Exception as e:
                         logger.error(f"Failed to save message logs: {e}")

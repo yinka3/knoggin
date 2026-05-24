@@ -1,25 +1,24 @@
-
 from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import redis.asyncio as aioredis
 from loguru import logger
 
-from common.conf.base import deep_merge, get_config
-from common.schema.settings import RootConfig
+from common.conf.manager import ConfigManager
 from common.schema.dtypes import BatchResult, EntityProfilesResult, FactRecord, Message
+from common.schema.settings import JobSettings, RootConfig
 from common.utils.core_utils import (
     fetch_conversation_turns,
-    handle_background_task_result,
     safe_update,
 )
-from common.schema.settings import JobSettings
 from common.utils.events import DebugEventEmitter, emit
+from common.utils.tasks import BackgroundTaskGroup
+from common.utils.time_utils import parse_iso_time, parse_iso_time_or_now
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.agent.prompts import get_lightweight_extraction_prompt
@@ -37,15 +36,20 @@ SESSION_KEY_TTL = 72 * 3600
 
 class Context:
     """
-    Context represents the state of an active user session.
-    Initialization and wiring logic is encapsulated in SessionAssembler.
+    Context represents the state and lifecycle container for an active user session.
+
+    It serves as the root orchestration point for a session, binding together user
+    state, background ingestion workers, and dynamic configuration. It deliberately
+    holds references to the ingestion pipeline (`BatchProcessor`, `BatchConsumer`)
+    so it can gracefully orchestrate the shutdown of all asynchronous session tasks.
+
+    Initialization and wiring logic is encapsulated in SessionAssembler to decouple
+    the construction of these services from the state container itself.
     """
 
-    def __init__(self, user_name: str, topics: List[str], redis_client):
+    def __init__(self, user_name: str, topics: List[str]):
         self.user_name: str = user_name
         self.active_topics: List[str] = topics
-        self.resources: Optional[ResourceManager] = None
-        self.redis_client: aioredis.Redis = redis_client
         self.model: Optional[str] = None
         self.file_rag: Optional[FileRAGService] = None
 
@@ -57,26 +61,31 @@ class Context:
 
         self.batch_processor: Optional[BatchProcessor] = None
         self.consumer: Optional[BatchConsumer] = None
-        self._background_tasks: set[asyncio.Task] = set()
-        self.current_config: RootConfig = get_config()
-
-
+        self.task_group = BackgroundTaskGroup("ContextTasks")
 
     @property
-    def memgraph(self):
-        return self.resources.memgraph if self.resources else None
+    def current_config(self) -> RootConfig:
+        return ConfigManager.get().config
+
+    @property
+    def redis_client(self):
+        return ResourceManager.get().redis
+
+    @property
+    def graph_client(self):
+        return ResourceManager.get().graph_client
 
     @property
     def llm(self):
-        return self.resources.llm_service if self.resources else None
+        return ResourceManager.get().llm_service
 
     @property
     def embedding_service(self):
-        return self.resources.embedding if self.resources else None
+        return ResourceManager.get().embedding
 
     @property
     def executor(self):
-        return self.resources.executor if self.resources else None
+        return ResourceManager.get().executor
 
     @classmethod
     async def create(
@@ -106,7 +115,6 @@ class Context:
         return await self.redis_client.incr(
             RedisKeys.global_next_turn_id(self.user_name, self.session_id)
         )
-
 
     async def add(self, msg: Message) -> Message:
         # Deterministic ID: same content + session + timestamp_ns = same ID
@@ -190,7 +198,7 @@ class Context:
 
     async def add_to_redis(self, msg: Message):
         """Maps a message to a turn and stores its content via the Smart Client."""
-        # 1. First log the conversation turn (User role)
+        # First log the conversation turn (User role)
         turn_id = await self.add_to_conversation_log(
             role="user",
             content=msg.content.strip(),
@@ -198,7 +206,7 @@ class Context:
             user_msg_id=msg.id,
         )
 
-        # 2. Map the message ID to this turn and store content
+        # Map the message ID to this turn and store content
         await AsyncRedisClient.update_message_mapping(
             user_name=self.user_name,
             session_id=self.session_id,
@@ -226,15 +234,9 @@ class Context:
             user_msg_id=user_msg_id,
         )
 
-        task = asyncio.create_task(
-            self._persist_assistant_embedding(turn_id, content, timestamp)
-        )
-        self._background_tasks.add(task)
-        task.add_done_callback(
-            lambda t: (
-                self._background_tasks.discard(t),
-                handle_background_task_result(t),
-            )
+        self.task_group.create_task(
+            self._persist_assistant_embedding(turn_id, content, timestamp),
+            name=f"persist_assistant_embedding_{turn_id}",
         )
 
     async def _maybe_extract_llm(self, content: str, user_msg_id: int) -> bool:
@@ -250,7 +252,6 @@ class Context:
         system_prompt = "You are a knowledge extractor. Be precise and concise."
         user_prompt = get_lightweight_extraction_prompt(content)
 
-        config = get_config()
         try:
             result: EntityProfilesResult = await self.llm.call_llm(
                 system=system_prompt,
@@ -262,7 +263,7 @@ class Context:
             if not result or not result.profiles:
                 return False
 
-            # ── Pass 1: Batch-encode all subject names for resolution ──
+            # Pass 1: Batch-encode all subject names for resolution
             subject_names = []
             valid_profiles = []
             for profile in result.profiles:
@@ -277,7 +278,7 @@ class Context:
 
             subject_embeddings = await self.embedding_service.encode(subject_names)
 
-            # ── Pass 2: Resolve subjects to entities, collect fact text ──
+            # Pass 2: Resolve subjects to entities, collect fact text
             fact_work: List[Tuple[int, str]] = []  # (target_id, fact_content)
 
             for i, profile in enumerate(valid_profiles):
@@ -313,11 +314,11 @@ class Context:
             if not fact_work:
                 return False
 
-            # ── Pass 3: Batch-encode all fact contents ──
+            # Pass 3: Batch-encode all fact contents
             fact_contents = [content for _, content in fact_work]
             fact_embeddings = await self.embedding_service.encode(fact_contents)
 
-            # ── Pass 4: Build Fact objects and write ──
+            # Pass 4: Build Fact objects and write
             facts_by_entity: Dict[int, List[FactRecord]] = {}
 
             for i, (target_id, fact_content) in enumerate(fact_work):
@@ -338,7 +339,7 @@ class Context:
             total_count = 0
             for eid, facts_to_write in facts_by_entity.items():
                 try:
-                    c = await self.memgraph.create_facts_batch(eid, facts_to_write)
+                    c = await self.graph_client.create_facts_batch(eid, facts_to_write)
                     total_count += int(c)
                 except Exception as e:
                     logger.error(
@@ -364,7 +365,9 @@ class Context:
 
         for attempt in range(max_retries):
             try:
-                embedding_list = await self.project.entities.compute_batch_embeddings([content])
+                embedding_list = await self.project.entities.compute_batch_embeddings(
+                    [content]
+                )
                 embedding_vector = embedding_list[0]
 
                 graph_id = turn_id + 1_000_000_000
@@ -379,7 +382,7 @@ class Context:
                     }
                 ]
 
-                await self.memgraph.save_message_logs(agent_msg_batch)
+                await self.graph_client.save_message_logs(agent_msg_batch)
                 return
 
             except Exception as e:
@@ -404,7 +407,7 @@ class Context:
         results = []
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
-            ts = datetime.fromisoformat(turn["timestamp"])
+            ts = parse_iso_time_or_now(turn["timestamp"])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append(
                 {
@@ -435,7 +438,7 @@ class Context:
         )
         await write_batch_to_graph(
             batch,
-            memgraph=self.memgraph,
+            graph_client=self.graph_client,
             entities=self.project.entities,
             session_id=self.session_id,
             project_id=self.project_id,
@@ -448,7 +451,7 @@ class Context:
     ) -> tuple[bool, str | None]:
         return await write_batch_callback(
             result,
-            memgraph=self.memgraph,
+            graph_client=self.graph_client,
             entities=self.project.entities,
             session_id=self.session_id,
             project_id=self.project_id,
@@ -456,91 +459,7 @@ class Context:
             redis_client=self.redis_client,
         )
 
-    async def update_runtime_settings(self, new_config_dict: dict):
-        """
-        Hot-reload runtime settings from the new configuration dictionary.
-        Supports partial updates (patches) by merging with the current config
-        to ensure active state isn't reset to defaults.
-        """
-        # 1. Start with CURRENT state to avoid resetting defaults on partial patches
-        current_data = self.current_config.model_dump()
-        updated_data = deep_merge(current_data, new_config_dict)
 
-        try:
-            new_config = RootConfig(**updated_data)
-        except Exception as e:
-            logger.error(f"Failed to validate new config for hot-reload: {e}")
-            return
-
-        logger.info("Applying hot-reload of runtime settings...")
-        dev_settings = new_config.developer_settings
-        old_dev = self.current_config.developer_settings
-
-        # 2. Dispatch updates using safe_update to prevent crashes from signature drift
-        if new_config.default_topics != self.current_config.default_topics:
-            topics_dict = updated_data.get("default_topics", {})
-            await self.project.update_topics_config(topics_dict)
-            if self.batch_processor:
-                self.batch_processor.refresh_topic_mappings()
-            await emit(
-                self.session_id,
-                "system",
-                "topics_updated",
-                {"topics": list(topics_dict.keys())},
-            )
-
-        if dev_settings.ingestion != old_dev.ingestion and self.consumer:
-            safe_update(self.consumer.update_settings, dev_settings.ingestion)
-
-        if dev_settings.jobs != old_dev.jobs:
-            self._update_job_settings(dev_settings.jobs, old_dev.jobs)
-
-        if dev_settings.entity_resolution != old_dev.entity_resolution and self.project and self.project.entities:
-            safe_update(self.project.entities.update_settings, dev_settings.entity_resolution)
-
-        if dev_settings.nlp_pipeline != old_dev.nlp_pipeline and self.project and self.project.pipeline:
-            safe_update(self.project.pipeline.update_settings, dev_settings.nlp_pipeline)
-
-        self.current_config = new_config
-
-        await emit(
-            self.session_id,
-            "system",
-            "config_updated",
-            {"keys": list(new_config_dict.keys())},
-        )
-        logger.info("Runtime settings update complete.")
-
-    def _update_job_settings(self, new_jobs: JobSettings, old_jobs: JobSettings):
-        """Update job-specific settings if they changed."""
-        if new_jobs.profile != old_jobs.profile and self.project.profile_job:
-            safe_update(self.project.profile_job.update_settings, new_jobs.profile)
-
-        if new_jobs.merger != old_jobs.merger and self.project.merge_job:
-            safe_update(self.project.merge_job.update_settings, new_jobs.merger)
-
-        if self.project and self.project.scheduler:
-            if new_jobs.cleaner != old_jobs.cleaner:
-                cleaner = self.project.scheduler._jobs.get("entity_cleanup")
-                if cleaner:
-                    cleaner.enabled = new_jobs.cleaner.enabled
-                    safe_update(cleaner.update_settings, new_jobs.cleaner)
-
-            if new_jobs.dlq != old_jobs.dlq:
-                dlq = self.project.scheduler._jobs.get("dlq_auto_replay")
-                if dlq:
-                    safe_update(dlq.update_settings, new_jobs.dlq)
-
-            if new_jobs.archival != old_jobs.archival:
-                archiver = self.project.scheduler._jobs.get("fact_archival")
-                if archiver:
-                    archiver.enabled = new_jobs.archival.enabled
-                    safe_update(archiver.update_settings, new_jobs.archival)
-
-            if new_jobs.topic_config != old_jobs.topic_config:
-                tconfig = self.project.scheduler._jobs.get("topic_config")
-                if tconfig:
-                    tconfig.enabled = new_jobs.topic_config.enabled
 
     async def refresh_session_ttls(self):
         """Refresh TTLs on all session-scoped Redis keys via the Smart Client."""
@@ -551,19 +470,7 @@ class Context:
     async def shutdown(self):
         if self.consumer:
             await self.consumer.stop()
-        if self.scheduler:
-            await self.scheduler.stop()
-        if self.resources:
-            self.resources.active_entities = None
 
-        if self._background_tasks:
-            logger.info(f"Awaiting {len(self._background_tasks)} background tasks...")
-            done, pending = await asyncio.wait(self._background_tasks, timeout=10.0)
-            if pending:
-                logger.warning(
-                    f"Cancelling {len(pending)} background tasks that did not complete in time"
-                )
-                for task in pending:
-                    task.cancel()
+        await self.task_group.shutdown(timeout=10.0)
         await emit(self.session_id, "system", "session_shutdown", {})
         await DebugEventEmitter.get().cleanup_scope(self.session_id)

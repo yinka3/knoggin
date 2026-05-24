@@ -8,7 +8,7 @@ from loguru import logger
 from common.schema.dtypes import BulkContradictionResult, FactRecord
 from common.utils.data_utils import extract_fact_with_source
 from common.utils.events import emit
-from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.graph_client import GraphClient
 from infrastructure.llm_client import LLMService
 from knoggin.agent.prompts import get_contradiction_judgment_prompt
 from knoggin.knowledge.services.embedding_service import EmbeddingService
@@ -27,7 +27,7 @@ class FactResolutionUtils:
         existing_facts: List[FactRecord],
         valid_msg_ids: Optional[set],
         session_id: str,
-        memgraph: MemgraphClient,
+        graph_client: GraphClient,
         embedding_service: EmbeddingService,
         llm: LLMService,
         contradiction_sim_low: float = 0.70,
@@ -105,11 +105,13 @@ class FactResolutionUtils:
 
         if facts_to_create:
             try:
-                count = await memgraph.create_facts_batch(entity_id, facts_to_create)
+                count = await graph_client.create_facts_batch(
+                    entity_id, facts_to_create
+                )
                 logger.debug(f"Created {count} facts for entity {entity_id}")
 
                 failed_invalidations = await FactResolutionUtils._invalidate_facts(
-                    to_invalidate, entity_id, session_id, memgraph, now
+                    to_invalidate, entity_id, session_id, graph_client, now
                 )
 
                 await emit(
@@ -145,7 +147,7 @@ class FactResolutionUtils:
                 )
         elif to_invalidate:
             failed_invalidations = await FactResolutionUtils._invalidate_facts(
-                to_invalidate, entity_id, session_id, memgraph, now
+                to_invalidate, entity_id, session_id, graph_client, now
             )
 
             await emit(
@@ -169,14 +171,14 @@ class FactResolutionUtils:
         fact_ids: set,
         entity_id: int,
         session_id: str,
-        memgraph: MemgraphClient,
+        graph_client: GraphClient,
         now: datetime,
     ) -> List[str]:
         """Helper to batch invalidate facts and emit failures."""
         failed_invalidations = []
         for fact_id in fact_ids:
             try:
-                await memgraph.invalidate_fact(fact_id, now)
+                await graph_client.invalidate_fact(fact_id, now)
             except Exception as e:
                 logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
                 failed_invalidations.append(fact_id)

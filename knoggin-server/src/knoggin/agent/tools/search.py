@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from datetime import datetime, timezone
 from functools import partial
@@ -10,7 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
-    from infrastructure.database.memgraph_client import MemgraphClient
+    from infrastructure.graph_client import GraphClient
     from knoggin.knowledge.services.embedding_service import EmbeddingService
     from knoggin.knowledge.services.entity_service import EntityManager
     from knoggin.knowledge.services.file_rag import FileRAGService
@@ -18,13 +17,18 @@ if TYPE_CHECKING:
 import httpx
 from loguru import logger
 
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
+
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    DDGS = None
 
 
 class SearchTools:
-    # Attributes provided by the composed Tools class
     redis: aioredis.Redis
-    memgraph: MemgraphClient
+    graph_client: GraphClient
     embedding_service: EmbeddingService
     search_cfg: Dict
     file_rag: Optional[FileRAGService]
@@ -59,7 +63,8 @@ class SearchTools:
         user_msg_keys = [k for k in msg_keys if k.startswith("msg_")]
 
         if user_msg_keys:
-            turn_mappings = await self.redis.hmget(lookup_key, *user_msg_keys)
+            raw_keys = [k.split("_", 1)[1] for k in user_msg_keys]
+            turn_mappings = await self.redis.hmget(lookup_key, *raw_keys)
             msg_to_turn = dict(zip(user_msg_keys, turn_mappings))
         else:
             msg_to_turn = {}
@@ -103,9 +108,8 @@ class SearchTools:
             if msg_key.startswith("msg_"):
                 raw = user_contents.get(msg_key)
                 if raw:
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
+                    data = safe_json_loads(raw)
+                    if not data or not isinstance(data, dict):
                         continue
                     output.append(
                         {
@@ -120,9 +124,8 @@ class SearchTools:
             else:
                 raw = assistant_contents.get(msg_key)
                 if raw:
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
+                    data = safe_json_loads(raw)
+                    if not data or not isinstance(data, dict):
                         continue
                     output.append(
                         {
@@ -151,7 +154,9 @@ class SearchTools:
             List of matching entities with id, name, summary snippet, type, and top connections.
         """
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
-        results = await self.memgraph.search_entity(query, self.active_topics, limit)
+        results = await self.graph_client.search_entity(
+            query, self.active_topics, limit
+        )
 
         if not results:
             return []
@@ -181,9 +186,7 @@ class SearchTools:
         if not self.file_rag:
             return [{"error": "No file service available for this session"}]
 
-        files = []
-        if self.file_rag:
-            files = self.file_rag.list_files()
+        files = self.file_rag.list_files()
 
         if not files:
             return [{"error": "No files uploaded to this session"}]
@@ -252,7 +255,7 @@ class SearchTools:
             ]
         return await self._news_brave(query, limit, brave_key, freshness or "pw")
 
-    # ── Internal helpers ──
+    # Internal helpers
 
     async def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
@@ -270,7 +273,7 @@ class SearchTools:
         results = {}
         query_embedding = await self.embedding_service.encode_single(query)
 
-        sem_results = await self.memgraph.search_messages_vector(
+        sem_results = await self.graph_client.search_messages_vector(
             query_embedding, vector_limit
         )
 
@@ -278,7 +281,7 @@ class SearchTools:
             msg_key = self._format_message_id(msg_id)
             results[msg_key] = ("semantic", float(score))
 
-        fts_results = await self.memgraph.search_messages_fts(query, fts_limit)
+        fts_results = await self.graph_client.search_messages_fts(query, fts_limit)
 
         max_fts = max([s for _, s in fts_results], default=1.0) or 1.0
 
@@ -357,8 +360,8 @@ class SearchTools:
 
         for msg_id, raw in zip(evidence_ids, raw_results):
             if raw:
-                try:
-                    data = json.loads(raw)
+                data = safe_json_loads(raw)
+                if data and isinstance(data, dict):
                     results.append(
                         {
                             "id": msg_id,
@@ -366,7 +369,7 @@ class SearchTools:
                             "timestamp": data.get("timestamp", ""),
                         }
                     )
-                except json.JSONDecodeError:
+                else:
                     logger.warning(f"Malformed evidence data for {msg_id}")
             else:
                 if msg_id.startswith("msg_"):
@@ -383,7 +386,7 @@ class SearchTools:
                         pass
 
         if missing_ids_numerical:
-            fallback_msgs = await self.memgraph.get_messages_by_ids(
+            fallback_msgs = await self.graph_client.get_messages_by_ids(
                 missing_ids_numerical
             )
             for m in fallback_msgs:
@@ -418,8 +421,9 @@ class SearchTools:
         target_turn_id = msg_id
         is_msg_id = msg_id.startswith("msg_")
         if is_msg_id:
-            target_turn_id = await self.redis.hget(lookup_key, msg_id)
-
+            raw_id = msg_id.split("_", 1)[1]
+            target_turn_id = await self.redis.hget(lookup_key, raw_id)
+            
         rank = None
         if target_turn_id:
             rank = await self.redis.zrank(sorted_key, target_turn_id)
@@ -428,7 +432,7 @@ class SearchTools:
             if is_msg_id:
                 try:
                     numerical_msg_id = int(msg_id.split("_")[1])
-                    fallback_msgs = await self.memgraph.get_surrounding_messages(
+                    fallback_msgs = await self.graph_client.get_surrounding_messages(
                         numerical_msg_id, forward, target_total
                     )
 
@@ -486,9 +490,8 @@ class SearchTools:
             if tid not in raw_map:
                 continue
 
-            try:
-                data = json.loads(raw_map[tid])
-            except json.JSONDecodeError:
+            data = safe_json_loads(raw_map[tid])
+            if not data or not isinstance(data, dict):
                 continue
 
             role = data.get("role", "unknown")
@@ -509,8 +512,8 @@ class SearchTools:
 
         pre_context.reverse()
 
-        try:
-            tgt_data = json.loads(raw_map[target_turn_id])
+        tgt_data = safe_json_loads(raw_map[target_turn_id])
+        if tgt_data and isinstance(tgt_data, dict):
             target_msg = {
                 "role": tgt_data.get("role", "unknown"),
                 "timestamp": tgt_data.get("timestamp", ""),
@@ -518,7 +521,7 @@ class SearchTools:
                 "id": target_turn_id,
                 "is_hit": True,
             }
-        except json.JSONDecodeError:
+        else:
             target_msg = {
                 "role": "unknown",
                 "timestamp": "",
@@ -534,9 +537,8 @@ class SearchTools:
             if tid not in raw_map:
                 continue
 
-            try:
-                data = json.loads(raw_map[tid])
-            except json.JSONDecodeError:
+            data = safe_json_loads(raw_map[tid])
+            if not data or not isinstance(data, dict):
                 continue
             post_context.append(
                 {
@@ -555,8 +557,14 @@ class SearchTools:
         """Free web search via DuckDuckGo — no API key required."""
         loop = asyncio.get_running_loop()
         try:
-            from duckduckgo_search import DDGS
-
+            if DDGS is None:
+                return [
+                    {
+                        "title": "Search Error",
+                        "url": "",
+                        "snippet": "duckduckgo_search is not installed",
+                    }
+                ]
             ddgs = DDGS()
             timelimit = {"pd": "d", "pw": "w", "pm": "m", "py": "y"}.get(freshness)
 

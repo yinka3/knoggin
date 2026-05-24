@@ -1,8 +1,7 @@
 from __future__ import annotations
-import json
-import os
+
 import uuid
-from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
 if TYPE_CHECKING:
     from knoggin.session.context import Context
@@ -10,9 +9,9 @@ if TYPE_CHECKING:
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.conf.base import get_config
-from common.conf.topics_config import TopicConfig
+from common.conf.manager import ConfigManager
 from common.schema.dtypes import AgentConfig
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.agent.executor import AgentExecutor
@@ -23,8 +22,6 @@ from knoggin.agent.types import (
     AgentState,
     RetrievedEvidence,
 )
-from knoggin.knowledge.services.entity_service import EntityManager
-from knoggin.knowledge.services.file_rag import FileRAGService
 from knoggin.knowledge.services.memory_service import MemoryManager
 
 
@@ -34,17 +31,15 @@ class Orchestrator:
     It prepares the environment and delegates the reasoning loop to AgentExecutor.
     """
 
-    def __init__(self, resources: ResourceManager):
-        self._resources = resources
+    def __init__(self):
+        pass
 
     async def run_stream(
         self,
         user_query: str,
         user_name: str,
         session_id: str,
-        redis: aioredis.Redis,
-        context: Optional[Context] = None,
-        entities: Optional[EntityManager] = None,
+        context: Context,
         user_timezone: Optional[str] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -66,8 +61,8 @@ class Orchestrator:
         """
         tools = None
         try:
-            # 1. Configuration
-            config = get_config()
+            # Configuration
+            config = ConfigManager.get().config
             limits = config.developer_settings.limits
             run_config = AgentRunConfig(
                 max_calls=limits.max_tool_calls,
@@ -78,16 +73,14 @@ class Orchestrator:
                 tool_limits=tuple(limits.tool_limits.items()),
             )
 
-            # 2. Services (Context-Aware)
-            services = await self._bootstrap_services(
-                user_name, session_id, redis, context, entities
-            )
+            # Services (Context-Aware)
+            services = await self._bootstrap_services(context, agent_id)
             tools = services["tools"]
             memory_mgr = services["memory"]
-            entities = services["entities"]
             topic_config = services["topic_config"]
 
-            # 3. Identity & Persona
+            # Identity & Persona
+            redis = ResourceManager.get().redis
             identity = await self._resolve_agent_identity(
                 user_name,
                 redis,
@@ -97,7 +90,7 @@ class Orchestrator:
             )
             agent_cfg = identity["config"]
 
-            # 4. Context & State Assembly
+            # Context & State Assembly
             effective_hot_topics = (
                 hot_topics if hot_topics is not None else topic_config.hot_topics
             )
@@ -115,8 +108,10 @@ class Orchestrator:
                 history=conversation_history or [],
             )
 
-            # 5. Execution via AgentExecutor
-            executor = AgentExecutor(ctx, self._resources.llm_service, tools, memory_mgr)
+            # Execution via AgentExecutor
+            executor = AgentExecutor(
+                ctx, ResourceManager.get().llm_service, tools, memory_mgr
+            )
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
@@ -155,9 +150,13 @@ class Orchestrator:
             agent_data = await redis.hget(RedisKeys.agents(user_name), agent_id)
             if agent_data:
                 try:
-                    agent_cfg = AgentConfig.from_dict(json.loads(agent_data))
+                    parsed_agent_data = safe_json_loads(agent_data)
+                    if parsed_agent_data:
+                        agent_cfg = AgentConfig.from_dict(parsed_agent_data)
                 except Exception as e:
-                    logger.warning(f"Failed to parse agent config for '{agent_id}': {e}")
+                    logger.warning(
+                        f"Failed to parse agent config for '{agent_id}': {e}"
+                    )
 
         return {
             "config": agent_cfg,
@@ -172,83 +171,37 @@ class Orchestrator:
 
     async def _bootstrap_services(
         self,
-        user_name: str,
-        session_id: str,
-        redis: aioredis.Redis,
-        context: Optional[Context] = None,
-        entities: Optional[EntityManager] = None,
+        context: Context,
+        agent_id: Optional[str] = None,
     ) -> Dict:
         """
-        Initializes or reuses the service suite.
-        If context is provided, we avoid redundant initialization and Redis hits.
+        Retrieves pre-wired service components from the active Context and instantiates MemoryManager.
         """
-        config = get_config()
-
-        # 1. Reuse or load TopicConfig
-        if context and context.topic_config:
-            topic_config = context.topic_config
-        else:
-            topic_config = await TopicConfig.load(redis, user_name, session_id)
-
-        # 2. Reuse or initialize MemoryManager
-        if context and hasattr(context, "memory_mgr"):  # Future-proofing
-            memory_mgr = context.memory_mgr
-        else:
-            memory_mgr = MemoryManager(
-                redis=redis,
-                user_name=user_name,
-                session_id=session_id,
-                agent_id="default",
-                topic_config=topic_config,
-            )
-
-        # 3. Reuse or initialize EntityManager
-        if context and context.entities:
-            entities = context.entities
-        elif not entities:
-            er_cfg = config.developer_settings.entity_resolution
-            entities = EntityManager(
-                session_id=session_id,
-                memgraph=self._resources.memgraph,
-                embedding_service=self._resources.embedding,
-                hierarchy_config=topic_config.hierarchy,
-                fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
-                fuzzy_non_substring_threshold=er_cfg.fuzzy_non_substring_threshold,
-                generic_token_freq=er_cfg.generic_token_freq,
-                candidate_fuzzy_threshold=er_cfg.candidate_fuzzy_threshold,
-                candidate_vector_threshold=er_cfg.candidate_vector_threshold,
-            )
-
-        # 4. Reuse or initialize FileRAG
-        if context and context.file_rag:
-            file_rag = context.file_rag
-        else:
-            upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
-            file_rag = FileRAGService(
-                session_id=session_id,
-                chroma_client=self._resources.chroma,
-                embedding_service=self._resources.embedding,
-                upload_dir=upload_dir,
-            )
-
-        # 5. Initialize Tools (Always fresh for the run, but using shared services)
+        config = ConfigManager.get().config
         search_cfg = config.developer_settings.search.model_dump()
+
+        memory_mgr = MemoryManager(
+            redis=ResourceManager.get().redis,
+            user_name=context.user_name,
+            session_id=context.session_id,
+            agent_id=agent_id or "default",
+            topic_config=context.project.topic_config,
+        )
+
         tools = Tools(
-            user_name=user_name,
-            memgraph=self._resources.memgraph,
-            entities=entities,
-            redis_client=redis,
-            session_id=session_id,
-            topic_config=topic_config,
+            user_name=context.user_name,
+            entities=context.project.entities,
+            session_id=context.session_id,
+            topic_config=context.project.topic_config,
             search_config=search_cfg,
-            file_rag=file_rag,
+            file_rag=context.file_rag,
             memory=memory_mgr,
         )
 
         return {
-            "topic_config": topic_config,
+            "topic_config": context.project.topic_config,
             "memory": memory_mgr,
-            "entities": entities,
-            "file_rag": file_rag,
+            "entities": context.project.entities,
+            "file_rag": context.file_rag,
             "tools": tools,
         }

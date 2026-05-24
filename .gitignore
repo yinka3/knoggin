@@ -90,7 +90,5 @@ cython_debug/
 # Knoggin specific
 config/
 redis_data/
-memgraph_data/
-memgraph_log/
 *.log
 

@@ -1,11 +1,11 @@
-
-import os
-from typing import Optional
+import uuid
+from typing import Callable, Optional
 
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig
+from common.utils.events import DebugEventEmitter
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.ingestion.services.batch_consumer import BatchConsumer
@@ -13,8 +13,8 @@ from knoggin.ingestion.services.pipeline_service import BatchProcessor
 from knoggin.ingestion.services.processor import TextProcessor
 from knoggin.knowledge.services.entity_service import EntityManager
 from knoggin.knowledge.services.file_rag import FileRAGService
-from knoggin.session.context import Context
 from knoggin.project.state import ProjectState
+from knoggin.session.context import Context
 
 LUA_SYNC_COUNTER_SCRIPT = """
 local current = tonumber(redis.call('GET', KEYS[1])) or 0
@@ -23,6 +23,7 @@ if proposed > current then
     redis.call('SET', KEYS[1], ARGV[1])
 end
 """
+
 
 class SessionAssembler:
     """
@@ -33,8 +34,14 @@ class SessionAssembler:
     def __init__(self, user_name: str, resources: ResourceManager):
         self.user_name = user_name
         self.resources = resources
-        self.config = get_config()
-        self.dev_settings = self.config.developer_settings
+
+    @property
+    def config(self):
+        return ConfigManager.get().config
+
+    @property
+    def dev_settings(self):
+        return self.config.developer_settings
 
     async def bootstrap(
         self,
@@ -61,23 +68,23 @@ class SessionAssembler:
 
         await self._sync_entity_counters()
 
-        # 1. Instantiate Context shell first
-        ctx = Context(
-            self.user_name, list(project_state.topic_config.raw.keys()), self.resources.redis
-        )
+        # Instantiate Context shell first
+        ctx = Context(self.user_name, list(project_state.topic_config.raw.keys()))
         ctx.session_id = session_id
         ctx.project_id = project_state.project_id
         ctx.project = project_state
         ctx.model = model
-        ctx.resources = self.resources
 
-        # 2. Initialize Batch Processor
+        # Initialize Batch Processor
         processor = self._init_batch_processor(
-            session_id, project_state.entities, project_state.pipeline, project_state.topic_config
+            session_id,
+            project_state.entities,
+            project_state.pipeline,
+            project_state.topic_config,
         )
         ctx.batch_processor = processor
 
-        # 3. Initialize Batch Consumer with direct callbacks
+        # Initialize Batch Consumer with direct callbacks
         consumer = self._init_batch_consumer(
             session_id,
             processor,
@@ -86,12 +93,13 @@ class SessionAssembler:
         )
         ctx.consumer = consumer
 
-        # 4. Initialize File RAG
+        ConfigManager.get().subscribe(consumer.update_settings, "developer_settings.ingestion")
+
+        # Initialize File RAG
         file_rag = self._init_file_rag(session_id)
         ctx.file_rag = file_rag
 
         # Register session to emitter for project event propagation
-        from common.utils.events import DebugEventEmitter
         DebugEventEmitter.get().register_session(project_state.project_id, session_id)
 
         return ctx
@@ -109,8 +117,8 @@ class SessionAssembler:
                 raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
 
         # Start the project scheduler if not already running
-        if ctx.scheduler and not ctx.scheduler.running:
-            await ctx.scheduler.start()
+        if ctx.project and ctx.project.scheduler and not ctx.project.scheduler.running:
+            await ctx.project.scheduler.start()
 
         if ctx.consumer:
             ctx.consumer.start()
@@ -118,7 +126,7 @@ class SessionAssembler:
         logger.info(f"System launched successfully for session {ctx.session_id}")
 
     async def _sync_entity_counters(self):
-        max_id = (await self.resources.memgraph.get_max_entity_id()) or 0
+        max_id = (await self.resources.graph_client.get_max_entity_id()) or 0
         await self.resources.redis.eval(
             LUA_SYNC_COUNTER_SCRIPT, 1, RedisKeys.global_next_ent_id(), max_id
         )
@@ -137,7 +145,6 @@ class SessionAssembler:
             llm=self.resources.llm_service,
             entities=entities,
             processor=pipeline,
-            memgraph=self.resources.memgraph,
             cpu_executor=self.resources.executor,
             user_name=self.user_name,
             topic_config=topic_config,
@@ -163,7 +170,7 @@ class SessionAssembler:
         return BatchConsumer(
             user_name=self.user_name,
             session_id=session_id,
-            memgraph=self.resources.memgraph,
+            graph_client=self.resources.graph_client,
             redis=self.resources.redis,
             processor=processor,
             get_session_context=get_session_context,
@@ -175,10 +182,7 @@ class SessionAssembler:
         )
 
     def _init_file_rag(self, session_id: str) -> FileRAGService:
-        upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
         return FileRAGService(
             session_id=session_id,
-            chroma_client=self.resources.chroma,
             embedding_service=self.resources.embedding,
-            upload_dir=upload_dir,
         )

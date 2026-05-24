@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import json
 import time
@@ -19,7 +20,6 @@ from common.schema.dtypes import (
 )
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
-from infrastructure.memgraph_client import MemgraphClient
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import get_connection_reasoning_prompt
@@ -49,20 +49,20 @@ class BatchProcessor:
         llm: LLMService,
         entities: EntityManager,
         processor: TextProcessor,
-        memgraph: MemgraphClient,
         cpu_executor: ThreadPoolExecutor,
         user_name: str,
         topic_config: TopicConfig,
         get_next_ent_id,
         resolution_threshold: float = 0.85,
         connection_prompt: str = None,
+        graph_client=None,
     ):
         self.session_id = session_id
+        self.graph_client = graph_client
         self.redis = redis_client
         self.llm = llm
         self.entities = entities
         self.processor = processor
-        self.memgraph = memgraph
         self.executor = cpu_executor
         self.user_name = user_name
         self.topic_config = topic_config
@@ -247,7 +247,6 @@ class BatchProcessor:
         Replaces VP-02 LLM disambiguation.
         """
         async with self.entities.resolution_lock:
-
             msg_text_map = {m["id"]: m["message"] for m in messages}
 
             entity_ids = []
@@ -353,7 +352,9 @@ class BatchProcessor:
                                 )
                             )
                             if existing_id and aliases_added:
-                                self.entities.commit_new_aliases(existing_id, new_aliases)
+                                self.entities.commit_new_aliases(
+                                    existing_id, new_aliases
+                                )
                                 alias_ids.add(existing_id)
                                 if existing_id not in alias_updates:
                                     alias_updates[existing_id] = []
@@ -410,9 +411,9 @@ class BatchProcessor:
         """
         results = {}
 
-        # ── Vector Embed Messages and Query Neighbors ──
+        # Vector Embed Messages and Query Neighbors
         all_candidate_ids = list({cid for cid, _, _ in candidate_pairs})
-        neighbors_by_entity = await self.memgraph.get_neighbor_ids_batch(
+        neighbors_by_entity = await self.entities.get_neighbor_ids_batch(
             all_candidate_ids
         )
 
@@ -428,7 +429,7 @@ class BatchProcessor:
                 )
                 msg_embeddings = {m: emb for m, emb in zip(unique_msg_ids, embeddings)}
 
-        # --- Signal 3: Fact relevance via LLM (RAG injected) ---
+        # Signal 3: Fact relevance via LLM (RAG injected)
         llm_pairs = []
         pair_keys = []
 
@@ -438,7 +439,7 @@ class BatchProcessor:
                 return cid, b_score, m_text, []
 
             # Vector search facts for this specific entity against the message
-            facts = await self.memgraph.search_relevant_facts(
+            facts = await self.entities.search_relevant_facts(
                 cid, msg_embeddings[m_id], limit=5
             )
             return cid, b_score, m_text, facts
@@ -505,7 +506,7 @@ class BatchProcessor:
                             results.get(candidate_id, base_score), base_score
                         )
 
-        # --- Signal 4: Connection co-occurrence ---
+        # Signal 4: Connection co-occurrence
         processed_candidates = set()
         for candidate_id, base_score, msg_id in candidate_pairs:
             if candidate_id in processed_candidates:
@@ -629,7 +630,7 @@ class BatchProcessor:
 
         if stage in ["processing", "message_log"] and session_text is not None:
             entry["session_text"] = session_text
-        
+
         if stage in ["graph_write", "message_log"] and batch_result is not None:
             entry["batch_result"] = batch_result.to_dict()
 

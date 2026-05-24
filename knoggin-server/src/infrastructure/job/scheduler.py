@@ -6,7 +6,8 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
-from infrastructure.jobs.base import BaseJob, JobContext
+from common.utils.time_utils import parse_iso_time
+from infrastructure.job.base import BaseJob, JobContext
 from infrastructure.redis_client import RedisKeys
 
 
@@ -19,9 +20,7 @@ class Scheduler:
     CHECK_INTERVAL = 30
     JOB_EXECUTION_TIMEOUT = 300
 
-    def __init__(
-        self, user_name: str, session_id: str, redis: aioredis.Redis
-    ):
+    def __init__(self, user_name: str, session_id: str, redis: aioredis.Redis):
         self.user_name = user_name
         self.session_id = session_id
         self.redis = redis
@@ -30,6 +29,10 @@ class Scheduler:
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._monitor_task: Optional[asyncio.Task] = None
         self._is_running = False
+    
+    @property
+    def running(self) -> bool:
+        return self._is_running
 
     def register(self, job: BaseJob) -> "Scheduler":
         """Register a job. Returns self for chaining."""
@@ -110,7 +113,9 @@ class Scheduler:
         )
         if not last_activity:
             return 0.0
-        last_ts = datetime.fromisoformat(last_activity)
+        last_ts = parse_iso_time(last_activity)
+        if not last_ts:
+            return 0.0
         return (datetime.now(timezone.utc) - last_ts).total_seconds()
 
     async def _run_pending_checks(self):

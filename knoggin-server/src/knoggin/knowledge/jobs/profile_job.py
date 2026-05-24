@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.schema.dtypes import (
     EntityProfilesResult,
     FactRecord,
@@ -18,8 +18,9 @@ from common.utils.data_utils import (
     process_extracted_facts,
 )
 from common.utils.events import emit
-from infrastructure.memgraph_client import MemgraphClient
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
+from common.utils.time_utils import parse_iso_time, parse_iso_time_or_now
+from infrastructure.graph_client import GraphClient
+from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import (
@@ -44,7 +45,7 @@ class ProfileRefinementJob(BaseJob):
         self,
         llm: LLMService,
         entities: EntityManager,
-        memgraph: MemgraphClient,
+        graph_client: GraphClient,
         executor: ThreadPoolExecutor,
         embedding_service: EmbeddingService,
         redis_client: aioredis.Redis,
@@ -62,7 +63,7 @@ class ProfileRefinementJob(BaseJob):
 
         self.llm = llm
         self.entities = entities
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.redis = redis_client
         self.executor = executor
         self.embedding_service = embedding_service
@@ -178,7 +179,7 @@ class ProfileRefinementJob(BaseJob):
 
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
-            ts = datetime.fromisoformat(turn["timestamp"])
+            ts = parse_iso_time_or_now(turn["timestamp"])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
 
             if turn["role"] == "user" and turn.get("user_msg_id") is not None:
@@ -243,11 +244,16 @@ class ProfileRefinementJob(BaseJob):
                 raw_ids = await self.redis.srandmember(dirty_key, limit)
 
             user_id = await self.entities.get_id(ctx.user_name)
-            candidate_ids = (
-                [int(id_str) for id_str in raw_ids if int(id_str) != user_id]
-                if raw_ids
-                else []
-            )
+            candidate_ids = []
+            if raw_ids:
+                for id_str in raw_ids:
+                    try:
+                        eid = int(id_str)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Non-numeric entity ID in dirty set: {id_str}")
+                        continue
+                    if eid != user_id:
+                        candidate_ids.append(eid)
 
             # Recency Guard (Targeted only)
             # Avoid refining if it was updated in the last 60 seconds
@@ -323,7 +329,7 @@ class ProfileRefinementJob(BaseJob):
                         updated_ids = [str(u["id"]) for u in updates]
 
                         if updated_ids:
-                            config = get_config()
+                            config = ConfigManager.get().config
                             merger_enabled = (
                                 config.developer_settings.jobs.merger.enabled
                             )
@@ -397,7 +403,7 @@ class ProfileRefinementJob(BaseJob):
         current_msg_id = curr_msg_id
 
         # Fetch existing facts from DB
-        existing_facts = await self.memgraph.get_facts_for_entity(
+        existing_facts = await self.graph_client.get_facts_for_entity(
             user_id,
             True,  # active_only
         )
@@ -411,7 +417,9 @@ class ProfileRefinementJob(BaseJob):
         else:
             system_reasoning = get_profile_extraction_prompt(ctx.user_name)
 
-        enriched_facts = await enrich_facts_with_sources(existing_facts, self.memgraph)
+        enriched_facts = await enrich_facts_with_sources(
+            existing_facts, self.graph_client
+        )
         if len(enriched_facts) > self.max_facts_context:
             enriched_facts = enriched_facts[-self.max_facts_context :]
 
@@ -476,7 +484,7 @@ class ProfileRefinementJob(BaseJob):
             existing_facts,
             valid_msg_ids,
             ctx.session_id,
-            self.memgraph,
+            self.graph_client,
             self.embedding_service,
             self.llm,
             self.contradiction_sim_low,
@@ -495,7 +503,7 @@ class ProfileRefinementJob(BaseJob):
             user_id, ctx.user_name, final_active_facts
         )
 
-        await self.memgraph.update_entity_profile(
+        await self.graph_client.update_entity_profile(
             entity_id=user_id,
             canonical_name=ctx.user_name,
             embedding=embedding,
@@ -529,7 +537,7 @@ class ProfileRefinementJob(BaseJob):
             llm_input = []
             for e in batch:
                 enriched_facts = await enrich_facts_with_sources(
-                    e["existing_facts"], self.memgraph
+                    e["existing_facts"], self.graph_client
                 )
                 if len(enriched_facts) > self.max_facts_context:
                     enriched_facts = enriched_facts[-self.max_facts_context :]
@@ -609,7 +617,7 @@ class ProfileRefinementJob(BaseJob):
                     existing_facts,
                     valid_msg_ids,
                     ctx.session_id,
-                    self.memgraph,
+                    self.graph_client,
                     self.embedding_service,
                     self.llm,
                     self.contradiction_sim_low,
@@ -643,7 +651,7 @@ class ProfileRefinementJob(BaseJob):
             ]
 
             for orig in no_update_ents:
-                await self.memgraph.update_entity_checkpoint(
+                await self.graph_client.update_entity_checkpoint(
                     orig["ent_id"], current_msg_id
                 )
 
@@ -669,7 +677,7 @@ class ProfileRefinementJob(BaseJob):
                 entity_ids,
             )  # if invalid, we should clear them from dirty queue too
 
-        ents_to_facts = await self.memgraph.get_facts_for_entities(
+        ents_to_facts = await self.graph_client.get_facts_for_entities(
             [ent_id for ent_id, _ in valid_entities], True
         )
 
@@ -680,7 +688,7 @@ class ProfileRefinementJob(BaseJob):
             return [], []
 
         # Batch fetch last_profiled_msg_id for all entities to avoid N+1
-        entities_data = await self.memgraph.get_entities_by_ids(
+        entities_data = await self.graph_client.get_entities_by_ids(
             [ent_id for ent_id, _ in valid_entities]
         )
         profiled_checkpoints = {
@@ -768,7 +776,7 @@ class ProfileRefinementJob(BaseJob):
     ) -> List[float]:
         """Recompute entity embedding from current active facts."""
         if active_facts is None:
-            active_facts = await self.memgraph.get_facts_for_entity(entity_id, True)
+            active_facts = await self.graph_client.get_facts_for_entity(entity_id, True)
             if active_facts is None:
                 logger.warning(
                     "Could not fetch facts for embedding update, using name only"
@@ -784,10 +792,10 @@ class ProfileRefinementJob(BaseJob):
         return new_emb
 
     async def _write_updates(self, updates: List[Dict]):
-        """Write profile updates to Memgraph sequentially."""
+        """Write profile updates to GraphClient sequentially."""
 
         for update in updates:
-            await self.memgraph.update_entity_profile(
+            await self.graph_client.update_entity_profile(
                 entity_id=update["id"],
                 canonical_name=update["canonical_name"],
                 embedding=update["embedding"],

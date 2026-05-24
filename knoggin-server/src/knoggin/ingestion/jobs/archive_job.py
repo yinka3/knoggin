@@ -5,8 +5,8 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
-from infrastructure.memgraph_client import MemgraphClient
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
+from infrastructure.graph_client import GraphClient
+from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 
 
@@ -19,14 +19,14 @@ class FactArchivalJob(BaseJob):
     def __init__(
         self,
         user_name: str,
-        memgraph: MemgraphClient,
+        graph_client: GraphClient,
         redis_client: aioredis.Redis,
         retention_days: int = 14,
         fallback_interval_hours: float = 24,
     ):
         self.user_name = user_name
         self.redis = redis_client
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.retention_days = retention_days
         self._fallback_interval_seconds = fallback_interval_hours * 3600
 
@@ -71,7 +71,7 @@ class FactArchivalJob(BaseJob):
         ):
             cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
 
-            deleted_count = await self.memgraph.delete_old_invalidated_facts(cutoff)
+            deleted_count = await self.graph_client.delete_old_invalidated_facts(cutoff)
 
             summary = f"Archived {deleted_count} invalidated facts"
             if deleted_count > 0:

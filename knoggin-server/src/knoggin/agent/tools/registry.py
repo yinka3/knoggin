@@ -1,10 +1,9 @@
 from typing import Optional
 
 import httpx
-import redis.asyncio as aioredis
 
 from common.conf.topics_config import TopicConfig
-from infrastructure.memgraph_client import MemgraphClient
+from infrastructure.resources import ResourceManager
 from knoggin.agent.tools.graph import GraphTools
 from knoggin.agent.tools.memory import MemoryTools
 from knoggin.agent.tools.search import SearchTools
@@ -26,6 +25,7 @@ TOOL_DISPATCH = {
     "web_search": ("web_search", ["query", "limit", "freshness"]),
     "news_search": ("news_search", ["query", "limit", "freshness"]),
     "request_clarification": None,  # handled specially
+    "request_replanning": None,  # handled specially
     "save_insight": ("save_insight", ["content"]),
     "spawn_specialist": (
         "spawn_specialist",
@@ -38,9 +38,7 @@ class Tools(SearchTools, GraphTools, MemoryTools):
     def __init__(
         self,
         user_name: str,
-        memgraph: MemgraphClient,
         entities: EntityManager,
-        redis_client: aioredis.Redis,
         session_id: str,
         topic_config: Optional[TopicConfig] = None,
         search_config: Optional[dict] = None,
@@ -48,10 +46,10 @@ class Tools(SearchTools, GraphTools, MemoryTools):
         memory: Optional[MemoryManager] = None,
     ):
         self.session_id = session_id
-        self.memgraph = memgraph
+        self.graph_client = ResourceManager.get().graph_client
         self.entities = entities
         self.user_name = user_name
-        self.redis = redis_client
+        self.redis = ResourceManager.get().redis
         self.embedding_service = entities.embedding_service
         self.topic_config = topic_config
         self.file_rag = file_rag

@@ -1,12 +1,12 @@
-from typing import Optional
-
-from loguru import logger
+from typing import Any, Optional
 
 import redis.asyncio as aioredis
+from loguru import logger
+
 from common.conf.topics_config import TopicConfig
-from infrastructure.jobs.scheduler import Scheduler
+from infrastructure.job.scheduler import Scheduler
+from knoggin.ingestion.services.processor import TextProcessor
 from knoggin.knowledge.services.entity_service import EntityManager
-from knoggin.knowledge.services.text_processor import TextProcessor
 
 
 class ProjectState:
@@ -32,6 +32,8 @@ class ProjectState:
         self.user_name = user_name
         self.redis_client = redis_client
 
+        self.profile_job: Optional[Any] = None
+        self.merge_job: Optional[Any] = None
         self.active_sessions_count = 0
 
     async def shutdown(self):
@@ -47,5 +49,4 @@ class ProjectState:
         self.topic_config.update(new_config)
         await self.topic_config.save(self.redis_client, self.user_name, self.project_id)
         self.entities.hierarchy_config = self.topic_config.hierarchy
-        self.pipeline.refresh_topic_mappings(self.topic_config)
-
+        self.pipeline.refresh_topic_mappings()

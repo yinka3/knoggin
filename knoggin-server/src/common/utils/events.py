@@ -6,6 +6,7 @@ from typing import Any, Dict, Set
 
 from loguru import logger
 
+from common.utils.time_utils import parse_iso_time
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 
 
@@ -60,9 +61,7 @@ class BaseEventEmitter:
                     del self._subscribers[scope_id]
 
     def has_subscribers(self, scope_id: str) -> bool:
-        return (
-            scope_id in self._subscribers and len(self._subscribers[scope_id]) > 0
-        )
+        return scope_id in self._subscribers and len(self._subscribers[scope_id]) > 0
 
     async def _emit_to_subs(self, scope_id: str, event_obj: Any):
         """Internal helper to push events to all subscribers in a scope."""
@@ -117,13 +116,17 @@ class BaseEventEmitter:
                     continue
 
                 last_event = history[-1]
-                ts_str = last_event.ts if hasattr(last_event, "ts") else last_event.get("ts", "")
+                ts_str = (
+                    last_event.ts
+                    if hasattr(last_event, "ts")
+                    else last_event.get("ts", "")
+                )
 
                 try:
-                    last_ts = datetime.fromisoformat(ts_str)
+                    last_ts = parse_iso_time(ts_str)
                     if (now - last_ts).total_seconds() > max_age_hours * 3600:
                         stale.append(scope_id)
-                except (ValueError, AttributeError):
+                except Exception:
                     stale.append(scope_id)
 
             for scope_id in stale:
@@ -147,14 +150,18 @@ class DebugEventEmitter(BaseEventEmitter):
         if project_id not in self.project_sessions:
             self.project_sessions[project_id] = set()
         self.project_sessions[project_id].add(session_id)
-        logger.debug(f"Registered session {session_id} to project {project_id} in emitter")
+        logger.debug(
+            f"Registered session {session_id} to project {project_id} in emitter"
+        )
 
     def unregister_session(self, project_id: str, session_id: str):
         if project_id in self.project_sessions:
             self.project_sessions[project_id].discard(session_id)
             if not self.project_sessions[project_id]:
                 del self.project_sessions[project_id]
-        logger.debug(f"Unregistered session {session_id} from project {project_id} in emitter")
+        logger.debug(
+            f"Unregistered session {session_id} from project {project_id} in emitter"
+        )
 
     async def subscribe(self, session_id: str) -> asyncio.Queue:
         # Override to use loguru context or just for naming

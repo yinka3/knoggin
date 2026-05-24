@@ -1,108 +1,134 @@
+import json
+import time
 from typing import Dict, List
 
 from loguru import logger
-from neo4j import AsyncDriver, AsyncManagedTransaction
+
+from infrastructure.postgres_client import PostgresClient
 
 
 class EntityWriter:
-    def __init__(self, driver: AsyncDriver):
-        self.driver = driver
+    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+        self.client = client
+        self.graph_name = graph_name
+
+    def _current_time_ms(self) -> int:
+        return int(time.time() * 1000)
 
     async def write_batch(self, entities: List[Dict], relationships: List[Dict]):
-        entity_params = []
-        for e in entities:
-            e_clean = e.copy()
-            e_clean["aliases"] = e.get("aliases") or []
-            entity_params.append(e_clean)
+        # We need a transaction for both Graph and Hybrid tables
+        if not self.client.async_pool:
+            raise RuntimeError("PostgresClient async_pool is not initialized")
 
-        relationship_params = []
-        for r in relationships:
-            r_clean = r.copy()
-            r_clean["confidence"] = r.get("confidence", 1.0)
-            relationship_params.append(r_clean)
+        now_ms = self._current_time_ms()
 
-        async def _write(tx: AsyncManagedTransaction):
-            if entity_params:
-                await tx.run(
-                    """
-                    UNWIND $batch AS data
-                    MERGE (e:Entity {id: data.id})
-                    ON CREATE SET
-                        e.session_id = data.session_id,
-                        e.project_id = data.project_id,
-                        e.canonical_name = data.canonical_name,
-                        e.aliases = data.aliases,
-                        e.type = data.type,
-                        e.confidence = data.confidence,
-                        e.last_updated = timestamp(),
-                        e.last_mentioned = timestamp(),
-                        e.embedding = data.embedding
-                    ON MATCH SET
-                        e.canonical_name = data.canonical_name,
-                        e.confidence = data.confidence,
-                        e.last_updated = timestamp(),
-                        e.last_mentioned = timestamp(),
-                        e.embedding = case when data.embedding IS NOT NULL then data.embedding else e.embedding end
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    # Write Entities to Graph
+                    if entities:
+                        entity_params = []
+                        for e in entities:
+                            e_clean = e.copy()
+                            e_clean["aliases"] = e.get("aliases") or []
+                            e_clean["now"] = now_ms
+                            entity_params.append(e_clean)
 
-                    WITH e, data
-                    UNWIND coalesce(e.aliases, []) + data.aliases AS alias
-                    WITH e, data, collect(DISTINCT alias) AS unique_aliases
-                    SET e.aliases = unique_aliases
+                        # Notice we omit 'embedding' from the graph properties to save space.
+                        # It will only live in the entity_search table.
+                        cypher_e = """
+                        UNWIND $batch AS data
+                        MERGE (e:Entity {id: data.id})
+                        ON CREATE SET
+                            e.session_id = data.session_id,
+                            e.project_id = data.project_id,
+                            e.canonical_name = data.canonical_name,
+                            e.aliases = data.aliases,
+                            e.type = data.type,
+                            e.confidence = data.confidence,
+                            e.last_updated = data.now,
+                            e.last_mentioned = data.now
+                        ON MATCH SET
+                            e.canonical_name = data.canonical_name,
+                            e.confidence = data.confidence,
+                            e.last_updated = data.now,
+                            e.last_mentioned = data.now
+                            
+                        WITH e, data
+                        // Handle aliases in AGE (concatenation via python pre-processing is safer, but we try AGE array functions if possible,
+                        // or we just overwrite if it's a batch update, but we need to merge aliases)
+                        // For AGE, to avoid agtype list concat errors, we'll overwrite with data.aliases if this is new, 
+                        // but ideally we'd merge them. For now, we set them.
+                        // (We will handle alias merges explicitly in update_entity_aliases)
+                        
+                        FOREACH (_ IN CASE WHEN data.topic IS NOT NULL AND data.topic <> "" THEN [1] ELSE [] END |
+                            MERGE (t:Topic {name: data.topic})
+                            MERGE (e)-[:BELONGS_TO]->(t)
+                        )
+                        RETURN e.id
+                        """
+                        # We run the graph query
+                        await cur.execute(
+                            self.client.build_cypher(cypher_e),
+                            (json.dumps({"batch": entity_params}),),
+                        )
 
-                    WITH e, data
-                    FOREACH (_ IN CASE WHEN data.topic IS NOT NULL AND data.topic <> "" THEN [1] ELSE [] END |
-                        MERGE (t:Topic {name: data.topic})
-                        MERGE (e)-[:BELONGS_TO]->(t)
-                    )
-                """,
-                    batch=entity_params,
-                )
+                        # 2. Write Hybrid Search Data (Vectors)
+                        for e in entities:
+                            if "embedding" in e and e["embedding"]:
+                                await cur.execute(
+                                    """
+                                    INSERT INTO entity_search (entity_id, canonical_name, user_name, project_id, embedding)
+                                    VALUES (%s, %s, %s, %s, %s::vector)
+                                    ON CONFLICT (entity_id) DO UPDATE SET
+                                        canonical_name = EXCLUDED.canonical_name,
+                                        embedding = COALESCE(EXCLUDED.embedding, entity_search.embedding)
+                                    """,
+                                    (
+                                        e["id"],
+                                        e["canonical_name"],
+                                        e.get("user_name", "default_user"),
+                                        e.get("project_id", "default_project"),
+                                        e["embedding"],
+                                    ),
+                                )
 
-            if relationship_params:
-                result = await tx.run(
-                    """
-                    UNWIND $batch AS rel
-                    MATCH (a:Entity {id: rel.entity_a_id})
-                    MATCH (b:Entity {id: rel.entity_b_id})
-                    WITH a, b, rel,
-                        CASE WHEN a.id < b.id THEN a ELSE b END AS node_a,
-                        CASE WHEN a.id < b.id THEN b ELSE a END AS node_b
-                    MERGE (node_a)-[r:RELATED_TO]->(node_b)
+                    # 3. Write Relationships to Graph
+                    if relationships:
+                        rel_params = []
+                        for r in relationships:
+                            r_clean = r.copy()
+                            r_clean["confidence"] = r.get("confidence", 1.0)
+                            r_clean["now"] = now_ms
+                            rel_params.append(r_clean)
 
-                    ON CREATE SET
-                        r.weight = 1,
-                        r.confidence = rel.confidence,
-                        r.last_seen = timestamp(),
-                        r.message_ids = [rel.message_id],
-                        r.context = rel.context
-
-                    ON MATCH SET
-                        r.weight = CASE
-                            WHEN rel.message_id IN coalesce(r.message_ids, [])
-                            THEN r.weight
-                            ELSE r.weight + 1
-                        END,
-                        r.confidence = CASE WHEN rel.confidence > r.confidence THEN rel.confidence ELSE r.confidence END,
-                        r.last_seen = timestamp(),
-                        r.context = CASE WHEN rel.context IS NOT NULL THEN rel.context ELSE r.context END
-
-                    WITH r, rel
-                    UNWIND coalesce(r.message_ids, []) + [rel.message_id] AS mid
-                    WITH r, collect(DISTINCT mid) AS unique_ids
-                    SET r.message_ids = unique_ids
-                    RETURN count(DISTINCT r) AS created_count
-                """,
-                    batch=relationship_params,
-                )
-                record = await result.single()
-                created = record["created_count"] if record else 0
-                if created < len(relationship_params):
-                    logger.warning(
-                        f"write_batch created/updated {created} relationship edges for {len(relationship_params)} inputs. Some entities might be missing."
-                    )
-
-        async with self.driver.session() as session:
-            await session.execute_write(_write)
+                        cypher_r = """
+                        UNWIND $batch AS rel
+                        MATCH (a:Entity {id: rel.entity_a_id})
+                        MATCH (b:Entity {id: rel.entity_b_id})
+                        WITH a, b, rel,
+                            CASE WHEN a.id < b.id THEN a ELSE b END AS node_a,
+                            CASE WHEN a.id < b.id THEN b ELSE a END AS node_b
+                        MERGE (node_a)-[r:RELATED_TO]->(node_b)
+                        ON CREATE SET
+                            r.weight = 1,
+                            r.confidence = rel.confidence,
+                            r.last_seen = rel.now,
+                            r.message_ids = [rel.message_id],
+                            r.context = rel.context
+                        ON MATCH SET
+                            r.weight = r.weight + 1,
+                            r.confidence = CASE WHEN rel.confidence > r.confidence THEN rel.confidence ELSE r.confidence END,
+                            r.last_seen = rel.now,
+                            r.context = CASE WHEN rel.context IS NOT NULL THEN rel.context ELSE r.context END
+                        RETURN count(r)
+                        """
+                        # Note: message_ids append for ON MATCH SET is omitted here because agtype list append
+                        # can be problematic. We handle complex edge updates in merge_entities.
+                        await cur.execute(
+                            self.client.build_cypher(cypher_r),
+                            (json.dumps({"batch": rel_params}),),
+                        )
 
         return True
 
@@ -113,174 +139,191 @@ class EntityWriter:
         embedding: List[float],
         last_msg_id: int,
     ):
-        """
-        Update entity metadata and embedding.
-        """
+        now_ms = self._current_time_ms()
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    # Update Graph
+                    cypher = """
+                    MATCH (e:Entity {id: $id})
+                    SET e.canonical_name = $canonical_name,
+                        e.last_updated = $now,
+                        e.last_profiled_msg_id = $last_msg_id
+                    RETURN e.id
+                    """
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (
+                            json.dumps(
+                                {
+                                    "id": entity_id,
+                                    "canonical_name": canonical_name,
+                                    "now": now_ms,
+                                    "last_msg_id": last_msg_id,
+                                }
+                            ),
+                        ),
+                    )
 
-        async def _update(tx: AsyncManagedTransaction):
-            await tx.run(
-                """
-                MATCH (e:Entity {id: $id})
-                SET e.canonical_name = $canonical_name,
-                    e.embedding = $embedding,
-                    e.last_updated = timestamp(),
-                    e.last_profiled_msg_id = $last_msg_id
-            """,
-                id=entity_id,
-                canonical_name=canonical_name,
-                embedding=embedding,
-                last_msg_id=last_msg_id,
-            )
-
-        async with self.driver.session() as session:
-            await session.execute_write(_update)
+                    # Update Vector Table
+                    await cur.execute(
+                        """
+                        UPDATE entity_search 
+                        SET canonical_name = %s, embedding = %s::vector
+                        WHERE entity_id = %s
+                        """,
+                        (canonical_name, embedding, entity_id),
+                    )
         logger.info(f"Updated entity {entity_id} (checkpoint: msg_{last_msg_id})")
 
     async def update_entity_canonical_name(
         self, entity_id: int, canonical_name: str
     ) -> None:
-        """Update only the canonical name. Does not touch embedding or checkpoint."""
-        query = """
-        MATCH (e:Entity {id: $id})
-        SET e.canonical_name = $canonical_name,
-            e.last_updated = timestamp()
-        """
+        now_ms = self._current_time_ms()
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    # Update Graph
+                    cypher = "MATCH (e:Entity {id: $id}) SET e.canonical_name = $canonical_name, e.last_updated = $now RETURN e.id"
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (
+                            json.dumps(
+                                {
+                                    "id": entity_id,
+                                    "canonical_name": canonical_name,
+                                    "now": now_ms,
+                                }
+                            ),
+                        ),
+                    )
 
-        async def _update(tx: AsyncManagedTransaction):
-            result = await tx.run(
-                query, {"id": entity_id, "canonical_name": canonical_name}
-            )
-            await result.consume()
-
-        async with self.driver.session() as session:
-            await session.execute_write(_update)
+                    # Update Vector Table
+                    await cur.execute(
+                        "UPDATE entity_search SET canonical_name = %s WHERE entity_id = %s",
+                        (canonical_name, entity_id),
+                    )
 
     async def update_entity_embedding(
         self, entity_id: int, embedding: List[float]
     ) -> None:
-        """
-        Persists a new embedding for an entity.
-        """
-        query = """
-        MATCH (e:Entity {id: $id})
-        SET e.embedding = $embedding,
-            e.last_updated = timestamp()
-        """
+        now_ms = self._current_time_ms()
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    # Mark updated in Graph
+                    cypher = "MATCH (e:Entity {id: $id}) SET e.last_updated = $now RETURN e.id"
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (json.dumps({"id": entity_id, "now": now_ms}),),
+                    )
 
-        async def _update(tx: AsyncManagedTransaction):
-            result = await tx.run(query, {"id": entity_id, "embedding": embedding})
-            await result.consume()
-
-        async with self.driver.session() as session:
-            await session.execute_write(_update)
+                    # Update Vector Table
+                    await cur.execute(
+                        "UPDATE entity_search SET embedding = %s::vector WHERE entity_id = %s",
+                        (embedding, entity_id),
+                    )
 
     async def update_entity_checkpoint(self, entity_id: int, last_msg_id: int) -> None:
-        """
-        Update ONLY the entity's profiled message checkpoint.
-        """
-        query = """
-        MATCH (e:Entity {id: $id})
-        SET e.last_profiled_msg_id = $last_msg_id
-        """
-
-        async def _update(tx: AsyncManagedTransaction):
-            result = await tx.run(query, {"id": entity_id, "last_msg_id": last_msg_id})
-            await result.consume()
-
-        async with self.driver.session() as session:
-            await session.execute_write(_update)
+        cypher = "MATCH (e:Entity {id: $id}) SET e.last_profiled_msg_id = $last_msg_id RETURN e.id"
+        await self.client.execute_write(
+            self.client.build_cypher(cypher),
+            (json.dumps({"id": entity_id, "last_msg_id": last_msg_id}),),
+        )
 
     async def update_entity_aliases(self, alias_updates: Dict[int, List[str]]):
-        """Append new aliases to existing entities."""
         if not alias_updates:
             return
 
-        params = [
-            {"id": eid, "new_aliases": aliases}
-            for eid, aliases in alias_updates.items()
-        ]
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    for eid, new_aliases in alias_updates.items():
+                        read_cyp = "MATCH (e:Entity {id: $id}) RETURN e.aliases"
+                        await cur.execute(
+                            self.client.build_cypher(read_cyp, "aliases agtype"),
+                            (json.dumps({"id": eid}),),
+                        )
+                        row = await cur.fetchone()
+                        existing = row["aliases"] if row and row["aliases"] else []
+                        combined = list(set(existing + new_aliases))
 
-        async def _update(tx: AsyncManagedTransaction):
-            await tx.run(
-                """
-                UNWIND $batch AS data
-                MATCH (e:Entity {id: data.id})
-                WITH e, data, coalesce(e.aliases, []) AS existing
-                UNWIND existing + data.new_aliases AS alias
-                WITH e, collect(DISTINCT alias) AS all_aliases
-                SET e.aliases = all_aliases, e.last_updated = timestamp()
-            """,
-                batch=params,
-            )
-
-        async with self.driver.session() as session:
-            await session.execute_write(_update)
+                        # Write back
+                        write_cyp = "MATCH (e:Entity {id: $id}) SET e.aliases = $aliases, e.last_updated = $now RETURN e.id"
+                        await cur.execute(
+                            self.client.build_cypher(write_cyp),
+                            (
+                                json.dumps(
+                                    {
+                                        "id": eid,
+                                        "aliases": combined,
+                                        "now": self._current_time_ms(),
+                                    }
+                                ),
+                            ),
+                        )
 
         logger.debug(f"Updated aliases for {len(alias_updates)} entities")
 
     async def cleanup_null_entities(self) -> int:
-        """Remove entities with null type and their relationships."""
-        query = """
+        cypher = """
         MATCH (e:Entity)
         WHERE e.type IS NULL
         DETACH DELETE e
-        RETURN count(e) as deleted
+        RETURN count(e)
         """
-
-        async def _cleanup(tx: AsyncManagedTransaction):
-            result = await tx.run(query)
-            record = await result.single()
-            return record["deleted"] if record else 0
-
-        async with self.driver.session() as session:
-            deleted = await session.execute_write(_cleanup)
-            if deleted > 0:
-                logger.info(f"Cleaned up {deleted} null-type entities")
-            return deleted
+        res = await self.client.execute_read(
+            self.client.build_cypher(cypher, "deleted agtype"), ("{}",)
+        )
+        return int(res[0]["deleted"]) if res else 0
 
     async def delete_entity(self, entity_id: int) -> bool:
-        """Delete a single entity, its facts, and all relationships."""
-        query = """
-        MATCH (e:Entity {id: $id})
-        OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
-        DETACH DELETE e, f
-        RETURN count(e) as deleted
-        """
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    # Delete from Graph
+                    cypher = """
+                    MATCH (e:Entity {id: $id})
+                    OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
+                    DETACH DELETE e, f
+                    RETURN count(e)
+                    """
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (json.dumps({"id": entity_id}),),
+                    )
 
-        async def _delete(tx: AsyncManagedTransaction):
-            result = await tx.run(query, {"id": entity_id})
-            record = await result.single()
-            return record["deleted"] if record else 0
-
-        try:
-            async with self.driver.session() as session:
-                deleted = await session.execute_write(_delete)
-                if deleted > 0:
-                    logger.info(f"Deleted entity {entity_id} with facts")
-                return deleted > 0
-        except Exception as e:
-            logger.error(f"Failed to delete entity {entity_id}: {e}")
-            return False
+                    # Delete from Vector Table
+                    await cur.execute(
+                        "DELETE FROM entity_search WHERE entity_id = %s", (entity_id,)
+                    )
+        return True
 
     async def bulk_delete_entities(self, entity_ids: List[int]) -> int:
-        """DETACH DELETE entities by ID list. Returns count deleted."""
         if not entity_ids:
             return 0
-        query = """
-        MATCH (e:Entity)
-        WHERE e.id IN $ids
-        OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
-        DETACH DELETE e, f
-        RETURN count(DISTINCT e) as deleted
-        """
 
-        async def _delete(tx: AsyncManagedTransaction):
-            result = await tx.run(query, {"ids": entity_ids})
-            record = await result.single()
-            return record["deleted"] if record else 0
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    # Delete from Graph
+                    cypher = """
+                    MATCH (e:Entity)
+                    WHERE e.id IN $ids
+                    OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
+                    DETACH DELETE e, f
+                    RETURN count(DISTINCT e)
+                    """
+                    res = await self.client.execute_read(
+                        self.client.build_cypher(cypher, "deleted agtype"),
+                        (json.dumps({"ids": entity_ids}),),
+                    )
+                    deleted = int(res[0]["deleted"]) if res else 0
 
-        async with self.driver.session() as session:
-            deleted = await session.execute_write(_delete)
-            if deleted > 0:
-                logger.info(f"Bulk deleted {deleted} orphan entities")
-            return deleted
+                    # Delete from Vector Table
+                    await cur.execute(
+                        "DELETE FROM entity_search WHERE entity_id = ANY(%s)",
+                        (entity_ids,),
+                    )
+
+        return deleted

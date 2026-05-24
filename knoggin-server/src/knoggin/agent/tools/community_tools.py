@@ -3,12 +3,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.schema.dtypes import AgentConfig
 from common.utils.events import emit_community
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.tools.registry import Tools
-from knoggin.community.db.community_store import CommunityStore
+from knoggin.community.community_store import CommunityStore
 from knoggin.knowledge.services.memory_service import MemoryManager
 
 
@@ -31,9 +31,7 @@ class CommunityTools(Tools):
     ):
         super().__init__(
             user_name=user_name,
-            memgraph=base_tools.memgraph,
             entities=base_tools.entities,
-            redis_client=base_tools.redis,
             session_id=base_tools.session_id,
             topic_config=base_tools.topic_config,
             search_config=base_tools.search_cfg,
@@ -93,7 +91,7 @@ class CommunityTools(Tools):
         new_id = f"spawned_{uuid.uuid4().hex[:8]}"
         self.current_participants.append(new_id)
 
-        llm_config = get_config().llm
+        llm_config = ConfigManager.get().config.llm
         new_agent = AgentConfig(
             id=new_id,
             name=name,

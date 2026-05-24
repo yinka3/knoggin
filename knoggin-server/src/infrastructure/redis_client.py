@@ -1,13 +1,15 @@
 import asyncio
 import json
 import os
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
 from loguru import logger
 
-from common.errors.exceptions import DependencyError
+from common.exceptions import DependencyError
+from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import parse_iso_time
 
 load_dotenv()
 
@@ -24,9 +26,6 @@ class AsyncRedisClient:
     @classmethod
     def _get_lock(cls) -> asyncio.Lock:
         if cls._lock is None:
-            # This is safe within a single event loop thread.
-            # For multi-threaded safety, we'd need a threading.Lock,
-            # but since this is for asyncio.Lock creation, we stay in asyncio land.
             cls._lock = asyncio.Lock()
         return cls._lock
 
@@ -34,7 +33,6 @@ class AsyncRedisClient:
     async def get_instance(cls) -> aioredis.Redis:
         """Async-safe singleton accessor with health check."""
         async with cls._get_lock():
-            # Check if instance exists and is responsive
             is_healthy = False
             if cls._instance is not None:
                 try:
@@ -98,9 +96,6 @@ class AsyncRedisClient:
         await ps.subscribe(channel)
         return ps
 
-    # ============ SMART PERSISTENCE (Compound Operations) ============
-
-
     @classmethod
     async def log_conversation_turn(
         cls,
@@ -120,31 +115,22 @@ class AsyncRedisClient:
         turn_key = str(turn_id)
 
         pipe = redis.pipeline()
-        # 1. Store the JSON data
         pipe.hset(conv_key, turn_key, json.dumps(payload))
-        # 2. Add to timeline (sorted by timestamp or turn_id)
+
         timestamp = payload.get("timestamp")
         score = turn_id
         if timestamp:
             try:
                 if isinstance(timestamp, str):
-                    from datetime import datetime
-                    score = datetime.fromisoformat(timestamp).timestamp()
+                    score = parse_iso_time(timestamp).timestamp()
             except Exception:
                 pass
         pipe.zadd(recent_key, {turn_key: score})
 
-        # 3. Prune old entries if we exceed limit
-        # We check card before executing to keep pipe simple,
-        # but for true atomicity we can just always run the remrange
+        # Keep history within limits
         pipe.zremrangebyrank(recent_key, 0, -(max_history + 1))
-        
-        await pipe.execute()
 
-        # 4. Secondary Cleanup: Remove Hash entries that were pruned from ZSet
-        # This is a bit more expensive so we only do it if the set shrunk
-        # but for simplicity we'll let the next history fetch handle dead keys
-        # or do a periodic cleanup.
+        await pipe.execute()
 
     @classmethod
     async def update_message_mapping(
@@ -165,7 +151,7 @@ class AsyncRedisClient:
             pipe.hset(lookup_key, str(msg_id), str(turn_id))
         if content is not None:
             pipe.hset(content_key, str(msg_id), content)
-        
+
         await pipe.execute()
 
     @classmethod
@@ -173,12 +159,11 @@ class AsyncRedisClient:
         """Refreshes TTLs for all session-scoped keys in a single pipeline."""
         redis = await cls.get_instance()
         keys = RedisKeys.get_session_scoped_keys(user_name, session_id)
-        
+
         pipe = redis.pipeline()
         for key in keys:
             pipe.expire(key, ttl)
         await pipe.execute()
-
 
     @classmethod
     async def load_formatted_memories(
@@ -192,41 +177,40 @@ class AsyncRedisClient:
         pipe = redis.pipeline()
         for cat in categories:
             pipe.hgetall(RedisKeys.agent_working_memory(agent_id, cat))
-        
+
         raw_results = await pipe.execute()
         formatted = {}
-        
+
         for i, raw in enumerate(raw_results):
             cat = categories[i]
             if not raw:
                 formatted[cat] = ""
                 continue
-            
+
             lines = []
             # Sort by timestamp if available in payload
             parsed = []
             for v in raw.values():
                 try:
-                    data = json.loads(v)
-                    parsed.append(data)
+                    data = safe_json_loads(v)
+                    if data:
+                        parsed.append(data)
                 except Exception:
                     continue
-            
+
             # Sort by created_at
             parsed.sort(key=lambda x: x.get("created_at", ""))
-            
+
             for item in parsed:
                 lines.append(f"- {item['content']}")
-            
+
             formatted[cat] = "\n".join(lines)
-            
+
         return formatted
 
 
 class RedisKeys:
     """Centralized Redis key patterns - session-scoped by default."""
-
-    # ============ PROJECT-SCOPED ============
 
     @staticmethod
     def projects(user: str) -> str:
@@ -263,10 +247,8 @@ class RedisKeys:
         return f"last_profile_update:{user}:{project_id}:{entity_id}"
 
     @staticmethod
-    def profile_complete(user: str, project_id: str) -> str:
-        return f"profile_complete:{user}:{project_id}"
-
-    # ============ SESSION-SCOPED ============
+    def profile_complete(user: str, session_id: str) -> str:
+        return f"profile_complete:{user}:{session_id}"
 
     @staticmethod
     def get_session_scoped_keys(user: str, session: str) -> list[str]:
@@ -286,7 +268,6 @@ class RedisKeys:
             RedisKeys.heartbeat_counter(user, session),
         ]
 
-
     @staticmethod
     def global_next_turn_id(user: str, session: str) -> str:
         return f"global:next_turn_id:{user}:{session}"
@@ -302,8 +283,6 @@ class RedisKeys:
     @staticmethod
     def message_content(user: str, session: str) -> str:
         return f"message_content:{user}:{session}"
-
-
 
     @staticmethod
     def last_processed(user: str, session: str) -> str:
@@ -324,8 +303,6 @@ class RedisKeys:
     @staticmethod
     def last_activity(user: str, session: str) -> str:
         return f"last_activity:{user}:{session}"
-
-
 
     @staticmethod
     def merge_undo(session: str, primary_id: int, secondary_id: int) -> str:
@@ -361,8 +338,6 @@ class RedisKeys:
     def heartbeat_counter(user: str, session: str) -> str:
         return f"heartbeat_counter:{user}:{session}"
 
-    # ============ GLOBAL (no session) ============
-
     @staticmethod
     def global_next_msg_id() -> str:
         return "global:next_msg_id"
@@ -394,8 +369,6 @@ class RedisKeys:
     @staticmethod
     def global_stats() -> str:
         return "global:stats"
-
-    # ============ COMMUNITY (Global) ============
 
     @staticmethod
     def community_config() -> str:

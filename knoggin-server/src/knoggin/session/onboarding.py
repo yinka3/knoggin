@@ -1,11 +1,11 @@
 import asyncio
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import ConnectionsResult, EntityProfilesResult, FactRecord
 from common.utils.core_utils import format_vp02_input, format_vp04_input
@@ -28,7 +28,7 @@ def _build_messages(responses: List[dict]) -> List[dict]:
 
 
 async def _create_user_entity(resources: ResourceManager, user_name: str) -> int:
-    existing = await resources.memgraph.get_entity_by_id(1)
+    existing = await resources.graph_client.get_entity_by_id(1)
 
     if existing and existing["canonical_name"] == user_name:
         logger.info("[SETUP] User entity already exists, reusing id=1")
@@ -41,7 +41,7 @@ async def _create_user_entity(resources: ResourceManager, user_name: str) -> int
             f"Wipe the database or resolve manually."
         )
 
-    config = get_config()
+    config = ConfigManager.get().config
     user_aliases = config.user_aliases
     all_aliases = [user_name] + [a.strip() for a in user_aliases if a.strip()]
     all_aliases = list(dict.fromkeys(all_aliases))
@@ -80,8 +80,8 @@ async def _create_user_entity(resources: ResourceManager, user_name: str) -> int
         for content, emb in zip(fact_contents, fact_embeddings)
     ]
 
-    await resources.memgraph.write_batch([user_entity], [])
-    await resources.memgraph.create_facts_batch(1, facts)
+    await resources.graph_client.write_batch([user_entity], [])
+    await resources.graph_client.create_facts_batch(1, facts)
 
     current = await resources.redis.get(RedisKeys.global_next_ent_id())
     if not current or int(current) < 1:
@@ -91,40 +91,9 @@ async def _create_user_entity(resources: ResourceManager, user_name: str) -> int
     return 1
 
 
-async def run_setup(
-    resources: ResourceManager,
-    topic_config: TopicConfig,
-    user_name: str,
-    responses: List[dict],
-) -> dict:
-    """
-    Run onboarding extraction pipeline.
-    Blocking — returns when complete.
-
-    Args:
-        resources: Shared ResourceManager instance
-        topic_config: The finalized TopicConfig (post user review)
-        user_name: The user's name (for VP prompt speaker context)
-        responses: List of {"question": str, "answer": str}
-
-    Returns:
-        Summary dict with entity/connection/fact counts
-    """
-    messages = _build_messages(responses)
-    if not messages:
-        return {
-            "success": True,
-            "entities_created": 0,
-            "connections_created": 0,
-            "facts_created": 0,
-            "entities": [],
-        }
-
-    user_id = await _create_user_entity(resources, user_name)
-
-    config = get_config()
-    user_aliases = config.user_aliases
-
+def _build_user_lookup(
+    user_id: int, user_name: str, user_aliases: List[str]
+) -> Tuple[Dict[str, dict], Dict[str, int]]:
     entity_lookup: Dict[str, dict] = {}
     entity_lookup[user_name.lower()] = {
         "id": user_id,
@@ -141,33 +110,12 @@ async def run_setup(
         if alias.strip():
             known_aliases[alias.strip().lower()] = user_id
 
-    async def _get_profile(eid):
-        if eid == user_id:
-            return {"canonical_name": user_name, "type": "person", "topic": "Identity"}
-        return None
+    return entity_lookup, known_aliases
 
-    processor = TextProcessor(
-        llm=resources.llm_service,
-        topic_config=topic_config,
-        get_known_aliases=lambda: known_aliases,
-        get_profile=_get_profile,
-        gliner=resources.gliner,
-        spacy=resources.spacy,
-    )
 
-    logger.info(f"[SETUP] Running NER on {len(messages)} responses")
-    mentions = await processor.extract_mentions(user_name, messages, "onboarding")
-
-    if not mentions:
-        logger.info("[SETUP] No entities found in onboarding responses")
-        return {
-            "success": True,
-            "entities_created": 0,
-            "connections_created": 0,
-            "facts_created": 0,
-            "entities": [],
-        }
-
+async def _process_mentions_into_entities(
+    resources: ResourceManager, mentions: List[Tuple], entity_lookup: Dict[str, dict]
+) -> Tuple[List[dict], Dict[str, dict]]:
     seen: Dict[str, dict] = {}
     for msg_id, name, typ, topic in mentions:
         key = name.strip().lower()
@@ -204,7 +152,17 @@ async def run_setup(
         entity_lookup[key] = entity
 
     logger.info(f"[SETUP] Registered {len(entities)} entities")
+    return entities, seen
 
+
+async def _extract_connections(
+    resources: ResourceManager,
+    entities: List[dict],
+    messages: List[dict],
+    user_name: str,
+    entity_lookup: Dict[str, dict],
+    seen: Dict[str, dict],
+) -> List[dict]:
     candidates = [
         {
             "canonical_name": e["canonical_name"],
@@ -241,13 +199,17 @@ async def run_setup(
                 )
 
     logger.info(f"[SETUP] Extracted {len(relationships)} connections")
+    return relationships
 
-    if entities or relationships:
-        await resources.memgraph.write_batch(entities, relationships)
-        logger.info(
-            f"[SETUP] Wrote {len(entities)} entities and {len(relationships)} relationships to graph"
-        )
 
+async def _extract_and_save_profiles(
+    resources: ResourceManager,
+    entities: List[dict],
+    messages: List[dict],
+    user_name: str,
+    user_aliases_list: List[str],
+    entity_lookup: Dict[str, dict],
+) -> int:
     conversation_text = "\n".join(f"[USER]: {m['message']}" for m in messages)
 
     llm_input = [
@@ -260,8 +222,6 @@ async def run_setup(
         for e in entities
     ]
 
-    config = get_config()
-    user_aliases_list = config.user_aliases
     llm_input.append(
         {
             "entity_name": user_name,
@@ -305,7 +265,7 @@ async def run_setup(
 
                 # Map embeddings back to profiles
                 fact_embeddings_map = {}
-                for i, (p_idx, f_idx) in enumerate(fact_mapping):
+                for i, (p_idx, _f_idx) in enumerate(fact_mapping):
                     if p_idx not in fact_embeddings_map:
                         fact_embeddings_map[p_idx] = []
                     fact_embeddings_map[p_idx].append(all_fact_embeddings[i])
@@ -337,7 +297,7 @@ async def run_setup(
 
                     if new_facts:
                         write_tasks.append(
-                            resources.memgraph.create_facts_batch(ent_id, new_facts)
+                            resources.graph_client.create_facts_batch(ent_id, new_facts)
                         )
 
                         resolution_text = f"{entity['canonical_name']}. " + " ".join(
@@ -354,13 +314,96 @@ async def run_setup(
                     res_embeddings = await resources.embedding.encode(resolution_texts)
 
                     update_tasks = [
-                        resources.memgraph.update_entity_embedding(ent_id, emb)
+                        resources.graph_client.update_entity_embedding(ent_id, emb)
                         for ent_id, emb in zip(resolution_entities, res_embeddings)
                     ]
                     await asyncio.gather(*update_tasks)
 
     logger.info(
         f"[SETUP] Created {facts_created} facts across {len(entities)} entities"
+    )
+    return facts_created
+
+
+async def run_setup(
+    resources: ResourceManager,
+    topic_config: TopicConfig,
+    user_name: str,
+    responses: List[dict],
+) -> dict:
+    """
+    Run onboarding extraction pipeline.
+    Blocking — returns when complete.
+
+    Args:
+        resources: Shared ResourceManager instance
+        topic_config: The finalized TopicConfig (post user review)
+        user_name: The user's name (for VP prompt speaker context)
+        responses: List of {"question": str, "answer": str}
+
+    Returns:
+        Summary dict with entity/connection/fact counts
+    """
+    messages = _build_messages(responses)
+    if not messages:
+        return {
+            "success": True,
+            "entities_created": 0,
+            "connections_created": 0,
+            "facts_created": 0,
+            "entities": [],
+        }
+
+    user_id = await _create_user_entity(resources, user_name)
+
+    config = ConfigManager.get().config
+    user_aliases = config.user_aliases
+
+    entity_lookup, known_aliases = _build_user_lookup(user_id, user_name, user_aliases)
+
+    async def _get_profile(eid):
+        if eid == user_id:
+            return {"canonical_name": user_name, "type": "person", "topic": "Identity"}
+        return None
+
+    processor = TextProcessor(
+        llm=resources.llm_service,
+        topic_config=topic_config,
+        get_known_aliases=lambda: known_aliases,
+        get_profile=_get_profile,
+        gliner=resources.gliner,
+        spacy=resources.spacy,
+    )
+
+    logger.info(f"[SETUP] Running NER on {len(messages)} responses")
+    mentions = await processor.extract_mentions(user_name, messages, "onboarding")
+
+    if not mentions:
+        logger.info("[SETUP] No entities found in onboarding responses")
+        return {
+            "success": True,
+            "entities_created": 0,
+            "connections_created": 0,
+            "facts_created": 0,
+            "entities": [],
+        }
+
+    entities, seen = await _process_mentions_into_entities(
+        resources, mentions, entity_lookup
+    )
+
+    relationships = await _extract_connections(
+        resources, entities, messages, user_name, entity_lookup, seen
+    )
+
+    if entities or relationships:
+        await resources.graph_client.write_batch(entities, relationships)
+        logger.info(
+            f"[SETUP] Wrote {len(entities)} entities and {len(relationships)} relationships to graph"
+        )
+
+    facts_created = await _extract_and_save_profiles(
+        resources, entities, messages, user_name, user_aliases, entity_lookup
     )
 
     return {

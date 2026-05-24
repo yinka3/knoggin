@@ -1,14 +1,15 @@
 import asyncio
-import json
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
+from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 from common.schema.dtypes import AgentConfig
 from common.utils.events import emit_community
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.agent.executor import AgentExecutor
@@ -18,20 +19,22 @@ from knoggin.agent.internals import (
     AgentState,
     RetrievedEvidence,
 )
+from knoggin.agent.system_prompt import get_agent_prompt
 from knoggin.agent.tools.community_tools import CommunityTools
 from knoggin.agent.tools.registry import Tools
+from knoggin.knowledge.services.memory_service import MemoryManager
+from knoggin.project.state import ProjectState
 from knoggin.session.boot import SessionAssembler
 from knoggin.session.context import Context
-from common.conf.topics_config import TopicConfig
-from knoggin.knowledge.services.memory_service import MemoryManager
 
 
 class CommunityManager:
     """Orchestrates autonomous agent discussions."""
 
-    def __init__(self, resources: ResourceManager, user_name: str):
-        self.resources = resources
+    def __init__(self, project_state: ProjectState, user_name: str):
+        self.project_state = project_state
         self.user_name = user_name
+        self.resources = ResourceManager.get()
         self._active_discussion_id: Optional[str] = None
         self._discussion_task: Optional[asyncio.Task] = None
 
@@ -42,15 +45,14 @@ class CommunityManager:
             user_name=self.user_name,
             session_id="community_system",
             agent_id=agent_id,
-            topic_config=TopicConfig(TopicConfig.DEFAULT_CONFIG),
+            topic_config=self.project_state.topic_config,
         )
 
         result = await memory_mgr.list_working_memory()
-        
+
         # Format for community loop (List[str] of content)
         return {
-            cat: [e.content for e in entries]
-            for cat, entries in result.blocks.items()
+            cat: [e.content for e in entries] for cat, entries in result.blocks.items()
         }
 
     async def _is_discussion_active(self) -> bool:
@@ -70,8 +72,9 @@ class CommunityManager:
             RedisKeys.agents(self.user_name), agent_id
         )
         if raw:
-            data = json.loads(raw)
-            return AgentConfig.from_dict(data)
+            data = safe_json_loads(raw)
+            if data and isinstance(data, dict):
+                return AgentConfig.from_dict(data)
 
         default_id = await self.resources.redis.get(
             RedisKeys.agents_default(self.user_name)
@@ -80,7 +83,7 @@ class CommunityManager:
             return await self._get_agent_config(default_id)
 
         logger.warning(f"AAC: Agent '{agent_id}' not found, using ephemeral default")
-        llm_config = get_config().llm
+        llm_config = ConfigManager.get().config.llm
         return AgentConfig(
             id=agent_id,
             name="STELLA",
@@ -119,7 +122,7 @@ class CommunityManager:
         await self.resources.redis.set(
             RedisKeys.community_discussion_active(), discussion_id
         )
-        await self.resources.memgraph.community.create_discussion(
+        await self.resources.graph_client.community.create_discussion(
             discussion_id, topic, valid_agent_ids
         )
 
@@ -141,7 +144,7 @@ class CommunityManager:
                 )
                 self._active_discussion_id = None
                 try:
-                    await self.resources.memgraph.community.close_discussion(
+                    await self.resources.graph_client.community.close_discussion(
                         discussion_id
                     )
                 except Exception as e:
@@ -162,10 +165,12 @@ class CommunityManager:
         self, discussion_id: str, topic: str, initial_agent_ids: List[str]
     ) -> None:
         assembler = SessionAssembler(self.user_name, self.resources)
-        # We use a system-level topic config for community discussions
-        ctx = await assembler.assemble(session_id=f"aac_{discussion_id}")
+        ctx = await assembler.assemble(
+            project_state=self.project_state,
+            session_id=f"aac_{discussion_id}",
+        )
 
-        config = get_config()
+        config = ConfigManager.get().config
         comm_cfg = config.developer_settings.community
         max_turns = comm_cfg.max_turns
 
@@ -216,7 +221,7 @@ class CommunityManager:
                 }
             )
 
-            await self.resources.memgraph.community.add_message(
+            await self.resources.graph_client.community.add_message(
                 discussion_id, agent_id, message, "assistant"
             )
 
@@ -254,26 +259,31 @@ class CommunityManager:
         agent_preferences = working_memory["preferences"] or None
         agent_icks = working_memory["icks"] or None
 
-        # Build restricted community tools
+        comm_memory = MemoryManager(
+            redis=self.resources.redis,
+            user_name=self.user_name,
+            session_id=ctx.session_id,
+            agent_id=agent.id,
+            topic_config=ctx.project.topic_config,
+        )
+
         base_tools = Tools(
             user_name=self.user_name,
-            memgraph=self.resources.memgraph,
-            entities=ctx.entities,
-            redis_client=self.resources.redis,
+            entities=ctx.project.entities,
             session_id=ctx.session_id,
-            topic_config=ctx.topic_config,
+            topic_config=ctx.project.topic_config,
             search_config={},
             file_rag=ctx.file_rag,
-            memory=None,
+            memory=comm_memory,
         )
 
         comm_tools = CommunityTools(
             self.user_name,
             base_tools,
-            self.resources.memgraph.community,
+            self.resources.graph_client.community,
             discussion_id,
             agent.id,
-            None,
+            comm_memory,
             participants,
         )
 
@@ -297,10 +307,8 @@ class CommunityManager:
             ctx=agent_ctx,
             llm=self.resources.llm_service,
             tools=comm_tools,
-            memory_mgr=None,
+            memory_mgr=comm_memory,
         )
-
-        from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 
         community_enabled_tools = [
             "search_entity",
@@ -353,9 +361,7 @@ class CommunityManager:
 
     async def _seed_discussion(self) -> Optional[Dict]:
         """Use seeding agent to analyze graph and initiate a discussion."""
-        from agent.system_prompt import get_agent_prompt
-
-        config = get_config()
+        config = ConfigManager.get().config
         comm_cfg = config.developer_settings.community
         seeding_agent_id = comm_cfg.seeding_agent_id
 
@@ -383,13 +389,11 @@ class CommunityManager:
         mem_entries = []
         if raw_mem:
             for v in raw_mem.values():
-                try:
-                    parsed = json.loads(v)
+                parsed = safe_json_loads(v)
+                if parsed and isinstance(parsed, dict):
                     content = parsed.get("content", "")
                     if content:
                         mem_entries.append(content)
-                except json.JSONDecodeError:
-                    continue
         agent_memory_context = "\n".join(mem_entries)
 
         base_prompt = get_agent_prompt(
@@ -469,7 +473,13 @@ class CommunityManager:
                     clean = clean[4:]
             clean = clean.strip()
 
-            data = json.loads(clean)
+            data = safe_json_loads(clean)
+            if not data or not isinstance(data, dict):
+                logger.warning(
+                    "AAC: Failed to parse seeding response as valid JSON dict"
+                )
+                logger.debug(f"Raw response: {response}")
+                raise ValueError("Seeding response not valid JSON dict")
 
             required_keys = ["topic", "agent_ids"]
             if not all(k in data for k in required_keys):
@@ -504,9 +514,6 @@ class CommunityManager:
 
             return data
 
-        except json.JSONDecodeError as e:
-            logger.warning(f"AAC: Failed to parse seeding response as JSON: {e}")
-            logger.debug(f"Raw response: {response}")
         except Exception as e:
             logger.warning(f"AAC: Seeding failed: {e}")
 
@@ -523,17 +530,17 @@ class CommunityManager:
         lines = []
 
         try:
-            stats = await self.resources.memgraph.get_graph_stats()
-            notable = await self.resources.memgraph.get_notable_entities(8)
+            stats = await self.resources.graph_client.get_graph_stats()
+            notable = await self.resources.graph_client.get_notable_entities(8)
             recent_entities = (
-                await self.resources.memgraph.get_recently_active_entities(7, 5)
+                await self.resources.graph_client.get_recently_active_entities(7, 5)
             )
-            recent_facts = await self.resources.memgraph.get_recent_facts(7, 10)
+            recent_facts = await self.resources.graph_client.get_recent_facts(7, 10)
             past_discussions = (
-                await self.resources.memgraph.community.get_recent_discussions(5)
+                await self.resources.graph_client.community.get_recent_discussions(5)
             )
-            insights = await self.resources.memgraph.community.get_discussion_insights(
-                5
+            insights = (
+                await self.resources.graph_client.community.get_discussion_insights(5)
             )
         except Exception as e:
             logger.warning(f"Failed to gather seeding context: {e}")
@@ -621,15 +628,18 @@ class CommunityManager:
         descriptions = []
 
         for aid, raw in raw_agents.items():
-            try:
-                data = json.loads(raw)
-                name = data.get("name", "Unknown")
-                persona = data.get("persona", "")[:120]
-                is_spawned = data.get("is_spawned", False)
+            data = safe_json_loads(raw)
+            if data and isinstance(data, dict):
+                try:
+                    name = data.get("name", "Unknown")
+                    persona = data.get("persona", "")[:120]
+                    is_spawned = data.get("is_spawned", False)
 
-                spawned_tag = " [spawned]" if is_spawned else ""
-                descriptions.append(f"- {name}{spawned_tag} (id: {aid}): {persona}")
-            except Exception:
+                    spawned_tag = " [spawned]" if is_spawned else ""
+                    descriptions.append(f"- {name}{spawned_tag} (id: {aid}): {persona}")
+                except Exception:
+                    descriptions.append(f"- Unknown (id: {aid})")
+            else:
                 descriptions.append(f"- Unknown (id: {aid})")
 
         return agent_ids, "\n".join(descriptions)

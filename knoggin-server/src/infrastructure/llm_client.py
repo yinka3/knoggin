@@ -8,7 +8,8 @@ from loguru import logger
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
-from common.errors.exceptions import ConfigurationError
+from common.exceptions import ConfigurationError
+from common.utils.tasks import BackgroundTaskGroup
 from infrastructure.redis_client import RedisKeys
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -44,7 +45,7 @@ class LLMService:
         self._client = None
         self._raw_client = None
         self._http_client = httpx.AsyncClient(timeout=10.0)
-        self._background_tasks: set[asyncio.Task] = set()
+        self.task_group = BackgroundTaskGroup("LLMTasks")
         self._model_prices: Dict[str, Dict[str, float]] = FALLBACK_COSTS.copy()
         self._prices_fetched = False
         self._tokenizer = None
@@ -112,7 +113,9 @@ class LLMService:
         extraction_model: Optional[str] = None,
         merge_model: Optional[str] = None,
     ):
-        if (api_key and api_key != self._api_key) or (base_url and base_url != self._base_url):
+        if (api_key and api_key != self._api_key) or (
+            base_url and base_url != self._base_url
+        ):
             if api_key:
                 self._api_key = api_key
             if base_url:
@@ -177,8 +180,7 @@ class LLMService:
                         # OpenRouter gives per-token. Convert to per-1M for internal table
                         self._model_prices[m_id] = {
                             "input": float(pricing.get("prompt", 0)) * 1_000_000,
-                            "output": float(pricing.get("completion", 0))
-                            * 1_000_000,
+                            "output": float(pricing.get("completion", 0)) * 1_000_000,
                         }
                 logger.info(f"Refreshed pricing for {len(data)} OpenRouter models.")
         except Exception as e:
@@ -202,9 +204,7 @@ class LLMService:
                 except Exception:
                     self._prices_fetched = False
 
-            task = asyncio.create_task(_fetch_and_confirm())
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self.task_group.create_task(_fetch_and_confirm(), name="fetch_model_prices")
 
     async def _record_local_usage(
         self, model: str, prompt_tokens: int, completion_tokens: int
@@ -277,44 +277,54 @@ class LLMService:
                     create_kwargs["extra_body"] = self._extra_body(reasoning)
 
                 if response_model:
-                    create_kwargs["response_model"] = response_model
-                    if mode:
-                        create_kwargs["mode"] = mode
-
-                if response_model:
                     (
                         response,
                         completion,
                     ) = await self._client.chat.completions.create_with_completion(
                         **create_kwargs
                     )
+
+                    if self._trace:
+                        self._trace.debug(
+                            f"MODEL: {model}\nUSER:\n{user}\nRESPONSE:\n{response}"
+                        )
+
+                    if completion.usage:
+                        prompt = completion.usage.prompt_tokens
+                        comp = completion.usage.completion_tokens
+                        self.task_group.create_task(
+                            self._record_local_usage(model, prompt, comp),
+                            name=f"record_usage_{model}",
+                        )
+
+                    return response
                 else:
-                    # Use raw client for non-structured calls to avoid instructor overhead/interference
-                    response = await self._raw_client.chat.completions.create(**create_kwargs)
-
-                if not response.choices:
-                    return None
-
-                content = response.choices[0].message.content
-
-                if not content or not content.strip():
-                    return None
-
-                if self._trace:
-                    self._trace.debug(
-                        f"MODEL: {model}\nUSER:\n{user}\nRESPONSE:\n{content}"
+                    response = await self._raw_client.chat.completions.create(
+                        **create_kwargs
                     )
 
-                if response.usage:
-                    prompt = response.usage.prompt_tokens
-                    comp = response.usage.completion_tokens
-                    task = asyncio.create_task(
-                        self._record_local_usage(model, prompt, comp)
-                    )
-                    self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
+                    if not response.choices:
+                        return None
 
-                return content
+                    content = response.choices[0].message.content
+
+                    if not content or not content.strip():
+                        return None
+
+                    if self._trace:
+                        self._trace.debug(
+                            f"MODEL: {model}\nUSER:\n{user}\nRESPONSE:\n{content}"
+                        )
+
+                    if response.usage:
+                        prompt = response.usage.prompt_tokens
+                        comp = response.usage.completion_tokens
+                        self.task_group.create_task(
+                            self._record_local_usage(model, prompt, comp),
+                            name=f"record_usage_{model}",
+                        )
+
+                    return content
 
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:
@@ -431,11 +441,10 @@ class LLMService:
                 if usage:
                     prompt = usage.get("prompt_tokens", 0)
                     comp = usage.get("completion_tokens", 0)
-                    task = asyncio.create_task(
-                        self._record_local_usage(model, prompt, comp)
+                    self.task_group.create_task(
+                        self._record_local_usage(model, prompt, comp),
+                        name=f"record_usage_streaming_{model}",
                     )
-                    self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
 
                 yield {"type": "done", "content": content, "usage": usage}
                 return
@@ -463,12 +472,7 @@ class LLMService:
                 yield {"type": "error", "message": str(e)}
 
     async def close(self):
-        if self._background_tasks:
-            done, pending = await asyncio.wait(self._background_tasks, timeout=5.0)
-            if pending:
-                logger.warning(
-                    f"Timeout waiting for {len(pending)} LLM usage stats recording tasks"
-                )
+        await self.task_group.shutdown(timeout=5.0)
 
         if self._http_client:
             await self._http_client.aclose()

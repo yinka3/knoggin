@@ -18,7 +18,9 @@ from common.schema.memory import (
     WorkingMemoryListResult,
     WorkingMemoryRemoveResult,
 )
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from knoggin.agent.formatters import format_memory_context
 
 
 class WorkingMemoryStrings(NamedTuple):
@@ -70,7 +72,7 @@ class MemoryManager:
         self.topic_config = topic_config
         self._emit = on_event  # (source, event, data) -> None
 
-    # ── helpers ──────────────────────────────────────────────
+    # helpers
 
     def _fire(self, source: str, event: str, data: dict):
         if self._emit:
@@ -79,9 +81,7 @@ class MemoryManager:
             except Exception as e:
                 logger.warning(f"MemoryManager event error: {e}")
 
-    # ════════════════════════════════════════════════════════
-    #  SESSION MEMORY BLOCKS
-    # ════════════════════════════════════════════════════════
+    # SESSION MEMORY BLOCKS
 
     async def save_memory(
         self, content: str, topic: str = "General"
@@ -198,17 +198,17 @@ class MemoryManager:
 
             entries = []
             for mem_id, payload in raw.items():
-                try:
-                    data = json.loads(payload)
+                data = safe_json_loads(payload)
+                if data and isinstance(data, dict):
                     entries.append(
                         MemoryEntry(
                             id=mem_id,
-                            content=data["content"],
+                            content=data.get("content", ""),
                             topic=data.get("topic", topic),
                             created_at=data.get("created_at", ""),
                         )
                     )
-                except json.JSONDecodeError:
+                else:
                     logger.warning(f"Corrupt memory block {mem_id} in {topic}")
             entries.sort(key=lambda e: e.created_at)
             blocks[topic] = entries
@@ -216,9 +216,7 @@ class MemoryManager:
         total = sum(len(v) for v in blocks.values())
         return MemoryListResult(blocks=blocks, total=total)
 
-    # ════════════════════════════════════════════════════════
-    #  WORKING MEMORY (rules, preferences, icks)
-    # ════════════════════════════════════════════════════════
+    # WORKING MEMORY (rules, preferences, icks)
 
     async def add_working_memory(
         self,
@@ -318,16 +316,16 @@ class MemoryManager:
             entries = []
             if raw:
                 for mem_id, payload in raw.items():
-                    try:
-                        data = json.loads(payload)
+                    data = safe_json_loads(payload)
+                    if data and isinstance(data, dict):
                         entries.append(
                             WorkingMemoryEntry(
                                 id=mem_id,
-                                content=data["content"],
+                                content=data.get("content", ""),
                                 created_at=data.get("created_at", ""),
                             )
                         )
-                    except json.JSONDecodeError:
+                    else:
                         logger.warning(f"Corrupt working memory {mem_id} in {cat}")
                 entries.sort(key=lambda e: e.created_at)
             blocks[cat] = entries
@@ -370,8 +368,6 @@ class MemoryManager:
         Caller wraps these into whatever context object they need
         (SDK uses PromptContext, server uses loose variables).
         """
-        from agent.formatters import format_memory_context
-
         blocks = await self.get_memory_blocks(hot_topics)
         raw_blocks = {
             topic: [

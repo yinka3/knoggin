@@ -5,6 +5,7 @@ from typing import List, Optional
 from loguru import logger
 
 from common.schema.dtypes import AgentConfig
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 
 
@@ -28,9 +29,10 @@ class AgentManager:
 
         agents = []
         for agent_id, data in raw_agents.items():
-            try:
-                agents.append(AgentConfig.from_dict(json.loads(data)))
-            except json.JSONDecodeError:
+            parsed = safe_json_loads(data)
+            if parsed and isinstance(parsed, dict):
+                agents.append(AgentConfig.from_dict(parsed))
+            else:
                 logger.warning(f"Malformed agent data for {agent_id}")
         return agents
 
@@ -41,13 +43,12 @@ class AgentManager:
         )
         if not raw:
             return None
+        parsed = safe_json_loads(raw)
+        if parsed and isinstance(parsed, dict):
+            return AgentConfig.from_dict(parsed)
 
-        try:
-            data = json.loads(raw)
-            return AgentConfig.from_dict(data)
-        except json.JSONDecodeError:
-            logger.warning(f"Malformed agent data for {agent_id}")
-            return None
+        logger.warning(f"Malformed agent data for {agent_id}")
+        return None
 
     async def get_agent_by_name(self, name: str) -> Optional[AgentConfig]:
         """Get agent by name (case-insensitive)."""

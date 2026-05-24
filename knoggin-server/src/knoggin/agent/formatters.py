@@ -3,6 +3,8 @@ from typing import Dict, List
 
 from loguru import logger
 
+from common.utils.time_utils import parse_iso_time_or_now
+
 # Timestamp bounds (Unix seconds)
 TS_MIN = 946684800  # 2000-01-01 00:00:00 UTC
 TS_MAX = 4102444800  # 2100-01-01 00:00:00 UTC
@@ -27,7 +29,7 @@ def _format_timestamp(ts) -> str:
 
     try:
         if isinstance(ts, str):
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            dt = parse_iso_time_or_now(ts)
             return dt.strftime("%Y-%m-%d %H:%M")
 
         if isinstance(ts, (int, float)):
@@ -62,7 +64,7 @@ def format_retrieved_messages(messages: List[Dict]) -> str:
             ts_display = ts_str
             try:
                 if "T" in ts_str:
-                    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    dt = parse_iso_time_or_now(ts_str)
                     ts_display = dt.strftime("%Y-%m-%d %H:%M")
             except (ValueError, TypeError) as e:
                 logger.debug(

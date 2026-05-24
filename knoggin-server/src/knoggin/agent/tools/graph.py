@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from infrastructure.database.memgraph_client import MemgraphClient
+    from infrastructure.graph_client import GraphClient
     from knoggin.knowledge.services.embedding_service import EmbeddingService
     from knoggin.knowledge.services.entity_service import EntityManager
 
 from common.utils.data_utils import cosine_similarity
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 
 
 class GraphTools:
     # Attributes provided by the composed Tools class
-    memgraph: MemgraphClient
+    graph_client: GraphClient
     entities: EntityManager
     embedding_service: EmbeddingService
     active_topics: Optional[List[str]]
@@ -38,7 +38,7 @@ class GraphTools:
         if not canonical:
             return [{"error": f"Entity not found: '{entity_name}'"}]
 
-        results = await self.memgraph.get_related_entities(
+        results = await self.graph_client.get_related_entities(
             [canonical], active_topics=self.active_topics, limit=50
         )
 
@@ -50,7 +50,7 @@ class GraphTools:
             return results
 
         # Try looking without topic filtering to see if it's "hidden"
-        hidden_results = await self.memgraph.get_related_entities(
+        hidden_results = await self.graph_client.get_related_entities(
             [canonical], active_topics=None
         )
 
@@ -84,7 +84,7 @@ class GraphTools:
             return [{"error": f"Entity not found: '{entity_name}'"}]
 
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
-        results = await self.memgraph.get_recent_activity(
+        results = await self.graph_client.get_recent_activity(
             canonical, active_topics=self.active_topics, hours=hours
         )
 
@@ -110,7 +110,7 @@ class GraphTools:
         entity_id = await self.entities.get_id(entity_name)
 
         if entity_id is not None:
-            facts = await self.memgraph.get_facts_for_entity(
+            facts = await self.graph_client.get_facts_for_entity(
                 entity_id, active_only=False
             )
 
@@ -130,7 +130,7 @@ class GraphTools:
 
         embedding = await self.embedding_service.encode_single(entity_name)
 
-        candidates = await self.memgraph.search_entities_by_embedding(
+        candidates = await self.graph_client.search_entities_by_embedding(
             embedding, limit=5, score_threshold=0.69
         )
 
@@ -138,7 +138,7 @@ class GraphTools:
             candidate_ids = [eid for eid, _ in candidates]
             similarity_map = {eid: sim for eid, sim in candidates}
 
-            facts_by_entity = await self.memgraph.get_facts_for_entities(
+            facts_by_entity = await self.graph_client.get_facts_for_entities(
                 candidate_ids, active_only=False
             )
 
@@ -202,7 +202,7 @@ class GraphTools:
             return [{"error": f"Entity not found: '{entity_b}'"}]
 
         # Trace path
-        path, has_inactive_shortcut = await self.memgraph.find_path_filtered(
+        path, has_inactive_shortcut = await self.graph_client.find_path_filtered(
             canonical_a, canonical_b, active_topics=self.active_topics, max_depth=4
         )
 
@@ -218,7 +218,7 @@ class GraphTools:
             return path
 
         if has_inactive_shortcut:
-            full_path, _ = await self.memgraph.find_path_filtered(
+            full_path, _ = await self.graph_client.find_path_filtered(
                 canonical_a, canonical_b, active_topics=None, max_depth=4
             )
 
@@ -286,7 +286,7 @@ class GraphTools:
         result = {"entity": canonical, "entity_id": entity_id}
 
         if direction in ("up", "both"):
-            parents = await self.memgraph.get_parent_entities(entity_id)
+            parents = await self.graph_client.get_parent_entities(entity_id)
             result["parents"] = parents
 
             if parents:
@@ -295,7 +295,9 @@ class GraphTools:
                 visited = {current_id}
 
                 while True:
-                    parent_list = await self.memgraph.get_parent_entities(current_id)
+                    parent_list = await self.graph_client.get_parent_entities(
+                        current_id
+                    )
                     if not parent_list:
                         break
                     parent = parent_list[0]  # assume single parent for now
@@ -308,7 +310,7 @@ class GraphTools:
                 result["ancestry"] = ancestry
 
         if direction in ("down", "both"):
-            children = await self.memgraph.get_child_entities(entity_id)
+            children = await self.graph_client.get_child_entities(entity_id)
             result["children"] = children
 
         return [result]
@@ -331,7 +333,7 @@ class GraphTools:
             return {}
 
         # Fetch context
-        raw = await self.memgraph.get_hot_topic_context_with_messages(
+        raw = await self.graph_client.get_hot_topic_context_with_messages(
             hot_topics, msg_limit=10, slim=slim
         )
         content_key = RedisKeys.message_content(self.user_name, self.session_id)
@@ -344,13 +346,11 @@ class GraphTools:
                 messages = []
                 for msg_id, raw_msg in zip(msg_ids, raw_msgs):
                     if raw_msg:
-                        try:
-                            parsed = json.loads(raw_msg)
+                        parsed = safe_json_loads(raw_msg)
+                        if parsed and isinstance(parsed, dict):
                             messages.append(
                                 {"id": msg_id, "message": parsed.get("message", "")}
                             )
-                        except json.JSONDecodeError:
-                            continue
                 data["messages"] = messages
             else:
                 data["messages"] = []

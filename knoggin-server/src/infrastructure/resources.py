@@ -3,19 +3,17 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-import chromadb
 import redis.asyncio as aioredis
 import spacy
 import torch
 from gliner import GLiNER
 from loguru import logger
 
-from common.conf.base import get_config
-from common.errors.exceptions import ConfigurationError, DependencyError
-from infrastructure.memgraph_client import MemgraphClient
+from common.conf.manager import ConfigManager
+from common.exceptions import ConfigurationError, DependencyError
+from infrastructure.graph_client import GraphClient
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import AsyncRedisClient
-from knoggin.community.db.community_store import CommunityStore
 from knoggin.knowledge.services.embedding_service import EmbeddingService
 from knoggin.knowledge.services.entity_service import EntityManager
 from log.llm_trace import get_trace_logger
@@ -31,17 +29,22 @@ class ResourceManager:
             cls._lock = asyncio.Lock()
         return cls._lock
 
+    @classmethod
+    def get(cls) -> "ResourceManager":
+        if cls._instance is None:
+            raise RuntimeError("ResourceManager not initialized")
+        return cls._instance
+
     def __init__(self):
-        self.memgraph: Optional[MemgraphClient] = None
+
+        self.graph_client: Optional[GraphClient] = None
         self.embedding: Optional[EmbeddingService] = None
         self.redis: Optional[aioredis.Redis] = None
         self.llm_service: Optional[LLMService] = None
         self.executor: Optional[ThreadPoolExecutor] = None
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
-        self.chroma: Optional[Any] = None
         self.active_entities: Optional[EntityManager] = None
-        self.community_store: Optional[CommunityStore] = None
 
     @classmethod
     async def initialize(cls, num_workers: int = 4) -> "ResourceManager":
@@ -68,10 +71,16 @@ class ResourceManager:
                     device = torch.device("cpu")
 
                 instance.executor = ThreadPoolExecutor(max_workers=num_workers)
-                instance.memgraph = MemgraphClient()
+
+                dsn = os.environ.get("DATABASE_URL")
+                if not dsn:
+                    raise ConfigurationError(
+                        "DATABASE_URL environment variable is not set"
+                    )
+                instance.graph_client = GraphClient(dsn=dsn)
                 instance.redis = await AsyncRedisClient.get_instance()
 
-                config = get_config()
+                config = ConfigManager.get().config
                 llm_config = config.llm
                 instance.llm_service = LLMService(
                     api_key=llm_config.api_key,
@@ -117,16 +126,11 @@ class ResourceManager:
                         details={"original_error": str(e)},
                     )
 
-                chroma_path = os.path.join(
-                    os.getenv("CONFIG_DIR", "./config"), "chroma_db"
-                )
-                instance.chroma = chromadb.PersistentClient(path=chroma_path)
+                await instance.graph_client.connect()
 
-                await instance.memgraph.initialize()
-                instance.community_store = instance.memgraph.community
                 instance.active_entities = EntityManager(
-                    memgraph=instance.memgraph,
-                    embedding_service=instance.embedding
+                    graph_client=instance.graph_client,
+                    embedding_service=instance.embedding,
                 )
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
@@ -148,8 +152,9 @@ class ResourceManager:
 
         await AsyncRedisClient.close_redis()
 
-        if self.memgraph:
-            await self.memgraph.close()
+        if self.graph_client:
+            await self.graph_client.close()
+            self.graph_client = None
         if self.embedding:
             self.embedding.cleanup()
         if self.llm_service:
@@ -157,9 +162,8 @@ class ResourceManager:
 
         self.gliner = None
         self.spacy = None
-        self.chroma = None
         self.redis = None
-        self.memgraph = None
+        self.graph_client = None
 
     async def shutdown(self):
         """Release all managed resources."""

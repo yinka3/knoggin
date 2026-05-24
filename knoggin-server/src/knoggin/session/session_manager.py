@@ -1,22 +1,28 @@
 import asyncio
 import json
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from common.conf.base import get_config
-from common.conf.topics_config import TopicConfig
+from common.conf.manager import ConfigManager
+from common.utils.events import DebugEventEmitter
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.file_rag import FileRAGService
+from knoggin.project.project_manager import ProjectManager
 from knoggin.session.context import Context
-from knoggin.project.services.project_manager import ProjectManager
 
 
 class SessionManager:
-    def __init__(self, resources: Any, user_name: str, active_sessions: Dict[str, Context], project_manager: ProjectManager):
+    def __init__(
+        self,
+        resources: Any,
+        user_name: str,
+        active_sessions: Dict[str, Context],
+        project_manager: ProjectManager,
+    ):
         self.resources = resources
         self.user_name = user_name
         self.active_sessions = active_sessions
@@ -29,10 +35,9 @@ class SessionManager:
             raw = await self.resources.redis.hgetall(RedisKeys.sessions(self.user_name))
             result = {}
             for sid, data in raw.items():
-                try:
-                    result[sid] = json.loads(data)
-                except json.JSONDecodeError:
-                    logger.warning(f"Malformed session data for {sid}")
+                parsed = safe_json_loads(data)
+                if parsed is not None:
+                    result[sid] = parsed
             return result
         except Exception as e:
             logger.error(f"Failed to list sessions (check Redis connection): {e}")
@@ -49,14 +54,16 @@ class SessionManager:
         session_id = str(uuid.uuid4())
 
         if topics_config is None:
-            config = get_config()
+            config = ConfigManager.get().config
             topics_config = config.default_topics
 
         async with self._lock:
             # Phase 1B: Ensure project exists and get its runtime state
             # If no project_id provided, we use a global fallback for now (or raise error if strict)
             actual_project_id = project_id or "global"
-            project_state = await self.project_manager.get_or_start_project(actual_project_id)
+            project_state = await self.project_manager.get_or_start_project(
+                actual_project_id
+            )
 
             context = await Context.create(
                 user_name=self.user_name,
@@ -103,14 +110,14 @@ class SessionManager:
             if not raw:
                 return None
 
-            try:
-                metadata = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning(f"Malformed session data for {session_id}")
+            metadata = safe_json_loads(raw)
+            if not metadata:
                 return None
 
             actual_project_id = metadata.get("project_id") or "global"
-            project_state = await self.project_manager.get_or_start_project(actual_project_id)
+            project_state = await self.project_manager.get_or_start_project(
+                actual_project_id
+            )
 
             context = await Context.create(
                 user_name=self.user_name,
@@ -139,7 +146,6 @@ class SessionManager:
             self._session_locks.pop(session_id, None)
 
         if context.project_id:
-            from common.utils.events import DebugEventEmitter
             DebugEventEmitter.get().unregister_session(context.project_id, session_id)
             await self.project_manager.release_project(context.project_id)
 
@@ -151,14 +157,12 @@ class SessionManager:
             RedisKeys.sessions(self.user_name), session_id
         )
         if raw:
-            try:
-                metadata = json.loads(raw)
+            metadata = safe_json_loads(raw, {})
+            if metadata:
                 metadata["last_active"] = datetime.now(timezone.utc).isoformat()
                 await self.resources.redis.hset(
                     RedisKeys.sessions(self.user_name), session_id, json.dumps(metadata)
                 )
-            except json.JSONDecodeError:
-                pass
 
         logger.info(f"Closed session: {session_id}")
         return True
@@ -180,9 +184,8 @@ class SessionManager:
         for raw in turn_data:
             if not raw:
                 continue
-            try:
-                parsed = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
+            parsed = safe_json_loads(raw)
+            if not parsed or not isinstance(parsed, dict):
                 logger.warning("Skipping corrupted turn in readonly history")
                 continue
             turns.append(
@@ -220,12 +223,9 @@ class SessionManager:
             if ctx.file_rag:
                 ctx.file_rag.cleanup_session()
         else:
-            upload_dir = os.path.join(os.getenv("CONFIG_DIR", "./config"), "uploads")
             temp_rag = FileRAGService(
                 session_id=session_id,
-                chroma_client=self.resources.chroma,
                 embedding_service=self.resources.embedding,
-                upload_dir=upload_dir,
             )
             temp_rag.cleanup_session()
 
@@ -250,10 +250,7 @@ class SessionManager:
         )
         metadata = {}
         if raw:
-            try:
-                metadata = json.loads(raw)
-            except json.JSONDecodeError:
-                pass
+            metadata = safe_json_loads(raw, {})
 
         metadata.update(new_data)
         await self.resources.redis.hset(

@@ -1,6 +1,6 @@
 from typing import Callable, List, Optional
 
-from infrastructure.jobs.scheduler import Scheduler
+from infrastructure.job.scheduler import Scheduler
 from knoggin.ingestion.jobs.archive_job import FactArchivalJob
 from knoggin.ingestion.jobs.cleaner_job import EntityCleanupJob
 from knoggin.ingestion.jobs.dlq_job import DLQReplayJob
@@ -14,7 +14,7 @@ def build_scheduler(
     session_id: str,
     redis_client,
     jobs_cfg: dict,
-    memgraph=None,
+    graph_client=None,
     llm=None,
     executor=None,
     embedding_service=None,
@@ -31,12 +31,12 @@ def build_scheduler(
     nlp_config = nlp_config or {}
 
     # Entity cleanup
-    if memgraph and entities:
+    if graph_client and entities:
         clean_cfg = jobs_cfg.get("cleaner", {})
         scheduler.register(
             EntityCleanupJob(
                 user_name=user_name,
-                memgraph=memgraph,
+                graph_client=graph_client,
                 entities=entities,
                 redis_client=redis_client,
                 interval_hours=clean_cfg.get("interval_hours", 24),
@@ -61,12 +61,12 @@ def build_scheduler(
         )
 
     # Fact archival
-    if memgraph:
+    if graph_client:
         arch_cfg = jobs_cfg.get("archival", {})
         scheduler.register(
             FactArchivalJob(
                 user_name=user_name,
-                memgraph=memgraph,
+                graph_client=graph_client,
                 retention_days=arch_cfg.get("retention_days", 14),
                 fallback_interval_hours=arch_cfg.get("fallback_interval_hours", 24),
             )
@@ -74,13 +74,13 @@ def build_scheduler(
 
     # LLM jobs
     if llm and getattr(llm, "is_configured", True):
-        if memgraph and entities and executor and embedding_service:
+        if graph_client and entities and executor and embedding_service:
             prof_cfg = jobs_cfg.get("profile", {})
             scheduler.register(
                 ProfileRefinementJob(
                     llm=llm,
                     entities=entities,
-                    memgraph=memgraph,
+                    graph_client=graph_client,
                     executor=executor,
                     embedding_service=embedding_service,
                     redis_client=redis_client,
@@ -104,7 +104,7 @@ def build_scheduler(
                 MergeDetectionJob(
                     user_name=user_name,
                     entities=entities,
-                    memgraph=memgraph,
+                    graph_client=graph_client,
                     llm_client=llm,
                     topic_config=topic_config,
                     executor=executor,
