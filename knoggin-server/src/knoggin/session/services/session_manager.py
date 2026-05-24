@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.utils.events import DebugEventEmitter
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
@@ -16,7 +16,13 @@ from knoggin.session.context import Context
 
 
 class SessionManager:
-    def __init__(self, resources: Any, user_name: str, active_sessions: Dict[str, Context], project_manager: ProjectManager):
+    def __init__(
+        self,
+        resources: Any,
+        user_name: str,
+        active_sessions: Dict[str, Context],
+        project_manager: ProjectManager,
+    ):
         self.resources = resources
         self.user_name = user_name
         self.active_sessions = active_sessions
@@ -48,14 +54,16 @@ class SessionManager:
         session_id = str(uuid.uuid4())
 
         if topics_config is None:
-            config = get_config()
+            config = ConfigManager.get().config
             topics_config = config.default_topics
 
         async with self._lock:
             # Phase 1B: Ensure project exists and get its runtime state
             # If no project_id provided, we use a global fallback for now (or raise error if strict)
             actual_project_id = project_id or "global"
-            project_state = await self.project_manager.get_or_start_project(actual_project_id)
+            project_state = await self.project_manager.get_or_start_project(
+                actual_project_id
+            )
 
             context = await Context.create(
                 user_name=self.user_name,
@@ -107,7 +115,9 @@ class SessionManager:
                 return None
 
             actual_project_id = metadata.get("project_id") or "global"
-            project_state = await self.project_manager.get_or_start_project(actual_project_id)
+            project_state = await self.project_manager.get_or_start_project(
+                actual_project_id
+            )
 
             context = await Context.create(
                 user_name=self.user_name,

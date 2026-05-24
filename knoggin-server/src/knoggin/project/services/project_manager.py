@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from common.conf.base import get_config, get_dev_settings
+from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig
 from common.utils.json_utils import safe_json_loads
 from infrastructure.job.scheduler import Scheduler
@@ -34,8 +34,14 @@ class ProjectManager:
         self.resources = resources
         self.user_name = user_name
         self.active_projects: Dict[str, ProjectState] = {}
-        self.config = get_config()
-        self.dev_settings = get_dev_settings()
+
+    @property
+    def config(self):
+        return ConfigManager.get().config
+
+    @property
+    def dev_settings(self):
+        return self.config.developer_settings
 
     async def create_project(
         self,
@@ -100,7 +106,10 @@ class ProjectManager:
         return meta
 
     async def update_project(
-        self, project_id: str, name: Optional[str] = None, description: Optional[str] = None
+        self,
+        project_id: str,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
     ) -> Optional[dict]:
         """Update project name or description."""
         meta = await self.get_project(project_id)
@@ -126,18 +135,20 @@ class ProjectManager:
 
     async def delete_project(self, project_id: str) -> List[str]:
         """Delete project metadata and return orphaned session IDs for caller to clean up."""
-        # 1. Get orphaned sessions
+        # Get orphaned sessions
         session_ids = await self.get_session_ids(project_id)
 
-        # 2. Delete from projects hash
+        # Delete from projects hash
         key = RedisKeys.projects(self.user_name)
         await self.resources.redis.hdel(key, project_id)
 
-        # 3. Delete the project_sessions set
+        # Delete the project_sessions set
         sessions_key = RedisKeys.project_sessions(self.user_name, project_id)
         await self.resources.redis.delete(sessions_key)
 
-        logger.info(f"Deleted project {project_id}, orphaned {len(session_ids)} sessions")
+        logger.info(
+            f"Deleted project {project_id}, orphaned {len(session_ids)} sessions"
+        )
         return session_ids
 
     async def add_session(self, project_id: str, session_id: str):
@@ -163,25 +174,24 @@ class ProjectManager:
 
         logger.info(f"Bootstrapping ProjectState for project_id: {project_id}")
 
-        # 1. Topic Config
+        # Topic Config
         topics_config_dict = self.config.default_topics
-        # Since project topics might be stored separately eventually, for now we just use default
-        # But we need to save it to Redis so TopicConfig.load works
+        topics_json = json.dumps({k: v.model_dump() for k, v in topics_config_dict.items()})
         await self.resources.redis.hset(
             RedisKeys.session_config(self.user_name),
             project_id,
-            json.dumps(topics_config_dict),
+            topics_json,
         )
         t_config = await TopicConfig.load(
             self.resources.redis, self.user_name, project_id
         )
         await t_config.save(self.resources.redis, self.user_name, project_id)
 
-        # 2. Entity Manager
+        # Entity Manager
         er_cfg = self.dev_settings.entity_resolution
         entities = EntityManager(
             project_id=project_id,
-            memgraph=self.resources.memgraph,
+            graph_client=self.resources.graph_client,
             embedding_service=self.resources.embedding,
             hierarchy_config=t_config.hierarchy,
             fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
@@ -191,7 +201,7 @@ class ProjectManager:
             candidate_vector_threshold=er_cfg.candidate_vector_threshold,
         )
 
-        # 3. NLP Pipeline
+        # NLP Pipeline
         nlp_cfg = self.dev_settings.nlp_pipeline
         pipeline = await asyncio.get_running_loop().run_in_executor(
             self.resources.executor,
@@ -208,24 +218,26 @@ class ProjectManager:
             ),
         )
 
-        # 4. Project-Level Batch Processor (for DLQ Replay)
+        # Project-Level Batch Processor (for DLQ Replay)
         project_processor = BatchProcessor(
             session_id=project_id,
             redis_client=self.resources.redis,
             llm=self.resources.llm_service,
             entities=entities,
             processor=pipeline,
-            memgraph=self.resources.memgraph,
+            graph_client=self.resources.graph_client,
             cpu_executor=self.resources.executor,
             user_name=self.user_name,
             topic_config=t_config,
-            get_next_ent_id=lambda: self.resources.redis.incr(RedisKeys.global_next_ent_id()),
+            get_next_ent_id=lambda: self.resources.redis.incr(
+                RedisKeys.global_next_ent_id()
+            ),
             resolution_threshold=er_cfg.resolution_threshold,
         )
 
         await self._verify_user_entity(entities)
 
-        # 5. Scheduler & Background Jobs
+        # Scheduler & Background Jobs
         scheduler = Scheduler(self.user_name, project_id, self.resources.redis)
         profile_job = self._init_profile_job(entities)
         merge_job = self._init_merge_job(entities, t_config)
@@ -267,14 +279,20 @@ class ProjectManager:
         user_id = await entities.get_id(self.user_name)
         if user_id is None:
             user_id = await entities.add_entity(self.user_name, "Identity")
-        entity = await self.resources.memgraph.get_entity(user_id)
+        entity = await self.resources.graph_client.get_entity(user_id)
         if entity:
             logger.info(f"User entity verified: {self.user_name} (id={user_id})")
             return
 
-        logger.warning("User entity exists in graph but missing from entities, backfilling")
-        all_aliases = entity.get("aliases") or [self.user_name] if entity else [self.user_name]
-        await entities.register_entity(user_id, self.user_name, all_aliases, "person", "Identity")
+        logger.warning(
+            "User entity exists in graph but missing from entities, backfilling"
+        )
+        all_aliases = (
+            entity.get("aliases") or [self.user_name] if entity else [self.user_name]
+        )
+        await entities.register_entity(
+            user_id, self.user_name, all_aliases, "person", "Identity"
+        )
 
     def _init_profile_job(self, entities: EntityManager) -> ProfileRefinementJob:
         jobs_cfg = self.dev_settings.jobs
@@ -284,7 +302,7 @@ class ProjectManager:
         return ProfileRefinementJob(
             llm=self.resources.llm_service,
             entities=entities,
-            memgraph=self.resources.memgraph,
+            graph_client=self.resources.graph_client,
             executor=self.resources.executor,
             embedding_service=self.resources.embedding,
             redis_client=self.resources.redis,
@@ -309,7 +327,7 @@ class ProjectManager:
         return MergeDetectionJob(
             user_name=self.user_name,
             entities=entities,
-            memgraph=self.resources.memgraph,
+            graph_client=self.resources.graph_client,
             llm_client=self.resources.llm_service,
             topic_config=topic_config,
             redis_client=self.resources.redis,
@@ -331,11 +349,13 @@ class ProjectManager:
         project_id = project_state.project_id
         topic_config = project_state.topic_config
         jobs_cfg = self.dev_settings.jobs
+        
+        config_mgr = ConfigManager.get()
 
         async def _dlq_write_callback(result):
             return await write_batch_callback(
                 result,
-                memgraph=self.resources.memgraph,
+                graph_client=self.resources.graph_client,
                 entities=entities,
                 session_id=project_id,
                 project_id=project_id,
@@ -349,58 +369,66 @@ class ProjectManager:
             entities.hierarchy_config = topic_config.hierarchy
             processor.refresh_topic_mappings()
 
+        def _global_topics_updated_cb(new_topics: dict):
+            asyncio.create_task(project_state.update_topics_config(new_topics))
+
+        config_mgr.subscribe(_global_topics_updated_cb, "default_topics")
+        config_mgr.subscribe(entities.update_settings, "developer_settings.entity_resolution")
+        config_mgr.subscribe(processor.update_settings, "developer_settings.nlp_pipeline")
+        config_mgr.subscribe(profile_job.update_settings, "developer_settings.jobs.profile")
+        config_mgr.subscribe(merge_job.update_settings, "developer_settings.jobs.merger")
+
         scheduler.register(profile_job)
         scheduler.register(merge_job)
 
         dlq_cfg = jobs_cfg.dlq
-        scheduler.register(
-            DLQReplayJob(
-                entities=entities,
-                processor=processor,
-                write_to_graph=_dlq_write_callback,
-                redis_client=self.resources.redis,
-                interval=dlq_cfg.interval_seconds,
-                batch_size=dlq_cfg.batch_size,
-                max_attempts=dlq_cfg.max_attempts,
-            )
+        dlq_job = DLQReplayJob(
+            entities=entities,
+            processor=processor,
+            write_to_graph=_dlq_write_callback,
+            redis_client=self.resources.redis,
+            interval=dlq_cfg.interval_seconds,
+            batch_size=dlq_cfg.batch_size,
+            max_attempts=dlq_cfg.max_attempts,
         )
+        scheduler.register(dlq_job)
+        config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
 
         clean_cfg = jobs_cfg.cleaner
-        scheduler.register(
-            EntityCleanupJob(
-                user_name=self.user_name,
-                memgraph=self.resources.memgraph,
-                entities=entities,
-                redis_client=self.resources.redis,
-                interval_hours=clean_cfg.interval_hours,
-                orphan_age_hours=clean_cfg.orphan_age_hours,
-                stale_junk_days=clean_cfg.stale_junk_days,
-            )
+        cleaner_job = EntityCleanupJob(
+            user_name=self.user_name,
+            graph_client=self.resources.graph_client,
+            entities=entities,
+            redis_client=self.resources.redis,
+            interval_hours=clean_cfg.interval_hours,
+            orphan_age_hours=clean_cfg.orphan_age_hours,
+            stale_junk_days=clean_cfg.stale_junk_days,
         )
+        scheduler.register(cleaner_job)
+        config_mgr.subscribe(cleaner_job.update_settings, "developer_settings.jobs.cleaner")
 
         arch_cfg = jobs_cfg.archival
-        scheduler.register(
-            FactArchivalJob(
-                user_name=self.user_name,
-                memgraph=self.resources.memgraph,
-                redis_client=self.resources.redis,
-                retention_days=arch_cfg.retention_days,
-                fallback_interval_hours=arch_cfg.fallback_interval_hours,
-            )
+        archival_job = FactArchivalJob(
+            user_name=self.user_name,
+            graph_client=self.resources.graph_client,
+            redis_client=self.resources.redis,
+            retention_days=arch_cfg.retention_days,
+            fallback_interval_hours=arch_cfg.fallback_interval_hours,
         )
+        scheduler.register(archival_job)
+        config_mgr.subscribe(archival_job.update_settings, "developer_settings.jobs.archival")
 
         topic_cfg = jobs_cfg.topic_config
-        scheduler.register(
-            TopicConfigJob(
-                llm=self.resources.llm_service,
-                topic_config=topic_config,
-                update_callback=_update_topics_callback,
-                redis_client=self.resources.redis,
-                interval_msgs=topic_cfg.interval_msgs,
-                conversation_window=topic_cfg.conversation_window,
-            )
+        topic_job = TopicConfigJob(
+            llm=self.resources.llm_service,
+            topic_config=topic_config,
+            update_callback=_update_topics_callback,
+            redis_client=self.resources.redis,
+            interval_msgs=topic_cfg.interval_msgs,
+            conversation_window=topic_cfg.conversation_window,
         )
+        scheduler.register(topic_job)
+        config_mgr.subscribe(topic_job.update_settings, "developer_settings.jobs.topic_config")
 
         # Register the Autonomous Agent Community Job (AACJob)
         scheduler.register(AACJob(project_state))
-

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.schema.dtypes import AgentConfig
 from common.utils.events import emit_community
 from infrastructure.redis_client import RedisKeys
@@ -91,7 +91,7 @@ class CommunityTools(Tools):
         new_id = f"spawned_{uuid.uuid4().hex[:8]}"
         self.current_participants.append(new_id)
 
-        llm_config = get_config().llm
+        llm_config = ConfigManager.get().config.llm
         new_agent = AgentConfig(
             id=new_id,
             name=name,

@@ -8,7 +8,7 @@ from loguru import logger
 
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
+from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from knoggin.ingestion.services.pipeline_service import BatchProcessor, BatchResult
 from knoggin.knowledge.services.entity_service import EntityManager
@@ -38,7 +38,7 @@ class DLQReplayJob(BaseJob):
         "BusyLoadingError",
         # OpenRouter
         "overloaded",
-        # Memgraph
+        # GraphClient
         "serialization error",
         "conflicting transactions",
         "Cannot get shared access",
@@ -92,7 +92,7 @@ class DLQReplayJob(BaseJob):
 
     def _validate_batch_result(self, result: BatchResult) -> BatchResult:
         """
-        Filter out stale entity IDs (e.g. phantom entities purged after a failed write), 
+        Filter out stale entity IDs (e.g. phantom entities purged after a failed write),
         forcing the DLQ to fall back to a safer full reprocessing retry.
         """
         valid_ids = [
@@ -173,7 +173,7 @@ class DLQReplayJob(BaseJob):
             ]
 
             await asyncio.wait_for(
-                self.processor.memgraph.save_message_logs(batch), timeout=30.0
+                self.processor.graph_client.save_message_logs(batch), timeout=30.0
             )
             logger.info(
                 f"DLQ: Message log retry succeeded for {len(messages)} messages"

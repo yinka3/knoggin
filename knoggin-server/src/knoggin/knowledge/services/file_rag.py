@@ -17,7 +17,7 @@ try:
     from markitdown import MarkItDown
 except ImportError:
     MarkItDown = None
-    
+
 try:
     from rank_bm25 import BM25Okapi
 except ImportError:
@@ -30,19 +30,35 @@ from knoggin.knowledge.services.embedding_service import EmbeddingService
 # ---------------------------------------------------------------------------
 
 ALLOWED_EXTENSIONS = {
-    ".txt", ".csv", ".json", ".md", ".css",
-    ".py", ".js", ".ts", ".jsx", ".tsx",
-    ".java", ".go", ".rs", ".c", ".cpp", ".h", ".html",
-    ".pdf", ".docx",
+    ".txt",
+    ".csv",
+    ".json",
+    ".md",
+    ".css",
+    ".py",
+    ".js",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    ".java",
+    ".go",
+    ".rs",
+    ".c",
+    ".cpp",
+    ".h",
+    ".html",
+    ".pdf",
+    ".docx",
 }
 
-MAX_FILE_SIZE = 50 * 1024 * 1024   # 50 MB
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 MAX_FILES_PER_SESSION = 100
 
 
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
+
 
 class FileRAGService:
     """Session-scoped file ingestion and retrieval via LlamaIndex + pgvector."""
@@ -132,7 +148,7 @@ class FileRAGService:
                 f"Unsupported file type: {ext}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
             )
 
-        file_size = path.stat().st_size
+        file_size = await asyncio.to_thread(lambda p: p.stat().st_size, path)
         if file_size > MAX_FILE_SIZE:
             raise ValueError(
                 f"File too large: {file_size / 1024 / 1024:.1f}MB. Max: {MAX_FILE_SIZE / 1024 / 1024:.0f}MB"
@@ -152,7 +168,14 @@ class FileRAGService:
         # Use LlamaIndex's built-in SimpleFileNodeParser via Document ingestion.
         # We construct nodes manually so we can attach our file_id metadata.
         splitter = SentenceSplitter(chunk_size=512, chunk_overlap=50)
-        doc = Document(text=content, metadata={"file_id": file_id, "file_name": original_name, "session_id": self.session_id})
+        doc = Document(
+            text=content,
+            metadata={
+                "file_id": file_id,
+                "file_name": original_name,
+                "session_id": self.session_id,
+            },
+        )
         nodes = splitter.get_nodes_from_documents([doc])
 
         # Embed all nodes async directly via our service
@@ -163,9 +186,7 @@ class FileRAGService:
 
         # Insert directly into pgvector via PGVectorStore
         store = self._get_vector_store()
-        await asyncio.get_running_loop().run_in_executor(
-            None, lambda: store.add(nodes)
-        )
+        await asyncio.get_running_loop().run_in_executor(None, lambda: store.add(nodes))
 
         # Update BM25 corpus
         for node in nodes:
@@ -183,7 +204,9 @@ class FileRAGService:
         }
         self._manifest[file_id] = file_meta
 
-        logger.info(f"Ingested '{original_name}' → {len(nodes)} chunks (session: {self.session_id})")
+        logger.info(
+            f"Ingested '{original_name}' → {len(nodes)} chunks (session: {self.session_id})"
+        )
         return file_meta
 
     async def search(
@@ -205,8 +228,7 @@ class FileRAGService:
         # --- Vector search directly via PGVectorStore ---
         store = self._get_vector_store()
         vs_query = VectorStoreQuery(
-            query_embedding=query_embedding,
-            similarity_top_k=35
+            query_embedding=query_embedding, similarity_top_k=35
         )
         loop = asyncio.get_running_loop()
         vector_result = await loop.run_in_executor(None, store.query, vs_query)
@@ -225,7 +247,9 @@ class FileRAGService:
         if self._bm25 and self._bm25_corpus:
             tokenized_query = query.lower().split()
             bm25_scores = self._bm25.get_scores(tokenized_query)
-            top_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:35]
+            top_indices = sorted(
+                range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True
+            )[:35]
             for idx in top_indices:
                 if bm25_scores[idx] <= 0:
                     continue
@@ -259,13 +283,15 @@ class FileRAGService:
         for text, meta, score in scored[:n_results]:
             clamped = max(min(float(score), 500.0), -500.0)
             norm_score = 1.0 / (1.0 + math.exp(-clamped))
-            output.append({
-                "content": text,
-                "file_name": meta.get("file_name", ""),
-                "file_id": meta.get("file_id", ""),
-                "score": round(norm_score, 4),
-                "raw_score": round(float(score), 4),
-            })
+            output.append(
+                {
+                    "content": text,
+                    "file_name": meta.get("file_name", ""),
+                    "file_id": meta.get("file_id", ""),
+                    "score": round(norm_score, 4),
+                    "raw_score": round(float(score), 4),
+                }
+            )
         return output
 
     def list_files(self) -> List[Dict]:

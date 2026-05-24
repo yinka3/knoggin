@@ -5,19 +5,20 @@ from typing import Dict, List, Optional
 import redis.asyncio as aioredis
 from loguru import logger
 
+from common.schema.settings import TopicSchema
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 
 
-def build_label_block(topics_config: dict) -> str:
+def build_label_block(topics_config: Dict[str, TopicSchema]) -> str:
     """Formats topics config into prompt-friendly label list for VP-01."""
     lines = []
     for topic, config in topics_config.items():
         if topic == "Identity":
             continue
-        if config.get("active", True) is False:
+        if config.active is False:
             continue
-        labels = config.get("labels", [])
+        labels = config.labels
         if labels:
             lines.append(f"Topic: {topic}")
             lines.append(f"  Labels: {', '.join(labels)}")
@@ -25,22 +26,22 @@ def build_label_block(topics_config: dict) -> str:
     return "\n".join(lines)
 
 
-def build_topic_alias_lookup(topics_config: dict) -> Dict[str, str]:
+def build_topic_alias_lookup(topics_config: Dict[str, TopicSchema]) -> Dict[str, str]:
     """Builds reverse lookup: alias/variant → canonical topic name."""
     lookup = {}
     for topic_name, config in topics_config.items():
         lookup[topic_name.lower()] = topic_name
-        for alias in config.get("aliases", []):
+        for alias in config.aliases:
             lookup[alias.lower()] = topic_name
     return lookup
 
 
-def get_active_topic_names(topics_config: dict) -> List[str]:
+def get_active_topic_names(topics_config: Dict[str, TopicSchema]) -> List[str]:
     """Returns list of topic names where active=True."""
     return [
         topic_name
         for topic_name, config in topics_config.items()
-        if config.get("active", True)
+        if config.active
     ]
 
 
@@ -50,16 +51,11 @@ class TopicConfig:
     Single source of truth for label blocks, aliases, hierarchy, and active topics.
     """
 
-    DEFAULT_CONFIG = {
-        "General": {
-            "active": True,
-            "labels": [],
-            "hierarchy": {},
-            "aliases": []
-        }
+    DEFAULT_CONFIG: Dict[str, TopicSchema] = {
+        "General": TopicSchema(active=True, hot=False, labels=[], hierarchy={}, aliases=[])
     }
 
-    def __init__(self, config: dict):
+    def __init__(self, config: Dict[str, TopicSchema]):
         self._config = config
         self._alias_lookup: Optional[Dict[str, str]] = None
         self._label_block: Optional[str] = None
@@ -69,18 +65,17 @@ class TopicConfig:
 
     @classmethod
     async def load(
-        cls,
-        redis_client: aioredis.Redis,
-        user_name: str,
-        session_id: str
+        cls, redis_client: aioredis.Redis, user_name: str, session_id: str
     ) -> "TopicConfig":
         """Load config from Redis."""
         raw = await redis_client.hget(RedisKeys.session_config(user_name), session_id)
         if raw:
             try:
-                config = safe_json_loads(raw)
-                if not config:
+                raw_dict = safe_json_loads(raw)
+                if not raw_dict:
                     config = copy.deepcopy(cls.DEFAULT_CONFIG)
+                else:
+                    config = {k: TopicSchema(**v) for k, v in raw_dict.items()}
             except Exception as e:
                 logger.error(f"Failed to decode topic config from Redis: {e}")
                 config = copy.deepcopy(cls.DEFAULT_CONFIG)
@@ -88,20 +83,13 @@ class TopicConfig:
             config = copy.deepcopy(cls.DEFAULT_CONFIG)
         return cls(config)
 
-    async def save(
-        self,
-        redis_client: aioredis.Redis,
-        user_name: str,
-        session_id: str
-    ):
+    async def save(self, redis_client: aioredis.Redis, user_name: str, session_id: str):
         """Persist config to Redis."""
+        dumped = {k: v.model_dump() for k, v in self._config.items()}
         await redis_client.hset(
-            RedisKeys.session_config(user_name),
-            session_id,
-            json.dumps(self._config)
+            RedisKeys.session_config(user_name), session_id, json.dumps(dumped)
         )
         logger.debug(f"TopicConfig saved for session {session_id}")
-
 
     def _clear_cache(self):
         """Clear all cached derived values."""
@@ -112,8 +100,8 @@ class TopicConfig:
         self._hot_topics = None
 
     @property
-    def raw(self) -> dict:
-        """Raw config dict."""
+    def raw(self) -> Dict[str, TopicSchema]:
+        """Raw config models."""
         return self._config
 
     @property
@@ -135,8 +123,7 @@ class TopicConfig:
         """Lazy-built topic → hierarchy mapping."""
         if self._hierarchy is None:
             self._hierarchy = {
-                topic: cfg.get("hierarchy", {})
-                for topic, cfg in self._config.items()
+                topic: cfg.hierarchy for topic, cfg in self._config.items()
             }
         return self._hierarchy
 
@@ -153,8 +140,9 @@ class TopicConfig:
         if self._hot_topics is None:
             active = set(self.active_topics)
             self._hot_topics = [
-                name for name, cfg in self._config.items()
-                if cfg.get("hot", False) and name in active
+                name
+                for name, cfg in self._config.items()
+                if cfg.hot and name in active
             ]
         return self._hot_topics
 
@@ -172,23 +160,32 @@ class TopicConfig:
 
     def get_labels_for_topic(self, topic: str) -> List[str]:
         """Get allowed labels for a specific topic."""
-        config = self._config.get(topic, {})
-        return config.get("labels", [])
+        config = self._config.get(topic)
+        if config:
+            return config.labels
+        return []
 
     def is_active(self, topic: str) -> bool:
         """Check if a topic is currently active."""
-        config = self._config.get(topic, {})
-        return config.get("active", True)
+        config = self._config.get(topic)
+        if config:
+            return config.active
+        return True
 
     def update(self, new_config: dict):
         """
         Update config and invalidate cache.
         Logs warnings for label modifications.
         """
-        for topic_name, topic_cfg in new_config.items():
+        for topic_name, topic_cfg_dict in new_config.items():
+            if isinstance(topic_cfg_dict, dict):
+                topic_cfg = TopicSchema(**topic_cfg_dict)
+            else:
+                topic_cfg = topic_cfg_dict
+                
             if topic_name in self._config:
-                old_labels = set(self._config[topic_name].get("labels", []))
-                new_labels = set(topic_cfg.get("labels", []))
+                old_labels = set(self._config[topic_name].labels)
+                new_labels = set(topic_cfg.labels)
                 if old_labels != new_labels:
                     logger.warning(
                         f"Labels modified for '{topic_name}': {old_labels} → {new_labels}"
@@ -201,10 +198,12 @@ class TopicConfig:
         self._clear_cache()
         logger.info(f"TopicConfig updated: {list(new_config.keys())}")
 
-    def add_topic(self, topic_name: str, config: dict):
+    def add_topic(self, topic_name: str, config: TopicSchema):
         """Add a new topic. Safe mid-session."""
         if topic_name in self._config:
-            logger.warning(f"Topic '{topic_name}' already exists. Use update() instead.")
+            logger.warning(
+                f"Topic '{topic_name}' already exists. Use update() instead."
+            )
             return
 
         self._config[topic_name] = config
@@ -223,7 +222,7 @@ class TopicConfig:
             logger.warning(f"Topic '{topic_name}' not found.")
             return
 
-        self._config[topic_name]["active"] = active
+        self._config[topic_name].active = active
         self._clear_cache()
         logger.info(f"Topic '{topic_name}' active={active}")
 
@@ -245,6 +244,8 @@ class TopicConfig:
                 invalid.append(topic)
 
         if invalid:
-            logger.warning(f"Hot topics filtered out (not active or unknown): {invalid}")
+            logger.warning(
+                f"Hot topics filtered out (not active or unknown): {invalid}"
+            )
 
         return valid

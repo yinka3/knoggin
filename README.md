@@ -10,7 +10,7 @@ Knoggin extracts entities and relationships from conversations, maintains evolvi
 
 This repository is a monorepo containing the following components:
 
-- **[knoggin-server](./knoggin-server/README.md):** The core engine (FastAPI, Memgraph, Redis).
+- **[knoggin-server](./knoggin-server/README.md):** The core engine (FastAPI, Postgres + Apache AGE, Redis).
 - **[knoggin-sdk](./knoggin-sdk/README.md):** Lightweight Python client for interacting with the server.
 - **[frontend](./frontend/README.md):** React-based dashboard and agent interface.
 - **knoggin-website:** Documentation and landing page (Hosting coming soon).

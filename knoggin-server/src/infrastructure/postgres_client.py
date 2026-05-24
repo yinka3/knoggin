@@ -10,13 +10,13 @@ from psycopg_pool import AsyncConnectionPool, ConnectionPool
 def _configure_sync_conn(conn: psycopg.Connection):
     """Load Apache AGE and set search path on every sync connection."""
     conn.execute("LOAD 'age';")
-    conn.execute("SET search_path = ag_catalog, \"$user\", public;")
+    conn.execute('SET search_path = ag_catalog, "$user", public;')
 
 
 async def _configure_async_conn(conn: psycopg.AsyncConnection):
     """Load Apache AGE and set search path on every async connection."""
     await conn.execute("LOAD 'age';")
-    await conn.execute("SET search_path = ag_catalog, \"$user\", public;")
+    await conn.execute('SET search_path = ag_catalog, "$user", public;')
 
 
 class PostgresClient:
@@ -55,8 +55,10 @@ class PostgresClient:
                 )
 
             self.sync_pool = await asyncio.to_thread(_init_sync)
-            
-            logger.info("Connected to Postgres (Async and Sync pools initialized with AGE loaded)")
+
+            logger.info(
+                "Connected to Postgres (Async and Sync pools initialized with AGE loaded)"
+            )
         except Exception as e:
             logger.error(f"Failed to connect to Postgres: {e}")
             raise
@@ -67,25 +69,29 @@ class PostgresClient:
             await self.async_pool.close()
         if self.sync_pool:
             await asyncio.to_thread(self.sync_pool.close)
-            
+
     # --- Async Helpers ---
 
-    async def execute_read(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    async def execute_read(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         """Execute a read-only SQL or AGE query asynchronously."""
         if not self.async_pool:
             raise RuntimeError("PostgresClient async_pool is not initialized")
-            
+
         async with self.async_pool.connection() as conn:
             # We don't strictly need a transaction for read, but it's safe.
             async with conn.cursor() as cur:
                 await cur.execute(query, params or {})
                 return await cur.fetchall()
 
-    async def execute_write(self, query: str, params: Optional[Dict[str, Any]] = None) -> int:
+    async def execute_write(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> int:
         """Execute a write SQL or AGE query asynchronously. Returns rowcount."""
         if not self.async_pool:
             raise RuntimeError("PostgresClient async_pool is not initialized")
-            
+
         async with self.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
@@ -94,21 +100,25 @@ class PostgresClient:
 
     # --- Sync Helpers (for Background Threads) ---
 
-    def execute_read_sync(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def execute_read_sync(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         """Execute a read-only SQL or AGE query synchronously."""
         if not self.sync_pool:
             raise RuntimeError("PostgresClient sync_pool is not initialized")
-            
+
         with self.sync_pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(query, params or {})
                 return cur.fetchall()
 
-    def execute_write_sync(self, query: str, params: Optional[Dict[str, Any]] = None) -> int:
+    def execute_write_sync(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> int:
         """Execute a write SQL or AGE query synchronously. Returns rowcount."""
         if not self.sync_pool:
             raise RuntimeError("PostgresClient sync_pool is not initialized")
-            
+
         with self.sync_pool.connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cur:
@@ -116,12 +126,16 @@ class PostgresClient:
                     return cur.rowcount
 
     # --- Cypher Helpers ---
-    
+
     @staticmethod
-    def build_cypher(cypher_query: str, return_types: str = "result agtype", graph_name: str = "knoggin_graph") -> str:
+    def build_cypher(
+        cypher_query: str,
+        return_types: str = "result agtype",
+        graph_name: str = "knoggin_graph",
+    ) -> str:
         """
         Wraps a Cypher query in the required Apache AGE SQL syntax.
         Parameters should be passed to psycopg execution as `%s` (a JSON string).
         `return_types` dictates the expected output columns, e.g., 'id agtype, name agtype'.
         """
-        return f"SELECT * FROM cypher('{graph_name}', $${cypher_query}$$, %s) AS ({return_types})"
+        return f"SELECT * FROM cypher('{graph_name}', $${cypher_query}$$, %s) AS ({return_types})"  # noqa: S608

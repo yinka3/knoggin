@@ -4,11 +4,11 @@ from typing import Dict, List
 
 from loguru import logger
 
-from infrastructure.postgres_client import PostgresClient
+from infrastructure.db_client import DBClient
 
 
 class CommunityStore:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 
@@ -25,12 +25,16 @@ class CommunityStore:
         try:
             await self.client.execute_write(
                 self.client.build_cypher(cypher, "id agtype"),
-                (json.dumps({
-                    "id": discussion_id,
-                    "topic": topic,
-                    "agent_ids": agent_ids,
-                    "ts": datetime.now(timezone.utc).isoformat()
-                }),)
+                (
+                    json.dumps(
+                        {
+                            "id": discussion_id,
+                            "topic": topic,
+                            "agent_ids": agent_ids,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }
+                    ),
+                ),
             )
         except Exception as e:
             logger.error(f"Failed to create_discussion: {e}")
@@ -48,13 +52,17 @@ class CommunityStore:
         try:
             await self.client.execute_write(
                 self.client.build_cypher(cypher, "agent_id agtype"),
-                (json.dumps({
-                    "discussion_id": discussion_id,
-                    "agent_id": agent_id,
-                    "content": content,
-                    "role": role,
-                    "ts": datetime.now(timezone.utc).isoformat()
-                }),)
+                (
+                    json.dumps(
+                        {
+                            "discussion_id": discussion_id,
+                            "agent_id": agent_id,
+                            "content": content,
+                            "role": role,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }
+                    ),
+                ),
             )
         except Exception as e:
             logger.error(f"Failed to add_message in discussion {discussion_id}: {e}")
@@ -69,10 +77,14 @@ class CommunityStore:
         try:
             await self.client.execute_write(
                 self.client.build_cypher(cypher, "id agtype"),
-                (json.dumps({
-                    "id": discussion_id,
-                    "ts": datetime.now(timezone.utc).isoformat()
-                }),)
+                (
+                    json.dumps(
+                        {
+                            "id": discussion_id,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }
+                    ),
+                ),
             )
         except Exception as e:
             logger.error(f"Failed to close_discussion: {e}")
@@ -90,12 +102,16 @@ class CommunityStore:
         try:
             await self.client.execute_write(
                 self.client.build_cypher(cypher, "id agtype"),
-                (json.dumps({
-                    "parent_id": parent_id,
-                    "child_id": child_id,
-                    "detail": detail,
-                    "ts": datetime.now(timezone.utc).isoformat()
-                }),)
+                (
+                    json.dumps(
+                        {
+                            "parent_id": parent_id,
+                            "child_id": child_id,
+                            "detail": detail,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }
+                    ),
+                ),
             )
         except Exception as e:
             logger.error(f"Failed to register_agent_spawn: {e}")
@@ -111,10 +127,20 @@ class CommunityStore:
         """
         try:
             data = await self.client.execute_read(
-                self.client.build_cypher(cypher, "id agtype, topic agtype, status agtype, created_at agtype, closed_at agtype, agent_ids agtype"),
-                ("{}",)
+                self.client.build_cypher(
+                    cypher,
+                    "id agtype, topic agtype, status agtype, created_at agtype, closed_at agtype, agent_ids agtype",
+                ),
+                ("{}",),
             )
-            return [{k: v.strip('"') if isinstance(v, str) else v for k, v in r.items() if v is not None} for r in data]
+            return [
+                {
+                    k: v.strip('"') if isinstance(v, str) else v
+                    for k, v in r.items()
+                    if v is not None
+                }
+                for r in data
+            ]
         except Exception as e:
             logger.error(f"Failed to get_discussions: {e}")
             return []
@@ -127,10 +153,20 @@ class CommunityStore:
         """
         try:
             data = await self.client.execute_read(
-                self.client.build_cypher(cypher, "agent_id agtype, content agtype, role agtype, timestamp agtype"),
-                (json.dumps({"discussion_id": discussion_id}),)
+                self.client.build_cypher(
+                    cypher,
+                    "agent_id agtype, content agtype, role agtype, timestamp agtype",
+                ),
+                (json.dumps({"discussion_id": discussion_id}),),
             )
-            return [{k: v.strip('"') if isinstance(v, str) else v for k, v in r.items() if v is not None} for r in data]
+            return [
+                {
+                    k: v.strip('"') if isinstance(v, str) else v
+                    for k, v in r.items()
+                    if v is not None
+                }
+                for r in data
+            ]
         except Exception as e:
             logger.error(f"Failed to get_discussion_history: {e}")
             return []
@@ -142,10 +178,20 @@ class CommunityStore:
         """
         try:
             data = await self.client.execute_read(
-                self.client.build_cypher(cypher, "parent agtype, child agtype, detail agtype, timestamp agtype"),
-                ("{}",)
+                self.client.build_cypher(
+                    cypher,
+                    "parent agtype, child agtype, detail agtype, timestamp agtype",
+                ),
+                ("{}",),
             )
-            return [{k: v.strip('"') if isinstance(v, str) else v for k, v in r.items() if v is not None} for r in data]
+            return [
+                {
+                    k: v.strip('"') if isinstance(v, str) else v
+                    for k, v in r.items()
+                    if v is not None
+                }
+                for r in data
+            ]
         except Exception as e:
             logger.error(f"Failed to get_agent_hierarchy: {e}")
             return []
@@ -166,10 +212,20 @@ class CommunityStore:
         """
         try:
             data = await self.client.execute_read(
-                self.client.build_cypher(cypher, "id agtype, topic agtype, status agtype, created_at agtype, closed_at agtype, message_count agtype"),
-                (json.dumps({"limit": limit}),)
+                self.client.build_cypher(
+                    cypher,
+                    "id agtype, topic agtype, status agtype, created_at agtype, closed_at agtype, message_count agtype",
+                ),
+                (json.dumps({"limit": limit}),),
             )
-            return [{k: v.strip('"') if isinstance(v, str) else v for k, v in r.items() if v is not None} for r in data]
+            return [
+                {
+                    k: v.strip('"') if isinstance(v, str) else v
+                    for k, v in r.items()
+                    if v is not None
+                }
+                for r in data
+            ]
         except Exception as e:
             logger.error(f"Failed to get_recent_discussions: {e}")
             return []
@@ -186,16 +242,27 @@ class CommunityStore:
         """
         try:
             data = await self.client.execute_read(
-                self.client.build_cypher(cypher, "content agtype, timestamp agtype, discussion_topic agtype"),
-                (json.dumps({"limit": limit}),)
+                self.client.build_cypher(
+                    cypher, "content agtype, timestamp agtype, discussion_topic agtype"
+                ),
+                (json.dumps({"limit": limit}),),
             )
-            return [{k: v.strip('"') if isinstance(v, str) else v for k, v in r.items() if v is not None} for r in data]
+            return [
+                {
+                    k: v.strip('"') if isinstance(v, str) else v
+                    for k, v in r.items()
+                    if v is not None
+                }
+                for r in data
+            ]
         except Exception as e:
             logger.error(f"Failed to get_discussion_insights: {e}")
             return []
 
     async def delete_old_discussions(self, retention_days: int = 30) -> int:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=retention_days)
+        ).isoformat()
         cypher = """
         MATCH (d:AAC_Discussion)
         WHERE d.created_at < $cutoff
@@ -211,12 +278,14 @@ class CommunityStore:
                 async with conn.transaction():
                     async with conn.cursor() as cur:
                         await cur.execute(
-                            self.client.build_cypher(cypher, "deleted_discussions agtype"),
-                            (json.dumps({"cutoff": cutoff}),)
+                            self.client.build_cypher(
+                                cypher, "deleted_discussions agtype"
+                            ),
+                            (json.dumps({"cutoff": cutoff}),),
                         )
                         record = await cur.fetchone()
                         count = int(record["deleted_discussions"]) if record else 0
-                        
+
                         if count > 0:
                             logger.info(f"Cleaned up {count} old AAC discussions")
                         return count

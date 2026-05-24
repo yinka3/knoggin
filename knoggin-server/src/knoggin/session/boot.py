@@ -1,10 +1,9 @@
-
 import uuid
 from typing import Callable, Optional
 
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig
 from common.utils.events import DebugEventEmitter
 from infrastructure.redis_client import RedisKeys
@@ -25,6 +24,7 @@ if proposed > current then
 end
 """
 
+
 class SessionAssembler:
     """
     Wires together the infrastructure, services, and background jobs for a session.
@@ -34,8 +34,14 @@ class SessionAssembler:
     def __init__(self, user_name: str, resources: ResourceManager):
         self.user_name = user_name
         self.resources = resources
-        self.config = get_config()
-        self.dev_settings = self.config.developer_settings
+
+    @property
+    def config(self):
+        return ConfigManager.get().config
+
+    @property
+    def dev_settings(self):
+        return self.config.developer_settings
 
     async def bootstrap(
         self,
@@ -62,22 +68,23 @@ class SessionAssembler:
 
         await self._sync_entity_counters()
 
-        # 1. Instantiate Context shell first
-        ctx = Context(
-            self.user_name, list(project_state.topic_config.raw.keys())
-        )
+        # Instantiate Context shell first
+        ctx = Context(self.user_name, list(project_state.topic_config.raw.keys()))
         ctx.session_id = session_id
         ctx.project_id = project_state.project_id
         ctx.project = project_state
         ctx.model = model
 
-        # 2. Initialize Batch Processor
+        # Initialize Batch Processor
         processor = self._init_batch_processor(
-            session_id, project_state.entities, project_state.pipeline, project_state.topic_config
+            session_id,
+            project_state.entities,
+            project_state.pipeline,
+            project_state.topic_config,
         )
         ctx.batch_processor = processor
 
-        # 3. Initialize Batch Consumer with direct callbacks
+        # Initialize Batch Consumer with direct callbacks
         consumer = self._init_batch_consumer(
             session_id,
             processor,
@@ -86,7 +93,9 @@ class SessionAssembler:
         )
         ctx.consumer = consumer
 
-        # 4. Initialize File RAG
+        ConfigManager.get().subscribe(consumer.update_settings, "developer_settings.ingestion")
+
+        # Initialize File RAG
         file_rag = self._init_file_rag(session_id)
         ctx.file_rag = file_rag
 
@@ -117,7 +126,7 @@ class SessionAssembler:
         logger.info(f"System launched successfully for session {ctx.session_id}")
 
     async def _sync_entity_counters(self):
-        max_id = (await self.resources.memgraph.get_max_entity_id()) or 0
+        max_id = (await self.resources.graph_client.get_max_entity_id()) or 0
         await self.resources.redis.eval(
             LUA_SYNC_COUNTER_SCRIPT, 1, RedisKeys.global_next_ent_id(), max_id
         )
@@ -161,7 +170,7 @@ class SessionAssembler:
         return BatchConsumer(
             user_name=self.user_name,
             session_id=session_id,
-            memgraph=self.resources.memgraph,
+            graph_client=self.resources.graph_client,
             redis=self.resources.redis,
             processor=processor,
             get_session_context=get_session_context,

@@ -40,6 +40,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "ddgs>=9.11.3",
     "instructor>=1.14.5",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
@@ -65,7 +66,7 @@ include = ["cli*", "api*", "common*", "knoggin*", "infrastructure*", "log*"]
 cli = ["templates/*"]
 
 [tool.uvicorn]
-reload-exclude = ["redis_data", "memgraph_data", "*.log"]
+reload-exclude = ["redis_data", "*.log"]
 
 [tool.uv.sources]
 en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" }

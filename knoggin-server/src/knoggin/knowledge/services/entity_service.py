@@ -21,7 +21,7 @@ from knoggin.knowledge.services.embedding_service import EmbeddingService
 class EntityManager:
     def __init__(
         self,
-        memgraph: "GraphClient",
+        graph_client: "GraphClient",
         embedding_service: EmbeddingService,
         project_id: Optional[str] = None,
         hierarchy_config: Optional[dict] = None,
@@ -32,7 +32,7 @@ class EntityManager:
         candidate_vector_threshold: float = 0.85,
     ):
 
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.hierarchy_config = hierarchy_config or {}
         self.project_id = project_id
         self.embedding_service = embedding_service
@@ -65,7 +65,7 @@ class EntityManager:
         )
 
     def _populate_cache(self, entity: dict) -> dict:
-        """Shared helper to hydrate internal indexes from a Memgraph entity record."""
+        """Shared helper to hydrate internal indexes from a GraphClient entity record."""
         eid = entity["id"]
         canonical = entity.get("canonical_name")
 
@@ -107,7 +107,7 @@ class EntityManager:
             stored_id = self._name_to_id.get(lower_name)
             if stored_id is not None:
                 return stored_id
-        found = await self.memgraph.get_entities_by_names([name])
+        found = await self.graph_client.get_entities_by_names([name])
         if found:
             entity = found[0]
             self._populate_cache(entity)
@@ -120,8 +120,8 @@ class EntityManager:
             if profile:
                 return profile
 
-        # Cache miss: fetch from memgraph
-        entity = await self.memgraph.get_entity_by_id(entity_id)
+        # Cache miss: fetch from graph_client
+        entity = await self.graph_client.get_entity_by_id(entity_id)
         if entity:
             return self._populate_cache(entity)
         return None
@@ -144,7 +144,7 @@ class EntityManager:
             profile = self.entity_profiles.get(entity_id)
             if profile and profile.get("embedding"):
                 return profile["embedding"]
-        return await self.memgraph.get_entity_embedding(entity_id)
+        return await self.graph_client.get_entity_embedding(entity_id)
 
     async def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -155,13 +155,19 @@ class EntityManager:
 
         return await self.embedding_service.encode(texts)
 
-    async def get_neighbor_ids_batch(self, candidate_ids: List[int]) -> Dict[int, set[int]]:
+    async def get_neighbor_ids_batch(
+        self, candidate_ids: List[int]
+    ) -> Dict[int, set[int]]:
         """Fetch neighbors for a batch of candidates."""
-        return await self.memgraph.get_neighbor_ids_batch(candidate_ids)
+        return await self.graph_client.get_neighbor_ids_batch(candidate_ids)
 
-    async def search_relevant_facts(self, entity_id: int, embedding: List[float], limit: int = 5) -> List[FactRecord]:
+    async def search_relevant_facts(
+        self, entity_id: int, embedding: List[float], limit: int = 5
+    ) -> List[FactRecord]:
         """Search relevant facts for a specific entity."""
-        return await self.memgraph.search_relevant_facts(entity_id, embedding, limit)
+        return await self.graph_client.search_relevant_facts(
+            entity_id, embedding, limit
+        )
 
     def validate_existing(
         self, canonical_name: str, mentions: List[str]
@@ -273,7 +279,7 @@ class EntityManager:
         vector_results = []
         if vector:
             try:
-                vector_results = await self.memgraph.search_entities_by_embedding(
+                vector_results = await self.graph_client.search_entities_by_embedding(
                     vector, limit=5, score_threshold=self.candidate_vector_threshold
                 )
             except Exception as e:
@@ -466,7 +472,7 @@ class EntityManager:
             entity_ids.add(id_a)
             entity_ids.add(id_b)
 
-        facts_by_entity = await self.memgraph.get_facts_for_entities(
+        facts_by_entity = await self.graph_client.get_facts_for_entities(
             list(entity_ids), active_only=True
         )
 
@@ -480,7 +486,7 @@ class EntityManager:
         return candidates
 
     def remove_entities(self, entity_ids: List[int]) -> int:
-        """Remove entities from entities indexes. Call after Memgraph deletion."""
+        """Remove entities from entities indexes. Call after GraphClient deletion."""
         if not entity_ids:
             return 0
 
@@ -523,7 +529,7 @@ class EntityManager:
 
             primary_name = primary_profile["canonical_name"]
 
-            neighbors = await self.memgraph.search_similar_entities(
+            neighbors = await self.graph_client.search_similar_entities(
                 primary_id, limit=50
             )
 
@@ -588,10 +594,10 @@ class EntityManager:
         Evaluate one pair for merge or hierarchy relationship.
         Returns candidate dict or None to skip.
         """
-        direct_edge = await self.memgraph.has_direct_edge(id_a, id_b)
+        direct_edge = await self.graph_client.has_direct_edge(id_a, id_b)
         if direct_edge:
             return None
-        hierarchy_edge = await self.memgraph.has_hierarchy_edge(id_a, id_b)
+        hierarchy_edge = await self.graph_client.has_hierarchy_edge(id_a, id_b)
         if hierarchy_edge:
             return None
 
@@ -611,8 +617,8 @@ class EntityManager:
             if not (fuzz_score >= 85 and type_a == type_b):
                 return None
 
-        neighbors_a = await self.memgraph.get_neighbor_ids(id_a)
-        neighbors_b = await self.memgraph.get_neighbor_ids(id_b)
+        neighbors_a = await self.graph_client.get_neighbor_ids(id_a)
+        neighbors_b = await self.graph_client.get_neighbor_ids(id_b)
         neighbors_a.discard(1)  # ignore user node
         neighbors_b.discard(1)
 

@@ -37,7 +37,7 @@ def get_topic_evolution_prompt(user_name: str) -> str:
     return render_prompt("pipeline/generate_topic_evolution.j2", user_name=user_name)
 
 
-async def enrich_facts_with_sources(facts: list, memgraph) -> List[Dict]:
+async def enrich_facts_with_sources(facts: list, graph_client) -> List[Dict]:
     """Enrich facts with timestamps and source message content."""
     enriched = []
     msg_id_to_indices: Dict[int, List[int]] = {}
@@ -57,7 +57,7 @@ async def enrich_facts_with_sources(facts: list, memgraph) -> List[Dict]:
 
     if msg_id_to_indices:
         try:
-            messages = await memgraph.get_messages_by_ids(
+            messages = await graph_client.get_messages_by_ids(
                 list(msg_id_to_indices.keys())
             )
             msg_text_map = {m["id"]: m.get("content", "") for m in messages}

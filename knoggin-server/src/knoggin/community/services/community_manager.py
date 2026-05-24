@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 from common.schema.dtypes import AgentConfig
 from common.utils.events import emit_community
@@ -52,8 +52,7 @@ class CommunityManager:
 
         # Format for community loop (List[str] of content)
         return {
-            cat: [e.content for e in entries]
-            for cat, entries in result.blocks.items()
+            cat: [e.content for e in entries] for cat, entries in result.blocks.items()
         }
 
     async def _is_discussion_active(self) -> bool:
@@ -84,7 +83,7 @@ class CommunityManager:
             return await self._get_agent_config(default_id)
 
         logger.warning(f"AAC: Agent '{agent_id}' not found, using ephemeral default")
-        llm_config = get_config().llm
+        llm_config = ConfigManager.get().config.llm
         return AgentConfig(
             id=agent_id,
             name="STELLA",
@@ -123,7 +122,7 @@ class CommunityManager:
         await self.resources.redis.set(
             RedisKeys.community_discussion_active(), discussion_id
         )
-        await self.resources.memgraph.community.create_discussion(
+        await self.resources.graph_client.community.create_discussion(
             discussion_id, topic, valid_agent_ids
         )
 
@@ -145,7 +144,7 @@ class CommunityManager:
                 )
                 self._active_discussion_id = None
                 try:
-                    await self.resources.memgraph.community.close_discussion(
+                    await self.resources.graph_client.community.close_discussion(
                         discussion_id
                     )
                 except Exception as e:
@@ -171,7 +170,7 @@ class CommunityManager:
             session_id=f"aac_{discussion_id}",
         )
 
-        config = get_config()
+        config = ConfigManager.get().config
         comm_cfg = config.developer_settings.community
         max_turns = comm_cfg.max_turns
 
@@ -222,7 +221,7 @@ class CommunityManager:
                 }
             )
 
-            await self.resources.memgraph.community.add_message(
+            await self.resources.graph_client.community.add_message(
                 discussion_id, agent_id, message, "assistant"
             )
 
@@ -274,7 +273,7 @@ class CommunityManager:
         comm_tools = CommunityTools(
             self.user_name,
             base_tools,
-            self.resources.memgraph.community,
+            self.resources.graph_client.community,
             discussion_id,
             agent.id,
             None,
@@ -355,7 +354,7 @@ class CommunityManager:
 
     async def _seed_discussion(self) -> Optional[Dict]:
         """Use seeding agent to analyze graph and initiate a discussion."""
-        config = get_config()
+        config = ConfigManager.get().config
         comm_cfg = config.developer_settings.community
         seeding_agent_id = comm_cfg.seeding_agent_id
 
@@ -469,7 +468,9 @@ class CommunityManager:
 
             data = safe_json_loads(clean)
             if not data or not isinstance(data, dict):
-                logger.warning("AAC: Failed to parse seeding response as valid JSON dict")
+                logger.warning(
+                    "AAC: Failed to parse seeding response as valid JSON dict"
+                )
                 logger.debug(f"Raw response: {response}")
                 raise ValueError("Seeding response not valid JSON dict")
 
@@ -522,17 +523,17 @@ class CommunityManager:
         lines = []
 
         try:
-            stats = await self.resources.memgraph.get_graph_stats()
-            notable = await self.resources.memgraph.get_notable_entities(8)
+            stats = await self.resources.graph_client.get_graph_stats()
+            notable = await self.resources.graph_client.get_notable_entities(8)
             recent_entities = (
-                await self.resources.memgraph.get_recently_active_entities(7, 5)
+                await self.resources.graph_client.get_recently_active_entities(7, 5)
             )
-            recent_facts = await self.resources.memgraph.get_recent_facts(7, 10)
+            recent_facts = await self.resources.graph_client.get_recent_facts(7, 10)
             past_discussions = (
-                await self.resources.memgraph.community.get_recent_discussions(5)
+                await self.resources.graph_client.community.get_recent_discussions(5)
             )
-            insights = await self.resources.memgraph.community.get_discussion_insights(
-                5
+            insights = (
+                await self.resources.graph_client.community.get_discussion_insights(5)
             )
         except Exception as e:
             logger.warning(f"Failed to gather seeding context: {e}")

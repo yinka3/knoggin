@@ -1,13 +1,13 @@
 import asyncio
 import json
 import os
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
 from loguru import logger
 
-from common.errors.exceptions import DependencyError
+from common.exceptions import DependencyError
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import parse_iso_time
 
@@ -33,7 +33,6 @@ class AsyncRedisClient:
     async def get_instance(cls) -> aioredis.Redis:
         """Async-safe singleton accessor with health check."""
         async with cls._get_lock():
-            # Check if instance exists and is responsive
             is_healthy = False
             if cls._instance is not None:
                 try:
@@ -97,9 +96,6 @@ class AsyncRedisClient:
         await ps.subscribe(channel)
         return ps
 
-    # ============ SMART PERSISTENCE (Compound Operations) ============
-
-
     @classmethod
     async def log_conversation_turn(
         cls,
@@ -119,9 +115,8 @@ class AsyncRedisClient:
         turn_key = str(turn_id)
 
         pipe = redis.pipeline()
-        # 1. Store the JSON data
         pipe.hset(conv_key, turn_key, json.dumps(payload))
-        # 2. Add to timeline (sorted by timestamp or turn_id)
+
         timestamp = payload.get("timestamp")
         score = turn_id
         if timestamp:
@@ -132,17 +127,10 @@ class AsyncRedisClient:
                 pass
         pipe.zadd(recent_key, {turn_key: score})
 
-        # 3. Prune old entries if we exceed limit
-        # We check card before executing to keep pipe simple,
-        # but for true atomicity we can just always run the remrange
+        # Keep history within limits
         pipe.zremrangebyrank(recent_key, 0, -(max_history + 1))
 
         await pipe.execute()
-
-        # 4. Secondary Cleanup: Remove Hash entries that were pruned from ZSet
-        # This is a bit more expensive so we only do it if the set shrunk
-        # but for simplicity we'll let the next history fetch handle dead keys
-        # or do a periodic cleanup.
 
     @classmethod
     async def update_message_mapping(
@@ -176,7 +164,6 @@ class AsyncRedisClient:
         for key in keys:
             pipe.expire(key, ttl)
         await pipe.execute()
-
 
     @classmethod
     async def load_formatted_memories(
@@ -225,8 +212,6 @@ class AsyncRedisClient:
 class RedisKeys:
     """Centralized Redis key patterns - session-scoped by default."""
 
-    # ============ PROJECT-SCOPED ============
-
     @staticmethod
     def projects(user: str) -> str:
         """Hash: project_id → JSON metadata"""
@@ -262,10 +247,8 @@ class RedisKeys:
         return f"last_profile_update:{user}:{project_id}:{entity_id}"
 
     @staticmethod
-    def profile_complete(user: str, project_id: str) -> str:
-        return f"profile_complete:{user}:{project_id}"
-
-    # ============ SESSION-SCOPED ============
+    def profile_complete(user: str, session_id: str) -> str:
+        return f"profile_complete:{user}:{session_id}"
 
     @staticmethod
     def get_session_scoped_keys(user: str, session: str) -> list[str]:
@@ -285,7 +268,6 @@ class RedisKeys:
             RedisKeys.heartbeat_counter(user, session),
         ]
 
-
     @staticmethod
     def global_next_turn_id(user: str, session: str) -> str:
         return f"global:next_turn_id:{user}:{session}"
@@ -301,8 +283,6 @@ class RedisKeys:
     @staticmethod
     def message_content(user: str, session: str) -> str:
         return f"message_content:{user}:{session}"
-
-
 
     @staticmethod
     def last_processed(user: str, session: str) -> str:
@@ -323,8 +303,6 @@ class RedisKeys:
     @staticmethod
     def last_activity(user: str, session: str) -> str:
         return f"last_activity:{user}:{session}"
-
-
 
     @staticmethod
     def merge_undo(session: str, primary_id: int, secondary_id: int) -> str:
@@ -360,8 +338,6 @@ class RedisKeys:
     def heartbeat_counter(user: str, session: str) -> str:
         return f"heartbeat_counter:{user}:{session}"
 
-    # ============ GLOBAL (no session) ============
-
     @staticmethod
     def global_next_msg_id() -> str:
         return "global:next_msg_id"
@@ -393,8 +369,6 @@ class RedisKeys:
     @staticmethod
     def global_stats() -> str:
         return "global:stats"
-
-    # ============ COMMUNITY (Global) ============
 
     @staticmethod
     def community_config() -> str:

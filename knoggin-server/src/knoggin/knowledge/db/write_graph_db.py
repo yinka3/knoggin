@@ -11,7 +11,7 @@ from knoggin.knowledge.services.entity_service import EntityManager
 
 async def write_batch_to_graph(
     batch: BatchResult,
-    memgraph: GraphClient,
+    graph_client: GraphClient,
     entities: EntityManager,
     session_id: str,
     project_id: str,
@@ -30,7 +30,7 @@ async def write_batch_to_graph(
 
     Args:
         batch: The BatchResult from processor.run()
-        memgraph: Memgraph memgraph instance
+        graph_client: GraphClient graph_client instance
         entities: Entity entities (for profiles, embeddings, aliases)
         session_id: Current session ID
         project_id: Current project ID
@@ -43,12 +43,14 @@ async def write_batch_to_graph(
     extraction_result = batch.extraction_result or []
     alias_updates = batch.alias_updates
 
-    # ── Zombie validation ───────────────────────────────────
+    # ── Zombie validation
     valid_existing_ids = set()
     existing_candidates = list(set(entity_ids) - new_entity_ids)
 
     if existing_candidates:
-        validation_result = await memgraph.validate_existing_ids(existing_candidates)
+        validation_result = await graph_client.validate_existing_ids(
+            existing_candidates
+        )
 
         if validation_result is None:
             logger.warning(
@@ -65,14 +67,14 @@ async def write_batch_to_graph(
                 )
                 entities.remove_entities(list(missing))
 
-    # ── Alias persistence ───────────────────────────────────
+    # ── Alias persistence
     if alias_updates:
-        await memgraph.update_entity_aliases(alias_updates)
+        await graph_client.update_entity_aliases(alias_updates)
         logger.info(f"Persisted alias updates for {len(alias_updates)} entities")
 
     safe_ids = valid_existing_ids.union(new_entity_ids)
 
-    # ── Build entity writes ─────────────────────────────────
+    # ── Build entity writes
     entities_to_write = []
 
     for eid in new_entity_ids:
@@ -114,7 +116,7 @@ async def write_batch_to_graph(
                 }
             )
 
-    # ── Build entity lookup for relationship resolution ─────
+    # ── Build entity lookup for relationship resolution
     entity_lookup = {}
     for eid in safe_ids:
         profile = entities.entity_profiles.get(eid)
@@ -133,7 +135,7 @@ async def write_batch_to_graph(
                 if mention:
                     entity_lookup[mention.lower()] = entry
 
-    # ── Build relationships ─────────────────────────────────
+    # ── Build relationships
     relationships = []
     for msg_result in extraction_result:
         msg_id = (
@@ -183,11 +185,11 @@ async def write_batch_to_graph(
                     f"(Entity missing or Zombie)"
                 )
 
-    # ── Write to graph ──────────────────────────────────────
+    # ── Write to graph
     if entities_to_write or relationships:
-        await memgraph.write_batch(entities_to_write, relationships)
+        await graph_client.write_batch(entities_to_write, relationships)
 
-    # ── Dirty entity tracking (for profile refinement) ──────
+    # ── Dirty entity tracking (for profile refinement)
     if redis_client and user_name and safe_ids:
         dirty_key = RedisKeys.dirty_entities(user_name, project_id)
         await redis_client.sadd(dirty_key, *[str(eid) for eid in safe_ids])
@@ -204,7 +206,7 @@ async def write_batch_to_graph(
 
 async def write_batch_callback(
     batch: BatchResult,
-    memgraph: GraphClient,
+    graph_client: GraphClient,
     entities: EntityManager,
     session_id: str,
     project_id: str,
@@ -227,7 +229,7 @@ async def write_batch_callback(
     try:
         await write_batch_to_graph(
             batch,
-            memgraph,
+            graph_client,
             entities,
             session_id=session_id,
             project_id=project_id,

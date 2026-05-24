@@ -154,7 +154,7 @@ async def fetch_conversation_turns(
     if up_to_msg_id:
         turn_key = await redis_client.hget(
             RedisKeys.msg_to_turn_lookup(user_name, session_id),
-            f"msg_{up_to_msg_id}",
+            str(up_to_msg_id),
         )
         if turn_key:
             turn_score = await redis_client.zscore(sorted_key, turn_key)
@@ -401,6 +401,7 @@ def format_vp05_input(entity_a: Dict, entity_b: Dict) -> str:
     output.extend(_format_entity_block(entity_a, "Entity A"))
     output.append("")
     output.extend(_format_entity_block(entity_b, "Entity B"))
+    return "\n".join(output)
 
 
 def safe_update(target_method: Callable, settings_model: Any) -> Optional[Any]:
@@ -424,7 +425,8 @@ def safe_update(target_method: Callable, settings_model: Any) -> Optional[Any]:
             return target_method(settings_model)
 
         valid_updates = {
-            k: v for k, v in all_settings.items()
+            k: v
+            for k, v in all_settings.items()
             if k in sig.parameters and v is not None
         }
         if valid_updates:

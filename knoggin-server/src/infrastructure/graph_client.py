@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -16,25 +16,27 @@ from knoggin.knowledge.db.writers.graph_writer import GraphWriter
 
 
 class GraphClient:
-    def __init__(self, postgres_client: PostgresClient):
-        self.postgres_client = postgres_client
-        self._entity_writer = EntityWriter(self.postgres_client)
-        self._fact_writer = FactWriter(self.postgres_client)
-        self._graph_writer = GraphWriter(self.postgres_client)
-        self._entity_reader = EntityReader(self.postgres_client)
-        self._fact_reader = FactReader(self.postgres_client)
-        self._graph_reader = GraphReader(self.postgres_client)
-        self._tools = ToolQueries(self.postgres_client)
-        self._community = CommunityStore(self.postgres_client)
-        logger.info("GraphClient initialized with Postgres/AGE backend")
+    def __init__(self, dsn: str):
+        self._postgres_client = PostgresClient(dsn=dsn)
+        self._entity_writer = EntityWriter(self._postgres_client)
+        self._fact_writer = FactWriter(self._postgres_client)
+        self._graph_writer = GraphWriter(self._postgres_client)
+        self._entity_reader = EntityReader(self._postgres_client)
+        self._fact_reader = FactReader(self._postgres_client)
+        self._graph_reader = GraphReader(self._postgres_client)
+        self._tools = ToolQueries(self._postgres_client)
+        self._community = CommunityStore(self._postgres_client)
+        logger.info("GraphClient initialized with internal Postgres/AGE backend")
+
+    async def connect(self):
+        await self._postgres_client.connect()
+
+    async def close(self):
+        await self._postgres_client.close()
 
     @property
     def community(self) -> CommunityStore:
         return self._community
-
-
-
-    # ===== WRITER DELEGATIONS =====
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         return await self._graph_writer.save_message_logs(messages)
@@ -107,8 +109,6 @@ class GraphClient:
 
     async def delete_relationship(self, entity_a_id: int, entity_b_id: int) -> bool:
         return await self._graph_writer.delete_relationship(entity_a_id, entity_b_id)
-
-    # ===== READER DELEGATIONS =====
 
     async def get_max_entity_id(self) -> int:
         return await self._entity_reader.get_max_entity_id()
@@ -264,8 +264,6 @@ class GraphClient:
         self, entity_ids: List[int]
     ) -> Dict[int, Set[int]]:
         return await self._graph_reader.get_neighbor_ids_batch(entity_ids)
-
-    # ===== TOOL QUERY DELEGATIONS =====
 
     async def get_hot_topic_context_with_messages(
         self, hot_topic_names: List[str], msg_limit: int = 5, slim: bool = False

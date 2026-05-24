@@ -4,11 +4,11 @@ from typing import Dict, List
 
 from loguru import logger
 
-from infrastructure.postgres_client import PostgresClient
+from infrastructure.db_client import DBClient
 
 
 class GraphWriter:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 
@@ -21,12 +21,11 @@ class GraphWriter:
 
         if not self.client.async_pool:
             raise RuntimeError("PostgresClient async_pool is not initialized")
-            
+
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # 1. Write to Graph
-                    # Notice we skip saving embedding to graph node to save space
+                    # Write to Graph
                     cypher = """
                     UNWIND $batch AS msg
                     MERGE (m:Message {id: msg.id})
@@ -35,22 +34,27 @@ class GraphWriter:
                         m.timestamp = msg.timestamp
                     RETURN count(m)
                     """
-                    
+
                     batch_params = []
                     for msg in messages:
-                        batch_params.append({
-                            "id": msg["id"],
-                            "content": msg["content"],
-                            "role": msg["role"],
-                            "timestamp": msg.get("timestamp", self._current_time_ms())
-                        })
-                        
-                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({"batch": batch_params}),))
-                    
-                    # 2. Write to Hybrid Full Text Search Table
-                    # We will use to_tsvector('english', content) inside the INSERT
+                        batch_params.append(
+                            {
+                                "id": msg["id"],
+                                "content": msg["content"],
+                                "role": msg["role"],
+                                "timestamp": msg.get(
+                                    "timestamp", self._current_time_ms()
+                                ),
+                            }
+                        )
+
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (json.dumps({"batch": batch_params}),),
+                    )
+
+                    # Write to Hybrid Full Text Search Table
                     for msg in messages:
-                        # Assuming project/session is accessible or default for now
                         await cur.execute(
                             """
                             INSERT INTO message_search (message_id, user_name, session_id, content_tsvector)
@@ -58,7 +62,12 @@ class GraphWriter:
                             ON CONFLICT (message_id) DO UPDATE SET
                                 content_tsvector = EXCLUDED.content_tsvector
                             """,
-                            (msg["id"], msg.get("user_name", "default_user"), msg.get("session_id", "default_session"), msg["content"])
+                            (
+                                msg["id"],
+                                msg.get("user_name", "default_user"),
+                                msg.get("session_id", "default_session"),
+                                msg["content"],
+                            ),
                         )
 
         logger.info(f"Saved {len(messages)} message logs to Postgres/AGE.")
@@ -72,21 +81,26 @@ class GraphWriter:
         CREATE (child)-[:PART_OF {created_at: $now}]->(parent)
         RETURN true as created
         """
-        
+
         try:
             res = await self.client.execute_write(
-                self.client.build_cypher(cypher, "created agtype"), 
-                (json.dumps({"child_id": child_id, "parent_id": parent_id, "now": self._current_time_ms()}),)
+                self.client.build_cypher(cypher, "created agtype"),
+                (
+                    json.dumps(
+                        {
+                            "child_id": child_id,
+                            "parent_id": parent_id,
+                            "now": self._current_time_ms(),
+                        }
+                    ),
+                ),
             )
-            # execute_write returns rowcount in our PostgresClient wrapper
-            # Wait, execute_write returns rowcount. If we want the actual record, 
-            # we should use execute_read since we are returning a value from cypher
-            # and want to inspect it. execute_read handles simple writes fine if autocommit=True, 
-            # but we use execute_write to guarantee transaction. Let's stick to execute_write and just rely on rowcount.
-            # Actually, rowcount of SELECT from cypher will be 1 if it returned `true as created`.
+            # execute_write returns rowcount, which will be > 0 if the edge was created successfully.
             return res > 0
         except Exception as e:
-            logger.error(f"Failed to create hierarchy edge ({child_id})-[:PART_OF]->({parent_id}): {e}")
+            logger.error(
+                f"Failed to create hierarchy edge ({child_id})-[:PART_OF]->({parent_id}): {e}"
+            )
             return False
 
     async def delete_relationship(self, entity_a_id: int, entity_b_id: int) -> bool:
@@ -98,14 +112,18 @@ class GraphWriter:
         try:
             res = await self.client.execute_write(
                 self.client.build_cypher(cypher, "deleted agtype"),
-                (json.dumps({"a_id": entity_a_id, "b_id": entity_b_id}),)
+                (json.dumps({"a_id": entity_a_id, "b_id": entity_b_id}),),
             )
             return res > 0
         except Exception as e:
-            logger.error(f"Failed to delete relationship ({entity_a_id}, {entity_b_id}): {e}")
+            logger.error(
+                f"Failed to delete relationship ({entity_a_id}, {entity_b_id}): {e}"
+            )
             return False
 
-    async def create_preference(self, id: str, content: str, kind: str, session_id: str) -> bool:
+    async def create_preference(
+        self, id: str, content: str, kind: str, session_id: str
+    ) -> bool:
         cypher = """
         CREATE (p:Preference {
             id: $id,
@@ -119,10 +137,17 @@ class GraphWriter:
         try:
             res = await self.client.execute_write(
                 self.client.build_cypher(cypher, "id agtype"),
-                (json.dumps({
-                    "id": id, "content": content, "kind": kind, 
-                    "session_id": session_id, "now": self._current_time_ms()
-                }),)
+                (
+                    json.dumps(
+                        {
+                            "id": id,
+                            "content": content,
+                            "kind": kind,
+                            "session_id": session_id,
+                            "now": self._current_time_ms(),
+                        }
+                    ),
+                ),
             )
             return res > 0
         except Exception as e:
@@ -138,13 +163,13 @@ class GraphWriter:
         try:
             res = await self.client.execute_write(
                 self.client.build_cypher(cypher, "deleted agtype"),
-                (json.dumps({"id": pref_id}),)
+                (json.dumps({"id": pref_id}),),
             )
             return res > 0
         except Exception as e:
             logger.error(f"Failed to delete preference: {e}")
             return False
-            
+
     async def merge_entities(self, primary_id: int, secondary_id: int) -> bool:
         if primary_id == secondary_id:
             logger.warning(f"Self-merge rejected: {primary_id}")
@@ -152,12 +177,12 @@ class GraphWriter:
 
         if not self.client.async_pool:
             raise RuntimeError("PostgresClient async_pool is not initialized")
-            
+
         try:
             async with self.client.async_pool.connection() as conn:
                 async with conn.transaction():
                     async with conn.cursor() as cur:
-                        # Step 1: Validate both exist
+                        # Validate both exist
                         cypher_validate = """
                         MATCH (p:Entity {id: $primary_id})
                         MATCH (s:Entity {id: $secondary_id})
@@ -170,29 +195,49 @@ class GraphWriter:
                             s.confidence as s_conf,
                             s.last_mentioned as s_last
                         """
-                        q_val = self.client.build_cypher(cypher_validate, "p_name agtype, p_aliases agtype, p_conf agtype, p_last agtype, s_name agtype, s_aliases agtype, s_conf agtype, s_last agtype")
-                        await cur.execute(q_val, (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                        q_val = self.client.build_cypher(
+                            cypher_validate,
+                            "p_name agtype, p_aliases agtype, p_conf agtype, p_last agtype, s_name agtype, s_aliases agtype, s_conf agtype, s_last agtype",
+                        )
+                        await cur.execute(
+                            q_val,
+                            (
+                                json.dumps(
+                                    {
+                                        "primary_id": primary_id,
+                                        "secondary_id": secondary_id,
+                                    }
+                                ),
+                            ),
+                        )
                         check = await cur.fetchone()
 
                         if not check:
-                            logger.error(f"Merge failed: one or both entities not found ({primary_id}, {secondary_id})")
+                            logger.error(
+                                f"Merge failed: one or both entities not found ({primary_id}, {secondary_id})"
+                            )
                             return False
 
-                        # Clean values
                         p_aliases = check["p_aliases"] or []
                         s_aliases = check["s_aliases"] or []
-                        s_name_raw = check["s_name"].strip('"') if isinstance(check["s_name"], str) else check["s_name"]
-                        
+                        s_name_raw = (
+                            check["s_name"].strip('"')
+                            if isinstance(check["s_name"], str)
+                            else check["s_name"]
+                        )
+
                         p_conf = float(check["p_conf"] or 0)
                         s_conf = float(check["s_conf"] or 0)
                         p_last = int(check["p_last"] or 0)
                         s_last = int(check["s_last"] or 0)
-                        
-                        combined_aliases = list(set(p_aliases + s_aliases + [s_name_raw]))
+
+                        combined_aliases = list(
+                            set(p_aliases + s_aliases + [s_name_raw])
+                        )
                         new_conf = s_conf if s_conf > p_conf else p_conf
                         new_last = s_last if s_last > p_last else p_last
 
-                        # Step 2: Update primary
+                        # Update primary
                         cypher_upd_p = """
                         MATCH (p:Entity {id: $primary_id})
                         SET p.aliases = $aliases,
@@ -201,25 +246,58 @@ class GraphWriter:
                             p.last_mentioned = $last
                         """
                         await cur.execute(
-                            self.client.build_cypher(cypher_upd_p), 
-                            (json.dumps({"primary_id": primary_id, "aliases": combined_aliases, "now": self._current_time_ms(), "conf": new_conf, "last": new_last}),)
+                            self.client.build_cypher(cypher_upd_p),
+                            (
+                                json.dumps(
+                                    {
+                                        "primary_id": primary_id,
+                                        "aliases": combined_aliases,
+                                        "now": self._current_time_ms(),
+                                        "conf": new_conf,
+                                        "last": new_last,
+                                    }
+                                ),
+                            ),
                         )
 
-                        # Step 2.5: Remove direct relationship
+                        # Remove direct relationship
                         cypher_del_direct = """
                         MATCH (p:Entity {id: $primary_id})-[r:RELATED_TO]-(s:Entity {id: $secondary_id})
                         DELETE r
                         """
-                        await cur.execute(self.client.build_cypher(cypher_del_direct), (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                        await cur.execute(
+                            self.client.build_cypher(cypher_del_direct),
+                            (
+                                json.dumps(
+                                    {
+                                        "primary_id": primary_id,
+                                        "secondary_id": secondary_id,
+                                    }
+                                ),
+                            ),
+                        )
 
-                        # Step 3: Array Consolidation for RELATED_TO
+                        # Array Consolidation for RELATED_TO
                         cypher_fetch_edges = """
                         MATCH (e:Entity)-[r:RELATED_TO]-(target:Entity)
                         WHERE e.id IN [$primary_id, $secondary_id]
                         RETURN e.id as source_id, target.id as target_id, r.weight as weight, r.confidence as conf, r.message_ids as msg_ids, r.last_seen as last_seen
                         """
-                        q_edges = self.client.build_cypher(cypher_fetch_edges, "source_id agtype, target_id agtype, weight agtype, conf agtype, msg_ids agtype, last_seen agtype")
-                        await cur.execute(q_edges, (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                        q_edges = self.client.build_cypher(
+                            cypher_fetch_edges,
+                            "source_id agtype, target_id agtype, weight agtype, conf agtype, msg_ids agtype, last_seen agtype",
+                        )
+                        await cur.execute(
+                            q_edges,
+                            (
+                                json.dumps(
+                                    {
+                                        "primary_id": primary_id,
+                                        "secondary_id": secondary_id,
+                                    }
+                                ),
+                            ),
+                        )
                         edge_rows = await cur.fetchall()
 
                         merged_edges = {}
@@ -229,9 +307,14 @@ class GraphWriter:
                             c = float(row["conf"] or 0)
                             ls = int(row["last_seen"] or 0)
                             m_ids = set(row["msg_ids"] or [])
-                            
+
                             if t_id not in merged_edges:
-                                merged_edges[t_id] = {"weight": w, "conf": c, "msg_ids": m_ids, "last_seen": ls}
+                                merged_edges[t_id] = {
+                                    "weight": w,
+                                    "conf": c,
+                                    "msg_ids": m_ids,
+                                    "last_seen": ls,
+                                }
                             else:
                                 merged_edges[t_id]["weight"] += w
                                 if c > merged_edges[t_id]["conf"]:
@@ -239,25 +322,37 @@ class GraphWriter:
                                 if ls > merged_edges[t_id]["last_seen"]:
                                     merged_edges[t_id]["last_seen"] = ls
                                 merged_edges[t_id]["msg_ids"].update(m_ids)
-                        
+
                         if merged_edges:
                             cypher_del_edges = """
                             MATCH (e:Entity)-[r:RELATED_TO]-(target:Entity)
                             WHERE e.id IN [$primary_id, $secondary_id]
                             DELETE r
                             """
-                            await cur.execute(self.client.build_cypher(cypher_del_edges), (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                            await cur.execute(
+                                self.client.build_cypher(cypher_del_edges),
+                                (
+                                    json.dumps(
+                                        {
+                                            "primary_id": primary_id,
+                                            "secondary_id": secondary_id,
+                                        }
+                                    ),
+                                ),
+                            )
 
                             edges_batch = []
                             for t_id, props in merged_edges.items():
-                                edges_batch.append({
-                                    "target_id": t_id,
-                                    "weight": props["weight"],
-                                    "conf": props["conf"],
-                                    "msg_ids": list(props["msg_ids"]),
-                                    "last_seen": props["last_seen"]
-                                })
-                                
+                                edges_batch.append(
+                                    {
+                                        "target_id": t_id,
+                                        "weight": props["weight"],
+                                        "conf": props["conf"],
+                                        "msg_ids": list(props["msg_ids"]),
+                                        "last_seen": props["last_seen"],
+                                    }
+                                )
+
                             cypher_write_edges = """
                             UNWIND $batch AS edge
                             MATCH (p:Entity {id: $primary_id})
@@ -272,9 +367,16 @@ class GraphWriter:
                                 last_seen: edge.last_seen
                             }]->(node_b)
                             """
-                            await cur.execute(self.client.build_cypher(cypher_write_edges), (json.dumps({"primary_id": primary_id, "batch": edges_batch}),))
+                            await cur.execute(
+                                self.client.build_cypher(cypher_write_edges),
+                                (
+                                    json.dumps(
+                                        {"primary_id": primary_id, "batch": edges_batch}
+                                    ),
+                                ),
+                            )
 
-                        # Step 4: Transfer HAS_FACT, BELONGS_TO, PART_OF (children)
+                        # Transfer HAS_FACT, BELONGS_TO, PART_OF (children)
                         cypher_transfer_facts = """
                         MATCH (s:Entity {id: $secondary_id})-[r:HAS_FACT]->(f:Fact)
                         MATCH (p:Entity {id: $primary_id})
@@ -282,7 +384,17 @@ class GraphWriter:
                         SET f.source_entity_id = $primary_id
                         DELETE r
                         """
-                        await cur.execute(self.client.build_cypher(cypher_transfer_facts), (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                        await cur.execute(
+                            self.client.build_cypher(cypher_transfer_facts),
+                            (
+                                json.dumps(
+                                    {
+                                        "primary_id": primary_id,
+                                        "secondary_id": secondary_id,
+                                    }
+                                ),
+                            ),
+                        )
 
                         cypher_transfer_topics = """
                         MATCH (s:Entity {id: $secondary_id})-[r:BELONGS_TO]->(t:Topic)
@@ -290,7 +402,17 @@ class GraphWriter:
                         MERGE (p)-[:BELONGS_TO]->(t)
                         DELETE r
                         """
-                        await cur.execute(self.client.build_cypher(cypher_transfer_topics), (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                        await cur.execute(
+                            self.client.build_cypher(cypher_transfer_topics),
+                            (
+                                json.dumps(
+                                    {
+                                        "primary_id": primary_id,
+                                        "secondary_id": secondary_id,
+                                    }
+                                ),
+                            ),
+                        )
 
                         cypher_transfer_children = """
                         MATCH (child:Entity)-[r:PART_OF]->(s:Entity {id: $secondary_id})
@@ -298,23 +420,50 @@ class GraphWriter:
                         MERGE (child)-[:PART_OF]->(p)
                         DELETE r
                         """
-                        await cur.execute(self.client.build_cypher(cypher_transfer_children), (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                        await cur.execute(
+                            self.client.build_cypher(cypher_transfer_children),
+                            (
+                                json.dumps(
+                                    {
+                                        "primary_id": primary_id,
+                                        "secondary_id": secondary_id,
+                                    }
+                                ),
+                            ),
+                        )
 
-                        # Step 4c: Parent transfer with conflict detection
+                        # Parent transfer with conflict detection
                         cypher_parents = """
                         MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->(s_parent:Entity)
                         MATCH (p:Entity {id: $primary_id})
                         OPTIONAL MATCH (p)-[:PART_OF]->(p_parent:Entity)
                         RETURN s_parent.id AS s_parent_id, p_parent.id AS p_parent_id
                         """
-                        await cur.execute(self.client.build_cypher(cypher_parents, "s_parent_id agtype, p_parent_id agtype"), (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                        await cur.execute(
+                            self.client.build_cypher(
+                                cypher_parents, "s_parent_id agtype, p_parent_id agtype"
+                            ),
+                            (
+                                json.dumps(
+                                    {
+                                        "primary_id": primary_id,
+                                        "secondary_id": secondary_id,
+                                    }
+                                ),
+                            ),
+                        )
                         record_4c = await cur.fetchone()
 
                         if record_4c and record_4c["s_parent_id"] is not None:
                             if record_4c["p_parent_id"] is not None:
-                                logger.warning(f"Hierarchy conflict during merge: primary {primary_id} and secondary {secondary_id} both have parents. Dropping secondary's parent edge.")
+                                logger.warning(
+                                    f"Hierarchy conflict during merge: primary {primary_id} and secondary {secondary_id} both have parents. Dropping secondary's parent edge."
+                                )
                                 cypher_del_s_parent = "MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->() DELETE r"
-                                await cur.execute(self.client.build_cypher(cypher_del_s_parent), (json.dumps({"secondary_id": secondary_id}),))
+                                await cur.execute(
+                                    self.client.build_cypher(cypher_del_s_parent),
+                                    (json.dumps({"secondary_id": secondary_id}),),
+                                )
                             else:
                                 cypher_trans_parent = """
                                 MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->(parent:Entity)
@@ -322,15 +471,36 @@ class GraphWriter:
                                 MERGE (p)-[:PART_OF]->(parent)
                                 DELETE r
                                 """
-                                await cur.execute(self.client.build_cypher(cypher_trans_parent), (json.dumps({"primary_id": primary_id, "secondary_id": secondary_id}),))
+                                await cur.execute(
+                                    self.client.build_cypher(cypher_trans_parent),
+                                    (
+                                        json.dumps(
+                                            {
+                                                "primary_id": primary_id,
+                                                "secondary_id": secondary_id,
+                                            }
+                                        ),
+                                    ),
+                                )
 
-                        # Step 5: Delete Secondary from Graph
-                        cypher_del_s = "MATCH (s:Entity {id: $secondary_id}) DETACH DELETE s"
-                        await cur.execute(self.client.build_cypher(cypher_del_s), (json.dumps({"secondary_id": secondary_id}),))
+                        # Delete Secondary from Graph
+                        cypher_del_s = (
+                            "MATCH (s:Entity {id: $secondary_id}) DETACH DELETE s"
+                        )
+                        await cur.execute(
+                            self.client.build_cypher(cypher_del_s),
+                            (json.dumps({"secondary_id": secondary_id}),),
+                        )
 
                         # Dual-Write Cleanup
-                        await cur.execute("DELETE FROM entity_search WHERE entity_id = %s", (secondary_id,))
-                        await cur.execute("UPDATE fact_search SET entity_id = %s WHERE entity_id = %s", (primary_id, secondary_id))
+                        await cur.execute(
+                            "DELETE FROM entity_search WHERE entity_id = %s",
+                            (secondary_id,),
+                        )
+                        await cur.execute(
+                            "UPDATE fact_search SET entity_id = %s WHERE entity_id = %s",
+                            (primary_id, secondary_id),
+                        )
 
                         logger.info(f"Merged entity {secondary_id} into {primary_id}")
                         return True

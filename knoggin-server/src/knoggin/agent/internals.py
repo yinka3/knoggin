@@ -183,9 +183,6 @@ def _format_evidence(
     if evidence.facts:
         msg += f"\n**Fact check results:**\n{format_fact_results(evidence.facts)}\n"
 
-    if evidence.summary:
-        msg += f"\n**Evidence summary (compressed):**\n{evidence.summary}\n"
-
     return msg
 
 
@@ -249,31 +246,34 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             target.extend(data)
 
     strategies = {
-        "search_messages":     lambda ev, d, cfg: _acc_messages(ev, d, cfg),
-        "search_entity":       lambda ev, d, cfg: _merge_unique(
+        "search_messages": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
+        "search_entity": lambda ev, d, cfg: _merge_unique(
             ev.profiles, d if isinstance(d, list) else [], lambda x: x["id"]
         ),
-        "get_connections":     lambda ev, d, cfg: _merge_unique(
-            ev.graph, d if isinstance(d, list) else [],
+        "get_connections": lambda ev, d, cfg: _merge_unique(
+            ev.graph,
+            d if isinstance(d, list) else [],
             lambda x: (x.get("source"), x.get("target")),
         ),
         "get_recent_activity": lambda ev, d, cfg: _merge_unique(
-            ev.graph, d if isinstance(d, list) else [],
+            ev.graph,
+            d if isinstance(d, list) else [],
             lambda x: (x.get("source"), x.get("target")),
         ),
-        "find_path":           lambda ev, d, cfg: ev.paths.extend(
+        "find_path": lambda ev, d, cfg: ev.paths.extend(
             d if isinstance(d, list) else []
         ),
-        "get_hierarchy":       lambda ev, d, cfg: _acc_extend_or_append(ev.hierarchy, d),
-        "fact_check":          lambda ev, d, cfg: _acc_extend_or_append(ev.facts, d),
-        "search_files":        lambda ev, d, cfg: _merge_unique(
-            ev.messages, _normalize_file_chunks(d) if isinstance(d, list) else [],
+        "get_hierarchy": lambda ev, d, cfg: _acc_extend_or_append(ev.hierarchy, d),
+        "fact_check": lambda ev, d, cfg: _acc_extend_or_append(ev.facts, d),
+        "search_files": lambda ev, d, cfg: _merge_unique(
+            ev.messages,
+            _normalize_file_chunks(d) if isinstance(d, list) else [],
             lambda x: x["id"],
         ),
-        "web_search":          lambda ev, d, cfg: _merge_unique(
+        "web_search": lambda ev, d, cfg: _merge_unique(
             ev.sources, d if isinstance(d, list) else [], lambda x: x.get("url")
         ),
-        "news_search":         lambda ev, d, cfg: _merge_unique(
+        "news_search": lambda ev, d, cfg: _merge_unique(
             ev.sources, d if isinstance(d, list) else [], lambda x: x.get("url")
         ),
     }
@@ -281,10 +281,6 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
     strategy = strategies.get(tool_name)
     if strategy:
         strategy(ctx.evidence, data, ctx.config)
-
-
-
-
 
 
 def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:

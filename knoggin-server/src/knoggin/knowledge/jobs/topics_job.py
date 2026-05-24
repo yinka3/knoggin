@@ -5,10 +5,11 @@ from typing import Awaitable, Callable
 import redis.asyncio as aioredis
 from loguru import logger
 
+from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import TopicConfigResult
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
+from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import get_topic_evolution_prompt

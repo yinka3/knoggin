@@ -25,7 +25,7 @@ TOOL_DISPATCH = {
     "web_search": ("web_search", ["query", "limit", "freshness"]),
     "news_search": ("news_search", ["query", "limit", "freshness"]),
     "request_clarification": None,  # handled specially
-    "request_replanning": None,     # handled specially
+    "request_replanning": None,  # handled specially
     "save_insight": ("save_insight", ["content"]),
     "spawn_specialist": (
         "spawn_specialist",
@@ -46,7 +46,7 @@ class Tools(SearchTools, GraphTools, MemoryTools):
         memory: Optional[MemoryManager] = None,
     ):
         self.session_id = session_id
-        self.memgraph = ResourceManager.get().memgraph
+        self.graph_client = ResourceManager.get().graph_client
         self.entities = entities
         self.user_name = user_name
         self.redis = ResourceManager.get().redis

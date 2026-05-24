@@ -12,14 +12,14 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 class EmbeddingService:
     """Embedding infrastructure for the knowledge graph."""
 
-    BATCH_SIZE = 64  # Process in chunks to avoid OOM
+    BATCH_SIZE = 64
 
     def __init__(
         self,
         embedding_model: str = "dunzhang/stella_en_1.5B_v5",
         reranker_model: str = "BAAI/bge-reranker-large",
         device: str = None,
-        batch_size: int = 64,
+        batch_size: int = 32,
     ):
         self.device = device or "cpu"
         self.batch_size = batch_size
@@ -32,7 +32,7 @@ class EmbeddingService:
         if str(self.device) == "cpu":
             self._config_kwargs["use_memory_efficient_attention"] = False
             self._config_kwargs["unpad_inputs"] = False
-
+        self._model_Kwargs = {"torch_dtype": torch.float16}
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
 
@@ -52,15 +52,18 @@ class EmbeddingService:
                 self._embedding_model,
                 trust_remote_code=True,
                 device=self.device,
-                model_kwargs={"torch_dtype": torch.float16},
+                model_kwargs=self._model_Kwargs,
                 config_kwargs=self._config_kwargs,
             )
-            reranker = CrossEncoder(self._reranker_model, device=self.device)
+            reranker = CrossEncoder(
+                self._reranker_model,
+                device=self.device,
+                model_kwargs=self._model_Kwargs,
+            )
             return embedder, reranker
 
         self._embedder, self._reranker = await loop.run_in_executor(None, _load_models)
 
-        # Fix 4: Dynamically determine embedding dimension
         if self._embedder:
             self._embedding_dim = self._embedder.get_sentence_embedding_dimension()
             logger.info(f"Loaded models on {self.device} | dims={self._embedding_dim}")
@@ -71,7 +74,6 @@ class EmbeddingService:
     def embedding_dim(self) -> int:
         """Dynamically determined dimension of the loaded embedding model."""
         if self._embedding_dim is None:
-            # In case someone calls this before load_models()
             return 1024
         return self._embedding_dim
 

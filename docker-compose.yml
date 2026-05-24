@@ -25,45 +25,26 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  memgraph:
-    image: memgraph/memgraph-mage:3.2
-    container_name: knoggin-memgraph
+  postgres:
+    build:
+      context: docker/postgres
+      dockerfile: Dockerfile
+    container_name: knoggin-postgres
     ports:
-      - "127.0.0.1:7687:7687"
-      - "127.0.0.1:7444:7444"
-    volumes:
-      - knoggin_mg_lib:/var/lib/memgraph
-      - knoggin_mg_log:/var/log/memgraph
-    command:
-      [
-        "--log-level=WARNING",
-        "--auth-module-mappings=",
-        "--storage-snapshot-on-exit=true",
-      ]
-    mem_limit: 3g
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "echo 'RETURN 1;' | mgconsole --host localhost --port 7687",
-        ]
-      interval: 10s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-
-  memgraph-lab:
-    image: memgraph/lab:2.22.0
-    container_name: knoggin-memgraph-lab
-    ports:
-      - "127.0.0.1:3001:3000"
-    depends_on:
-      memgraph:
-        condition: service_healthy
+      - "127.0.0.1:5432:5432"
     environment:
-      - QUICK_CONNECT_MG_HOST=memgraph
-      - QUICK_CONNECT_MG_PORT=7687
+      - POSTGRES_USER=knoggin
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-knoggin}
+      - POSTGRES_DB=knoggin_db
+    volumes:
+      - knoggin_pg_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knoggin -d knoggin_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   knoggin-api:
@@ -79,13 +60,12 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - MEMGRAPH_HOST=memgraph
-      - MEMGRAPH_PORT=7687
+      - DATABASE_URL=${DATABASE_URL:-postgresql://knoggin:knoggin@postgres:5432/knoggin_db}
       - CONFIG_DIR=/app/config
     depends_on:
       redis:
         condition: service_healthy
-      memgraph:
+      postgres:
         condition: service_healthy
     healthcheck:
       test:
@@ -102,6 +82,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  knoggin_mg_lib:
-  knoggin_mg_log:
+  knoggin_pg_data:
   knoggin_redis_data:

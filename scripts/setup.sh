@@ -7,16 +7,16 @@ if [ -f .env ]; then
 fi
 
 REDIS_PW=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
-MG_PW=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+PG_PW=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
 
 cat > .env << EOF
 REDIS_PASSWORD=${REDIS_PW}
-MEMGRAPH_USER=vestige
-MEMGRAPH_PASSWORD=${MG_PW}
-MEMGRAPH_HOST=memgraph
-MEMGRAPH_PORT=7687
 REDIS_HOST=redis
 REDIS_PORT=6379
+POSTGRES_USER=knoggin
+POSTGRES_PASSWORD=${PG_PW}
+POSTGRES_DB=knoggin_db
+DATABASE_URL=postgresql://knoggin:${PG_PW}@postgres:5432/knoggin_db
 EOF
 
 echo "Generated .env with secure passwords"

@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.utils.time_utils import parse_iso_time
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
@@ -23,14 +23,16 @@ class AACJob(BaseJob):
         return "aac_discussion"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        config = get_config()
+        config = ConfigManager.get().config
         comm_cfg = config.developer_settings.community
         if not comm_cfg.enabled:
             return False
 
         interval_min = comm_cfg.interval_minutes
         last_run = await self.resources.redis.get(
-            RedisKeys.job_last_run(self.name, ctx.user_name, self.project_state.project_id)
+            RedisKeys.job_last_run(
+                self.name, ctx.user_name, self.project_state.project_id
+            )
         )
 
         if not last_run:
@@ -42,17 +44,21 @@ class AACJob(BaseJob):
         return (now - last_dt).total_seconds() >= (interval_min * 60)
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        logger.info(f"AAC: Starting scheduled discussion for {ctx.user_name} on project {self.project_state.project_id}")
+        logger.info(
+            f"AAC: Starting scheduled discussion for {ctx.user_name} on project {self.project_state.project_id}"
+        )
 
         manager = CommunityManager(self.project_state, ctx.user_name)
         try:
             await manager.trigger_discussion()
 
-            if self.resources.community_store:
-                await self.resources.community_store.delete_old_discussions(30)
+            if self.resources.graph_client and self.resources.graph_client.community:
+                await self.resources.graph_client.community.delete_old_discussions(30)
 
             await self.resources.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, self.project_state.project_id),
+                RedisKeys.job_last_run(
+                    self.name, ctx.user_name, self.project_state.project_id
+                ),
                 datetime.now(timezone.utc).isoformat(),
             )
 

@@ -6,7 +6,7 @@ from loguru import logger
 
 from common.utils.events import emit
 from infrastructure.graph_client import GraphClient
-from infrastructure.jobs.base import BaseJob, JobContext, JobResult
+from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.entity_service import EntityManager
 
@@ -23,7 +23,7 @@ class EntityCleanupJob(BaseJob):
     def __init__(
         self,
         user_name: str,
-        memgraph: GraphClient,
+        graph_client: GraphClient,
         entities: EntityManager,
         redis_client: aioredis.Redis,
         interval_hours: int = 24,
@@ -31,7 +31,7 @@ class EntityCleanupJob(BaseJob):
         stale_junk_days: int = 30,
     ):
         self.user_name = user_name
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.redis = redis_client
         self.entities = entities
 
@@ -66,7 +66,7 @@ class EntityCleanupJob(BaseJob):
         with logger.contextualize(
             user=ctx.user_name, job=self.name, session=ctx.session_id
         ):
-            await self.memgraph.cleanup_null_entities()
+            await self.graph_client.cleanup_null_entities()
 
             now_ms = int(time.time() * 1000)
             orphan_cutoff = now_ms - self.orphan_cutoff_ms
@@ -80,7 +80,7 @@ class EntityCleanupJob(BaseJob):
                 )
                 return JobResult(success=True, summary="User entity not initialized")
 
-            orphan_ids = await self.memgraph.get_orphan_entities(
+            orphan_ids = await self.graph_client.get_orphan_entities(
                 user_id, orphan_cutoff, junk_cutoff
             )
 
@@ -113,7 +113,7 @@ class EntityCleanupJob(BaseJob):
             deleted_count = 0
             for i in range(0, len(orphan_ids), batch_size):
                 batch = orphan_ids[i : i + batch_size]
-                deleted_count += await self.memgraph.bulk_delete_entities(batch)
+                deleted_count += await self.graph_client.bulk_delete_entities(batch)
                 self.entities.remove_entities(batch)
                 await asyncio.sleep(0.1)  # Yield to other tasks
 

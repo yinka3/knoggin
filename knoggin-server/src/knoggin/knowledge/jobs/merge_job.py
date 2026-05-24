@@ -34,7 +34,7 @@ class MergeDetectionJob(BaseJob):
         self,
         user_name: str,
         entities: EntityManager,
-        memgraph: GraphClient,
+        graph_client: GraphClient,
         llm_client: LLMService,
         topic_config: TopicConfig,
         redis_client: aioredis.Redis,
@@ -46,7 +46,7 @@ class MergeDetectionJob(BaseJob):
 
         self.user_name = user_name
         self.entities = entities
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.redis = redis_client
         self.llm = llm_client
         self.topic_config = topic_config
@@ -122,10 +122,10 @@ class MergeDetectionJob(BaseJob):
         system = self.merge_prompt if self.merge_prompt else get_merge_judgment_prompt()
 
         enriched_facts_a = await enrich_facts_with_sources(
-            candidate.get("facts_a", []), self.memgraph
+            candidate.get("facts_a", []), self.graph_client
         )
         enriched_facts_b = await enrich_facts_with_sources(
-            candidate.get("facts_b", []), self.memgraph
+            candidate.get("facts_b", []), self.graph_client
         )
 
         user_content = format_vp05_input(
@@ -192,13 +192,15 @@ class MergeDetectionJob(BaseJob):
 
         for attempt in range(1, max_retries + 1):
             try:
-                success = await self.memgraph.merge_entities(primary_id, secondary_id)
+                success = await self.graph_client.merge_entities(
+                    primary_id, secondary_id
+                )
 
                 if success:
                     now = datetime.now(timezone.utc)
                     for fact_id in duplicate_fact_ids:
                         try:
-                            await self.memgraph.invalidate_fact(fact_id, now)
+                            await self.graph_client.invalidate_fact(fact_id, now)
                         except Exception as e:
                             logger.warning(
                                 f"Failed to invalidate duplicate fact {fact_id} during merge: {e}"
@@ -206,7 +208,7 @@ class MergeDetectionJob(BaseJob):
                     return True
                 else:
                     logger.warning(
-                        f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): memgraph returned False"
+                        f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): graph_client returned False"
                     )
 
             except Exception as e:
@@ -296,10 +298,12 @@ class MergeDetectionJob(BaseJob):
                     logger.info(
                         f"Renaming merged entity {p_id}: {p_name} -> {suggested_name}"
                     )
-                    await self.memgraph.update_entity_canonical_name(p_id, suggested_name)
+                    await self.graph_client.update_entity_canonical_name(
+                        p_id, suggested_name
+                    )
                     p_name = suggested_name
 
-                all_facts = await self.memgraph.get_facts_for_entity(p_id, True)
+                all_facts = await self.graph_client.get_facts_for_entity(p_id, True)
                 if all_facts:
                     resolution_text = f"{p_name}. " + " ".join(
                         [f.content for f in all_facts]
@@ -307,8 +311,10 @@ class MergeDetectionJob(BaseJob):
                 else:
                     resolution_text = f"{p_name} (merged with {s_name})"
 
-                new_embedding = await self.entities.compute_embedding(p_id, resolution_text)
-                await self.memgraph.update_entity_embedding(p_id, new_embedding)
+                new_embedding = await self.entities.compute_embedding(
+                    p_id, resolution_text
+                )
+                await self.graph_client.update_entity_embedding(p_id, new_embedding)
 
             except Exception as e:
                 logger.exception(f"Finalize merge failed for {p_id}<-{s_id}: {e}")
@@ -503,7 +509,7 @@ class MergeDetectionJob(BaseJob):
         all_merge_ids = []
         for c in clean_batch:
             all_merge_ids.extend([c["primary_id"], c["secondary_id"]])
-        all_merge_facts = await self.memgraph.get_facts_for_entities(
+        all_merge_facts = await self.graph_client.get_facts_for_entities(
             list(set(all_merge_ids)), active_only=False
         )
 
@@ -580,7 +586,7 @@ class MergeDetectionJob(BaseJob):
                 continue
 
             for parent_type, child_types in type_rules.items():
-                candidates = await self.memgraph.get_hierarchy_candidates(
+                candidates = await self.graph_client.get_hierarchy_candidates(
                     topic,
                     parent_type,
                     child_types,
@@ -588,7 +594,7 @@ class MergeDetectionJob(BaseJob):
                 )
 
                 for c in candidates:
-                    success = await self.memgraph.create_hierarchy_edge(
+                    success = await self.graph_client.create_hierarchy_edge(
                         c["parent_id"], c["child_id"]
                     )
 

@@ -18,6 +18,7 @@ from common.schema.memory import (
     WorkingMemoryListResult,
     WorkingMemoryRemoveResult,
 )
+from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from knoggin.agent.formatters import format_memory_context
 
@@ -71,7 +72,7 @@ class MemoryManager:
         self.topic_config = topic_config
         self._emit = on_event  # (source, event, data) -> None
 
-    # ── helpers ──────────────────────────────────────────────
+    # helpers
 
     def _fire(self, source: str, event: str, data: dict):
         if self._emit:
@@ -80,9 +81,7 @@ class MemoryManager:
             except Exception as e:
                 logger.warning(f"MemoryManager event error: {e}")
 
-    # ════════════════════════════════════════════════════════
-    #  SESSION MEMORY BLOCKS
-    # ════════════════════════════════════════════════════════
+    # SESSION MEMORY BLOCKS
 
     async def save_memory(
         self, content: str, topic: str = "General"
@@ -217,9 +216,7 @@ class MemoryManager:
         total = sum(len(v) for v in blocks.values())
         return MemoryListResult(blocks=blocks, total=total)
 
-    # ════════════════════════════════════════════════════════
-    #  WORKING MEMORY (rules, preferences, icks)
-    # ════════════════════════════════════════════════════════
+    # WORKING MEMORY (rules, preferences, icks)
 
     async def add_working_memory(
         self,

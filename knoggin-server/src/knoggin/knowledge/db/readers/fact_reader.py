@@ -5,11 +5,11 @@ from typing import Dict, List
 from loguru import logger
 
 from common.schema.dtypes import FactRecord
-from infrastructure.postgres_client import PostgresClient
+from infrastructure.db_client import DBClient
 
 
 class FactReader:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 
@@ -18,21 +18,33 @@ class FactReader:
         # Handle datetime parsing from ISO strings returned by AGE
         valid_at_str = record["valid_at"]
         invalid_at_str = record.get("invalid_at")
-        
+
         # Strip quotes if AGE returned them as JSON strings
         if isinstance(valid_at_str, str) and valid_at_str.startswith('"'):
             valid_at_str = valid_at_str.strip('"')
         if isinstance(invalid_at_str, str) and invalid_at_str.startswith('"'):
             invalid_at_str = invalid_at_str.strip('"')
-            
+
         valid_at = datetime.fromisoformat(valid_at_str)
         invalid_at = datetime.fromisoformat(invalid_at_str) if invalid_at_str else None
-        
+
         # Clean string fields
-        fact_id = record["id"].strip('"') if isinstance(record["id"], str) else str(record["id"])
-        content = record["content"].strip('"') if isinstance(record["content"], str) else record["content"]
-        source = record["source"].strip('"') if record.get("source") and isinstance(record["source"], str) else record.get("source")
-        
+        fact_id = (
+            record["id"].strip('"')
+            if isinstance(record["id"], str)
+            else str(record["id"])
+        )
+        content = (
+            record["content"].strip('"')
+            if isinstance(record["content"], str)
+            else record["content"]
+        )
+        source = (
+            record["source"].strip('"')
+            if record.get("source") and isinstance(record["source"], str)
+            else record.get("source")
+        )
+
         return FactRecord(
             id=fact_id,
             source_entity_id=int(record["source_entity_id"]),
@@ -41,7 +53,9 @@ class FactReader:
             invalid_at=invalid_at,
             confidence=float(record["confidence"]),
             embedding=embedding,
-            source_msg_id=int(record["source_msg_id"]) if record.get("source_msg_id") is not None else None,
+            source_msg_id=int(record["source_msg_id"])
+            if record.get("source_msg_id") is not None
+            else None,
             source=source,
         )
 
@@ -54,14 +68,16 @@ class FactReader:
         RETURN f.id, f.source_entity_id, f.content, f.valid_at, f.invalid_at, f.confidence, f.source, m.id as source_msg_id, f.created_at
         ORDER BY f.created_at DESC
         """
-        
+
         query = self.client.build_cypher(
             cypher,
-            "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype, created_at agtype"
+            "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype, created_at agtype",
         )
-        
+
         try:
-            res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
+            res = await self.client.execute_read(
+                query, (json.dumps({"entity_id": entity_id}),)
+            )
             return [self._hydrate_fact(row) for row in res]
         except Exception as e:
             logger.error(f"Failed to get facts for entity {entity_id}: {e}")
@@ -72,9 +88,9 @@ class FactReader:
     ) -> Dict[int, List[FactRecord]]:
         if not entity_ids:
             return {}
-            
+
         where = "AND f.invalid_at IS NULL" if active_only else ""
-        
+
         # We fetch all matching facts and truncate to 5 per entity in Python,
         # avoiding complex AGE/Postgres subquery bridging.
         cypher = f"""
@@ -86,21 +102,25 @@ class FactReader:
             f.confidence as confidence, f.source as source, m.id as source_msg_id, f.created_at
         ORDER BY f.created_at DESC
         """
-        
+
         query = self.client.build_cypher(
             cypher,
-            "entity_id agtype, id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype, created_at agtype"
+            "entity_id agtype, id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype, created_at agtype",
         )
-        
+
         try:
-            res = await self.client.execute_read(query, (json.dumps({"entity_ids": entity_ids}),))
-            facts_by_entity: Dict[int, List[FactRecord]] = {eid: [] for eid in entity_ids}
-            
+            res = await self.client.execute_read(
+                query, (json.dumps({"entity_ids": entity_ids}),)
+            )
+            facts_by_entity: Dict[int, List[FactRecord]] = {
+                eid: [] for eid in entity_ids
+            }
+
             for row in res:
                 eid = int(row["entity_id"])
                 if len(facts_by_entity[eid]) < 5:
                     facts_by_entity[eid].append(self._hydrate_fact(row))
-                    
+
             return facts_by_entity
         except Exception as e:
             logger.error(f"Failed to batch fetch facts: {e}")
@@ -119,13 +139,15 @@ class FactReader:
         LIMIT %s
         """
         try:
-            search_res = await self.client.execute_read(search_query, (entity_id, query_embedding, limit))
+            search_res = await self.client.execute_read(
+                search_query, (entity_id, query_embedding, limit)
+            )
             if not search_res:
                 return []
-                
+
             fact_ids = [row["fact_id"] for row in search_res]
             embeddings_map = {row["fact_id"]: row["embedding"] for row in search_res}
-            
+
             # 2. Fetch those specific facts from graph
             cypher = """
             MATCH (f:Fact)
@@ -135,24 +157,30 @@ class FactReader:
             """
             query = self.client.build_cypher(
                 cypher,
-                "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype"
+                "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype",
             )
-            
-            graph_res = await self.client.execute_read(query, (json.dumps({"fact_ids": fact_ids}),))
-            
+
+            graph_res = await self.client.execute_read(
+                query, (json.dumps({"fact_ids": fact_ids}),)
+            )
+
             results = []
             for row in graph_res:
-                fid = row["id"].strip('"') if isinstance(row["id"], str) else str(row["id"])
+                fid = (
+                    row["id"].strip('"')
+                    if isinstance(row["id"], str)
+                    else str(row["id"])
+                )
                 emb = embeddings_map.get(fid)
                 if emb and hasattr(emb, "tolist"):
                     emb = emb.tolist()
                 elif emb:
                     emb = list(emb)
-                    
+
                 results.append(self._hydrate_fact(row, embedding=emb))
-                
+
             return results
-            
+
         except Exception as e:
             logger.error(f"Failed to search relevant facts for {entity_id}: {e}")
             return []
@@ -164,10 +192,12 @@ class FactReader:
         """
         query = self.client.build_cypher(
             cypher,
-            "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype"
+            "id agtype, source_entity_id agtype, content agtype, valid_at agtype, invalid_at agtype, confidence agtype, source agtype, source_msg_id agtype",
         )
         try:
-            res = await self.client.execute_read(query, (json.dumps({"msg_id": msg_id}),))
+            res = await self.client.execute_read(
+                query, (json.dumps({"msg_id": msg_id}),)
+            )
             return [self._hydrate_fact(row) for row in res]
         except Exception as e:
             logger.error(f"Failed to get facts from message {msg_id}: {e}")
@@ -185,17 +215,29 @@ class FactReader:
         """
         query = self.client.build_cypher(
             cypher,
-            "id agtype, content agtype, created_at agtype, entity_name agtype, entity_type agtype"
+            "id agtype, content agtype, created_at agtype, entity_name agtype, entity_type agtype",
         )
         try:
-            res = await self.client.execute_read(query, (json.dumps({"cutoff": cutoff, "limit": limit}),))
+            res = await self.client.execute_read(
+                query, (json.dumps({"cutoff": cutoff, "limit": limit}),)
+            )
             return [
                 {
-                    "id": row["id"].strip('"') if isinstance(row["id"], str) else str(row["id"]),
-                    "content": row["content"].strip('"') if isinstance(row["content"], str) else row["content"],
-                    "created_at": row["created_at"].strip('"') if isinstance(row["created_at"], str) else row["created_at"],
-                    "entity_name": row["entity_name"].strip('"') if isinstance(row["entity_name"], str) else row["entity_name"],
-                    "entity_type": row["entity_type"].strip('"') if isinstance(row["entity_type"], str) else row["entity_type"]
+                    "id": row["id"].strip('"')
+                    if isinstance(row["id"], str)
+                    else str(row["id"]),
+                    "content": row["content"].strip('"')
+                    if isinstance(row["content"], str)
+                    else row["content"],
+                    "created_at": row["created_at"].strip('"')
+                    if isinstance(row["created_at"], str)
+                    else row["created_at"],
+                    "entity_name": row["entity_name"].strip('"')
+                    if isinstance(row["entity_name"], str)
+                    else row["entity_name"],
+                    "entity_type": row["entity_type"].strip('"')
+                    if isinstance(row["entity_type"], str)
+                    else row["entity_type"],
                 }
                 for row in res
             ]

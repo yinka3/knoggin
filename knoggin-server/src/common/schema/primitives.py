@@ -138,7 +138,7 @@ class FactRecord(Fact):
 
     @classmethod
     def from_db_record(cls, record: dict) -> "FactRecord":
-        """Hydrate from a Memgraph query result."""
+        """Hydrate from a GraphClient query result."""
         return cls(
             id=record["id"],
             content=record["content"],

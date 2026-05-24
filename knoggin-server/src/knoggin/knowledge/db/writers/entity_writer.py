@@ -4,11 +4,11 @@ from typing import Dict, List
 
 from loguru import logger
 
-from infrastructure.postgres_client import PostgresClient
+from infrastructure.db_client import DBClient
 
 
 class EntityWriter:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 
@@ -19,14 +19,13 @@ class EntityWriter:
         # We need a transaction for both Graph and Hybrid tables
         if not self.client.async_pool:
             raise RuntimeError("PostgresClient async_pool is not initialized")
-            
+
         now_ms = self._current_time_ms()
-        
+
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    
-                    # 1. Write Entities to Graph
+                    # Write Entities to Graph
                     if entities:
                         entity_params = []
                         for e in entities:
@@ -34,7 +33,7 @@ class EntityWriter:
                             e_clean["aliases"] = e.get("aliases") or []
                             e_clean["now"] = now_ms
                             entity_params.append(e_clean)
-                            
+
                         # Notice we omit 'embedding' from the graph properties to save space.
                         # It will only live in the entity_search table.
                         cypher_e = """
@@ -69,8 +68,11 @@ class EntityWriter:
                         RETURN e.id
                         """
                         # We run the graph query
-                        await cur.execute(self.client.build_cypher(cypher_e), (json.dumps({"batch": entity_params}),))
-                        
+                        await cur.execute(
+                            self.client.build_cypher(cypher_e),
+                            (json.dumps({"batch": entity_params}),),
+                        )
+
                         # 2. Write Hybrid Search Data (Vectors)
                         for e in entities:
                             if "embedding" in e and e["embedding"]:
@@ -83,12 +85,12 @@ class EntityWriter:
                                         embedding = COALESCE(EXCLUDED.embedding, entity_search.embedding)
                                     """,
                                     (
-                                        e["id"], 
-                                        e["canonical_name"], 
-                                        e.get("user_name", "default_user"), 
+                                        e["id"],
+                                        e["canonical_name"],
+                                        e.get("user_name", "default_user"),
                                         e.get("project_id", "default_project"),
-                                        e["embedding"]
-                                    )
+                                        e["embedding"],
+                                    ),
                                 )
 
                     # 3. Write Relationships to Graph
@@ -99,7 +101,7 @@ class EntityWriter:
                             r_clean["confidence"] = r.get("confidence", 1.0)
                             r_clean["now"] = now_ms
                             rel_params.append(r_clean)
-                            
+
                         cypher_r = """
                         UNWIND $batch AS rel
                         MATCH (a:Entity {id: rel.entity_a_id})
@@ -121,10 +123,13 @@ class EntityWriter:
                             r.context = CASE WHEN rel.context IS NOT NULL THEN rel.context ELSE r.context END
                         RETURN count(r)
                         """
-                        # Note: message_ids append for ON MATCH SET is omitted here because agtype list append 
+                        # Note: message_ids append for ON MATCH SET is omitted here because agtype list append
                         # can be problematic. We handle complex edge updates in merge_entities.
-                        await cur.execute(self.client.build_cypher(cypher_r), (json.dumps({"batch": rel_params}),))
-                        
+                        await cur.execute(
+                            self.client.build_cypher(cypher_r),
+                            (json.dumps({"batch": rel_params}),),
+                        )
+
         return True
 
     async def update_entity_profile(
@@ -146,11 +151,20 @@ class EntityWriter:
                         e.last_profiled_msg_id = $last_msg_id
                     RETURN e.id
                     """
-                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({
-                        "id": entity_id, "canonical_name": canonical_name, 
-                        "now": now_ms, "last_msg_id": last_msg_id
-                    }),))
-                    
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (
+                            json.dumps(
+                                {
+                                    "id": entity_id,
+                                    "canonical_name": canonical_name,
+                                    "now": now_ms,
+                                    "last_msg_id": last_msg_id,
+                                }
+                            ),
+                        ),
+                    )
+
                     # Update Vector Table
                     await cur.execute(
                         """
@@ -158,37 +172,64 @@ class EntityWriter:
                         SET canonical_name = %s, embedding = %s::vector
                         WHERE entity_id = %s
                         """,
-                        (canonical_name, embedding, entity_id)
+                        (canonical_name, embedding, entity_id),
                     )
         logger.info(f"Updated entity {entity_id} (checkpoint: msg_{last_msg_id})")
 
-    async def update_entity_canonical_name(self, entity_id: int, canonical_name: str) -> None:
+    async def update_entity_canonical_name(
+        self, entity_id: int, canonical_name: str
+    ) -> None:
         now_ms = self._current_time_ms()
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
                     # Update Graph
                     cypher = "MATCH (e:Entity {id: $id}) SET e.canonical_name = $canonical_name, e.last_updated = $now RETURN e.id"
-                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({"id": entity_id, "canonical_name": canonical_name, "now": now_ms}),))
-                    
-                    # Update Vector Table
-                    await cur.execute("UPDATE entity_search SET canonical_name = %s WHERE entity_id = %s", (canonical_name, entity_id))
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (
+                            json.dumps(
+                                {
+                                    "id": entity_id,
+                                    "canonical_name": canonical_name,
+                                    "now": now_ms,
+                                }
+                            ),
+                        ),
+                    )
 
-    async def update_entity_embedding(self, entity_id: int, embedding: List[float]) -> None:
+                    # Update Vector Table
+                    await cur.execute(
+                        "UPDATE entity_search SET canonical_name = %s WHERE entity_id = %s",
+                        (canonical_name, entity_id),
+                    )
+
+    async def update_entity_embedding(
+        self, entity_id: int, embedding: List[float]
+    ) -> None:
         now_ms = self._current_time_ms()
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
                     # Mark updated in Graph
                     cypher = "MATCH (e:Entity {id: $id}) SET e.last_updated = $now RETURN e.id"
-                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({"id": entity_id, "now": now_ms}),))
-                    
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (json.dumps({"id": entity_id, "now": now_ms}),),
+                    )
+
                     # Update Vector Table
-                    await cur.execute("UPDATE entity_search SET embedding = %s::vector WHERE entity_id = %s", (embedding, entity_id))
+                    await cur.execute(
+                        "UPDATE entity_search SET embedding = %s::vector WHERE entity_id = %s",
+                        (embedding, entity_id),
+                    )
 
     async def update_entity_checkpoint(self, entity_id: int, last_msg_id: int) -> None:
         cypher = "MATCH (e:Entity {id: $id}) SET e.last_profiled_msg_id = $last_msg_id RETURN e.id"
-        await self.client.execute_write(self.client.build_cypher(cypher), (json.dumps({"id": entity_id, "last_msg_id": last_msg_id}),))
+        await self.client.execute_write(
+            self.client.build_cypher(cypher),
+            (json.dumps({"id": entity_id, "last_msg_id": last_msg_id}),),
+        )
 
     async def update_entity_aliases(self, alias_updates: Dict[int, List[str]]):
         if not alias_updates:
@@ -197,23 +238,37 @@ class EntityWriter:
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # For AGE, the safest way to append arrays without agtype casting nightmares 
+                    # For AGE, the safest way to append arrays without agtype casting nightmares
                     # is to read existing, combine in Python, write back.
                     for eid, new_aliases in alias_updates.items():
                         # Read existing
                         read_cyp = "MATCH (e:Entity {id: $id}) RETURN e.aliases"
-                        res = await self.client.execute_read(self.client.build_cypher(read_cyp, "aliases agtype"), (json.dumps({"id": eid}),))
-                        
+                        res = await self.client.execute_read(
+                            self.client.build_cypher(read_cyp, "aliases agtype"),
+                            (json.dumps({"id": eid}),),
+                        )
+
                         existing = []
                         if res and res[0]["aliases"]:
                             existing = res[0]["aliases"]
-                            
+
                         combined = list(set(existing + new_aliases))
-                        
+
                         # Write back
                         write_cyp = "MATCH (e:Entity {id: $id}) SET e.aliases = $aliases, e.last_updated = $now RETURN e.id"
-                        await cur.execute(self.client.build_cypher(write_cyp), (json.dumps({"id": eid, "aliases": combined, "now": self._current_time_ms()}),))
-                        
+                        await cur.execute(
+                            self.client.build_cypher(write_cyp),
+                            (
+                                json.dumps(
+                                    {
+                                        "id": eid,
+                                        "aliases": combined,
+                                        "now": self._current_time_ms(),
+                                    }
+                                ),
+                            ),
+                        )
+
         logger.debug(f"Updated aliases for {len(alias_updates)} entities")
 
     async def cleanup_null_entities(self) -> int:
@@ -223,7 +278,9 @@ class EntityWriter:
         DETACH DELETE e
         RETURN count(e)
         """
-        res = await self.client.execute_read(self.client.build_cypher(cypher, "deleted agtype"), ("{}",))
+        res = await self.client.execute_read(
+            self.client.build_cypher(cypher, "deleted agtype"), ("{}",)
+        )
         return int(res[0]["deleted"]) if res else 0
 
     async def delete_entity(self, entity_id: int) -> bool:
@@ -237,16 +294,21 @@ class EntityWriter:
                     DETACH DELETE e, f
                     RETURN count(e)
                     """
-                    await cur.execute(self.client.build_cypher(cypher), (json.dumps({"id": entity_id}),))
-                    
+                    await cur.execute(
+                        self.client.build_cypher(cypher),
+                        (json.dumps({"id": entity_id}),),
+                    )
+
                     # Delete from Vector Table
-                    await cur.execute("DELETE FROM entity_search WHERE entity_id = %s", (entity_id,))
+                    await cur.execute(
+                        "DELETE FROM entity_search WHERE entity_id = %s", (entity_id,)
+                    )
         return True
 
     async def bulk_delete_entities(self, entity_ids: List[int]) -> int:
         if not entity_ids:
             return 0
-            
+
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
@@ -258,10 +320,16 @@ class EntityWriter:
                     DETACH DELETE e, f
                     RETURN count(DISTINCT e)
                     """
-                    res = await self.client.execute_read(self.client.build_cypher(cypher, "deleted agtype"), (json.dumps({"ids": entity_ids}),))
+                    res = await self.client.execute_read(
+                        self.client.build_cypher(cypher, "deleted agtype"),
+                        (json.dumps({"ids": entity_ids}),),
+                    )
                     deleted = int(res[0]["deleted"]) if res else 0
-                    
+
                     # Delete from Vector Table
-                    await cur.execute("DELETE FROM entity_search WHERE entity_id = ANY(%s)", (entity_ids,))
-                    
+                    await cur.execute(
+                        "DELETE FROM entity_search WHERE entity_id = ANY(%s)",
+                        (entity_ids,),
+                    )
+
         return deleted

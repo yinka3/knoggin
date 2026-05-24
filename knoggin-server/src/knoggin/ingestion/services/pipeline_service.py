@@ -245,7 +245,6 @@ class BatchProcessor:
         Replaces VP-02 LLM disambiguation.
         """
         async with self.entities.resolution_lock:
-
             msg_text_map = {m["id"]: m["message"] for m in messages}
 
             entity_ids = []
@@ -351,7 +350,9 @@ class BatchProcessor:
                                 )
                             )
                             if existing_id and aliases_added:
-                                self.entities.commit_new_aliases(existing_id, new_aliases)
+                                self.entities.commit_new_aliases(
+                                    existing_id, new_aliases
+                                )
                                 alias_ids.add(existing_id)
                                 if existing_id not in alias_updates:
                                     alias_updates[existing_id] = []
@@ -408,7 +409,7 @@ class BatchProcessor:
         """
         results = {}
 
-        # ── Vector Embed Messages and Query Neighbors ──
+        # Vector Embed Messages and Query Neighbors
         all_candidate_ids = list({cid for cid, _, _ in candidate_pairs})
         neighbors_by_entity = await self.entities.get_neighbor_ids_batch(
             all_candidate_ids
@@ -426,7 +427,7 @@ class BatchProcessor:
                 )
                 msg_embeddings = {m: emb for m, emb in zip(unique_msg_ids, embeddings)}
 
-        # --- Signal 3: Fact relevance via LLM (RAG injected) ---
+        # Signal 3: Fact relevance via LLM (RAG injected)
         llm_pairs = []
         pair_keys = []
 
@@ -503,7 +504,7 @@ class BatchProcessor:
                             results.get(candidate_id, base_score), base_score
                         )
 
-        # --- Signal 4: Connection co-occurrence ---
+        # Signal 4: Connection co-occurrence
         processed_candidates = set()
         for candidate_id, base_score, msg_id in candidate_pairs:
             if candidate_id in processed_candidates:

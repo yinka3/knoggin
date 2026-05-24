@@ -4,11 +4,11 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from infrastructure.postgres_client import PostgresClient
+from infrastructure.db_client import DBClient
 
 
 class EntityReader:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 
@@ -110,7 +110,9 @@ class EntityReader:
         try:
             params_json = json.dumps(params)
             count_res = await self.client.execute_read(count_query, (params_json,))
-            total = int(count_res[0]["total"]) if count_res and count_res[0]["total"] else 0
+            total = (
+                int(count_res[0]["total"]) if count_res and count_res[0]["total"] else 0
+            )
 
             if total == 0:
                 return [], 0
@@ -122,15 +124,17 @@ class EntityReader:
                 snippets = row["fact_snippets"] or []
                 summary = ". ".join(filter(None, snippets)) if snippets else None
 
-                entities.append({
-                    "id": int(row["id"]),
-                    "session_id": row["session_id"],
-                    "canonical_name": row["canonical_name"],
-                    "type": row["type"],
-                    "topic": row["topic"],
-                    "last_mentioned": float(row["last_mentioned"] or 0),
-                    "summary": summary,
-                })
+                entities.append(
+                    {
+                        "id": int(row["id"]),
+                        "session_id": row["session_id"],
+                        "canonical_name": row["canonical_name"],
+                        "type": row["type"],
+                        "topic": row["topic"],
+                        "last_mentioned": float(row["last_mentioned"] or 0),
+                        "summary": summary,
+                    }
+                )
             return entities, total
         except Exception as e:
             logger.error(f"Failed to list entities: {e}")
@@ -155,7 +159,9 @@ class EntityReader:
             "id agtype, session_id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, last_mentioned agtype, last_updated agtype, last_profiled_msg_id agtype",
         )
         try:
-            res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
+            res = await self.client.execute_read(
+                query, (json.dumps({"entity_id": entity_id}),)
+            )
             if not res:
                 return None
             row = res[0]
@@ -177,7 +183,7 @@ class EntityReader:
     async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:
         if not entity_ids:
             return []
-            
+
         cypher = """
         MATCH (e:Entity)
         WHERE e.id IN $entity_ids
@@ -196,32 +202,38 @@ class EntityReader:
             cypher,
             "id agtype, session_id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, last_mentioned agtype, last_updated agtype, last_profiled_msg_id agtype",
         )
-        
+
         # We also need embeddings from the relational table for full compatibility
-        emb_query = "SELECT entity_id, embedding FROM entity_search WHERE entity_id = ANY(%s)"
-        
+        emb_query = (
+            "SELECT entity_id, embedding FROM entity_search WHERE entity_id = ANY(%s)"
+        )
+
         try:
-            res = await self.client.execute_read(query, (json.dumps({"entity_ids": entity_ids}),))
-            
+            res = await self.client.execute_read(
+                query, (json.dumps({"entity_ids": entity_ids}),)
+            )
+
             # Fetch embeddings
             emb_res = await self.client.execute_read(emb_query, (entity_ids,))
             embeddings_map = {row["entity_id"]: row["embedding"] for row in emb_res}
-            
+
             entities = []
             for row in res:
                 eid = int(row["id"])
-                entities.append({
-                    "id": eid,
-                    "session_id": row["session_id"],
-                    "canonical_name": row["canonical_name"],
-                    "aliases": row["aliases"] or [],
-                    "type": row["type"],
-                    "topic": row["topic"],
-                    "last_mentioned": float(row["last_mentioned"] or 0),
-                    "last_updated": float(row["last_updated"] or 0),
-                    "last_profiled_msg_id": row["last_profiled_msg_id"],
-                    "embedding": embeddings_map.get(eid, [])
-                })
+                entities.append(
+                    {
+                        "id": eid,
+                        "session_id": row["session_id"],
+                        "canonical_name": row["canonical_name"],
+                        "aliases": row["aliases"] or [],
+                        "type": row["type"],
+                        "topic": row["topic"],
+                        "last_mentioned": float(row["last_mentioned"] or 0),
+                        "last_updated": float(row["last_updated"] or 0),
+                        "last_profiled_msg_id": row["last_profiled_msg_id"],
+                        "embedding": embeddings_map.get(eid, []),
+                    }
+                )
             return entities
         except Exception as e:
             logger.error(f"Failed to fetch entities by ids: {e}")
@@ -257,10 +269,12 @@ class EntityReader:
         """
         query = self.client.build_cypher(
             cypher,
-            "id agtype, canonical_name agtype, type agtype, aliases agtype, facts agtype"
+            "id agtype, canonical_name agtype, type agtype, aliases agtype, facts agtype",
         )
         try:
-            res = await self.client.execute_read(query, (json.dumps({"names": lower_names}),))
+            res = await self.client.execute_read(
+                query, (json.dumps({"names": lower_names}),)
+            )
             return [
                 {
                     "id": int(row["id"]),
@@ -275,13 +289,15 @@ class EntityReader:
             logger.error(f"Failed to get entities by names: {e}")
             return []
 
-    async def search_similar_entities(self, entity_id: int, limit: int = 50) -> List[Tuple[int, float]]:
-        """Find similar entities using Postgres pgvector (replaces Memgraph vector index)."""
+    async def search_similar_entities(
+        self, entity_id: int, limit: int = 50
+    ) -> List[Tuple[int, float]]:
+        """Find similar entities using Postgres pgvector (replaces GraphClient vector index)."""
         # 1. Get the source vector
         emb = await self.get_entity_embedding(entity_id)
         if not emb:
             return []
-            
+
         # 2. Search using pgvector cosine distance `<=>`
         # `<=>` returns distance, so we do 1 - distance for similarity
         query = """
@@ -309,7 +325,9 @@ class EntityReader:
         LIMIT %s
         """
         try:
-            res = await self.client.execute_read(query, (embedding, embedding, score_threshold, embedding, limit))
+            res = await self.client.execute_read(
+                query, (embedding, embedding, score_threshold, embedding, limit)
+            )
             return [(r["entity_id"], r["similarity"]) for r in res]
         except Exception as e:
             logger.error(f"Entity vector search failed: {e}")
@@ -336,31 +354,48 @@ class EntityReader:
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         RETURN e.id, e.canonical_name, e.aliases, e.type, t.name as topic, e.session_id
         """
-        query = self.client.build_cypher(cypher, "id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, session_id agtype")
+        query = self.client.build_cypher(
+            cypher,
+            "id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, session_id agtype",
+        )
         emb_query = "SELECT entity_id, embedding FROM entity_search"
         try:
             res = await self.client.execute_read(query, ("{}",))
             emb_res = await self.client.execute_read(emb_query)
-            embeddings_map = {row["entity_id"]: (row["embedding"].tolist() if hasattr(row["embedding"], "tolist") else list(row["embedding"])) for row in emb_res}
-            
+            embeddings_map = {
+                row["entity_id"]: (
+                    row["embedding"].tolist()
+                    if hasattr(row["embedding"], "tolist")
+                    else list(row["embedding"])
+                )
+                for row in emb_res
+            }
+
             entities = []
             for row in res:
                 eid = int(row["id"])
-                entities.append({
-                    "id": eid,
-                    "canonical_name": row["canonical_name"],
-                    "aliases": row["aliases"] or [],
-                    "type": row["type"],
-                    "topic": row["topic"],
-                    "session_id": row["session_id"],
-                    "embedding": embeddings_map.get(eid, [])
-                })
+                entities.append(
+                    {
+                        "id": eid,
+                        "canonical_name": row["canonical_name"],
+                        "aliases": row["aliases"] or [],
+                        "type": row["type"],
+                        "topic": row["topic"],
+                        "session_id": row["session_id"],
+                        "embedding": embeddings_map.get(eid, []),
+                    }
+                )
             return entities
         except Exception as e:
             logger.error(f"Failed to hydrate entities: {e}")
             return []
 
-    async def get_orphan_entities(self, protected_id: int = 1, orphan_cutoff_ms: int = 0, stale_junk_cutoff_ms: int = 0) -> List[int]:
+    async def get_orphan_entities(
+        self,
+        protected_id: int = 1,
+        orphan_cutoff_ms: int = 0,
+        stale_junk_cutoff_ms: int = 0,
+    ) -> List[int]:
         cypher = """
         MATCH (e:Entity)
         WHERE e.id <> $protected_id
@@ -373,11 +408,18 @@ class EntityReader:
         """
         query = self.client.build_cypher(cypher, "id agtype")
         try:
-            res = await self.client.execute_read(query, (json.dumps({
-                "protected_id": protected_id,
-                "orphan_cutoff": orphan_cutoff_ms,
-                "stale_cutoff": stale_junk_cutoff_ms
-            }),))
+            res = await self.client.execute_read(
+                query,
+                (
+                    json.dumps(
+                        {
+                            "protected_id": protected_id,
+                            "orphan_cutoff": orphan_cutoff_ms,
+                            "stale_cutoff": stale_junk_cutoff_ms,
+                        }
+                    ),
+                ),
+            )
             return [int(r["id"]) for r in res]
         except Exception as e:
             logger.error(f"Failed to fetch orphans: {e}")
@@ -393,7 +435,15 @@ class EntityReader:
         query = self.client.build_cypher(cypher, "type agtype, count agtype")
         try:
             res = await self.client.execute_read(query, ("{}",))
-            return [{"type": r["type"].strip('"') if isinstance(r["type"], str) else r["type"], "count": int(r["count"])} for r in res]
+            return [
+                {
+                    "type": r["type"].strip('"')
+                    if isinstance(r["type"], str)
+                    else r["type"],
+                    "count": int(r["count"]),
+                }
+                for r in res
+            ]
         except Exception as e:
             logger.error(f"Failed to get entity count by type: {e}")
             return []
@@ -407,7 +457,15 @@ class EntityReader:
         query = self.client.build_cypher(cypher, "topic agtype, count agtype")
         try:
             res = await self.client.execute_read(query, ("{}",))
-            return [{"topic": r["topic"].strip('"') if isinstance(r["topic"], str) else r["topic"], "count": int(r["count"])} for r in res]
+            return [
+                {
+                    "topic": r["topic"].strip('"')
+                    if isinstance(r["topic"], str)
+                    else r["topic"],
+                    "count": int(r["count"]),
+                }
+                for r in res
+            ]
         except Exception as e:
             logger.error(f"Failed to get entity count by topic: {e}")
             return []
@@ -420,10 +478,23 @@ class EntityReader:
         LIMIT $limit
         RETURN e.canonical_name as name, e.type as type, connections
         """
-        query = self.client.build_cypher(cypher, "name agtype, type agtype, connections agtype")
+        query = self.client.build_cypher(
+            cypher, "name agtype, type agtype, connections agtype"
+        )
         try:
             res = await self.client.execute_read(query, (json.dumps({"limit": limit}),))
-            return [{"name": r["name"].strip('"') if isinstance(r["name"], str) else r["name"], "type": r["type"].strip('"') if isinstance(r["type"], str) else r["type"], "connections": int(r["connections"])} for r in res]
+            return [
+                {
+                    "name": r["name"].strip('"')
+                    if isinstance(r["name"], str)
+                    else r["name"],
+                    "type": r["type"].strip('"')
+                    if isinstance(r["type"], str)
+                    else r["type"],
+                    "connections": int(r["connections"]),
+                }
+                for r in res
+            ]
         except Exception as e:
             logger.error(f"Failed to get top connected entities: {e}")
             return []
@@ -438,22 +509,36 @@ class EntityReader:
             r.context as context,
             r.confidence as confidence
         """
-        query = self.client.build_cypher(cypher, "neighbor_id agtype, neighbor_name agtype, weight agtype, message_ids agtype, context agtype, confidence agtype")
+        query = self.client.build_cypher(
+            cypher,
+            "neighbor_id agtype, neighbor_name agtype, weight agtype, message_ids agtype, context agtype, confidence agtype",
+        )
         try:
-            res = await self.client.execute_read(query, (json.dumps({"entity_id": entity_id}),))
-            return [{
-                "neighbor_id": int(r["neighbor_id"]),
-                "neighbor_name": r["neighbor_name"].strip('"') if isinstance(r["neighbor_name"], str) else r["neighbor_name"],
-                "weight": float(r["weight"] or 1.0),
-                "message_ids": r["message_ids"] or [],
-                "context": r["context"].strip('"') if isinstance(r["context"], str) else r["context"],
-                "confidence": float(r["confidence"] or 1.0)
-            } for r in res]
+            res = await self.client.execute_read(
+                query, (json.dumps({"entity_id": entity_id}),)
+            )
+            return [
+                {
+                    "neighbor_id": int(r["neighbor_id"]),
+                    "neighbor_name": r["neighbor_name"].strip('"')
+                    if isinstance(r["neighbor_name"], str)
+                    else r["neighbor_name"],
+                    "weight": float(r["weight"] or 1.0),
+                    "message_ids": r["message_ids"] or [],
+                    "context": r["context"].strip('"')
+                    if isinstance(r["context"], str)
+                    else r["context"],
+                    "confidence": float(r["confidence"] or 1.0),
+                }
+                for r in res
+            ]
         except Exception as e:
             logger.error(f"Failed to get relationships for entity {entity_id}: {e}")
             return []
 
-    async def get_recently_active_entities(self, days: int = 7, limit: int = 10) -> List[Dict]:
+    async def get_recently_active_entities(
+        self, days: int = 7, limit: int = 10
+    ) -> List[Dict]:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         cypher = """
         MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
@@ -465,17 +550,33 @@ class EntityReader:
         ORDER BY recent_facts DESC, last_activity DESC
         LIMIT $limit
         """
-        query = self.client.build_cypher(cypher, "id agtype, name agtype, type agtype, topic agtype, recent_facts agtype, last_activity agtype")
+        query = self.client.build_cypher(
+            cypher,
+            "id agtype, name agtype, type agtype, topic agtype, recent_facts agtype, last_activity agtype",
+        )
         try:
-            res = await self.client.execute_read(query, (json.dumps({"cutoff": cutoff, "limit": limit}),))
-            return [{
-                "id": int(r["id"]),
-                "name": r["name"].strip('"') if isinstance(r["name"], str) else r["name"],
-                "type": r["type"].strip('"') if isinstance(r["type"], str) else r["type"],
-                "topic": r["topic"].strip('"') if isinstance(r["topic"], str) else r["topic"],
-                "recent_facts": int(r["recent_facts"]),
-                "last_activity": r["last_activity"].strip('"') if isinstance(r["last_activity"], str) else r["last_activity"]
-            } for r in res]
+            res = await self.client.execute_read(
+                query, (json.dumps({"cutoff": cutoff, "limit": limit}),)
+            )
+            return [
+                {
+                    "id": int(r["id"]),
+                    "name": r["name"].strip('"')
+                    if isinstance(r["name"], str)
+                    else r["name"],
+                    "type": r["type"].strip('"')
+                    if isinstance(r["type"], str)
+                    else r["type"],
+                    "topic": r["topic"].strip('"')
+                    if isinstance(r["topic"], str)
+                    else r["topic"],
+                    "recent_facts": int(r["recent_facts"]),
+                    "last_activity": r["last_activity"].strip('"')
+                    if isinstance(r["last_activity"], str)
+                    else r["last_activity"],
+                }
+                for r in res
+            ]
         except Exception as e:
             logger.error(f"Failed to get recently active entities: {e}")
             return []
@@ -494,17 +595,29 @@ class EntityReader:
         ORDER BY connection_count DESC
         LIMIT $limit
         """
-        query = self.client.build_cypher(cypher, "id agtype, name agtype, type agtype, topic agtype, connection_count agtype, fact_count agtype")
+        query = self.client.build_cypher(
+            cypher,
+            "id agtype, name agtype, type agtype, topic agtype, connection_count agtype, fact_count agtype",
+        )
         try:
             res = await self.client.execute_read(query, (json.dumps({"limit": limit}),))
-            return [{
-                "id": int(r["id"]),
-                "name": r["name"].strip('"') if isinstance(r["name"], str) else r["name"],
-                "type": r["type"].strip('"') if isinstance(r["type"], str) else r["type"],
-                "topic": r["topic"].strip('"') if isinstance(r["topic"], str) else r["topic"],
-                "connection_count": int(r["connection_count"]),
-                "fact_count": int(r["fact_count"])
-            } for r in res]
+            return [
+                {
+                    "id": int(r["id"]),
+                    "name": r["name"].strip('"')
+                    if isinstance(r["name"], str)
+                    else r["name"],
+                    "type": r["type"].strip('"')
+                    if isinstance(r["type"], str)
+                    else r["type"],
+                    "topic": r["topic"].strip('"')
+                    if isinstance(r["topic"], str)
+                    else r["topic"],
+                    "connection_count": int(r["connection_count"]),
+                    "fact_count": int(r["fact_count"]),
+                }
+                for r in res
+            ]
         except Exception as e:
             logger.error(f"Failed to get notable entities: {e}")
             return []

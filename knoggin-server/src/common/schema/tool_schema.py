@@ -310,7 +310,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "reason": {
                         "type": "string",
-                        "description": "Optional explanation of why you are escalating or what failed."
+                        "description": "Optional explanation of why you are escalating or what failed.",
                     }
                 },
                 "required": [],

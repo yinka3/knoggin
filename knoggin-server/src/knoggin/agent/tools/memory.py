@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class MemoryTools:
     # Attributes provided by the composed Tools class
     redis: aioredis.Redis
-    memgraph: GraphClient
+    graph_client: GraphClient
     entities: EntityManager
     memory: Optional[MemoryManager]
     user_name: str

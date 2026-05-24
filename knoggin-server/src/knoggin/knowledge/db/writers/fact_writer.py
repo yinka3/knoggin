@@ -5,38 +5,39 @@ from typing import List
 from loguru import logger
 
 from common.schema.dtypes import FactRecord
-from infrastructure.postgres_client import PostgresClient
+from infrastructure.db_client import DBClient
 
 
 class FactWriter:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 
     async def create_facts_batch(self, entity_id: int, facts: List[FactRecord]) -> int:
         if not facts:
             return 0
-            
+
         if not self.client.async_pool:
             raise RuntimeError("PostgresClient async_pool is not initialized")
 
         fact_params = []
         for f in facts:
-            fact_params.append({
-                "id": f.id,
-                "content": f.content,
-                "valid_at": f.valid_at.isoformat(),
-                "invalid_at": f.invalid_at.isoformat() if f.invalid_at else None,
-                "confidence": f.confidence,
-                "source_msg_id": f.source_msg_id,
-                "source": f.source,
-            })
+            fact_params.append(
+                {
+                    "id": f.id,
+                    "content": f.content,
+                    "valid_at": f.valid_at.isoformat(),
+                    "invalid_at": f.invalid_at.isoformat() if f.invalid_at else None,
+                    "confidence": f.confidence,
+                    "source_msg_id": f.source_msg_id,
+                    "source": f.source,
+                }
+            )
 
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    
-                    # 1. Write to AGE Graph
+                    # Write to AGE Graph
                     cypher = """
                     MATCH (e:Entity {id: $entity_id})
                     UNWIND $batch AS item
@@ -57,30 +58,20 @@ class FactWriter:
                     )
                     RETURN count(f)
                     """
-                    
-                    res = await self.client.execute_read(
-                        self.client.build_cypher(cypher.replace("RETURN count(f)", "RETURN count(f)")), 
-                        (json.dumps({"entity_id": entity_id, "batch": fact_params}),)
-                    )
-                    # Note: We used execute_read above just to get the returned rows from Cypher easily, 
-                    # but we are doing it inside an explicit psycopg transaction block, so it is safe.
-                    # Actually, execute_read opens its own connection from the pool. 
-                    # Wait! I should use `cur.execute` inside this block to guarantee transaction scope!
-                    
+
                     await cur.execute(
-                        self.client.build_cypher(cypher, "created_count agtype"), 
-                        (json.dumps({"entity_id": entity_id, "batch": fact_params}),)
+                        self.client.build_cypher(cypher, "created_count agtype"),
+                        (json.dumps({"entity_id": entity_id, "batch": fact_params}),),
                     )
                     record = await cur.fetchone()
                     count = int(record["created_count"]) if record else 0
-                    
+
                     if count == 0:
-                        raise Exception(f"Failed to create facts for entity {entity_id} (parent may not exist)")
-                        
-                    # 2. Write to Postgres fact_search table (Vectors)
-                    # We assume project_id/user_name can be inferred or left default if not attached to facts, 
-                    # but typically facts belong to the same project as their entity.
-                    # We will just write them. The entity_id links them anyway.
+                        raise Exception(
+                            f"Failed to create facts for entity {entity_id} (parent may not exist)"
+                        )
+
+                    # Write to Postgres fact_search table (Vectors)
                     for f in facts:
                         if f.embedding:
                             await cur.execute(
@@ -92,30 +83,41 @@ class FactWriter:
                                     embedding = COALESCE(EXCLUDED.embedding, fact_search.embedding)
                                 """,
                                 (
-                                    f.id, entity_id, "default_user", "default_project", 
-                                    f.embedding, f.invalid_at
-                                )
+                                    f.id,
+                                    entity_id,
+                                    "default_user",
+                                    "default_project",
+                                    f.embedding,
+                                    f.invalid_at,
+                                ),
                             )
-                            
+
         return count
 
     async def invalidate_fact(self, fact_id: str, invalid_at: datetime) -> bool:
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # 1. Update Graph
+                    # Update Graph
                     cypher = "MATCH (f:Fact {id: $fact_id}) SET f.invalid_at = $invalid_at RETURN f.id"
                     await cur.execute(
                         self.client.build_cypher(cypher, "id agtype"),
-                        (json.dumps({"fact_id": fact_id, "invalid_at": invalid_at.isoformat()}),)
+                        (
+                            json.dumps(
+                                {
+                                    "fact_id": fact_id,
+                                    "invalid_at": invalid_at.isoformat(),
+                                }
+                            ),
+                        ),
                     )
                     record = await cur.fetchone()
-                    
-                    # 2. Update Vector Table
+
+                    # Update Vector Table
                     if record:
                         await cur.execute(
                             "UPDATE fact_search SET invalid_at = %s WHERE fact_id = %s",
-                            (invalid_at, fact_id)
+                            (invalid_at, fact_id),
                         )
                         return True
         return False
@@ -124,7 +126,7 @@ class FactWriter:
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # 1. Graph
+                    # Delete from Graph
                     cypher = """
                     MATCH (f:Fact)
                     WHERE f.invalid_at IS NOT NULL AND f.invalid_at < $cutoff
@@ -135,17 +137,22 @@ class FactWriter:
                     # We return the IDs to delete them from Postgres table easily
                     await cur.execute(
                         self.client.build_cypher(cypher, "fact_id agtype"),
-                        (json.dumps({"cutoff": cutoff.isoformat()}),)
+                        (json.dumps({"cutoff": cutoff.isoformat()}),),
                     )
                     records = await cur.fetchall()
-                    deleted_ids = [r["fact_id"].strip('"') if isinstance(r["fact_id"], str) else r["fact_id"] for r in records]
-                    
-                    # 2. Vector Table
+                    deleted_ids = [
+                        r["fact_id"].strip('"')
+                        if isinstance(r["fact_id"], str)
+                        else r["fact_id"]
+                        for r in records
+                    ]
+
+                    # Delete from Vector Table
                     if deleted_ids:
                         await cur.execute(
                             "DELETE FROM fact_search WHERE fact_id = ANY(%s)",
-                            (deleted_ids,)
+                            (deleted_ids,),
                         )
                         logger.info(f"Deleted {len(deleted_ids)} old invalidated facts")
-                        
+
         return len(deleted_ids) if records else 0

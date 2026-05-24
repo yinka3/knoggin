@@ -49,5 +49,4 @@ class ProjectState:
         self.topic_config.update(new_config)
         await self.topic_config.save(self.redis_client, self.user_name, self.project_id)
         self.entities.hierarchy_config = self.topic_config.hierarchy
-        self.pipeline.refresh_topic_mappings(self.topic_config)
-
+        self.pipeline.refresh_topic_mappings()

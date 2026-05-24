@@ -65,7 +65,7 @@ class AgentExecutor:
     ) -> AsyncGenerator[Dict, None]:
         """Runs the reasoning loop and yields events."""
 
-        # 1. Prepare environment
+        # Prepare environment
         tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
         current_time = simulated_date or datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
 
@@ -93,7 +93,7 @@ class AgentExecutor:
 
         last_result = None
 
-        # 2. Reasoning Loop
+        # Reasoning Loop
         needs_replanning = False
 
         while self.ctx.state.attempt_count < self.ctx.config.max_attempts:
@@ -129,7 +129,7 @@ class AgentExecutor:
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
 
-            # 3. Call LLM for this step
+            # Call LLM for this step
             async for event in self._step(
                 current_time,
                 current_model,
@@ -191,7 +191,9 @@ class AgentExecutor:
                         )
                         if replanning:
                             reason = replanning.args.get("reason", "No reason provided")
-                            logger.info(f"AgentExecutor: Librarian requested re-planning. Reason: {reason}")
+                            logger.info(
+                                f"AgentExecutor: Librarian requested re-planning. Reason: {reason}"
+                            )
                             needs_replanning = True
                             break
 
@@ -206,7 +208,7 @@ class AgentExecutor:
                 else:
                     yield event
 
-        # 3. Fallback if max attempts reached
+        # Fallback if max attempts reached
         yield await self._fallback()
 
     async def _step(
@@ -250,7 +252,6 @@ class AgentExecutor:
         active_schemas = get_filtered_schemas(enabled_tools)
         if client_tools:
             active_schemas = active_schemas + client_tools
-
 
         pending_tool_calls = []
         content_accumulator = ""
@@ -304,12 +305,12 @@ class AgentExecutor:
     @staticmethod
     def _safe_parse_args(json_str: str) -> Dict:
         """Secure tool argument parsing using json and Pydantic validation."""
-        # 1. Try standard JSON
+        # Try standard JSON
         parsed = safe_json_loads(json_str)
         if isinstance(parsed, dict):
             return parsed
 
-        # 2. Try to fix common LLM formatting issues (trailing commas, missing quotes)
+        # Try to fix common LLM formatting issues (trailing commas, missing quotes)
         cleaned = json_str.strip()
         cleaned = re.sub(r",\s*([\]}])", r"\1", cleaned)
 
@@ -513,8 +514,9 @@ class AgentExecutor:
             if summary:
                 self.ctx.evidence.summary = summary
             else:
-                logger.warning("Evidence summarization failed. Truncating raw evidence as fallback.")
-
+                logger.warning(
+                    "Evidence summarization failed. Truncating raw evidence as fallback."
+                )
 
             self.ctx.evidence.messages = self.ctx.evidence.messages[-5:]
             self.ctx.evidence.profiles = self.ctx.evidence.profiles[-5:]

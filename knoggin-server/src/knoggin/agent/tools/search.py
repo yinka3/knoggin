@@ -29,7 +29,7 @@ except ImportError:
 class SearchTools:
     # Attributes provided by the composed Tools class
     redis: aioredis.Redis
-    memgraph: GraphClient
+    graph_client: GraphClient
     embedding_service: EmbeddingService
     search_cfg: Dict
     file_rag: Optional[FileRAGService]
@@ -64,7 +64,8 @@ class SearchTools:
         user_msg_keys = [k for k in msg_keys if k.startswith("msg_")]
 
         if user_msg_keys:
-            turn_mappings = await self.redis.hmget(lookup_key, *user_msg_keys)
+            raw_keys = [k.split("_", 1)[1] for k in user_msg_keys]
+            turn_mappings = await self.redis.hmget(lookup_key, *raw_keys)
             msg_to_turn = dict(zip(user_msg_keys, turn_mappings))
         else:
             msg_to_turn = {}
@@ -154,7 +155,9 @@ class SearchTools:
             List of matching entities with id, name, summary snippet, type, and top connections.
         """
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
-        results = await self.memgraph.search_entity(query, self.active_topics, limit)
+        results = await self.graph_client.search_entity(
+            query, self.active_topics, limit
+        )
 
         if not results:
             return []
@@ -184,9 +187,7 @@ class SearchTools:
         if not self.file_rag:
             return [{"error": "No file service available for this session"}]
 
-        files = []
-        if self.file_rag:
-            files = self.file_rag.list_files()
+        files = self.file_rag.list_files()
 
         if not files:
             return [{"error": "No files uploaded to this session"}]
@@ -255,7 +256,7 @@ class SearchTools:
             ]
         return await self._news_brave(query, limit, brave_key, freshness or "pw")
 
-    # ── Internal helpers ──
+    # Internal helpers
 
     async def _resolve_entity_name(self, entity: str) -> Optional[str]:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
@@ -273,7 +274,7 @@ class SearchTools:
         results = {}
         query_embedding = await self.embedding_service.encode_single(query)
 
-        sem_results = await self.memgraph.search_messages_vector(
+        sem_results = await self.graph_client.search_messages_vector(
             query_embedding, vector_limit
         )
 
@@ -281,7 +282,7 @@ class SearchTools:
             msg_key = self._format_message_id(msg_id)
             results[msg_key] = ("semantic", float(score))
 
-        fts_results = await self.memgraph.search_messages_fts(query, fts_limit)
+        fts_results = await self.graph_client.search_messages_fts(query, fts_limit)
 
         max_fts = max([s for _, s in fts_results], default=1.0) or 1.0
 
@@ -386,7 +387,7 @@ class SearchTools:
                         pass
 
         if missing_ids_numerical:
-            fallback_msgs = await self.memgraph.get_messages_by_ids(
+            fallback_msgs = await self.graph_client.get_messages_by_ids(
                 missing_ids_numerical
             )
             for m in fallback_msgs:
@@ -421,8 +422,9 @@ class SearchTools:
         target_turn_id = msg_id
         is_msg_id = msg_id.startswith("msg_")
         if is_msg_id:
-            target_turn_id = await self.redis.hget(lookup_key, msg_id)
-
+            raw_id = msg_id.split("_", 1)[1]
+            target_turn_id = await self.redis.hget(lookup_key, raw_id)
+            
         rank = None
         if target_turn_id:
             rank = await self.redis.zrank(sorted_key, target_turn_id)
@@ -431,7 +433,7 @@ class SearchTools:
             if is_msg_id:
                 try:
                     numerical_msg_id = int(msg_id.split("_")[1])
-                    fallback_msgs = await self.memgraph.get_surrounding_messages(
+                    fallback_msgs = await self.graph_client.get_surrounding_messages(
                         numerical_msg_id, forward, target_total
                     )
 
@@ -557,7 +559,13 @@ class SearchTools:
         loop = asyncio.get_running_loop()
         try:
             if DDGS is None:
-                return [{"title": "Search Error", "url": "", "snippet": "duckduckgo_search is not installed"}]
+                return [
+                    {
+                        "title": "Search Error",
+                        "url": "",
+                        "snippet": "duckduckgo_search is not installed",
+                    }
+                ]
             ddgs = DDGS()
             timelimit = {"pd": "d", "pw": "w", "pm": "m", "py": "y"}.get(freshness)
 

@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.conf.base import get_config
+from common.conf.manager import ConfigManager
 from common.schema.dtypes import AgentConfig
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
@@ -31,7 +31,7 @@ class Orchestrator:
     It prepares the environment and delegates the reasoning loop to AgentExecutor.
     """
 
-    def __init__(self, resources: Optional[ResourceManager] = None):
+    def __init__(self):
         pass
 
     async def run_stream(
@@ -61,8 +61,8 @@ class Orchestrator:
         """
         tools = None
         try:
-            # 1. Configuration
-            config = get_config()
+            # Configuration
+            config = ConfigManager.get().config
             limits = config.developer_settings.limits
             run_config = AgentRunConfig(
                 max_calls=limits.max_tool_calls,
@@ -73,13 +73,13 @@ class Orchestrator:
                 tool_limits=tuple(limits.tool_limits.items()),
             )
 
-            # 2. Services (Context-Aware)
+            # Services (Context-Aware)
             services = await self._bootstrap_services(context, agent_id)
             tools = services["tools"]
             memory_mgr = services["memory"]
             topic_config = services["topic_config"]
 
-            # 3. Identity & Persona
+            # Identity & Persona
             redis = ResourceManager.get().redis
             identity = await self._resolve_agent_identity(
                 user_name,
@@ -90,7 +90,7 @@ class Orchestrator:
             )
             agent_cfg = identity["config"]
 
-            # 4. Context & State Assembly
+            # Context & State Assembly
             effective_hot_topics = (
                 hot_topics if hot_topics is not None else topic_config.hot_topics
             )
@@ -108,8 +108,10 @@ class Orchestrator:
                 history=conversation_history or [],
             )
 
-            # 5. Execution via AgentExecutor
-            executor = AgentExecutor(ctx, ResourceManager.get().llm_service, tools, memory_mgr)
+            # Execution via AgentExecutor
+            executor = AgentExecutor(
+                ctx, ResourceManager.get().llm_service, tools, memory_mgr
+            )
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
@@ -152,7 +154,9 @@ class Orchestrator:
                     if parsed_agent_data:
                         agent_cfg = AgentConfig.from_dict(parsed_agent_data)
                 except Exception as e:
-                    logger.warning(f"Failed to parse agent config for '{agent_id}': {e}")
+                    logger.warning(
+                        f"Failed to parse agent config for '{agent_id}': {e}"
+                    )
 
         return {
             "config": agent_cfg,
@@ -173,7 +177,7 @@ class Orchestrator:
         """
         Retrieves pre-wired service components from the active Context and instantiates MemoryManager.
         """
-        config = get_config()
+        config = ConfigManager.get().config
         search_cfg = config.developer_settings.search.model_dump()
 
         memory_mgr = MemoryManager(

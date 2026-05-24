@@ -18,11 +18,10 @@ class BatchConsumer:
         self,
         user_name: str,
         session_id: str,
-        memgraph: GraphClient,
+        graph_client: GraphClient,
         processor: BatchProcessor,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
-
         write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
         batch_size: int = 8,
         batch_timeout: float = 360.0,
@@ -32,7 +31,7 @@ class BatchConsumer:
 
         self.user_name = user_name
         self.session_id = session_id
-        self.memgraph = memgraph
+        self.graph_client = graph_client
         self.processor = processor
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
@@ -254,7 +253,7 @@ class BatchConsumer:
                     ]
                     try:
                         await asyncio.wait_for(
-                            self.memgraph.save_message_logs(batch), timeout=30.0
+                            self.graph_client.save_message_logs(batch), timeout=30.0
                         )
                     except Exception as e:
                         logger.error(f"Failed to save message logs: {e}")
