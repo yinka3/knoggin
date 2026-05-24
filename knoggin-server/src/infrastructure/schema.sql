@@ -1,17 +1,3 @@
--- Knoggin Postgres Schema (Apache AGE + pgvector)
-
--- 1. Enable Extensions
-CREATE EXTENSION IF NOT EXISTS age;
-CREATE EXTENSION IF NOT EXISTS vector;
-
--- 2. Initialize Apache AGE Graph
--- We wrap this in an anonymous block to only create if it doesn't exist
-DO $$ 
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM ag_graph WHERE name = 'knoggin_graph') THEN
-        PERFORM create_graph('knoggin_graph');
-    END IF;
-END $$;
 
 -- 3. File RAG / ChromaDB Replacement
 CREATE TABLE IF NOT EXISTS file_chunks (

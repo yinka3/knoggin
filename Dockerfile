@@ -20,6 +20,17 @@ COPY knoggin-sdk/pyproject.toml ./knoggin-sdk/
 # Using uv sync with --frozen to ensure reproducible builds from the lockfile
 RUN uv sync --frozen --no-dev --package knoggin-server
 
+# Use the virtual environment created by uv
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Pre-download ML models so first boot is instant
+RUN python -c "\
+from sentence_transformers import SentenceTransformer, CrossEncoder; \
+SentenceTransformer('dunzhang/stella_en_1.5B_v5'); \
+CrossEncoder('BAAI/bge-reranker-large')"
+
+RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_large-v2.1')"
+
 # Copy the entire workspace source
 COPY . .
 
