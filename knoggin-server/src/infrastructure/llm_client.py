@@ -6,7 +6,7 @@ import instructor
 import redis.asyncio as aioredis
 from loguru import logger
 from openai import AsyncOpenAI
-from transformers import AutoTokenizer
+import tiktoken
 
 from common.exceptions import ConfigurationError
 from common.utils.tasks import BackgroundTaskGroup
@@ -66,21 +66,15 @@ class LLMService:
             logger.warning("LLMService initialized without API key")
 
     async def load_tokenizer(self):
-        """Async loading of the heavy tokenizer."""
+        """Load tiktoken encoding for token estimation."""
         if self._tokenizer:
             return
 
         try:
-            loop = asyncio.get_running_loop()
-            # Offload heavy loading to thread pool
-            self._tokenizer = await loop.run_in_executor(
-                None, lambda: AutoTokenizer.from_pretrained("unsloth/gemma-2-2b")
-            )
-            logger.info("LLM tokenizer loaded")
+            self._tokenizer = tiktoken.get_encoding("cl100k_base")
+            logger.info("Tiktoken loaded (cl100k_base)")
         except Exception as e:
-            logger.warning(
-                f"Failed to load transformers tokenizer: {e}. Token estimation will be less accurate."
-            )
+            logger.warning(f"Failed to load tiktoken: {e}")
 
     @property
     def agent_model(self) -> str:
