@@ -82,6 +82,7 @@ class SessionAssembler:
             project_state.pipeline,
             project_state.topic_config,
         )
+        processor.get_next_ent_id = ctx.get_next_ent_id
         ctx.batch_processor = processor
 
         # Initialize Batch Consumer with direct callbacks
@@ -148,8 +149,6 @@ class SessionAssembler:
             cpu_executor=self.resources.executor,
             user_name=self.user_name,
             topic_config=topic_config,
-            # This is tricky: it needs a callback to the context's get_next_ent_id
-            # We'll need to wrap it or satisfy it after Context creation
             get_next_ent_id=None,
             resolution_threshold=er_cfg.resolution_threshold,
         )

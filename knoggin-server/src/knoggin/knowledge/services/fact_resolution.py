@@ -34,6 +34,8 @@ class FactResolutionUtils:
         contradiction_sim_high: float = 0.95,
         contradiction_batch_size: int = 4,
         contradiction_prompt: Optional[str] = None,
+        user_name: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> Tuple[List[FactRecord], List[str]]:
         """
         Invalidate old facts and create new ones. Creates first, invalidates after.
@@ -106,12 +108,21 @@ class FactResolutionUtils:
         if facts_to_create:
             try:
                 count = await graph_client.create_facts_batch(
-                    entity_id, facts_to_create
+                    entity_id,
+                    facts_to_create,
+                    user_name=user_name,
+                    session_id=session_id,
+                    project_id=project_id,
                 )
                 logger.debug(f"Created {count} facts for entity {entity_id}")
 
                 failed_invalidations = await FactResolutionUtils._invalidate_facts(
-                    to_invalidate, entity_id, session_id, graph_client, now
+                    to_invalidate,
+                    entity_id,
+                    session_id,
+                    graph_client,
+                    now,
+                    project_id=project_id,
                 )
 
                 await emit(
@@ -147,7 +158,12 @@ class FactResolutionUtils:
                 )
         elif to_invalidate:
             failed_invalidations = await FactResolutionUtils._invalidate_facts(
-                to_invalidate, entity_id, session_id, graph_client, now
+                to_invalidate,
+                entity_id,
+                session_id,
+                graph_client,
+                now,
+                project_id=project_id,
             )
 
             await emit(
@@ -173,12 +189,15 @@ class FactResolutionUtils:
         session_id: str,
         graph_client: GraphClient,
         now: datetime,
+        project_id: Optional[str] = None,
     ) -> List[str]:
         """Helper to batch invalidate facts and emit failures."""
         failed_invalidations = []
         for fact_id in fact_ids:
             try:
-                await graph_client.invalidate_fact(fact_id, now)
+                await graph_client.invalidate_fact(
+                    fact_id, now, project_id=project_id
+                )
             except Exception as e:
                 logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
                 failed_invalidations.append(fact_id)

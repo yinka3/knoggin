@@ -36,6 +36,7 @@ class SearchTools:
     session_id: str
     active_topics: Optional[List[str]]
     entities: EntityManager
+    readable_project_ids: Optional[List[str]]
 
     async def search_messages(self, query: str, limit: int = None) -> List[Dict]:
         """
@@ -56,87 +57,64 @@ class SearchTools:
         if not results:
             return []
 
-        msg_keys = [msg_key for msg_key, _ in results]
-        scores = {msg_key: score for msg_key, score in results}
-
-        lookup_key = RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id)
-        user_msg_keys = [k for k in msg_keys if k.startswith("msg_")]
-
-        if user_msg_keys:
-            raw_keys = [k.split("_", 1)[1] for k in user_msg_keys]
-            turn_mappings = await self.redis.hmget(lookup_key, *raw_keys)
-            msg_to_turn = dict(zip(user_msg_keys, turn_mappings))
-        else:
-            msg_to_turn = {}
-
-        turn_keys = []
-        for msg_key in msg_keys:
-            if msg_key.startswith("msg_"):
-                turn_keys.append(msg_to_turn.get(msg_key))
-            else:
-                turn_keys.append(msg_key)
+        hits = [
+            {
+                "id": msg_key,
+                "score": score,
+                "user_name": self.user_name,
+                "session_id": session_id or self.session_id,
+            }
+            for msg_key, score, session_id in results
+        ]
 
         contexts = await asyncio.gather(
-            *[self._get_surrounding_context(msg_key) for msg_key in msg_keys]
+            *[
+                self._get_surrounding_context(
+                    hit["id"], session_id=hit["session_id"]
+                )
+                for hit in hits
+            ]
         )
-
-        content_key = RedisKeys.message_content(self.user_name, self.session_id)
-        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
-
-        assistant_msg_keys = [k for k in msg_keys if not k.startswith("msg_")]
-
-        user_contents = {}
-        if user_msg_keys:
-            raw_contents = await self.redis.hmget(content_key, *user_msg_keys)
-            user_contents = dict(zip(user_msg_keys, raw_contents))
-
-        assistant_contents = {}
-        if assistant_msg_keys:
-            raw_contents = await self.redis.hmget(conv_key, *assistant_msg_keys)
-            assistant_contents = dict(zip(assistant_msg_keys, raw_contents))
 
         seen_turns = set()
         output = []
 
-        for msg_key, turn_key, context in zip(msg_keys, turn_keys, contexts):
-            if not turn_key or turn_key in seen_turns:
+        for hit_result, context in zip(hits, contexts):
+            msg_key = hit_result["id"]
+            session_id = hit_result["session_id"]
+            hit = next((m for m in context if m.get("is_hit")), None)
+            if not hit:
                 continue
 
-            for msg in context:
-                seen_turns.add(msg["id"])
-
             if msg_key.startswith("msg_"):
-                raw = user_contents.get(msg_key)
-                if raw:
-                    data = safe_json_loads(raw)
-                    if not data or not isinstance(data, dict):
-                        continue
-                    output.append(
-                        {
-                            "id": msg_key,
-                            "role": "user",
-                            "message": data.get("message", ""),
-                            "timestamp": data.get("timestamp", ""),
-                            "score": scores[msg_key],
-                            "context": context,
-                        }
-                    )
-            else:
-                raw = assistant_contents.get(msg_key)
-                if raw:
-                    data = safe_json_loads(raw)
-                    if not data or not isinstance(data, dict):
-                        continue
-                    output.append(
-                        {
-                            "id": msg_key,
-                            "role": data.get("role", "assistant"),
-                            "message": data.get("content", ""),
-                            "timestamp": data.get("timestamp", ""),
-                            "score": scores[msg_key],
-                            "context": context,
-                        }
-                    )
+                content_key = RedisKeys.message_content(self.user_name, session_id)
+                raw = await self.redis.hget(content_key, msg_key)
+                data = safe_json_loads(raw) if raw else None
+                if data and isinstance(data, dict):
+                    hit = {
+                        **hit,
+                        "role": data.get("role", "user"),
+                        "content": data.get("message", data.get("content", "")),
+                        "timestamp": data.get("timestamp", hit.get("timestamp", "")),
+                    }
+
+            turn_marker = f"{session_id}:{hit['id']}"
+            if turn_marker in seen_turns:
+                continue
+            seen_turns.add(turn_marker)
+
+            output.append(
+                {
+                    "id": msg_key,
+                    "user_name": self.user_name,
+                    "session_id": session_id,
+                    "role": hit.get("role", "user"),
+                    "message": hit.get("content", ""),
+                    "timestamp": hit.get("timestamp", ""),
+                    "score": hit_result["score"],
+                    "context": context,
+                }
+            )
 
         return output
 
@@ -155,7 +133,10 @@ class SearchTools:
         """
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
         results = await self.graph_client.search_entity(
-            query, self.active_topics, limit
+            query,
+            self.active_topics,
+            limit,
+            visible_project_ids=self.readable_project_ids,
         )
 
         if not results:
@@ -163,9 +144,8 @@ class SearchTools:
 
         for entity in results:
             for conn in entity.get("top_connections", []):
-                evidence_ids = conn.pop("evidence_ids", [])
-                string_ids = [self._format_message_id(x) for x in evidence_ids]
-                conn["evidence"] = await self._hydrate_evidence(string_ids)
+                evidence_refs = conn.pop("evidence_refs", conn.pop("evidence_ids", []))
+                conn["evidence"] = await self._hydrate_evidence(evidence_refs)
 
         return results
 
@@ -261,7 +241,9 @@ class SearchTools:
         """Resolve user input to canonical entity name via exact or fuzzy match."""
         return await self.entities.resolve_entity_name(entity)
 
-    async def _search_messages(self, query: str, k: int) -> List[Tuple[str, float]]:
+    async def _search_messages(
+        self, query: str, k: int
+    ) -> List[Tuple[str, float, Optional[str]]]:
         """
         Asynchronous internal method executing hybrid vector + FTS search over messages,
         followed by an optional cross-encoder reranking step if candidates exceed 1.
@@ -279,24 +261,41 @@ class SearchTools:
 
         for msg_id, score in sem_results:
             msg_key = self._format_message_id(msg_id)
-            results[msg_key] = ("semantic", float(score))
+            results[(self.session_id, msg_key)] = (
+                "semantic",
+                float(score),
+                self.session_id,
+            )
 
-        fts_results = await self.graph_client.search_messages_fts(query, fts_limit)
+        visible_session_ids = await self._get_visible_session_ids()
+        fts_results = await self.graph_client.search_messages_fts(
+            query,
+            fts_limit,
+            user_name=self.user_name,
+            session_ids=visible_session_ids,
+        )
 
-        max_fts = max([s for _, s in fts_results], default=1.0) or 1.0
+        max_fts = max([s for _, s, _ in fts_results], default=1.0) or 1.0
 
-        for msg_id, raw_score in fts_results:
+        for msg_id, raw_score, result_session_id in fts_results:
             msg_key = self._format_message_id(msg_id)
+            scoped_key = (result_session_id, msg_key)
 
             norm_score = raw_score / max_fts if max_fts > 0 else 0
 
-            logger.debug(f"FTS result: {msg_key} score={norm_score:.3f}")
+            logger.debug(
+                f"FTS result: {result_session_id}:{msg_key} score={norm_score:.3f}"
+            )
 
-            if msg_key in results:
-                _, sem_score = results[msg_key]
-                results[msg_key] = ("both", sem_score + norm_score)
+            if scoped_key in results:
+                _, sem_score, _ = results[scoped_key]
+                results[scoped_key] = (
+                    "both",
+                    sem_score + norm_score,
+                    result_session_id,
+                )
             else:
-                results[msg_key] = ("keyword", norm_score)
+                results[scoped_key] = ("keyword", norm_score, result_session_id)
 
         if not results:
             return []
@@ -308,16 +307,33 @@ class SearchTools:
                     results.items(), key=lambda x: x[1][1], reverse=True
                 )[:rerank_candidates]
                 candidate_keys = [k for k, _ in sorted_candidates]
+                candidate_refs = [
+                    {
+                        "user_name": self.user_name,
+                        "session_id": session_id or self.session_id,
+                        "message_id": self._parse_message_ref_id(msg_key),
+                    }
+                    for session_id, msg_key in candidate_keys
+                ]
 
-                hydrated = await self._hydrate_evidence(candidate_keys)
-                text_map = {h["id"]: h.get("message", "") for h in hydrated}
-                texts = [text_map.get(k, "") for k in candidate_keys]
+                hydrated = await self._hydrate_evidence(candidate_refs)
+                text_map = {
+                    (h.get("session_id"), h["id"]): h.get("message", "")
+                    for h in hydrated
+                }
+                texts = [
+                    text_map.get((session_id, msg_key), "")
+                    for session_id, msg_key in candidate_keys
+                ]
 
                 scores = await self.embedding_service.rerank(query, texts)
                 reranked = sorted(
                     zip(candidate_keys, scores), key=lambda x: x[1], reverse=True
                 )
-                return [(msg_key, float(score)) for msg_key, score in reranked[:k]]
+                return [
+                    (msg_key, float(score), session_id)
+                    for (session_id, msg_key), score in reranked[:k]
+                ]
         except Exception as e:
             logger.warning(f"Rerank failed, falling back to raw scores: {e}")
 
@@ -325,98 +341,181 @@ class SearchTools:
         sorted_results = sorted(results.items(), key=lambda x: x[1][1], reverse=True)[
             :k
         ]
-        return [(key, score) for key, (_, score) in sorted_results]
+        return [
+            (msg_key, score, stored_session_id or key_session_id)
+            for (key_session_id, msg_key), (
+                _,
+                score,
+                stored_session_id,
+            ) in sorted_results
+        ]
 
-    async def _hydrate_evidence(
-        self, evidence_ids: List[str], timeout: float = 5.0
-    ) -> List[Dict]:
-        """
-        Fetch full message payloads from Redis for a list of string evidence IDs.
-        Falls back to PostgreSQL lookup if Redis cache misses.
-        """
-        if not evidence_ids:
-            return []
+    def _normalize_evidence_ref(self, ref) -> Optional[Dict]:
+        if isinstance(ref, dict):
+            raw_id = ref.get("message_id", ref.get("id"))
+            user_name = ref.get("user_name") or self.user_name
+            session_id = ref.get("session_id") or self.session_id
+        else:
+            raw_id = ref
+            user_name = self.user_name
+            session_id = self.session_id
 
-        content_key = RedisKeys.message_content(self.user_name, self.session_id)
-        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
-
-        pipe = self.redis.pipeline()
-        for msg_id in evidence_ids:
-            if msg_id.startswith("msg_"):
-                pipe.hget(content_key, msg_id)
-            else:
-                pipe.hget(conv_key, msg_id)
+        if raw_id is None or not user_name or not session_id:
+            return None
 
         try:
-            raw_results = await asyncio.wait_for(pipe.execute(), timeout=timeout)
+            message_id = self._parse_message_ref_id(raw_id)
+        except (TypeError, ValueError, IndexError):
+            return None
+
+        return {
+            "user_name": user_name,
+            "session_id": session_id,
+            "message_id": message_id,
+            "key": self._format_message_id(message_id),
+        }
+
+    @staticmethod
+    def _parse_message_ref_id(raw_id) -> int:
+        if isinstance(raw_id, str):
+            if raw_id.startswith("msg_"):
+                return int(raw_id.split("_", 1)[1])
+            if raw_id.startswith("turn_"):
+                return int(raw_id.split("_", 1)[1]) + 1_000_000_000
+        return int(raw_id)
+
+    async def _hydrate_evidence(
+        self, evidence_refs: List, timeout: float = 5.0
+    ) -> List[Dict]:
+        """
+        Fetch full message payloads from Redis for scoped evidence refs.
+        Falls back to PostgreSQL lookup if Redis cache misses.
+        """
+        if not evidence_refs:
+            return []
+
+        normalized = []
+        for idx, ref in enumerate(evidence_refs):
+            item = self._normalize_evidence_ref(ref)
+            if item:
+                item["idx"] = idx
+                normalized.append(item)
+
+        if not normalized:
+            return []
+
+        raw_by_idx = {}
+        grouped = {}
+        for item in normalized:
+            bucket = "message" if item["key"].startswith("msg_") else "conversation"
+            grouped.setdefault((item["user_name"], item["session_id"], bucket), []).append(
+                item
+            )
+
+        try:
+            for (user_name, session_id, bucket), items in grouped.items():
+                redis_key = (
+                    RedisKeys.message_content(user_name, session_id)
+                    if bucket == "message"
+                    else RedisKeys.conversation(user_name, session_id)
+                )
+                pipe = self.redis.pipeline()
+                for item in items:
+                    pipe.hget(redis_key, item["key"])
+                raw_results = await asyncio.wait_for(pipe.execute(), timeout=timeout)
+                for item, raw in zip(items, raw_results):
+                    raw_by_idx[item["idx"]] = raw
         except asyncio.TimeoutError:
             logger.warning(
-                f"Redis hydrate timed out for {len(evidence_ids)} evidence IDs"
+                f"Redis hydrate timed out for {len(evidence_refs)} evidence refs"
             )
             return []
 
-        results = []
-        missing_ids_numerical = []
+        results_by_idx = {}
+        missing_by_session = {}
+        normalized_by_idx = {item["idx"]: item for item in normalized}
 
-        for msg_id, raw in zip(evidence_ids, raw_results):
+        for item in normalized:
+            raw = raw_by_idx.get(item["idx"])
             if raw:
                 data = safe_json_loads(raw)
                 if data and isinstance(data, dict):
-                    results.append(
-                        {
-                            "id": msg_id,
-                            "message": data.get("message", data.get("content", "")),
-                            "timestamp": data.get("timestamp", ""),
-                        }
-                    )
+                    results_by_idx[item["idx"]] = {
+                        "id": item["key"],
+                        "user_name": item["user_name"],
+                        "session_id": item["session_id"],
+                        "message": data.get("message", data.get("content", "")),
+                        "timestamp": data.get("timestamp", ""),
+                    }
                 else:
-                    logger.warning(f"Malformed evidence data for {msg_id}")
+                    logger.warning(f"Malformed evidence data for {item['key']}")
             else:
-                if msg_id.startswith("msg_"):
-                    try:
-                        missing_ids_numerical.append(int(msg_id.split("_")[1]))
-                    except (ValueError, IndexError):
-                        pass
-                elif msg_id.startswith("turn_"):
-                    try:
-                        missing_ids_numerical.append(
-                            int(msg_id.split("_")[1]) + 1_000_000_000
-                        )
-                    except (ValueError, IndexError):
-                        pass
+                missing_by_session.setdefault(
+                    (item["user_name"], item["session_id"]), []
+                ).append(item["message_id"])
 
-        if missing_ids_numerical:
+        for (user_name, session_id), message_ids in missing_by_session.items():
             fallback_msgs = await self.graph_client.get_messages_by_ids(
-                missing_ids_numerical
+                message_ids,
+                user_name=user_name,
+                session_ids=[session_id],
             )
-            for m in fallback_msgs:
+            for message in fallback_msgs:
                 ts_iso = ""
-                if "timestamp" in m and isinstance(m["timestamp"], (int, float)):
+                if "timestamp" in message and isinstance(message["timestamp"], (int, float)):
                     ts_iso = datetime.fromtimestamp(
-                        m["timestamp"] / 1000.0, timezone.utc
+                        message["timestamp"] / 1000.0, timezone.utc
                     ).isoformat()
 
-                if m["id"] >= 1_000_000_000:
-                    str_id = f"turn_{m['id'] - 1_000_000_000}"
+                if message["id"] >= 1_000_000_000:
+                    str_id = f"turn_{message['id'] - 1_000_000_000}"
                 else:
-                    str_id = f"msg_{m['id']}"
+                    str_id = f"msg_{message['id']}"
 
-                results.append(
-                    {"id": str_id, "message": m["content"], "timestamp": ts_iso}
-                )
+                for idx, item in normalized_by_idx.items():
+                    if (
+                        item["user_name"] == user_name
+                        and item["session_id"] == session_id
+                        and item["message_id"] == message["id"]
+                        and idx not in results_by_idx
+                    ):
+                        results_by_idx[idx] = {
+                            "id": str_id,
+                            "user_name": message.get("user_name"),
+                            "session_id": message.get("session_id"),
+                            "message": message["content"],
+                            "timestamp": ts_iso,
+                        }
 
-        return results
+        return [results_by_idx[idx] for idx in sorted(results_by_idx)]
+
+    async def _get_visible_session_ids(self) -> List[str]:
+        if not self.readable_project_ids:
+            return [self.session_id]
+
+        visible = {self.session_id}
+        for project_id in self.readable_project_ids:
+            session_ids = await self.redis.smembers(
+                RedisKeys.project_sessions(self.user_name, project_id)
+            )
+            visible.update(session_ids or [])
+        return list(visible)
 
     async def _get_surrounding_context(
-        self, msg_id: str, forward: int = 3, target_total: int = 10
+        self,
+        msg_id: str,
+        forward: int = 3,
+        target_total: int = 10,
+        session_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Given a specific message or turn ID, retrieve the surrounding conversational
         context (previous and succeeding turns) to provide continuity in search results.
         """
-        sorted_key = RedisKeys.recent_conversation(self.user_name, self.session_id)
-        conv_key = RedisKeys.conversation(self.user_name, self.session_id)
-        lookup_key = RedisKeys.msg_to_turn_lookup(self.user_name, self.session_id)
+        target_session_id = session_id or self.session_id
+        sorted_key = RedisKeys.recent_conversation(self.user_name, target_session_id)
+        conv_key = RedisKeys.conversation(self.user_name, target_session_id)
+        lookup_key = RedisKeys.msg_to_turn_lookup(self.user_name, target_session_id)
 
         target_turn_id = msg_id
         is_msg_id = msg_id.startswith("msg_")
@@ -433,7 +532,11 @@ class SearchTools:
                 try:
                     numerical_msg_id = int(msg_id.split("_")[1])
                     fallback_msgs = await self.graph_client.get_surrounding_messages(
-                        numerical_msg_id, forward, target_total
+                        numerical_msg_id,
+                        forward,
+                        target_total,
+                        user_name=self.user_name,
+                        session_id=target_session_id,
                     )
 
                     formatted_fallback = []

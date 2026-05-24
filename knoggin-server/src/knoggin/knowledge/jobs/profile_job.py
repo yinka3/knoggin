@@ -7,13 +7,13 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.scoping import GLOBAL_PROJECT_SCOPE
 from common.schema.dtypes import (
     EntityProfilesResult,
     FactRecord,
 )
 from common.utils.core_utils import fetch_conversation_turns
 from common.utils.data_utils import (
-    enrich_facts_with_sources,
     format_vp04_input,
     process_extracted_facts,
 )
@@ -24,6 +24,7 @@ from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin.agent.prompts import (
+    enrich_facts_with_sources,
     get_profile_extraction_prompt,
 )
 from knoggin.knowledge.services.embedding_service import EmbeddingService
@@ -302,7 +303,7 @@ class ProfileRefinementJob(BaseJob):
                     )
 
                     if updates:
-                        await self._write_updates(updates)
+                        await self._write_updates(updates, ctx.session_id)
                         await emit(
                             ctx.session_id,
                             "job",
@@ -418,7 +419,10 @@ class ProfileRefinementJob(BaseJob):
             system_reasoning = get_profile_extraction_prompt(ctx.user_name)
 
         enriched_facts = await enrich_facts_with_sources(
-            existing_facts, self.graph_client
+            existing_facts,
+            self.graph_client,
+            user_name=ctx.user_name,
+            session_id=ctx.session_id,
         )
         if len(enriched_facts) > self.max_facts_context:
             enriched_facts = enriched_facts[-self.max_facts_context :]
@@ -491,6 +495,8 @@ class ProfileRefinementJob(BaseJob):
             self.contradiction_sim_high,
             self.contradiction_batch_size,
             self.contradiction_prompt,
+            user_name=ctx.user_name,
+            project_id=GLOBAL_PROJECT_SCOPE,
         )
         if failed_invalidations:
             dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
@@ -508,6 +514,7 @@ class ProfileRefinementJob(BaseJob):
             canonical_name=ctx.user_name,
             embedding=embedding,
             last_msg_id=current_msg_id,
+            project_id=GLOBAL_PROJECT_SCOPE,
         )
 
         logger.info(f"Refined user profile for {ctx.user_name}")
@@ -537,7 +544,10 @@ class ProfileRefinementJob(BaseJob):
             llm_input = []
             for e in batch:
                 enriched_facts = await enrich_facts_with_sources(
-                    e["existing_facts"], self.graph_client
+                    e["existing_facts"],
+                    self.graph_client,
+                    user_name=ctx.user_name,
+                    session_id=ctx.session_id,
                 )
                 if len(enriched_facts) > self.max_facts_context:
                     enriched_facts = enriched_facts[-self.max_facts_context :]
@@ -624,6 +634,8 @@ class ProfileRefinementJob(BaseJob):
                     self.contradiction_sim_high,
                     self.contradiction_batch_size,
                     self.contradiction_prompt,
+                    user_name=ctx.user_name,
+                    project_id=ctx.session_id,
                 )
                 if failed_invalidations:
                     dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
@@ -642,6 +654,7 @@ class ProfileRefinementJob(BaseJob):
                         "canonical_name": orig["entity_name"],
                         "embedding": embedding,
                         "last_msg_id": current_msg_id,
+                        "project_id": ctx.session_id,
                     }
                 )
 
@@ -652,7 +665,7 @@ class ProfileRefinementJob(BaseJob):
 
             for orig in no_update_ents:
                 await self.graph_client.update_entity_checkpoint(
-                    orig["ent_id"], current_msg_id
+                    orig["ent_id"], current_msg_id, project_id=ctx.session_id
                 )
 
             return updates
@@ -791,7 +804,7 @@ class ProfileRefinementJob(BaseJob):
 
         return new_emb
 
-    async def _write_updates(self, updates: List[Dict]):
+    async def _write_updates(self, updates: List[Dict], project_id: str):
         """Write profile updates to GraphClient sequentially."""
 
         for update in updates:
@@ -800,6 +813,7 @@ class ProfileRefinementJob(BaseJob):
                 canonical_name=update["canonical_name"],
                 embedding=update["embedding"],
                 last_msg_id=update["last_msg_id"],
+                project_id=update.get("project_id") or project_id,
             )
 
         logger.info(f"Wrote {len(updates)} profile updates to graph")

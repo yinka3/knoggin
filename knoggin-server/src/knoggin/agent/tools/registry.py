@@ -51,6 +51,8 @@ class Tools(SearchTools, GraphTools, MemoryTools):
         self.user_name = user_name
         self.redis = ResourceManager.get().redis
         self.embedding_service = entities.embedding_service
+        self.project_id = entities.project_id
+        self.readable_project_ids = entities.readable_project_ids
         self.topic_config = topic_config
         self.file_rag = file_rag
         self.active_topics = topic_config.active_topics if topic_config else None

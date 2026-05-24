@@ -93,7 +93,7 @@ class AgentLimitSettings(BaseModel):
             "search_messages": 6,
             "get_connections": 8,
             "search_entity": 8,
-            "get_activity": 8,
+            "get_recent_activity": 8,
             "find_path": 8,
             "get_hierarchy": 8,
             "fact_check": 6,

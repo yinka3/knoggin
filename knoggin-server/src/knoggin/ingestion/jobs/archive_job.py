@@ -71,7 +71,9 @@ class FactArchivalJob(BaseJob):
         ):
             cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
 
-            deleted_count = await self.graph_client.delete_old_invalidated_facts(cutoff)
+            deleted_count = await self.graph_client.delete_old_invalidated_facts(
+                cutoff, project_id=ctx.session_id
+            )
 
             summary = f"Archived {deleted_count} invalidated facts"
             if deleted_count > 0:

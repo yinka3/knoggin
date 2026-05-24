@@ -166,6 +166,9 @@ class DLQReplayJob(BaseJob):
                     "id": msg["id"],
                     "content": msg.get("message", msg.get("content", "")),
                     "role": msg.get("role", "user"),
+                    "user_name": entry.get("user_name", ctx.user_name),
+                    "session_id": entry.get("session_id", ctx.session_id),
+                    "project_id": entry.get("project_id", ctx.session_id),
                     "timestamp": msg.get("timestamp", ""),
                     "embedding": result.message_embeddings.get(msg["id"], []),
                 }

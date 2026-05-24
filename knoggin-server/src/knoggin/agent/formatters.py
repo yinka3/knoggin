@@ -71,7 +71,12 @@ def format_retrieved_messages(messages: List[Dict]) -> str:
                     f"Failed to format retrieved message timestamp {ts_str}: {e}"
                 )
 
-            role = "USER" if msg["role"] == "user" else "AGENT"
+            if msg["role"] == "user":
+                role = "USER"
+            elif msg["role"] == "file":
+                role = "FILE"
+            else:
+                role = "AGENT"
             content = msg.get("content", "")
 
             marker = ">> " if msg.get("is_hit") else "   "

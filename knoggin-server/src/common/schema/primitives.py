@@ -120,6 +120,12 @@ def _parse_dt(val) -> datetime:
 class FactRecord(Fact):
     """DB-stored fact"""
 
+    source_user_name: Optional[str] = Field(
+        None, description="User scope for the source message"
+    )
+    source_session_id: Optional[str] = Field(
+        None, description="Session scope for the source message"
+    )
     id: str = Field(..., description="Unique fact identifier")
     source_entity_id: int = Field(..., description="DB ID of the source entity")
     valid_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -153,6 +159,8 @@ class FactRecord(Fact):
             confidence=record.get("confidence", 1.0),
             embedding=record.get("embedding") or [],
             source_msg_id=record.get("source_msg_id"),
+            source_user_name=record.get("source_user_name"),
+            source_session_id=record.get("source_session_id"),
             source=record.get("source", "user"),
         )
 

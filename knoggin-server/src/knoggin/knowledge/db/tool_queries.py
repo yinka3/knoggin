@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from common.scoping import IDENTITY_ENTITY_ID
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -28,8 +29,19 @@ class ToolQueries:
             for i in range(len(evidence))
         ]
 
+    def _scope_params(self, visible_project_ids: Optional[List[str]] = None) -> Dict:
+        return {
+            "filter_projects": bool(visible_project_ids),
+            "visible_project_ids": visible_project_ids or [],
+            "identity_entity_id": IDENTITY_ENTITY_ID,
+        }
+
     async def get_hot_topic_context_with_messages(
-        self, hot_topic_names: List[str], msg_limit: int = 5, slim: bool = False
+        self,
+        hot_topic_names: List[str],
+        msg_limit: int = 5,
+        slim: bool = False,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         # In AGE, list comprehensions like `[(e)-[:HAS_FACT]->(f) ... | f.content]` work if formatted carefully,
         # but subquery limitations can trigger. A safer fallback is multiple queries, but let's try standard standard Cypher first.
@@ -38,6 +50,7 @@ class ToolQueries:
         cypher = """
         MATCH (t:Topic) WHERE t.name IN $hot_topics
         MATCH (e:Entity)-[:BELONGS_TO]->(t)
+        WHERE $filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id
         OPTIONAL MATCH (e)-[r:RELATED_TO]-()
         WITH t, e, r
         ORDER BY e.last_mentioned DESC
@@ -52,7 +65,15 @@ class ToolQueries:
 
         try:
             data = await self.client.execute_read(
-                query, (json.dumps({"hot_topics": hot_topic_names}),)
+                query,
+                (
+                    json.dumps(
+                        {
+                            "hot_topics": hot_topic_names,
+                            **self._scope_params(visible_project_ids),
+                        }
+                    ),
+                ),
             )
 
             topics_map = {}
@@ -65,7 +86,8 @@ class ToolQueries:
                 if t_name not in topics_map:
                     topics_map[t_name] = {
                         "entities": [],
-                        "message_ids": set(),
+                        "message_refs": [],
+                        "_message_ref_keys": set(),
                         "_entity_names": set(),
                     }
 
@@ -86,16 +108,25 @@ class ToolQueries:
                     topics_map[t_name]["entities"].append(ent)
 
                 if row["msg_ids"]:
-                    for m_id in row["msg_ids"]:
-                        if len(topics_map[t_name]["message_ids"]) < msg_limit:
-                            topics_map[t_name]["message_ids"].add(m_id)
+                    for msg_ref in row["msg_ids"]:
+                        ref_key = (
+                            msg_ref.get("user_name"),
+                            msg_ref.get("session_id"),
+                            msg_ref.get("message_id"),
+                        ) if isinstance(msg_ref, dict) else msg_ref
+                        if (
+                            ref_key not in topics_map[t_name]["_message_ref_keys"]
+                            and len(topics_map[t_name]["message_refs"]) < msg_limit
+                        ):
+                            topics_map[t_name]["_message_ref_keys"].add(ref_key)
+                            topics_map[t_name]["message_refs"].append(msg_ref)
 
             # Convert sets to lists
             result = {}
             for t, val in topics_map.items():
                 result[t] = {
                     "entities": val["entities"],
-                    "message_ids": list(val["message_ids"]),
+                    "message_refs": val["message_refs"],
                 }
             return result
         except Exception as e:
@@ -112,21 +143,36 @@ class ToolQueries:
         return " | ".join(sanitized.split())
 
     async def search_messages_fts(
-        self, query: str, limit: int = 50
-    ) -> List[Tuple[int, float]]:
+        self,
+        query: str,
+        limit: int = 50,
+        user_name: Optional[str] = None,
+        session_ids: Optional[List[str]] = None,
+    ) -> List[Tuple[int, float, str]]:
         sanitized = self._sanitize_fts_query(query)
         if not sanitized:
             return []
 
-        sql = """
-        SELECT message_id, ts_rank(content_tsvector, to_tsquery('english', %s)) as score
+        scope_sql = ""
+        params = [sanitized, sanitized]
+        if user_name and session_ids:
+            scope_sql = "AND user_name = %s AND session_id = ANY(%s)"
+            params.extend([user_name, session_ids])
+
+        sql = f"""
+        SELECT message_id, session_id, ts_rank(content_tsvector, to_tsquery('english', %s)) as score
         FROM message_search
         WHERE content_tsvector @@ to_tsquery('english', %s)
+        {scope_sql}
         ORDER BY score DESC LIMIT %s
         """
         try:
-            res = await self.client.execute_read(sql, (sanitized, sanitized, limit))
-            return [(int(row["message_id"]), float(row["score"])) for row in res]
+            params.append(limit)
+            res = await self.client.execute_read(sql, tuple(params))
+            return [
+                (int(row["message_id"]), float(row["score"]), row["session_id"])
+                for row in res
+            ]
         except Exception as e:
             logger.error(f"Postgres FTS search failed: {e}")
             return []
@@ -138,6 +184,7 @@ class ToolQueries:
         limit: int = 5,
         connections_limit: int = 5,
         evidence_limit: int = 5,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         clean_query = re.sub(r"[^\w\s.\-']", "", query).strip()
         if not clean_query:
@@ -145,14 +192,21 @@ class ToolQueries:
 
         # 1. Search Postgres for top entity IDs
         # We can just use ILIKE on canonical_name
-        search_sql = """
+        scope_sql = ""
+        search_params = [f"%{clean_query}%", limit * 2]
+        if visible_project_ids:
+            scope_sql = "AND (project_id = ANY(%s) OR entity_id = %s)"
+            search_params = [f"%{clean_query}%", visible_project_ids, IDENTITY_ENTITY_ID, limit * 2]
+
+        search_sql = f"""
         SELECT entity_id FROM entity_search
         WHERE canonical_name ILIKE %s
+        {scope_sql}
         LIMIT %s
         """
         try:
             id_res = await self.client.execute_read(
-                search_sql, (f"%{clean_query}%", limit * 2)
+                search_sql, tuple(search_params)
             )
             if not id_res:
                 return []
@@ -161,6 +215,8 @@ class ToolQueries:
             # 2. Fetch Graph data for those IDs
             cypher = """
             MATCH (e:Entity) WHERE e.id IN $ids
+            WITH e
+            WHERE $filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id
             OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
             WITH e, t
             WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
@@ -183,7 +239,7 @@ class ToolQueries:
                 conn.canonical_name AS conn_name,
                 conn.aliases AS conn_aliases,
                 r.weight AS conn_weight,
-                r.message_ids AS evidence_ids,
+                r.message_ids AS evidence_refs,
                 r.context AS conn_context,
                 [(conn)-[:HAS_FACT]->(cf) WHERE cf.invalid_at IS NULL | cf.content] AS conn_facts,
                 parent.canonical_name AS parent_name,
@@ -192,7 +248,7 @@ class ToolQueries:
 
             q = self.client.build_cypher(
                 cypher,
-                "id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, last_mentioned agtype, last_updated agtype, facts agtype, conn_name agtype, conn_aliases agtype, conn_weight agtype, evidence_ids agtype, conn_context agtype, conn_facts agtype, parent_name agtype, children_count agtype",
+                "id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, last_mentioned agtype, last_updated agtype, facts agtype, conn_name agtype, conn_aliases agtype, conn_weight agtype, evidence_refs agtype, conn_context agtype, conn_facts agtype, parent_name agtype, children_count agtype",
             )
 
             data = await self.client.execute_read(
@@ -205,6 +261,7 @@ class ToolQueries:
                             "active_topics": active_topics
                             if active_topics is not None
                             else [],
+                            **self._scope_params(visible_project_ids),
                         }
                     ),
                 ),
@@ -254,7 +311,7 @@ class ToolQueries:
                             "context": row["conn_context"].strip('"')
                             if isinstance(row["conn_context"], str)
                             else row["conn_context"],
-                            "evidence_ids": list(row["evidence_ids"] or [])[
+                            "evidence_refs": list(row["evidence_refs"] or [])[
                                 :evidence_limit
                             ],
                         }
@@ -270,10 +327,14 @@ class ToolQueries:
         entity_names: List[str],
         active_topics: Optional[List[str]] = None,
         limit: int = 25,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         cypher = """
         MATCH (source:Entity) WHERE source.canonical_name IN $names
+        WITH source
+        WHERE $filter_projects = false OR source.project_id IN $visible_project_ids OR source.id = $identity_entity_id
         MATCH (source)-[r:RELATED_TO]-(target:Entity)
+        WHERE $filter_projects = false OR target.project_id IN $visible_project_ids OR target.id = $identity_entity_id
         OPTIONAL MATCH (target)-[:BELONGS_TO]->(t:Topic)
         WITH source, r, target, t
         WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
@@ -282,7 +343,7 @@ class ToolQueries:
             target.canonical_name as target,
             [(target)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as target_facts,
             r.weight as connection_strength,
-            r.message_ids as evidence_ids,
+            r.message_ids as evidence_refs,
             r.confidence as confidence,
             r.last_seen as last_seen,
             r.context as context
@@ -291,7 +352,7 @@ class ToolQueries:
         """
         q = self.client.build_cypher(
             cypher,
-            "source agtype, target agtype, target_facts agtype, connection_strength agtype, evidence_ids agtype, confidence agtype, last_seen agtype, context agtype",
+            "source agtype, target agtype, target_facts agtype, connection_strength agtype, evidence_refs agtype, confidence agtype, last_seen agtype, context agtype",
         )
         try:
             data = await self.client.execute_read(
@@ -305,6 +366,7 @@ class ToolQueries:
                             if active_topics is not None
                             else [],
                             "limit": limit,
+                            **self._scope_params(visible_project_ids),
                         }
                     ),
                 ),
@@ -319,7 +381,7 @@ class ToolQueries:
                     else r["target"],
                     "target_facts": r["target_facts"] or [],
                     "connection_strength": float(r["connection_strength"] or 1.0),
-                    "evidence_ids": r["evidence_ids"] or [],
+                    "evidence_refs": r["evidence_refs"] or [],
                     "confidence": float(r["confidence"] or 1.0),
                     "last_seen": r["last_seen"],
                     "context": r["context"].strip('"')
@@ -337,19 +399,22 @@ class ToolQueries:
         entity_name: str,
         active_topics: Optional[List[str]] = None,
         hours: int = 24,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         cutoff_ms = int((time.time() - (hours * 3600)) * 1000)
         cypher = """
         MATCH (e:Entity {canonical_name: $name})-[r:RELATED_TO]-(target:Entity)
         WHERE r.last_seen > $cutoff
+        AND ($filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
+        AND ($filter_projects = false OR target.project_id IN $visible_project_ids OR target.id = $identity_entity_id)
         OPTIONAL MATCH (target)-[:BELONGS_TO]->(t:Topic)
         WITH e, r, target, t
         WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
-        RETURN target.canonical_name as entity, r.message_ids as evidence_ids, r.last_seen as time
+        RETURN target.canonical_name as entity, r.message_ids as evidence_refs, r.last_seen as time
         ORDER BY r.last_seen DESC
         """
         q = self.client.build_cypher(
-            cypher, "entity agtype, evidence_ids agtype, time agtype"
+            cypher, "entity agtype, evidence_refs agtype, time agtype"
         )
         try:
             data = await self.client.execute_read(
@@ -363,6 +428,7 @@ class ToolQueries:
                             "active_topics": active_topics
                             if active_topics is not None
                             else [],
+                            **self._scope_params(visible_project_ids),
                         }
                     ),
                 ),
@@ -372,7 +438,7 @@ class ToolQueries:
                     "entity": r["entity"].strip('"')
                     if isinstance(r["entity"], str)
                     else r["entity"],
-                    "evidence_ids": r["evidence_ids"] or [],
+                    "evidence_refs": r["evidence_refs"] or [],
                     "time": r["time"],
                 }
                 for r in data
@@ -387,14 +453,18 @@ class ToolQueries:
         end_name: str,
         active_topics: Optional[List[str]] = None,
         max_depth: int = 4,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> Optional[Tuple[List[str], List[str], List[List[str]], bool]]:
         # Using AGE standard variable-length path
         cypher = f"""
         MATCH (start:Entity {{canonical_name: $start_name}})
         MATCH (end:Entity {{canonical_name: $end_name}})
+        WHERE ($filter_projects = false OR start.project_id IN $visible_project_ids OR start.id = $identity_entity_id)
+          AND ($filter_projects = false OR end.project_id IN $visible_project_ids OR end.id = $identity_entity_id)
         MATCH p = (start)-[rels:RELATED_TO*1..{max_depth}]-(end)
         
         WITH p, nodes(p) as path_nodes, relationships(p) as path_rels
+        WHERE ALL(n IN path_nodes WHERE $filter_projects = false OR n.project_id IN $visible_project_ids OR n.id = $identity_entity_id)
         ORDER BY length(p) ASC LIMIT 1
         
         UNWIND path_nodes AS n
@@ -403,16 +473,16 @@ class ToolQueries:
         WITH p, path_nodes, path_rels, collect(COALESCE(t.name, 'General')) AS node_topics
         WITH p, path_nodes, path_rels, node_topics,
              [node IN path_nodes | node.canonical_name] AS names,
-             [r IN path_rels | r.message_ids] AS evidence_ids
+             [r IN path_rels | r.message_ids] AS evidence_refs
              
-        WITH names, node_topics, evidence_ids,
+        WITH names, node_topics, evidence_refs,
              ANY(topic IN node_topics WHERE NOT ($filter_topics = false OR topic IN $active_topics)) as has_inactive
              
-        RETURN names, node_topics, evidence_ids, has_inactive
+        RETURN names, node_topics, evidence_refs, has_inactive
         """
         q = self.client.build_cypher(
             cypher,
-            "names agtype, node_topics agtype, evidence_ids agtype, has_inactive agtype",
+            "names agtype, node_topics agtype, evidence_refs agtype, has_inactive agtype",
         )
         try:
             data = await self.client.execute_read(
@@ -426,6 +496,7 @@ class ToolQueries:
                             "active_topics": active_topics
                             if active_topics is not None
                             else [],
+                            **self._scope_params(visible_project_ids),
                         }
                     ),
                 ),
@@ -436,7 +507,7 @@ class ToolQueries:
             return (
                 row["names"],
                 row["node_topics"],
-                row["evidence_ids"],
+                row["evidence_refs"],
                 bool(row["has_inactive"]),
             )
         except Exception as e:
@@ -449,20 +520,22 @@ class ToolQueries:
         end_name: str,
         active_topics: Optional[List[str]] = None,
         max_depth: int = 4,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> Optional[Tuple[List[str], List[str], List[List[str]]]]:
         cypher = f"""
         MATCH (start:Entity {{canonical_name: $start_name}})
         MATCH (end:Entity {{canonical_name: $end_name}})
+        WHERE ($filter_projects = false OR start.project_id IN $visible_project_ids OR start.id = $identity_entity_id)
+          AND ($filter_projects = false OR end.project_id IN $visible_project_ids OR end.id = $identity_entity_id)
         MATCH p = (start)-[rels:RELATED_TO*1..{max_depth}]-(end)
         
         WITH p, nodes(p) as path_nodes, relationships(p) as path_rels
-        ORDER BY length(p) ASC
-        
-        // Filter out paths containing inactive nodes
-        WHERE ALL(n IN path_nodes WHERE 
+        WHERE ALL(n IN path_nodes WHERE $filter_projects = false OR n.project_id IN $visible_project_ids OR n.id = $identity_entity_id)
+          AND ALL(n IN path_nodes WHERE
             EXISTS {{ MATCH (n)-[:BELONGS_TO]->(t:Topic) WHERE t.name IN $active_topics }} OR
             NOT EXISTS {{ MATCH (n)-[:BELONGS_TO]->(:Topic) }}
         )
+        ORDER BY length(p) ASC
         
         WITH p, path_nodes, path_rels LIMIT 1
         
@@ -472,10 +545,10 @@ class ToolQueries:
         WITH p, collect(COALESCE(t.name, 'General')) AS node_topics, path_nodes, path_rels
         RETURN [n IN path_nodes | n.canonical_name] AS names,
                node_topics,
-               [r IN path_rels | r.message_ids] AS evidence_ids
+               [r IN path_rels | r.message_ids] AS evidence_refs
         """
         q = self.client.build_cypher(
-            cypher, "names agtype, node_topics agtype, evidence_ids agtype"
+            cypher, "names agtype, node_topics agtype, evidence_refs agtype"
         )
         try:
             data = await self.client.execute_read(
@@ -488,6 +561,7 @@ class ToolQueries:
                             "active_topics": active_topics
                             if active_topics is not None
                             else [],
+                            **self._scope_params(visible_project_ids),
                         }
                     ),
                 ),
@@ -495,7 +569,7 @@ class ToolQueries:
             if not data:
                 return None
             row = data[0]
-            return (row["names"], row["node_topics"], row["evidence_ids"])
+            return (row["names"], row["node_topics"], row["evidence_refs"])
         except Exception as e:
             logger.error(f"Failed _find_active_only_path: {e}")
             return None
@@ -506,9 +580,10 @@ class ToolQueries:
         end_name: str,
         active_topics: Optional[List[str]] = None,
         max_depth: int = 4,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> Tuple[List[Dict], bool]:
         shortest = await self._find_shortest_path(
-            start_name, end_name, active_topics, max_depth
+            start_name, end_name, active_topics, max_depth, visible_project_ids
         )
         if not shortest:
             return [], False
@@ -518,7 +593,7 @@ class ToolQueries:
             return self._build_path_data(names, topics, evidence), False
 
         active_path = await self._find_active_only_path(
-            start_name, end_name, active_topics, max_depth
+            start_name, end_name, active_topics, max_depth, visible_project_ids
         )
         if active_path:
             active_names, active_topics_list, active_evidence = active_path

@@ -66,7 +66,7 @@ class EntityCleanupJob(BaseJob):
         with logger.contextualize(
             user=ctx.user_name, job=self.name, session=ctx.session_id
         ):
-            await self.graph_client.cleanup_null_entities()
+            await self.graph_client.cleanup_null_entities(project_id=ctx.session_id)
 
             now_ms = int(time.time() * 1000)
             orphan_cutoff = now_ms - self.orphan_cutoff_ms
@@ -81,7 +81,7 @@ class EntityCleanupJob(BaseJob):
                 return JobResult(success=True, summary="User entity not initialized")
 
             orphan_ids = await self.graph_client.get_orphan_entities(
-                user_id, orphan_cutoff, junk_cutoff
+                user_id, orphan_cutoff, junk_cutoff, project_id=ctx.session_id
             )
 
             merge_key = RedisKeys.merge_queue(self.user_name, ctx.session_id)
@@ -113,7 +113,9 @@ class EntityCleanupJob(BaseJob):
             deleted_count = 0
             for i in range(0, len(orphan_ids), batch_size):
                 batch = orphan_ids[i : i + batch_size]
-                deleted_count += await self.graph_client.bulk_delete_entities(batch)
+                deleted_count += await self.graph_client.bulk_delete_entities(
+                    batch, project_id=ctx.session_id
+                )
                 self.entities.remove_entities(batch)
                 await asyncio.sleep(0.1)  # Yield to other tasks
 

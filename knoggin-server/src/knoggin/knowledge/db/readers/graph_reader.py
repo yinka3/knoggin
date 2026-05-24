@@ -11,12 +11,30 @@ class GraphReader:
         self.client = client
         self.graph_name = graph_name
 
-    async def get_message_text(self, message_id: int) -> str:
-        cypher = "MATCH (m:Message {id: $id}) RETURN m.content"
+    async def get_message_text(
+        self, message_id: int, user_name: str, session_id: str
+    ) -> str:
+        if not user_name or not session_id:
+            logger.warning("Refusing unsafe message text lookup without user/session scope")
+            return ""
+
+        cypher = """
+        MATCH (m:Message {user_name: $user_name, session_id: $session_id, id: $id})
+        RETURN m.content
+        """
         query = self.client.build_cypher(cypher, "content agtype")
         try:
             res = await self.client.execute_read(
-                query, (json.dumps({"id": message_id}),)
+                query,
+                (
+                    json.dumps(
+                        {
+                            "id": message_id,
+                            "user_name": user_name,
+                            "session_id": session_id,
+                        }
+                    ),
+                ),
             )
             if not res:
                 return ""
@@ -26,23 +44,43 @@ class GraphReader:
             logger.error(f"Failed to get message text for {message_id}: {e}")
             return ""
 
-    async def get_messages_by_ids(self, ids: List[int]) -> List[Dict]:
+    async def get_messages_by_ids(
+        self,
+        ids: List[int],
+        user_name: Optional[str] = None,
+        session_ids: Optional[List[str]] = None,
+    ) -> List[Dict]:
         if not ids:
             return []
+        if not user_name or not session_ids:
+            logger.warning("Refusing unsafe message lookup without user/session scope")
+            return []
+
+        params = {"ids": ids, "user_name": user_name, "session_ids": session_ids}
+
         cypher = """
         MATCH (m:Message)
         WHERE m.id IN $ids
-        RETURN m.id, m.role, m.content, m.timestamp
+        AND m.user_name = $user_name
+        AND m.session_id IN $session_ids
+        RETURN m.id, m.user_name, m.session_id, m.role, m.content, m.timestamp
         ORDER BY m.id ASC
         """
         query = self.client.build_cypher(
-            cypher, "id agtype, role agtype, content agtype, timestamp agtype"
+            cypher,
+            "id agtype, user_name agtype, session_id agtype, role agtype, content agtype, timestamp agtype",
         )
         try:
-            res = await self.client.execute_read(query, (json.dumps({"ids": ids}),))
+            res = await self.client.execute_read(query, (json.dumps(params),))
             return [
                 {
                     "id": int(row["id"]),
+                    "user_name": row["user_name"].strip('"')
+                    if isinstance(row["user_name"], str)
+                    else row["user_name"],
+                    "session_id": row["session_id"].strip('"')
+                    if isinstance(row["session_id"], str)
+                    else row["session_id"],
                     "role": row["role"].strip('"')
                     if isinstance(row["role"], str)
                     else row["role"],
@@ -58,16 +96,31 @@ class GraphReader:
             return []
 
     async def get_surrounding_messages(
-        self, message_id: int, forward: int = 3, target_total: int = 10
+        self,
+        message_id: int,
+        forward: int = 3,
+        target_total: int = 10,
+        user_name: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> List[Dict]:
+        if not user_name or not session_id:
+            logger.warning(
+                "Refusing unsafe surrounding-message lookup without user/session scope"
+            )
+            return []
+
         back_limit = max(0, target_total - forward - 1)
+        session_ids = [session_id]
+        params_base = {"user_name": user_name, "session_id": session_id}
 
         # In AGE, complex correlated CALL subqueries can be brittle.
         # It's cleaner and safer to do the backwards/forwards search sequentially in python,
         # or use simple independent Cypher fetches.
         # We will fetch the target first.
         try:
-            target_res = await self.get_messages_by_ids([message_id])
+            target_res = await self.get_messages_by_ids(
+                [message_id], user_name=user_name, session_ids=session_ids
+            )
             if not target_res:
                 return []
             target = target_res[0]
@@ -76,7 +129,9 @@ class GraphReader:
             back_cypher = """
             MATCH (prev:Message)
             WHERE prev.timestamp <= $ts AND prev.id <> $id
-            RETURN prev.id, prev.role, prev.content, prev.timestamp
+            AND prev.user_name = $user_name
+            AND prev.session_id = $session_id
+            RETURN prev.id, prev.user_name, prev.session_id, prev.role, prev.content, prev.timestamp
             ORDER BY prev.timestamp DESC
             LIMIT $limit
             """
@@ -84,30 +139,58 @@ class GraphReader:
             fwd_cypher = """
             MATCH (next:Message)
             WHERE next.timestamp >= $ts AND next.id <> $id
-            RETURN next.id, next.role, next.content, next.timestamp
+            AND next.user_name = $user_name
+            AND next.session_id = $session_id
+            RETURN next.id, next.user_name, next.session_id, next.role, next.content, next.timestamp
             ORDER BY next.timestamp ASC
             LIMIT $limit
             """
 
             back_q = self.client.build_cypher(
-                back_cypher, "id agtype, role agtype, content agtype, timestamp agtype"
+                back_cypher,
+                "id agtype, user_name agtype, session_id agtype, role agtype, content agtype, timestamp agtype",
             )
             fwd_q = self.client.build_cypher(
-                fwd_cypher, "id agtype, role agtype, content agtype, timestamp agtype"
+                fwd_cypher,
+                "id agtype, user_name agtype, session_id agtype, role agtype, content agtype, timestamp agtype",
             )
 
             back_data = await self.client.execute_read(
                 back_q,
-                (json.dumps({"ts": target_ts, "id": message_id, "limit": back_limit}),),
+                (
+                    json.dumps(
+                        {
+                            "ts": target_ts,
+                            "id": message_id,
+                            "limit": back_limit,
+                            **params_base,
+                        }
+                    ),
+                ),
             )
             fwd_data = await self.client.execute_read(
                 fwd_q,
-                (json.dumps({"ts": target_ts, "id": message_id, "limit": forward}),),
+                (
+                    json.dumps(
+                        {
+                            "ts": target_ts,
+                            "id": message_id,
+                            "limit": forward,
+                            **params_base,
+                        }
+                    ),
+                ),
             )
 
             def parse(row):
                 return {
                     "id": int(row["id"]),
+                    "user_name": row["user_name"].strip('"')
+                    if isinstance(row["user_name"], str)
+                    else row["user_name"],
+                    "session_id": row["session_id"].strip('"')
+                    if isinstance(row["session_id"], str)
+                    else row["session_id"],
                     "role": row["role"].strip('"')
                     if isinstance(row["role"], str)
                     else row["role"],

@@ -625,6 +625,9 @@ class BatchProcessor:
             "attempt": attempt,
             "stage": stage,
             "batch_size": len(messages),
+            "user_name": self.user_name,
+            "session_id": self.session_id,
+            "project_id": self.entities.project_id,
             "messages": messages,
         }
 

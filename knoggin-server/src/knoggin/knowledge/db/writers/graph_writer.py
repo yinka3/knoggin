@@ -1,9 +1,10 @@
 import json
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.scoping import IDENTITY_ENTITY_ID
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -14,6 +15,24 @@ class GraphWriter:
 
     def _current_time_ms(self) -> int:
         return int(time.time() * 1000)
+
+    @staticmethod
+    def _require_project_id(project_id: Optional[str], operation: str) -> str:
+        if not project_id:
+            raise ValueError(f"{operation} requires project_id scope")
+        return project_id
+
+    @staticmethod
+    def _merge_evidence_refs(existing: List, incoming: List) -> List:
+        merged = []
+        seen = set()
+        for ref in (existing or []) + (incoming or []):
+            key = json.dumps(ref, sort_keys=True) if isinstance(ref, dict) else str(ref)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(ref)
+        return merged
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         if not messages:
@@ -28,20 +47,38 @@ class GraphWriter:
                     # Write to Graph
                     cypher = """
                     UNWIND $batch AS msg
-                    MERGE (m:Message {id: msg.id})
+                    MERGE (m:Message {
+                        user_name: msg.user_name,
+                        session_id: msg.session_id,
+                        id: msg.id
+                    })
                     SET m.content = msg.content,
                         m.role = msg.role,
-                        m.timestamp = msg.timestamp
+                        m.timestamp = msg.timestamp,
+                        m.project_id = msg.project_id
                     RETURN count(m)
                     """
 
                     batch_params = []
                     for msg in messages:
+                        missing = [
+                            key
+                            for key in ("user_name", "session_id", "project_id")
+                            if not msg.get(key)
+                        ]
+                        if missing:
+                            raise ValueError(
+                                f"Message {msg.get('id')} missing required scope fields: {missing}"
+                            )
+
                         batch_params.append(
                             {
                                 "id": msg["id"],
                                 "content": msg["content"],
                                 "role": msg["role"],
+                                "user_name": msg["user_name"],
+                                "session_id": msg["session_id"],
+                                "project_id": msg["project_id"],
                                 "timestamp": msg.get(
                                     "timestamp", self._current_time_ms()
                                 ),
@@ -59,13 +96,13 @@ class GraphWriter:
                             """
                             INSERT INTO message_search (message_id, user_name, session_id, content_tsvector)
                             VALUES (%s, %s, %s, to_tsvector('english', %s))
-                            ON CONFLICT (message_id) DO UPDATE SET
+                            ON CONFLICT (user_name, session_id, message_id) DO UPDATE SET
                                 content_tsvector = EXCLUDED.content_tsvector
                             """,
                             (
                                 msg["id"],
-                                msg.get("user_name", "default_user"),
-                                msg.get("session_id", "default_session"),
+                                msg["user_name"],
+                                msg["session_id"],
                                 msg["content"],
                             ),
                         )
@@ -73,11 +110,16 @@ class GraphWriter:
         logger.info(f"Saved {len(messages)} message logs to Postgres/AGE.")
         return True
 
-    async def create_hierarchy_edge(self, parent_id: int, child_id: int) -> bool:
+    async def create_hierarchy_edge(
+        self, parent_id: int, child_id: int, project_id: Optional[str] = None
+    ) -> bool:
+        project_id = self._require_project_id(project_id, "create_hierarchy_edge")
         cypher = """
         MATCH (child:Entity {id: $child_id})
         MATCH (parent:Entity {id: $parent_id})
-        WHERE NOT (child)-[:PART_OF]->(parent)
+        WHERE child.project_id = $project_id
+          AND parent.project_id = $project_id
+          AND NOT (child)-[:PART_OF]->(parent)
         CREATE (child)-[:PART_OF {created_at: $now}]->(parent)
         RETURN true as created
         """
@@ -90,6 +132,7 @@ class GraphWriter:
                         {
                             "child_id": child_id,
                             "parent_id": parent_id,
+                            "project_id": project_id,
                             "now": self._current_time_ms(),
                         }
                     ),
@@ -103,16 +146,30 @@ class GraphWriter:
             )
             return False
 
-    async def delete_relationship(self, entity_a_id: int, entity_b_id: int) -> bool:
+    async def delete_relationship(
+        self, entity_a_id: int, entity_b_id: int, project_id: Optional[str] = None
+    ) -> bool:
+        project_id = self._require_project_id(project_id, "delete_relationship")
         cypher = """
         MATCH (a:Entity {id: $a_id})-[r:RELATED_TO]-(b:Entity {id: $b_id})
+        WHERE (a.project_id = $project_id OR a.id = $identity_entity_id)
+          AND (b.project_id = $project_id OR b.id = $identity_entity_id)
         DELETE r
         RETURN count(r)
         """
         try:
             res = await self.client.execute_write(
                 self.client.build_cypher(cypher, "deleted agtype"),
-                (json.dumps({"a_id": entity_a_id, "b_id": entity_b_id}),),
+                (
+                    json.dumps(
+                        {
+                            "a_id": entity_a_id,
+                            "b_id": entity_b_id,
+                            "project_id": project_id,
+                            "identity_entity_id": IDENTITY_ENTITY_ID,
+                        }
+                    ),
+                ),
             )
             return res > 0
         except Exception as e:
@@ -170,9 +227,17 @@ class GraphWriter:
             logger.error(f"Failed to delete preference: {e}")
             return False
 
-    async def merge_entities(self, primary_id: int, secondary_id: int) -> bool:
+    async def merge_entities(
+        self, primary_id: int, secondary_id: int, project_id: Optional[str] = None
+    ) -> bool:
+        project_id = self._require_project_id(project_id, "merge_entities")
         if primary_id == secondary_id:
             logger.warning(f"Self-merge rejected: {primary_id}")
+            return False
+        if primary_id == IDENTITY_ENTITY_ID or secondary_id == IDENTITY_ENTITY_ID:
+            logger.warning(
+                f"Identity entity merge rejected: {primary_id} <- {secondary_id}"
+            )
             return False
 
         if not self.client.async_pool:
@@ -186,6 +251,8 @@ class GraphWriter:
                         cypher_validate = """
                         MATCH (p:Entity {id: $primary_id})
                         MATCH (s:Entity {id: $secondary_id})
+                        WHERE p.project_id = $project_id
+                          AND s.project_id = $project_id
                         RETURN p.canonical_name as p_name,
                             p.aliases as p_aliases,
                             p.confidence as p_conf,
@@ -206,6 +273,8 @@ class GraphWriter:
                                     {
                                         "primary_id": primary_id,
                                         "secondary_id": secondary_id,
+                                        "project_id": project_id,
+                                        "identity_entity_id": IDENTITY_ENTITY_ID,
                                     }
                                 ),
                             ),
@@ -306,7 +375,7 @@ class GraphWriter:
                             w = int(row["weight"] or 1)
                             c = float(row["conf"] or 0)
                             ls = int(row["last_seen"] or 0)
-                            m_ids = set(row["msg_ids"] or [])
+                            m_ids = row["msg_ids"] or []
 
                             if t_id not in merged_edges:
                                 merged_edges[t_id] = {
@@ -321,7 +390,9 @@ class GraphWriter:
                                     merged_edges[t_id]["conf"] = c
                                 if ls > merged_edges[t_id]["last_seen"]:
                                     merged_edges[t_id]["last_seen"] = ls
-                                merged_edges[t_id]["msg_ids"].update(m_ids)
+                                merged_edges[t_id]["msg_ids"] = self._merge_evidence_refs(
+                                    merged_edges[t_id]["msg_ids"], m_ids
+                                )
 
                         if merged_edges:
                             cypher_del_edges = """
@@ -348,7 +419,7 @@ class GraphWriter:
                                         "target_id": t_id,
                                         "weight": props["weight"],
                                         "conf": props["conf"],
-                                        "msg_ids": list(props["msg_ids"]),
+                                        "msg_ids": props["msg_ids"],
                                         "last_seen": props["last_seen"],
                                     }
                                 )

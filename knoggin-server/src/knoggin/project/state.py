@@ -23,8 +23,10 @@ class ProjectState:
         scheduler: Scheduler,
         user_name: str,
         redis_client: aioredis.Redis,
+        readable_project_ids: Optional[list[str]] = None,
     ):
         self.project_id = project_id
+        self.readable_project_ids = readable_project_ids or [project_id]
         self.topic_config = topic_config
         self.entities = entities
         self.pipeline = pipeline

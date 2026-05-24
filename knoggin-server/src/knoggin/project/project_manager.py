@@ -9,6 +9,7 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig
+from common.scoping import build_readable_project_ids
 from common.utils.json_utils import safe_json_loads
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
@@ -105,6 +106,17 @@ class ProjectManager:
         )
         return meta
 
+    async def get_readable_project_ids(self, project_id: str) -> List[str]:
+        """Return projects readable from project_id: global identity, own project, and allowed projects."""
+        meta = await self.get_project(project_id)
+        allowed = meta.get("allowed_projects", []) if meta else []
+
+        if allowed:
+            existing = await self.resources.redis.hgetall(RedisKeys.projects(self.user_name))
+            allowed = [pid for pid in allowed if pid in existing]
+
+        return build_readable_project_ids(project_id, allowed)
+
     async def update_project(
         self,
         project_id: str,
@@ -173,6 +185,7 @@ class ProjectManager:
             return self.active_projects[project_id]
 
         logger.info(f"Bootstrapping ProjectState for project_id: {project_id}")
+        readable_project_ids = await self.get_readable_project_ids(project_id)
 
         # Topic Config
         topics_config_dict = self.config.default_topics
@@ -191,6 +204,7 @@ class ProjectManager:
         er_cfg = self.dev_settings.entity_resolution
         entities = EntityManager(
             project_id=project_id,
+            readable_project_ids=readable_project_ids,
             graph_client=self.resources.graph_client,
             embedding_service=self.resources.embedding,
             hierarchy_config=t_config.hierarchy,
@@ -250,6 +264,7 @@ class ProjectManager:
             scheduler=scheduler,
             user_name=self.user_name,
             redis_client=self.resources.redis,
+            readable_project_ids=readable_project_ids,
         )
         project_state.profile_job = profile_job
         project_state.merge_job = merge_job

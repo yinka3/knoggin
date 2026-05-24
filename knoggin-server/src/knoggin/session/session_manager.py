@@ -30,6 +30,12 @@ class SessionManager:
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
+    def _serialize_topics_config(self, topics_config: dict) -> dict:
+        return {
+            name: cfg.model_dump() if hasattr(cfg, "model_dump") else cfg
+            for name, cfg in topics_config.items()
+        }
+
     async def list_sessions(self) -> Dict[str, dict]:
         try:
             raw = await self.resources.redis.hgetall(RedisKeys.sessions(self.user_name))
@@ -75,7 +81,7 @@ class SessionManager:
 
             metadata = {
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "topics_config": topics_config,
+                "topics_config": self._serialize_topics_config(topics_config),
                 "last_active": datetime.now(timezone.utc).isoformat(),
                 "model": model,
                 "agent_id": agent_id,

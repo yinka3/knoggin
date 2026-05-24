@@ -31,10 +31,11 @@ CREATE INDEX IF NOT EXISTS entity_search_embedding_idx
 ON entity_search USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS message_search (
-    message_id BIGINT PRIMARY KEY,
+    message_id BIGINT NOT NULL,
     user_name TEXT NOT NULL,
     session_id TEXT NOT NULL,
-    content_tsvector tsvector
+    content_tsvector tsvector,
+    PRIMARY KEY (user_name, session_id, message_id)
 );
 
 -- Index for Full-Text Search on messages

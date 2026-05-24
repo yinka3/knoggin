@@ -280,6 +280,7 @@ class Context:
 
             # Pass 2: Resolve subjects to entities, collect fact text
             fact_work: List[Tuple[int, str]] = []  # (target_id, fact_content)
+            config = self.current_config
 
             for i, profile in enumerate(valid_profiles):
                 subject = subject_names[i]
@@ -339,7 +340,13 @@ class Context:
             total_count = 0
             for eid, facts_to_write in facts_by_entity.items():
                 try:
-                    c = await self.graph_client.create_facts_batch(eid, facts_to_write)
+                    c = await self.graph_client.create_facts_batch(
+                        eid,
+                        facts_to_write,
+                        user_name=self.user_name,
+                        session_id=self.session_id,
+                        project_id=self.project_id,
+                    )
                     total_count += int(c)
                 except Exception as e:
                     logger.error(
@@ -377,6 +384,9 @@ class Context:
                         "id": graph_id,
                         "content": content,
                         "role": "assistant",
+                        "user_name": self.user_name,
+                        "session_id": self.session_id,
+                        "project_id": self.project_id,
                         "timestamp": timestamp.timestamp() * 1000,
                         "embedding": embedding_vector,
                     }

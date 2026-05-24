@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
+from common.scoping import IDENTITY_ENTITY_ID
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -15,6 +16,13 @@ class EntityReader:
     def _parse_agtype(self, val):
         """Basic helper to unwrap agtype returned by psycopg (often just standard dicts/lists/scalars if configured, but safe to handle)."""
         return val
+
+    def _scope_params(self, visible_project_ids: Optional[List[str]] = None) -> Dict:
+        return {
+            "filter_projects": bool(visible_project_ids),
+            "visible_project_ids": visible_project_ids or [],
+            "identity_entity_id": IDENTITY_ENTITY_ID,
+        }
 
     async def get_max_entity_id(self) -> int:
         """Returns the highest entity ID currently in the DB."""
@@ -140,12 +148,16 @@ class EntityReader:
             logger.error(f"Failed to list entities: {e}")
             return [], 0
 
-    async def get_entity_by_id(self, entity_id: int) -> Optional[Dict]:
+    async def get_entity_by_id(
+        self, entity_id: int, visible_project_ids: Optional[List[str]] = None
+    ) -> Optional[Dict]:
         cypher = """
         MATCH (e:Entity {id: $entity_id})
+        WHERE $filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         RETURN e.id,
             e.session_id,
+            e.project_id,
             e.canonical_name,
             e.aliases,
             e.type,
@@ -156,11 +168,12 @@ class EntityReader:
         """
         query = self.client.build_cypher(
             cypher,
-            "id agtype, session_id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, last_mentioned agtype, last_updated agtype, last_profiled_msg_id agtype",
+            "id agtype, session_id agtype, project_id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, last_mentioned agtype, last_updated agtype, last_profiled_msg_id agtype",
         )
         try:
+            params = {"entity_id": entity_id, **self._scope_params(visible_project_ids)}
             res = await self.client.execute_read(
-                query, (json.dumps({"entity_id": entity_id}),)
+                query, (json.dumps(params),)
             )
             if not res:
                 return None
@@ -168,6 +181,7 @@ class EntityReader:
             return {
                 "id": int(row["id"]) if row["id"] else None,
                 "session_id": row["session_id"],
+                "project_id": row["project_id"],
                 "canonical_name": row["canonical_name"],
                 "aliases": row["aliases"] or [],
                 "type": row["type"],
@@ -258,26 +272,32 @@ class EntityReader:
             logger.error(f"Failed to find alias collisions: {e}")
             return []
 
-    async def get_entities_by_names(self, names: List[str]) -> List[Dict]:
+    async def get_entities_by_names(
+        self, names: List[str], visible_project_ids: Optional[List[str]] = None
+    ) -> List[Dict]:
         lower_names = [n.lower() for n in names]
         cypher = """
         MATCH (e:Entity)
         WHERE toLower(e.canonical_name) IN $names
             OR any(alias IN e.aliases WHERE toLower(alias) IN $names)
+        WITH e
+        WHERE $filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id
         OPTIONAL MATCH (e)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL
-        RETURN e.id, e.canonical_name, e.type, e.aliases, collect(f.content) as facts
+        RETURN e.id, e.project_id, e.canonical_name, e.type, e.aliases, collect(f.content) as facts
         """
         query = self.client.build_cypher(
             cypher,
-            "id agtype, canonical_name agtype, type agtype, aliases agtype, facts agtype",
+            "id agtype, project_id agtype, canonical_name agtype, type agtype, aliases agtype, facts agtype",
         )
         try:
+            params = {"names": lower_names, **self._scope_params(visible_project_ids)}
             res = await self.client.execute_read(
-                query, (json.dumps({"names": lower_names}),)
+                query, (json.dumps(params),)
             )
             return [
                 {
                     "id": int(row["id"]),
+                    "project_id": row["project_id"],
                     "canonical_name": row["canonical_name"],
                     "type": row["type"],
                     "aliases": row["aliases"] or [],
@@ -290,7 +310,10 @@ class EntityReader:
             return []
 
     async def search_similar_entities(
-        self, entity_id: int, limit: int = 50
+        self,
+        entity_id: int,
+        limit: int = 50,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Tuple[int, float]]:
         """Find similar entities using Postgres pgvector (replaces GraphClient vector index)."""
         # 1. Get the source vector
@@ -300,34 +323,50 @@ class EntityReader:
 
         # 2. Search using pgvector cosine distance `<=>`
         # `<=>` returns distance, so we do 1 - distance for similarity
-        query = """
+        scope_sql = ""
+        params = [emb, entity_id]
+        if visible_project_ids:
+            scope_sql = "AND (project_id = ANY(%s) OR entity_id = %s)"
+            params.extend([visible_project_ids, IDENTITY_ENTITY_ID])
+        query = f"""
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entity_search
         WHERE entity_id != %s
+        {scope_sql}
         ORDER BY embedding <=> %s::vector
         LIMIT %s
         """
         try:
-            res = await self.client.execute_read(query, (emb, entity_id, emb, limit))
+            params.extend([emb, limit])
+            res = await self.client.execute_read(query, tuple(params))
             return [(r["entity_id"], r["similarity"]) for r in res]
         except Exception as e:
             logger.error(f"Failed to search similar entities for {entity_id}: {e}")
             return []
 
     async def search_entities_by_embedding(
-        self, embedding: List[float], limit: int = 10, score_threshold: float = 0.8
+        self,
+        embedding: List[float],
+        limit: int = 10,
+        score_threshold: float = 0.8,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Tuple[int, float]]:
-        query = """
+        scope_sql = ""
+        params = [embedding, embedding, score_threshold]
+        if visible_project_ids:
+            scope_sql = "AND (project_id = ANY(%s) OR entity_id = %s)"
+            params.extend([visible_project_ids, IDENTITY_ENTITY_ID])
+        query = f"""
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entity_search
         WHERE 1 - (embedding <=> %s::vector) >= %s
+        {scope_sql}
         ORDER BY embedding <=> %s::vector
         LIMIT %s
         """
         try:
-            res = await self.client.execute_read(
-                query, (embedding, embedding, score_threshold, embedding, limit)
-            )
+            params.extend([embedding, limit])
+            res = await self.client.execute_read(query, tuple(params))
             return [(r["entity_id"], r["similarity"]) for r in res]
         except Exception as e:
             logger.error(f"Entity vector search failed: {e}")
@@ -395,10 +434,16 @@ class EntityReader:
         protected_id: int = 1,
         orphan_cutoff_ms: int = 0,
         stale_junk_cutoff_ms: int = 0,
+        project_id: Optional[str] = None,
     ) -> List[int]:
+        if not project_id:
+            logger.warning("Refusing unsafe orphan lookup without project scope")
+            return []
+
         cypher = """
         MATCH (e:Entity)
         WHERE e.id <> $protected_id
+        AND e.project_id = $project_id
         AND NOT EXISTS { MATCH (e)-[:HAS_FACT]->(f_active:Fact) WHERE f_active.invalid_at IS NULL }
         OPTIONAL MATCH (e)-[r:RELATED_TO]-(neighbor)
         WITH e, collect(neighbor.id) as neighbors
@@ -416,6 +461,7 @@ class EntityReader:
                             "protected_id": protected_id,
                             "orphan_cutoff": orphan_cutoff_ms,
                             "stale_cutoff": stale_junk_cutoff_ms,
+                            "project_id": project_id,
                         }
                     ),
                 ),
@@ -505,13 +551,13 @@ class EntityReader:
         RETURN neighbor.id as neighbor_id,
             neighbor.canonical_name as neighbor_name,
             r.weight as weight,
-            r.message_ids as message_ids,
+            r.message_ids as message_refs,
             r.context as context,
             r.confidence as confidence
         """
         query = self.client.build_cypher(
             cypher,
-            "neighbor_id agtype, neighbor_name agtype, weight agtype, message_ids agtype, context agtype, confidence agtype",
+            "neighbor_id agtype, neighbor_name agtype, weight agtype, message_refs agtype, context agtype, confidence agtype",
         )
         try:
             res = await self.client.execute_read(
@@ -524,7 +570,7 @@ class EntityReader:
                     if isinstance(r["neighbor_name"], str)
                     else r["neighbor_name"],
                     "weight": float(r["weight"] or 1.0),
-                    "message_ids": r["message_ids"] or [],
+                    "message_refs": r["message_refs"] or [],
                     "context": r["context"].strip('"')
                     if isinstance(r["context"], str)
                     else r["context"],

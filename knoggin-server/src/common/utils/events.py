@@ -2,7 +2,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 
@@ -39,19 +39,32 @@ class BaseEventEmitter:
         self._history: Dict[str, deque] = {}
         self._lock = asyncio.Lock()
         self._history_maxlen = history_maxlen
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _remember_loop(self) -> asyncio.AbstractEventLoop:
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+        return loop
+
+    def get_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        if self._loop and self._loop.is_running():
+            return self._loop
+        return None
 
     async def subscribe(self, scope_id: str) -> asyncio.Queue:
+        loop = self._remember_loop()
         async with self._lock:
             if scope_id not in self._subscribers:
                 self._subscribers[scope_id] = set()
             queue = asyncio.Queue(maxsize=500)
             for evt in self._history.get(scope_id, []):
                 queue.put_nowait(evt)
-            sub = Subscriber(queue=queue, last_active=asyncio.get_running_loop().time())
+            sub = Subscriber(queue=queue, last_active=loop.time())
             self._subscribers[scope_id].add(sub)
             return queue
 
     async def unsubscribe(self, scope_id: str, queue: asyncio.Queue):
+        self._remember_loop()
         async with self._lock:
             if scope_id in self._subscribers:
                 self._subscribers[scope_id] = {
@@ -65,6 +78,7 @@ class BaseEventEmitter:
 
     async def _emit_to_subs(self, scope_id: str, event_obj: Any):
         """Internal helper to push events to all subscribers in a scope."""
+        self._remember_loop()
         if scope_id not in self._history:
             self._history[scope_id] = deque(maxlen=self._history_maxlen)
         self._history[scope_id].append(event_obj)
@@ -98,12 +112,14 @@ class BaseEventEmitter:
                 )
 
     async def cleanup_scope(self, scope_id: str):
+        self._remember_loop()
         async with self._lock:
             self._history.pop(scope_id, None)
             self._subscribers.pop(scope_id, None)
 
     async def _base_cleanup(self, max_age_hours: int = 24):
         """Shared stale history cleanup logic."""
+        self._remember_loop()
         async with self._lock:
             stale = []
             now = datetime.now(timezone.utc)
@@ -280,13 +296,35 @@ def emit_sync(
     verbose_only: bool = False,
 ):
     emitter = DebugEventEmitter.get()
+    coro = emitter.emit(session_id, component, event, data, verbose_only)
+
+    def _log_failure(task: asyncio.Future):
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except Exception as e:
+            logger.error(f"emit_sync result inspection failed: {e}")
+            return
+        if exc:
+            logger.error(f"emit_sync failed for {component}.{event}: {exc}")
+
     try:
         loop = asyncio.get_running_loop()
-        asyncio.run_coroutine_threadsafe(
-            emitter.emit(session_id, component, event, data, verbose_only), loop
-        )
     except RuntimeError:
-        pass
+        loop = emitter.get_loop()
+        if not loop:
+            coro.close()
+            logger.warning(
+                f"Dropped sync event {component}.{event}: no running event loop is registered"
+            )
+            return
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        future.add_done_callback(_log_failure)
+        return
+
+    task = loop.create_task(coro)
+    task.add_done_callback(_log_failure)
 
 
 async def emit_community(

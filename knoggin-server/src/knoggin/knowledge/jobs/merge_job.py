@@ -10,7 +10,6 @@ from common.conf.topics_config import TopicConfig
 from common.schema.dtypes import FactRecord, MergeJudgment
 from common.utils.data_utils import (
     cosine_similarity,
-    enrich_facts_with_sources,
     find_duplicate_facts,
     format_vp05_input,
     has_sufficient_facts,
@@ -21,7 +20,7 @@ from infrastructure.graph_client import GraphClient
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
-from knoggin.agent.prompts import get_merge_judgment_prompt
+from knoggin.agent.prompts import enrich_facts_with_sources, get_merge_judgment_prompt
 from knoggin.knowledge.services.entity_service import EntityManager
 
 
@@ -122,10 +121,16 @@ class MergeDetectionJob(BaseJob):
         system = self.merge_prompt if self.merge_prompt else get_merge_judgment_prompt()
 
         enriched_facts_a = await enrich_facts_with_sources(
-            candidate.get("facts_a", []), self.graph_client
+            candidate.get("facts_a", []),
+            self.graph_client,
+            user_name=self.user_name,
+            session_id=session_id,
         )
         enriched_facts_b = await enrich_facts_with_sources(
-            candidate.get("facts_b", []), self.graph_client
+            candidate.get("facts_b", []),
+            self.graph_client,
+            user_name=self.user_name,
+            session_id=session_id,
         )
 
         user_content = format_vp05_input(
@@ -180,6 +185,7 @@ class MergeDetectionJob(BaseJob):
         primary_id: int,
         secondary_id: int,
         duplicate_fact_ids: List[str],
+        project_id: str,
         max_retries: int = 2,
     ) -> bool:
         """Execute DB merge then invalidate duplicate facts."""
@@ -193,14 +199,16 @@ class MergeDetectionJob(BaseJob):
         for attempt in range(1, max_retries + 1):
             try:
                 success = await self.graph_client.merge_entities(
-                    primary_id, secondary_id
+                    primary_id, secondary_id, project_id=project_id
                 )
 
                 if success:
                     now = datetime.now(timezone.utc)
                     for fact_id in duplicate_fact_ids:
                         try:
-                            await self.graph_client.invalidate_fact(fact_id, now)
+                            await self.graph_client.invalidate_fact(
+                                fact_id, now, project_id=project_id
+                            )
                         except Exception as e:
                             logger.warning(
                                 f"Failed to invalidate duplicate fact {fact_id} during merge: {e}"
@@ -253,7 +261,7 @@ class MergeDetectionJob(BaseJob):
             # but if the transaction aborted during the crash, skipping it fully fragments the Graph DB.
             # We MUST explicitly re-run the DB transaction to guarantee safety before finalizing.
             db_success = await self._execute_merge_db_only(
-                p_id, s_id, item.get("duplicate_fact_ids", [])
+                p_id, s_id, item.get("duplicate_fact_ids", []), ctx.session_id
             )
 
             if db_success:
@@ -299,7 +307,7 @@ class MergeDetectionJob(BaseJob):
                         f"Renaming merged entity {p_id}: {p_name} -> {suggested_name}"
                     )
                     await self.graph_client.update_entity_canonical_name(
-                        p_id, suggested_name
+                        p_id, suggested_name, project_id=ctx.session_id
                     )
                     p_name = suggested_name
 
@@ -314,7 +322,9 @@ class MergeDetectionJob(BaseJob):
                 new_embedding = await self.entities.compute_embedding(
                     p_id, resolution_text
                 )
-                await self.graph_client.update_entity_embedding(p_id, new_embedding)
+                await self.graph_client.update_entity_embedding(
+                    p_id, new_embedding, project_id=ctx.session_id
+                )
 
             except Exception as e:
                 logger.exception(f"Finalize merge failed for {p_id}<-{s_id}: {e}")
@@ -537,7 +547,7 @@ class MergeDetectionJob(BaseJob):
             await self.redis.sadd(index_key, intent_key)
 
             db_success = await self._execute_merge_db_only(
-                p_id, s_id, item_dict["duplicate_fact_ids"]
+                p_id, s_id, item_dict["duplicate_fact_ids"], ctx.session_id
             )
 
             if db_success:
@@ -595,7 +605,7 @@ class MergeDetectionJob(BaseJob):
 
                 for c in candidates:
                     success = await self.graph_client.create_hierarchy_edge(
-                        c["parent_id"], c["child_id"]
+                        c["parent_id"], c["child_id"], project_id=ctx.session_id
                     )
 
                     if success:

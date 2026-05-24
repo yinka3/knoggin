@@ -178,7 +178,10 @@ class Orchestrator:
         Retrieves pre-wired service components from the active Context and instantiates MemoryManager.
         """
         config = ConfigManager.get().config
-        search_cfg = config.developer_settings.search.model_dump()
+        search_cfg = {
+            **config.developer_settings.search.model_dump(),
+            **config.search.model_dump(),
+        }
 
         memory_mgr = MemoryManager(
             redis=ResourceManager.get().redis,

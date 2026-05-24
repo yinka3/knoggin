@@ -246,6 +246,9 @@ class BatchConsumer:
                             "id": msg["id"],
                             "content": msg["message"],
                             "role": msg.get("role", "user"),
+                            "user_name": self.user_name,
+                            "session_id": self.session_id,
+                            "project_id": self.processor.entities.project_id,
                             "timestamp": msg.get("timestamp", ""),
                             "embedding": result.message_embeddings.get(msg["id"], []),
                         }

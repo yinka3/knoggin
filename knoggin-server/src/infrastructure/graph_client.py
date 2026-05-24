@@ -46,11 +46,28 @@ class GraphClient:
     ) -> bool:
         return await self._entity_writer.write_batch(entities, relationships)
 
-    async def create_facts_batch(self, entity_id: int, facts: List[FactRecord]) -> int:
-        return await self._fact_writer.create_facts_batch(entity_id, facts)
+    async def create_facts_batch(
+        self,
+        entity_id: int,
+        facts: List[FactRecord],
+        user_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> int:
+        return await self._fact_writer.create_facts_batch(
+            entity_id,
+            facts,
+            user_name=user_name,
+            session_id=session_id,
+            project_id=project_id,
+        )
 
-    async def invalidate_fact(self, fact_id: str, invalid_at: datetime) -> bool:
-        return await self._fact_writer.invalidate_fact(fact_id, invalid_at)
+    async def invalidate_fact(
+        self, fact_id: str, invalid_at: datetime, project_id: Optional[str] = None
+    ) -> bool:
+        return await self._fact_writer.invalidate_fact(
+            fact_id, invalid_at, project_id=project_id
+        )
 
     async def update_entity_profile(
         self,
@@ -58,46 +75,75 @@ class GraphClient:
         canonical_name: str,
         embedding: List[float],
         last_msg_id: int,
+        project_id: Optional[str] = None,
     ):
         return await self._entity_writer.update_entity_profile(
-            entity_id, canonical_name, embedding, last_msg_id
+            entity_id, canonical_name, embedding, last_msg_id, project_id=project_id
         )
 
     async def update_entity_canonical_name(
-        self, entity_id: int, canonical_name: str
+        self, entity_id: int, canonical_name: str, project_id: Optional[str] = None
     ) -> None:
         return await self._entity_writer.update_entity_canonical_name(
-            entity_id, canonical_name
+            entity_id, canonical_name, project_id=project_id
         )
 
-    async def update_entity_embedding(self, entity_id: int, embedding: List[float]):
-        return await self._entity_writer.update_entity_embedding(entity_id, embedding)
+    async def update_entity_embedding(
+        self, entity_id: int, embedding: List[float], project_id: Optional[str] = None
+    ):
+        return await self._entity_writer.update_entity_embedding(
+            entity_id, embedding, project_id=project_id
+        )
 
-    async def update_entity_checkpoint(self, entity_id: int, last_msg_id: int):
+    async def update_entity_checkpoint(
+        self, entity_id: int, last_msg_id: int, project_id: Optional[str] = None
+    ):
         return await self._entity_writer.update_entity_checkpoint(
-            entity_id, last_msg_id
+            entity_id, last_msg_id, project_id=project_id
         )
 
-    async def update_entity_aliases(self, alias_updates: Dict[int, List[str]]):
-        return await self._entity_writer.update_entity_aliases(alias_updates)
+    async def update_entity_aliases(
+        self, alias_updates: Dict[int, List[str]], project_id: Optional[str] = None
+    ):
+        return await self._entity_writer.update_entity_aliases(
+            alias_updates, project_id=project_id
+        )
 
-    async def create_hierarchy_edge(self, parent_id: int, child_id: int) -> bool:
-        return await self._graph_writer.create_hierarchy_edge(parent_id, child_id)
+    async def create_hierarchy_edge(
+        self, parent_id: int, child_id: int, project_id: Optional[str] = None
+    ) -> bool:
+        return await self._graph_writer.create_hierarchy_edge(
+            parent_id, child_id, project_id=project_id
+        )
 
-    async def merge_entities(self, primary_id: int, secondary_id: int) -> bool:
-        return await self._graph_writer.merge_entities(primary_id, secondary_id)
+    async def merge_entities(
+        self, primary_id: int, secondary_id: int, project_id: Optional[str] = None
+    ) -> bool:
+        return await self._graph_writer.merge_entities(
+            primary_id, secondary_id, project_id=project_id
+        )
 
-    async def cleanup_null_entities(self) -> int:
-        return await self._entity_writer.cleanup_null_entities()
+    async def cleanup_null_entities(self, project_id: Optional[str] = None) -> int:
+        return await self._entity_writer.cleanup_null_entities(project_id=project_id)
 
-    async def delete_entity(self, entity_id: int) -> bool:
-        return await self._entity_writer.delete_entity(entity_id)
+    async def delete_entity(
+        self, entity_id: int, project_id: Optional[str] = None
+    ) -> bool:
+        return await self._entity_writer.delete_entity(entity_id, project_id=project_id)
 
-    async def bulk_delete_entities(self, entity_ids: List[int]) -> int:
-        return await self._entity_writer.bulk_delete_entities(entity_ids)
+    async def bulk_delete_entities(
+        self, entity_ids: List[int], project_id: Optional[str] = None
+    ) -> int:
+        return await self._entity_writer.bulk_delete_entities(
+            entity_ids, project_id=project_id
+        )
 
-    async def delete_old_invalidated_facts(self, cutoff: datetime) -> int:
-        return await self._fact_writer.delete_old_invalidated_facts(cutoff)
+    async def delete_old_invalidated_facts(
+        self, cutoff: datetime, project_id: Optional[str] = None
+    ) -> int:
+        return await self._fact_writer.delete_old_invalidated_facts(
+            cutoff, project_id=project_id
+        )
 
     async def create_preference(
         self, id: str, content: str, kind: str, session_id: str
@@ -107,8 +153,12 @@ class GraphClient:
     async def delete_preference(self, pref_id: str) -> bool:
         return await self._graph_writer.delete_preference(pref_id)
 
-    async def delete_relationship(self, entity_a_id: int, entity_b_id: int) -> bool:
-        return await self._graph_writer.delete_relationship(entity_a_id, entity_b_id)
+    async def delete_relationship(
+        self, entity_a_id: int, entity_b_id: int, project_id: Optional[str] = None
+    ) -> bool:
+        return await self._graph_writer.delete_relationship(
+            entity_a_id, entity_b_id, project_id=project_id
+        )
 
     async def get_max_entity_id(self) -> int:
         return await self._entity_reader.get_max_entity_id()
@@ -116,17 +166,33 @@ class GraphClient:
     async def get_entity_embedding(self, entity_id: int) -> List[float]:
         return await self._entity_reader.get_entity_embedding(entity_id)
 
-    async def get_message_text(self, message_id: int) -> str:
-        return await self._graph_reader.get_message_text(message_id)
+    async def get_message_text(
+        self, message_id: int, user_name: str, session_id: str
+    ) -> str:
+        return await self._graph_reader.get_message_text(
+            message_id, user_name, session_id
+        )
 
-    async def get_messages_by_ids(self, ids: List[int]) -> List[Dict]:
-        return await self._graph_reader.get_messages_by_ids(ids)
+    async def get_messages_by_ids(
+        self,
+        ids: List[int],
+        user_name: Optional[str] = None,
+        session_ids: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        return await self._graph_reader.get_messages_by_ids(
+            ids, user_name=user_name, session_ids=session_ids
+        )
 
     async def get_surrounding_messages(
-        self, message_id: int, forward: int = 3, target_total: int = 10
+        self,
+        message_id: int,
+        forward: int = 3,
+        target_total: int = 10,
+        user_name: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> List[Dict]:
         return await self._graph_reader.get_surrounding_messages(
-            message_id, forward, target_total
+            message_id, forward, target_total, user_name=user_name, session_id=session_id
         )
 
     async def get_facts_for_entity(
@@ -146,8 +212,12 @@ class GraphClient:
     ) -> Dict[int, List[FactRecord]]:
         return await self._fact_reader.get_facts_for_entities(entity_ids, active_only)
 
-    async def get_facts_from_message(self, msg_id: int) -> List[FactRecord]:
-        return await self._fact_reader.get_facts_from_message(msg_id)
+    async def get_facts_from_message(
+        self, msg_id: int, user_name: str = None, session_id: str = None
+    ) -> List[FactRecord]:
+        return await self._fact_reader.get_facts_from_message(
+            msg_id, user_name=user_name, session_id=session_id
+        )
 
     async def validate_existing_ids(self, ids: List[int]) -> Optional[Set[int]]:
         return await self._entity_reader.validate_existing_ids(ids)
@@ -163,16 +233,21 @@ class GraphClient:
         protected_id: int = 1,
         orphan_cutoff_ms: int = 0,
         stale_junk_cutoff_ms: int = 0,
+        project_id: Optional[str] = None,
     ) -> List[int]:
         return await self._entity_reader.get_orphan_entities(
-            protected_id, orphan_cutoff_ms, stale_junk_cutoff_ms
+            protected_id, orphan_cutoff_ms, stale_junk_cutoff_ms, project_id=project_id
         )
 
     async def get_neighbor_ids(self, entity_id: int) -> Set[int]:
         return await self._graph_reader.get_neighbor_ids(entity_id)
 
-    async def get_entities_by_names(self, names: List[str]) -> List[Dict]:
-        return await self._entity_reader.get_entities_by_names(names)
+    async def get_entities_by_names(
+        self, names: List[str], visible_project_ids: List[str] = None
+    ) -> List[Dict]:
+        return await self._entity_reader.get_entities_by_names(
+            names, visible_project_ids
+        )
 
     async def get_parent_entities(self, entity_id: int) -> List[Dict]:
         return await self._graph_reader.get_parent_entities(entity_id)
@@ -197,15 +272,21 @@ class GraphClient:
         return await self._graph_reader.has_hierarchy_edge(id_a, id_b)
 
     async def search_similar_entities(
-        self, entity_id: int, limit: int = 50
+        self, entity_id: int, limit: int = 50, visible_project_ids: List[str] = None
     ) -> List[Tuple[int, float]]:
-        return await self._entity_reader.search_similar_entities(entity_id, limit)
+        return await self._entity_reader.search_similar_entities(
+            entity_id, limit, visible_project_ids
+        )
 
     async def search_entities_by_embedding(
-        self, embedding: List[float], limit: int = 10, score_threshold: float = 0.8
+        self,
+        embedding: List[float],
+        limit: int = 10,
+        score_threshold: float = 0.8,
+        visible_project_ids: List[str] = None,
     ) -> List[Tuple[int, float]]:
         return await self._entity_reader.search_entities_by_embedding(
-            embedding, limit, score_threshold
+            embedding, limit, score_threshold, visible_project_ids
         )
 
     async def search_messages_vector(
@@ -225,8 +306,12 @@ class GraphClient:
             limit, offset, topic, entity_type, search
         )
 
-    async def get_entity_by_id(self, entity_id: int) -> Optional[Dict]:
-        return await self._entity_reader.get_entity_by_id(entity_id=entity_id)
+    async def get_entity_by_id(
+        self, entity_id: int, visible_project_ids: List[str] = None
+    ) -> Optional[Dict]:
+        return await self._entity_reader.get_entity_by_id(
+            entity_id=entity_id, visible_project_ids=visible_project_ids
+        )
 
     async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:
         return await self._entity_reader.get_entities_by_ids(entity_ids)
@@ -266,16 +351,26 @@ class GraphClient:
         return await self._graph_reader.get_neighbor_ids_batch(entity_ids)
 
     async def get_hot_topic_context_with_messages(
-        self, hot_topic_names: List[str], msg_limit: int = 5, slim: bool = False
+        self,
+        hot_topic_names: List[str],
+        msg_limit: int = 5,
+        slim: bool = False,
+        visible_project_ids: List[str] = None,
     ) -> Dict:
         return await self._tools.get_hot_topic_context_with_messages(
-            hot_topic_names, msg_limit, slim
+            hot_topic_names, msg_limit, slim, visible_project_ids
         )
 
     async def search_messages_fts(
-        self, query: str, limit: int = 50
-    ) -> List[Tuple[int, float]]:
-        return await self._tools.search_messages_fts(query, limit)
+        self,
+        query: str,
+        limit: int = 50,
+        user_name: str = None,
+        session_ids: List[str] = None,
+    ) -> List[Tuple[int, float, str]]:
+        return await self._tools.search_messages_fts(
+            query, limit, user_name, session_ids
+        )
 
     async def search_entity(
         self,
@@ -284,22 +379,38 @@ class GraphClient:
         limit: int = 5,
         connections_limit: int = 5,
         evidence_limit: int = 5,
+        visible_project_ids: List[str] = None,
     ) -> List[Dict]:
         return await self._tools.search_entity(
-            query, active_topics, limit, connections_limit, evidence_limit
+            query,
+            active_topics,
+            limit,
+            connections_limit,
+            evidence_limit,
+            visible_project_ids,
         )
 
     async def get_related_entities(
-        self, entity_names: List[str], active_topics: List[str] = None, limit: int = 50
+        self,
+        entity_names: List[str],
+        active_topics: List[str] = None,
+        limit: int = 50,
+        visible_project_ids: List[str] = None,
     ) -> List[Dict]:
         return await self._tools.get_related_entities(
-            entity_names, active_topics, limit
+            entity_names, active_topics, limit, visible_project_ids
         )
 
     async def get_recent_activity(
-        self, entity_name: str, active_topics: List[str] = None, hours: int = 24
+        self,
+        entity_name: str,
+        active_topics: List[str] = None,
+        hours: int = 24,
+        visible_project_ids: List[str] = None,
     ) -> List[Dict]:
-        return await self._tools.get_recent_activity(entity_name, active_topics, hours)
+        return await self._tools.get_recent_activity(
+            entity_name, active_topics, hours, visible_project_ids
+        )
 
     async def find_path_filtered(
         self,
@@ -307,7 +418,8 @@ class GraphClient:
         end_name: str,
         active_topics: List[str] = None,
         max_depth: int = 4,
+        visible_project_ids: List[str] = None,
     ) -> Tuple[List[Dict], bool]:
         return await self._tools.find_path_filtered(
-            start_name, end_name, active_topics, max_depth
+            start_name, end_name, active_topics, max_depth, visible_project_ids
         )

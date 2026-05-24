@@ -14,7 +14,13 @@ from typing import Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 
 # ── Re-export Domain Primitives ──────────────────────────────────
-from common.schema.primitives import Connection, EntityRecord, Fact, ProfileUpdate
+from common.schema.primitives import (
+    Connection,
+    EntityRecord,
+    Fact,
+    FactRecord,
+    ProfileUpdate,
+)
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import parse_iso_time
 

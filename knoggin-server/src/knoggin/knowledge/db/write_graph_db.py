@@ -37,6 +37,18 @@ async def write_batch_to_graph(
         user_name: For dirty entity tracking (optional)
         redis_client: For dirty entity tracking (optional)
     """
+    missing_scope = [
+        key
+        for key, value in {
+            "user_name": user_name,
+            "session_id": session_id,
+            "project_id": project_id,
+        }.items()
+        if not value
+    ]
+    if missing_scope:
+        raise ValueError(f"Graph batch write missing required scope: {missing_scope}")
+
     entity_ids = batch.entity_ids
     new_entity_ids = batch.new_entity_ids
     alias_updated_ids = batch.alias_updated_ids
@@ -69,7 +81,7 @@ async def write_batch_to_graph(
 
     # ── Alias persistence
     if alias_updates:
-        await graph_client.update_entity_aliases(alias_updates)
+        await graph_client.update_entity_aliases(alias_updates, project_id=project_id)
         logger.info(f"Persisted alias updates for {len(alias_updates)} entities")
 
     safe_ids = valid_existing_ids.union(new_entity_ids)
@@ -89,6 +101,7 @@ async def write_batch_to_graph(
                     "topic": profile.get("topic", "General"),
                     "embedding": await entities.get_embedding_for_id(eid),
                     "aliases": entities.get_mentions_for_id(eid),
+                    "user_name": user_name,
                     "session_id": profile.get("session_id") or session_id,
                     "project_id": profile.get("project_id") or entities.project_id,
                 }
@@ -111,6 +124,7 @@ async def write_batch_to_graph(
                     "topic": profile.get("topic", "General"),
                     "embedding": await entities.get_embedding_for_id(eid),
                     "aliases": entities.get_mentions_for_id(eid),
+                    "user_name": user_name,
                     "session_id": profile.get("session_id") or session_id,
                     "project_id": profile.get("project_id") or entities.project_id,
                 }
@@ -168,6 +182,11 @@ async def write_batch_to_graph(
             ent_b = entity_lookup.get(ent_b_name) if ent_b_name else None
 
             if ent_a and ent_b:
+                evidence_ref = {
+                    "user_name": user_name,
+                    "session_id": session_id,
+                    "message_id": int(str(msg_id).removeprefix("msg_")),
+                }
                 relationships.append(
                     {
                         "entity_a": ent_a["canonical_name"],
@@ -175,6 +194,10 @@ async def write_batch_to_graph(
                         "entity_a_id": ent_a["id"],
                         "entity_b_id": ent_b["id"],
                         "message_id": f"msg_{msg_id}",
+                        "evidence_ref": evidence_ref,
+                        "user_name": user_name,
+                        "session_id": session_id,
+                        "project_id": project_id,
                         "confidence": pair_confidence,
                         "context": pair_context,
                     }

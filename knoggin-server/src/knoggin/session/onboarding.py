@@ -7,6 +7,7 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig
+from common.scoping import GLOBAL_PROJECT_SCOPE
 from common.schema.dtypes import ConnectionsResult, EntityProfilesResult, FactRecord
 from common.utils.core_utils import format_vp02_input, format_vp04_input
 from infrastructure.redis_client import RedisKeys
@@ -56,7 +57,9 @@ async def _create_user_entity(resources: ResourceManager, user_name: str) -> int
         "topic": "Identity",
         "embedding": embedding,
         "aliases": all_aliases,
+        "user_name": user_name,
         "session_id": "onboarding",
+        "project_id": GLOBAL_PROJECT_SCOPE,
     }
 
     user_facts_raw = config.user_facts
@@ -81,7 +84,13 @@ async def _create_user_entity(resources: ResourceManager, user_name: str) -> int
     ]
 
     await resources.graph_client.write_batch([user_entity], [])
-    await resources.graph_client.create_facts_batch(1, facts)
+    await resources.graph_client.create_facts_batch(
+        1,
+        facts,
+        user_name=user_name,
+        session_id="onboarding",
+        project_id=GLOBAL_PROJECT_SCOPE,
+    )
 
     current = await resources.redis.get(RedisKeys.global_next_ent_id())
     if not current or int(current) < 1:
@@ -114,7 +123,10 @@ def _build_user_lookup(
 
 
 async def _process_mentions_into_entities(
-    resources: ResourceManager, mentions: List[Tuple], entity_lookup: Dict[str, dict]
+    resources: ResourceManager,
+    mentions: List[Tuple],
+    entity_lookup: Dict[str, dict],
+    user_name: str,
 ) -> Tuple[List[dict], Dict[str, dict]]:
     seen: Dict[str, dict] = {}
     for msg_id, name, typ, topic in mentions:
@@ -146,7 +158,9 @@ async def _process_mentions_into_entities(
             "topic": entry["topic"],
             "embedding": embeddings[i],
             "aliases": [entry["name"]],
+            "user_name": user_name,
             "session_id": "onboarding",
+            "project_id": GLOBAL_PROJECT_SCOPE,
         }
         entities.append(entity)
         entity_lookup[key] = entity
@@ -186,6 +200,11 @@ async def _extract_connections(
             ent_a = entity_lookup.get(pair.entity_a.lower())
             ent_b = entity_lookup.get(pair.entity_b.lower())
             if ent_a and ent_b:
+                evidence_ref = {
+                    "user_name": user_name,
+                    "session_id": "onboarding",
+                    "message_id": int(pair.msg_id),
+                }
                 relationships.append(
                     {
                         "entity_a": ent_a["canonical_name"],
@@ -193,6 +212,10 @@ async def _extract_connections(
                         "entity_a_id": ent_a["id"],
                         "entity_b_id": ent_b["id"],
                         "message_id": f"msg_{pair.msg_id}",
+                        "evidence_ref": evidence_ref,
+                        "user_name": user_name,
+                        "session_id": "onboarding",
+                        "project_id": GLOBAL_PROJECT_SCOPE,
                         "confidence": pair.confidence,
                         "context": pair.context,
                     }
@@ -297,7 +320,13 @@ async def _extract_and_save_profiles(
 
                     if new_facts:
                         write_tasks.append(
-                            resources.graph_client.create_facts_batch(ent_id, new_facts)
+                            resources.graph_client.create_facts_batch(
+                                ent_id,
+                                new_facts,
+                                user_name=user_name,
+                                session_id="onboarding",
+                                project_id=GLOBAL_PROJECT_SCOPE,
+                            )
                         )
 
                         resolution_text = f"{entity['canonical_name']}. " + " ".join(
@@ -314,7 +343,9 @@ async def _extract_and_save_profiles(
                     res_embeddings = await resources.embedding.encode(resolution_texts)
 
                     update_tasks = [
-                        resources.graph_client.update_entity_embedding(ent_id, emb)
+                        resources.graph_client.update_entity_embedding(
+                            ent_id, emb, project_id=GLOBAL_PROJECT_SCOPE
+                        )
                         for ent_id, emb in zip(resolution_entities, res_embeddings)
                     ]
                     await asyncio.gather(*update_tasks)
@@ -389,7 +420,7 @@ async def run_setup(
         }
 
     entities, seen = await _process_mentions_into_entities(
-        resources, mentions, entity_lookup
+        resources, mentions, entity_lookup, user_name
     )
 
     relationships = await _extract_connections(

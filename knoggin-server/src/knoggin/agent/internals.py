@@ -102,7 +102,7 @@ def _format_evidence(
     msg = ""
 
     new_profile_ids = set()
-    new_message_ids = set()
+    new_message_keys = set()
     new_graph_keys = set()
 
     if last_result:
@@ -115,12 +115,11 @@ def _format_evidence(
             if tool == "search_entity":
                 new_profile_ids = {d.get("id") for d in data if d.get("id")}
             elif tool == "search_messages":
-                new_message_ids = {d.get("id") for d in data if d.get("id")}
-            elif tool == "search_files":
-                new_message_ids = {
-                    f"{d.get('file_id', 'file')}_{d.get('chunk_index', 0)}"
-                    for d in data
+                new_message_keys = {
+                    _message_evidence_key(d) for d in data if _message_evidence_key(d)
                 }
+            elif tool == "search_files":
+                new_message_keys = {_file_evidence_key(d) for d in data}
             elif tool in ("get_connections", "get_recent_activity"):
                 new_graph_keys = {
                     (d.get("source"), d.get("target"))
@@ -167,8 +166,14 @@ def _format_evidence(
         msg += f"\n**Path results:**\n{format_path_results(evidence.paths)}\n"
 
     if evidence.messages:
-        new_msgs = [m for m in evidence.messages if m.get("id") in new_message_ids]
-        old_msgs = [m for m in evidence.messages if m.get("id") not in new_message_ids]
+        new_msgs = [
+            m for m in evidence.messages if _message_evidence_key(m) in new_message_keys
+        ]
+        old_msgs = [
+            m
+            for m in evidence.messages
+            if _message_evidence_key(m) not in new_message_keys
+        ]
 
         if old_msgs:
             msg += f"Previously retrieved messages: {len(old_msgs)} results\n"
@@ -200,16 +205,60 @@ def _merge_unique(target_list: List, new_items, key_func) -> None:
             existing_keys.add(k)
 
 
+def _message_evidence_key(item: Dict) -> Optional[Tuple]:
+    if not isinstance(item, dict):
+        return None
+
+    if item.get("source_type") == "file":
+        return _file_evidence_key(item)
+
+    item_id = item.get("id")
+    if item_id is None:
+        return None
+
+    user_name = item.get("user_name")
+    session_id = item.get("session_id")
+    if user_name or session_id:
+        return ("message", user_name, session_id, item_id)
+    return ("message", item_id)
+
+
+def _file_evidence_key(item: Dict) -> Optional[Tuple]:
+    if not isinstance(item, dict):
+        return None
+
+    file_id = item.get("file_id")
+    chunk_index = item.get("chunk_index")
+    item_id = item.get("id")
+
+    if file_id is not None or chunk_index is not None:
+        return ("file", file_id or "file", chunk_index or 0)
+    if isinstance(item_id, str) and item_id.startswith("file:"):
+        return ("file", item_id)
+    return None
+
+
 def _normalize_file_chunks(data: List[Dict]) -> List[Dict]:
     """Normalize search_files results into the standard message shape."""
     return [
         {
-            "id": f"{chunk.get('file_id', 'file')}_{chunk.get('chunk_index', 0)}",
+            "id": f"file:{chunk.get('file_id', 'file')}:{chunk.get('chunk_index', 0)}",
+            "file_id": chunk.get("file_id", "file"),
+            "chunk_index": chunk.get("chunk_index", 0),
             "content": chunk.get("content", ""),
             "message": chunk.get("content", ""),
             "role": "file",
             "score": chunk.get("score", 0.5),
             "source": chunk.get("file_name", "uploaded file"),
+            "source_type": "file",
+            "context": [
+                {
+                    "role": "file",
+                    "timestamp": chunk.get("file_name", "uploaded file"),
+                    "content": chunk.get("content", ""),
+                    "is_hit": True,
+                }
+            ],
         }
         for chunk in data
         if "error" not in chunk
@@ -230,7 +279,9 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
 
     def _acc_messages(ev, data, cfg):
         _merge_unique(
-            ev.messages, data if isinstance(data, list) else [], lambda x: x["id"]
+            ev.messages,
+            data if isinstance(data, list) else [],
+            _message_evidence_key,
         )
         if len(ev.messages) > cfg.max_accumulated_messages:
             ev.messages.sort(
@@ -268,7 +319,7 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
         "search_files": lambda ev, d, cfg: _merge_unique(
             ev.messages,
             _normalize_file_chunks(d) if isinstance(d, list) else [],
-            lambda x: x["id"],
+            _message_evidence_key,
         ),
         "web_search": lambda ev, d, cfg: _merge_unique(
             ev.sources, d if isinstance(d, list) else [], lambda x: x.get("url")

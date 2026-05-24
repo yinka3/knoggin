@@ -24,6 +24,7 @@ class EntityManager:
         graph_client: "GraphClient",
         embedding_service: EmbeddingService,
         project_id: Optional[str] = None,
+        readable_project_ids: Optional[List[str]] = None,
         hierarchy_config: Optional[dict] = None,
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
@@ -35,6 +36,9 @@ class EntityManager:
         self.graph_client = graph_client
         self.hierarchy_config = hierarchy_config or {}
         self.project_id = project_id
+        self.readable_project_ids = readable_project_ids or (
+            [project_id] if project_id else None
+        )
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
         self._name_to_id = LRUCache(maxsize=3000000)
@@ -107,7 +111,9 @@ class EntityManager:
             stored_id = self._name_to_id.get(lower_name)
             if stored_id is not None:
                 return stored_id
-        found = await self.graph_client.get_entities_by_names([name])
+        found = await self.graph_client.get_entities_by_names(
+            [name], visible_project_ids=self.readable_project_ids
+        )
         if found:
             entity = found[0]
             self._populate_cache(entity)
@@ -121,7 +127,9 @@ class EntityManager:
                 return profile
 
         # Cache miss: fetch from graph_client
-        entity = await self.graph_client.get_entity_by_id(entity_id)
+        entity = await self.graph_client.get_entity_by_id(
+            entity_id, visible_project_ids=self.readable_project_ids
+        )
         if entity:
             return self._populate_cache(entity)
         return None
@@ -280,7 +288,10 @@ class EntityManager:
         if vector:
             try:
                 vector_results = await self.graph_client.search_entities_by_embedding(
-                    vector, limit=5, score_threshold=self.candidate_vector_threshold
+                    vector,
+                    limit=5,
+                    score_threshold=self.candidate_vector_threshold,
+                    visible_project_ids=self.readable_project_ids,
                 )
             except Exception as e:
                 logger.warning(f"Vector search failed, using fuzzy only: {e}")
@@ -530,7 +541,7 @@ class EntityManager:
             primary_name = primary_profile["canonical_name"]
 
             neighbors = await self.graph_client.search_similar_entities(
-                primary_id, limit=50
+                primary_id, limit=50, visible_project_ids=self.readable_project_ids
             )
 
             for neighbor_id, _ in neighbors:

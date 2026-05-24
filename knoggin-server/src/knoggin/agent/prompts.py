@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from loguru import logger
 
@@ -37,10 +37,16 @@ def get_topic_evolution_prompt(user_name: str) -> str:
     return render_prompt("pipeline/generate_topic_evolution.j2", user_name=user_name)
 
 
-async def enrich_facts_with_sources(facts: list, graph_client) -> List[Dict]:
+async def enrich_facts_with_sources(
+    facts: list,
+    graph_client,
+    user_name: str = None,
+    session_id: str = None,
+) -> List[Dict]:
     """Enrich facts with timestamps and source message content."""
     enriched = []
-    msg_id_to_indices: Dict[int, List[int]] = {}
+    scope_to_indices: Dict[Tuple[str, str, int], List[int]] = {}
+    skipped_unscoped_sources = 0
 
     for i, fact in enumerate(facts):
         entry = {
@@ -51,19 +57,45 @@ async def enrich_facts_with_sources(facts: list, graph_client) -> List[Dict]:
         enriched.append(entry)
 
         if fact.source_msg_id:
-            if fact.source_msg_id not in msg_id_to_indices:
-                msg_id_to_indices[fact.source_msg_id] = []
-            msg_id_to_indices[fact.source_msg_id].append(i)
+            fact_user = getattr(fact, "source_user_name", None) or user_name
+            fact_session = getattr(fact, "source_session_id", None) or session_id
+            if fact_user and fact_session:
+                key = (fact_user, fact_session, fact.source_msg_id)
+                if key not in scope_to_indices:
+                    scope_to_indices[key] = []
+                scope_to_indices[key].append(i)
+            else:
+                skipped_unscoped_sources += 1
 
-    if msg_id_to_indices:
+    if skipped_unscoped_sources:
+        logger.debug(
+            f"Skipping {skipped_unscoped_sources} source message enrichments without user/session scope"
+        )
+
+    if scope_to_indices:
+        by_scope: Dict[Tuple[str, str], List[int]] = {}
+        for fact_user, fact_session, msg_id in scope_to_indices:
+            by_scope.setdefault((fact_user, fact_session), []).append(msg_id)
+
         try:
-            messages = await graph_client.get_messages_by_ids(
-                list(msg_id_to_indices.keys())
-            )
-            msg_text_map = {m["id"]: m.get("content", "") for m in messages}
+            msg_text_map = {}
+            for (fact_user, fact_session), msg_ids in by_scope.items():
+                messages = await graph_client.get_messages_by_ids(
+                    list(dict.fromkeys(msg_ids)),
+                    user_name=fact_user,
+                    session_ids=[fact_session],
+                )
+                for message in messages:
+                    msg_text_map[
+                        (
+                            message.get("user_name", fact_user),
+                            message.get("session_id", fact_session),
+                            message["id"],
+                        )
+                    ] = message.get("content", "")
 
-            for msg_id, indices in msg_id_to_indices.items():
-                text = msg_text_map.get(msg_id)
+            for key, indices in scope_to_indices.items():
+                text = msg_text_map.get(key)
                 if text:
                     for idx in indices:
                         enriched[idx]["source_message"] = text

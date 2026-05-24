@@ -8,8 +8,6 @@ if TYPE_CHECKING:
     from knoggin.knowledge.services.entity_service import EntityManager
 
 from common.utils.data_utils import cosine_similarity
-from common.utils.json_utils import safe_json_loads
-from infrastructure.redis_client import RedisKeys
 
 
 class GraphTools:
@@ -21,6 +19,7 @@ class GraphTools:
     search_cfg: Dict
     user_name: str
     session_id: str
+    readable_project_ids: Optional[List[str]]
 
     async def get_connections(self, entity_name: str) -> List[Dict]:
         """
@@ -39,19 +38,21 @@ class GraphTools:
             return [{"error": f"Entity not found: '{entity_name}'"}]
 
         results = await self.graph_client.get_related_entities(
-            [canonical], active_topics=self.active_topics, limit=50
+            [canonical],
+            active_topics=self.active_topics,
+            limit=50,
+            visible_project_ids=self.readable_project_ids,
         )
 
         if results:
             for r in results:
-                evidence_ids = r.pop("evidence_ids", [])
-                string_ids = [self._format_message_id(x) for x in evidence_ids]
-                r["evidence"] = await self._hydrate_evidence(string_ids)
+                evidence_refs = r.pop("evidence_refs", r.pop("evidence_ids", []))
+                r["evidence"] = await self._hydrate_evidence(evidence_refs)
             return results
 
         # Try looking without topic filtering to see if it's "hidden"
         hidden_results = await self.graph_client.get_related_entities(
-            [canonical], active_topics=None
+            [canonical], active_topics=None, visible_project_ids=self.readable_project_ids
         )
 
         if hidden_results:
@@ -85,13 +86,15 @@ class GraphTools:
 
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
         results = await self.graph_client.get_recent_activity(
-            canonical, active_topics=self.active_topics, hours=hours
+            canonical,
+            active_topics=self.active_topics,
+            hours=hours,
+            visible_project_ids=self.readable_project_ids,
         )
 
         for r in results:
-            evidence_ids = r.pop("evidence_ids", [])
-            string_ids = [self._format_message_id(x) for x in evidence_ids]
-            r["evidence"] = await self._hydrate_evidence(string_ids)
+            evidence_refs = r.pop("evidence_refs", r.pop("evidence_ids", []))
+            r["evidence"] = await self._hydrate_evidence(evidence_refs)
 
         return results
 
@@ -131,7 +134,10 @@ class GraphTools:
         embedding = await self.embedding_service.encode_single(entity_name)
 
         candidates = await self.graph_client.search_entities_by_embedding(
-            embedding, limit=5, score_threshold=0.69
+            embedding,
+            limit=5,
+            score_threshold=0.69,
+            visible_project_ids=self.readable_project_ids,
         )
 
         if candidates:
@@ -203,14 +209,17 @@ class GraphTools:
 
         # Trace path
         path, has_inactive_shortcut = await self.graph_client.find_path_filtered(
-            canonical_a, canonical_b, active_topics=self.active_topics, max_depth=4
+            canonical_a,
+            canonical_b,
+            active_topics=self.active_topics,
+            max_depth=4,
+            visible_project_ids=self.readable_project_ids,
         )
 
         if path:
             for step in path:
                 evidence_refs = step.pop("evidence_refs", [])
-                string_ids = [self._format_message_id(x) for x in evidence_refs]
-                step["evidence"] = await self._hydrate_evidence(string_ids)
+                step["evidence"] = await self._hydrate_evidence(evidence_refs)
             if has_inactive_shortcut:
                 path.append(
                     {"note": "A shorter connection exists through inactive topics"}
@@ -219,7 +228,11 @@ class GraphTools:
 
         if has_inactive_shortcut:
             full_path, _ = await self.graph_client.find_path_filtered(
-                canonical_a, canonical_b, active_topics=None, max_depth=4
+                canonical_a,
+                canonical_b,
+                active_topics=None,
+                max_depth=4,
+                visible_project_ids=self.readable_project_ids,
             )
 
             safe_path = []
@@ -234,6 +247,8 @@ class GraphTools:
                 )
 
                 if both_active:
+                    evidence_refs = step.pop("evidence_refs", [])
+                    step["evidence"] = await self._hydrate_evidence(evidence_refs)
                     safe_path.append(step)
                 else:
                     inactive_topics = []
@@ -334,27 +349,15 @@ class GraphTools:
 
         # Fetch context
         raw = await self.graph_client.get_hot_topic_context_with_messages(
-            hot_topics, msg_limit=10, slim=slim
+            hot_topics,
+            msg_limit=10,
+            slim=slim,
+            visible_project_ids=self.readable_project_ids,
         )
-        content_key = RedisKeys.message_content(self.user_name, self.session_id)
-
         for _, data in raw.items():
-            msg_ids = data.get("message_ids", [])
-
-            if msg_ids:
-                raw_msgs = await self.redis.hmget(content_key, *msg_ids)
-                messages = []
-                for msg_id, raw_msg in zip(msg_ids, raw_msgs):
-                    if raw_msg:
-                        parsed = safe_json_loads(raw_msg)
-                        if parsed and isinstance(parsed, dict):
-                            messages.append(
-                                {"id": msg_id, "message": parsed.get("message", "")}
-                            )
-                data["messages"] = messages
-            else:
-                data["messages"] = []
-
+            message_refs = data.get("message_refs", data.get("message_ids", []))
+            data["messages"] = await self._hydrate_evidence(message_refs)
+            data.pop("message_refs", None)
             data.pop("message_ids", None)
 
         return raw
