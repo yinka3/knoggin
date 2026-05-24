@@ -4,11 +4,11 @@ from typing import Dict, List
 
 from loguru import logger
 
-from infrastructure.db_client import DBClient
+from infrastructure.postgres_client import PostgresClient
 
 
 class EntityWriter:
-    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 
@@ -238,20 +238,14 @@ class EntityWriter:
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # For AGE, the safest way to append arrays without agtype casting nightmares
-                    # is to read existing, combine in Python, write back.
                     for eid, new_aliases in alias_updates.items():
-                        # Read existing
                         read_cyp = "MATCH (e:Entity {id: $id}) RETURN e.aliases"
-                        res = await self.client.execute_read(
+                        await cur.execute(
                             self.client.build_cypher(read_cyp, "aliases agtype"),
                             (json.dumps({"id": eid}),),
                         )
-
-                        existing = []
-                        if res and res[0]["aliases"]:
-                            existing = res[0]["aliases"]
-
+                        row = await cur.fetchone()
+                        existing = row["aliases"] if row and row["aliases"] else []
                         combined = list(set(existing + new_aliases))
 
                         # Write back

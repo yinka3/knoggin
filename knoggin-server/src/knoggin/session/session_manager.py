@@ -11,7 +11,7 @@ from common.utils.events import DebugEventEmitter
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 from knoggin.knowledge.services.file_rag import FileRAGService
-from knoggin.project.services.project_manager import ProjectManager
+from knoggin.project.project_manager import ProjectManager
 from knoggin.session.context import Context
 
 

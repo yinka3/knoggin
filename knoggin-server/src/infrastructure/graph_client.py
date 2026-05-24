@@ -5,7 +5,7 @@ from loguru import logger
 
 from common.schema.dtypes import FactRecord
 from infrastructure.postgres_client import PostgresClient
-from knoggin.community.db.community_store import CommunityStore
+from knoggin.community.community_store import CommunityStore
 from knoggin.knowledge.db.readers.entity_reader import EntityReader
 from knoggin.knowledge.db.readers.fact_reader import FactReader
 from knoggin.knowledge.db.readers.graph_reader import GraphReader

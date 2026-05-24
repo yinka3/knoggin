@@ -259,7 +259,14 @@ class CommunityManager:
         agent_preferences = working_memory["preferences"] or None
         agent_icks = working_memory["icks"] or None
 
-        # Build restricted community tools
+        comm_memory = MemoryManager(
+            redis=self.resources.redis,
+            user_name=self.user_name,
+            session_id=ctx.session_id,
+            agent_id=agent.id,
+            topic_config=ctx.project.topic_config,
+        )
+
         base_tools = Tools(
             user_name=self.user_name,
             entities=ctx.project.entities,
@@ -267,7 +274,7 @@ class CommunityManager:
             topic_config=ctx.project.topic_config,
             search_config={},
             file_rag=ctx.file_rag,
-            memory=None,
+            memory=comm_memory,
         )
 
         comm_tools = CommunityTools(
@@ -276,7 +283,7 @@ class CommunityManager:
             self.resources.graph_client.community,
             discussion_id,
             agent.id,
-            None,
+            comm_memory,
             participants,
         )
 
@@ -300,7 +307,7 @@ class CommunityManager:
             ctx=agent_ctx,
             llm=self.resources.llm_service,
             tools=comm_tools,
-            memory_mgr=None,
+            memory_mgr=comm_memory,
         )
 
         community_enabled_tools = [

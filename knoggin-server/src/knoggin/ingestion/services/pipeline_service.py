@@ -55,8 +55,10 @@ class BatchProcessor:
         get_next_ent_id,
         resolution_threshold: float = 0.85,
         connection_prompt: str = None,
+        graph_client=None,
     ):
         self.session_id = session_id
+        self.graph_client = graph_client
         self.redis = redis_client
         self.llm = llm
         self.entities = entities

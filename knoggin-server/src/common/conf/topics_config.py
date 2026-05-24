@@ -170,7 +170,7 @@ class TopicConfig:
         config = self._config.get(topic)
         if config:
             return config.active
-        return True
+        return False
 
     def update(self, new_config: dict):
         """

@@ -13,7 +13,7 @@ from common.utils.json_utils import safe_json_loads
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
-from knoggin.community.jobs.aac_job import AACJob
+from knoggin.community.community_job import AACJob
 from knoggin.ingestion.jobs.archive_job import FactArchivalJob
 from knoggin.ingestion.jobs.cleaner_job import EntityCleanupJob
 from knoggin.ingestion.jobs.dlq_job import DLQReplayJob
@@ -277,21 +277,14 @@ class ProjectManager:
 
     async def _verify_user_entity(self, entities: EntityManager) -> None:
         user_id = await entities.get_id(self.user_name)
-        if user_id is None:
-            user_id = await entities.add_entity(self.user_name, "Identity")
-        entity = await self.resources.graph_client.get_entity(user_id)
-        if entity:
+        if user_id is not None:
             logger.info(f"User entity verified: {self.user_name} (id={user_id})")
             return
 
-        logger.warning(
-            "User entity exists in graph but missing from entities, backfilling"
-        )
-        all_aliases = (
-            entity.get("aliases") or [self.user_name] if entity else [self.user_name]
-        )
+        logger.info(f"User entity not found, creating: {self.user_name}")
+        new_id = await self.resources.redis.incr(RedisKeys.global_next_ent_id())
         await entities.register_entity(
-            user_id, self.user_name, all_aliases, "person", "Identity"
+            new_id, self.user_name, [self.user_name], "person", "Identity"
         )
 
     def _init_profile_job(self, entities: EntityManager) -> ProfileRefinementJob:

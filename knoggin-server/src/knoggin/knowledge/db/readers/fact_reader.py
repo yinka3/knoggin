@@ -5,11 +5,11 @@ from typing import Dict, List
 from loguru import logger
 
 from common.schema.dtypes import FactRecord
-from infrastructure.db_client import DBClient
+from infrastructure.postgres_client import PostgresClient
 
 
 class FactReader:
-    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 

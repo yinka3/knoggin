@@ -114,6 +114,8 @@ class Scheduler:
         if not last_activity:
             return 0.0
         last_ts = parse_iso_time(last_activity)
+        if not last_ts:
+            return 0.0
         return (datetime.now(timezone.utc) - last_ts).total_seconds()
 
     async def _run_pending_checks(self):

@@ -3,8 +3,8 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from loguru import logger
 
-from common.errors.exceptions import ToolExecutionError
-from common.utils.time_utils import parse_iso_time
+from common.exceptions import ToolExecutionError
+from common.utils.time_utils import parse_iso_time, parse_iso_time_or_now
 from knoggin.agent.formatters import (
     format_entity_results,
     format_fact_results,
@@ -31,7 +31,7 @@ def build_user_message(
             ts = turn.get("timestamp")
             if ts:
                 try:
-                    dt = parse_iso_time(ts)
+                    dt = parse_iso_time_or_now(ts)
                     msg += f"[{dt.strftime('%H:%M')}] {role}: {turn['content']}\n"
                 except Exception:
                     msg += f"{role}: {turn['content']}\n"

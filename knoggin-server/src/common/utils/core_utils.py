@@ -11,7 +11,7 @@ from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
 from common.utils.json_utils import safe_json_loads
-from common.utils.time_utils import parse_iso_time
+from common.utils.time_utils import parse_iso_time_or_now
 from infrastructure.redis_client import RedisKeys
 
 PRONOUNS = {
@@ -243,7 +243,7 @@ def format_recorded_date(recorded: str) -> str:
     if not recorded:
         return "unknown"
     try:
-        dt = parse_iso_time(recorded)
+        dt = parse_iso_time_or_now(recorded)
         return dt.strftime("%Y-%m-%d")
     except Exception:
         return str(recorded)[:10]

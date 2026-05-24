@@ -3,11 +3,11 @@ from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from infrastructure.db_client import DBClient
+from infrastructure.postgres_client import PostgresClient
 
 
 class GraphReader:
-    def __init__(self, client: DBClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
 

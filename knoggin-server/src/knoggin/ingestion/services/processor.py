@@ -65,9 +65,9 @@ class TextProcessor:
         label_to_topics = {}
 
         for topic, config in self.topic_config.raw.items():
-            if config.get("active", True) is False:
+            if not config.active:
                 continue
-            for label in config.get("labels", []):
+            for label in config.labels:
                 label_lower = label.lower()
                 if label_lower not in label_to_topics:
                     label_to_topics[label_lower] = []

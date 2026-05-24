@@ -1,18 +1,13 @@
 from datetime import datetime, timezone
-from typing import Union
+from typing import Union, Optional
 
 
-def parse_iso_time(timestamp: Union[str, float, int]) -> datetime:
-    """Safely parse ISO timestamps (including trailing Z) or Unix timestamps.
-    Falls back to current UTC time if parsing fails or input is empty.
-    """
+def parse_iso_time(timestamp: Union[str, float, int]) -> Optional[datetime]:
+    """Parse timestamp strictly. Returns None on failure — caller decides the fallback."""
     if not timestamp:
-        return datetime.now(timezone.utc)
+        return None
 
     if isinstance(timestamp, (int, float)):
-        # Treat as Unix timestamp (seconds)
-        # Note: if it's in milliseconds, this might give a year in the far future.
-        # But for general use, assuming seconds is standard.
         return datetime.fromtimestamp(timestamp, timezone.utc)
 
     timestamp_str = str(timestamp).strip()
@@ -22,4 +17,9 @@ def parse_iso_time(timestamp: Union[str, float, int]) -> datetime:
     try:
         return datetime.fromisoformat(timestamp_str)
     except ValueError:
-        return datetime.now(timezone.utc)
+        return None
+
+
+def parse_iso_time_or_now(timestamp: Union[str, float, int]) -> datetime:
+    """Lenient wrapper — returns now() if parsing fails. Use for display-only contexts."""
+    return parse_iso_time(timestamp) or datetime.now(timezone.utc)

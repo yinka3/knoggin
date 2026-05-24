@@ -27,7 +27,6 @@ except ImportError:
 
 
 class SearchTools:
-    # Attributes provided by the composed Tools class
     redis: aioredis.Redis
     graph_client: GraphClient
     embedding_service: EmbeddingService

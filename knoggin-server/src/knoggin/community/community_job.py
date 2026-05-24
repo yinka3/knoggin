@@ -1,13 +1,13 @@
-from datetime import datetime, timezone
+import time
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.utils.time_utils import parse_iso_time
+
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
-from knoggin.community.services.community_manager import CommunityManager
+from knoggin.community.community_manager import CommunityManager
 from knoggin.project.state import ProjectState
 
 
@@ -38,10 +38,11 @@ class AACJob(BaseJob):
         if not last_run:
             return True
 
-        last_dt = parse_iso_time(last_run)
-        now = datetime.now(timezone.utc)
-
-        return (now - last_dt).total_seconds() >= (interval_min * 60)
+        try:
+            elapsed = time.time() - float(last_run)
+        except (ValueError, TypeError):
+            return True
+        return elapsed >= (interval_min * 60)
 
     async def execute(self, ctx: JobContext) -> JobResult:
         logger.info(
@@ -55,12 +56,10 @@ class AACJob(BaseJob):
             if self.resources.graph_client and self.resources.graph_client.community:
                 await self.resources.graph_client.community.delete_old_discussions(30)
 
-            await self.resources.redis.set(
-                RedisKeys.job_last_run(
+            last_run_key = RedisKeys.job_last_run(
                     self.name, ctx.user_name, self.project_state.project_id
-                ),
-                datetime.now(timezone.utc).isoformat(),
-            )
+                )
+            await self.resources.redis.set(last_run_key, time.time())
 
             return JobResult(success=True, summary="Discussion triggered")
         except Exception as e:

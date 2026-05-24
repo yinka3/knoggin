@@ -18,7 +18,7 @@ from common.utils.core_utils import (
 )
 from common.utils.events import DebugEventEmitter, emit
 from common.utils.tasks import BackgroundTaskGroup
-from common.utils.time_utils import parse_iso_time
+from common.utils.time_utils import parse_iso_time, parse_iso_time_or_now
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin.agent.prompts import get_lightweight_extraction_prompt
@@ -407,7 +407,7 @@ class Context:
         results = []
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
-            ts = parse_iso_time(turn["timestamp"])
+            ts = parse_iso_time_or_now(turn["timestamp"])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append(
                 {

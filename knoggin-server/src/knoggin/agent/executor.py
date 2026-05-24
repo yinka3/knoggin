@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from common.errors.exceptions import ToolExecutionError
+from common.exceptions import ToolExecutionError
 from common.schema.tool_schema import get_filtered_schemas
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads

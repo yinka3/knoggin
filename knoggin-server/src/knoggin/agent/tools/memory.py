@@ -11,13 +11,11 @@ if TYPE_CHECKING:
 
 
 class MemoryTools:
-    # Attributes provided by the composed Tools class
     redis: aioredis.Redis
     graph_client: GraphClient
     entities: EntityManager
     memory: Optional[MemoryManager]
-    user_name: str
-    session_id: str
+
 
     async def save_memory(self, content: str, topic: str = "General") -> Dict:
         """Save a note to persistent session memory."""

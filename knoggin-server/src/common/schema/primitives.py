@@ -106,7 +106,10 @@ class Fact(BaseModel):
 def _parse_dt(val) -> datetime:
     """Parse a datetime from various formats (ISO string, unix timestamp, or datetime)."""
     if isinstance(val, str):
-        return parse_iso_time(val)
+        result = parse_iso_time(val)
+        if result is None:
+            raise ValueError(f"Cannot parse datetime from string: {val}")
+        return result
     if isinstance(val, (int, float)):
         return datetime.fromtimestamp(val, tz=timezone.utc)
     if isinstance(val, datetime):
