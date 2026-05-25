@@ -100,6 +100,3 @@ class AgentConfig:
     is_spawned: bool = False
     spawned_by: Optional[str] = None
     created_at: Optional[str] = None
-
-
-AgentResult = ChatResult

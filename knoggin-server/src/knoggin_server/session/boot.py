@@ -8,9 +8,9 @@ from common.conf.topics_config import TopicConfig
 from common.utils.events import DebugEventEmitter
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
-from knoggin.ingestion.services.batch_consumer import BatchConsumer
-from knoggin.ingestion.services.pipeline_service import BatchProcessor
-from knoggin.ingestion.services.processor import TextProcessor
+from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
+from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.services.entity_service import EntityManager
 from knoggin_server.knowledge.services.file_rag import FileRAGService
 from knoggin_server.project.state import ProjectState

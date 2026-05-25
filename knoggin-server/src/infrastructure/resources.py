@@ -90,7 +90,7 @@ class ResourceManager:
                     trace_logger=get_trace_logger(),
                     redis_client=instance.redis,
                 )
-                instance.embedding = EmbeddingService(device=device)
+                instance.embedding = EmbeddingService(device=device.type)
 
                 async def load_spacy():
                     exclude = ["ner", "lemmatizer", "attribute_ruler"]

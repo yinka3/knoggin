@@ -3,7 +3,11 @@
 This package is the public Python facade for embedded Knoggin engine usage.
 
 V1 is not an HTTP client. It imports the engine package directly, boots shared
-engine resources, and exposes project/session handles over the current runtime.
+engine resources, and exposes project/session handles over the current local
+runtime.
+
+The frontend API for the local app is a separate surface. It does not need to
+mirror this SDK exactly.
 
 ## Current Surface
 
@@ -12,6 +16,7 @@ engine resources, and exposes project/session handles over the current runtime.
 - `Session`: active chat/session handle.
 - `session.files`: session-scoped file upload, list, search, and delete.
 - `kg.agents`: wrapper around engine agent configuration management.
+- `kg.project("global")`: lightweight handle for the default project scope.
 - `ChatResult` and `ChatEvent`: normalized chat outputs.
 - `ProjectInfo`, `SessionInfo`, `AgentConfig`, `FileInfo`,
   `FileSearchResult`, and `ConversationTurn`: SDK-facing metadata.
@@ -44,6 +49,8 @@ async def main():
 ## Current Boundaries
 
 - Chat is the learning path; the SDK does not expose `learn`.
+- Engine managers are internal to the facade; use `kg.project(...)`,
+  `kg.create_project(...)`, and `kg.agents` instead.
 - Session-level topic overrides are not exposed because they are metadata-only in
   the current engine.
 - Files are session-scoped because the current engine `FileRAGService` is
@@ -52,3 +59,4 @@ async def main():
   `forget_memory`; the SDK does not add separate learning methods.
 - Local Python tool execution is not wired into embedded chat yet; `tool` and
   `tool_to_schema` are schema helpers only in V1.
+- The SDK is local embedded Python, not a hosted/cloud client.

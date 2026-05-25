@@ -69,6 +69,18 @@ en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/dow
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "unit: pure or mostly pure fast tests",
+    "smoke: package and import boundary checks",
+    "runtime: fake-backed engine lifecycle tests",
+    "storage: storage contract tests",
+    "integration: cross-subsystem tests",
+    "slow: expensive tests",
+    "requires_redis: requires a real Redis service",
+    "requires_postgres: requires a real Postgres service",
+    "requires_pgvector: requires pgvector support",
+    "no_network: test is expected to make no external network calls",
+]
 
 [tool.ruff]
 line-length = 88

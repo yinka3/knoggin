@@ -99,28 +99,33 @@ class Knoggin:
 
             resources = await ResourceManager.initialize(num_workers=workers)
             cls._resource_workers = workers
+            facade = cls(user_name=user_name, resources=resources)
             cls._open_facades += 1
 
-        return cls(user_name=user_name, resources=resources)
+        return facade
 
     def __init__(self, user_name: str, resources: Any):
-        from knoggin_server.agent.services.agent_manager import AgentManager
         from knoggin_server.agent.orchestrator import Orchestrator
+        from knoggin_server.agent.services.agent_manager import AgentManager
         from knoggin_server.project.project_manager import ProjectManager
         from knoggin_server.session.session_manager import SessionManager
 
         self.user_name = user_name
         self.resources = resources
         self._active_sessions: Dict[str, Any] = {}
-        self.projects = ProjectManager(resources, user_name)
-        self.sessions = SessionManager(
-            resources, user_name, self._active_sessions, self.projects
+        self._project_manager = ProjectManager(resources, user_name)
+        self._session_manager = SessionManager(
+            resources, user_name, self._active_sessions, self._project_manager
         )
         self.agents = AgentDirectory(
             AgentManager(resources, user_name, self._active_sessions)
         )
-        self.orchestrator = Orchestrator()
+        self._orchestrator = Orchestrator()
         self._closed = False
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Knoggin facade is closed")
 
     async def close(self) -> None:
         """Close active sessions for this facade, then release shared resources."""
@@ -128,7 +133,7 @@ class Knoggin:
             return
 
         for session_id in list(self._active_sessions):
-            await self.sessions.close_session(session_id)
+            await self._session_manager.close_session(session_id)
 
         async with self.__class__._get_lock():
             self.__class__._open_facades = max(0, self.__class__._open_facades - 1)
@@ -152,7 +157,8 @@ class Knoggin:
         access_mode: str = "open",
         allowed_projects: Optional[List[str]] = None,
     ) -> "Project":
-        metadata = await self.projects.create_project(
+        self._ensure_open()
+        metadata = await self._project_manager.create_project(
             name=name,
             description=description,
             access_mode=access_mode,
@@ -161,24 +167,31 @@ class Knoggin:
         return Project(self, metadata["id"], _project_info_from_dict(metadata))
 
     def project(self, project_id: str = "global") -> "Project":
+        self._ensure_open()
         return Project(self, project_id)
 
     async def list_projects(self) -> List[ProjectInfo]:
-        return [_project_info_from_dict(p) for p in await self.projects.list_projects()]
+        self._ensure_open()
+        return [
+            _project_info_from_dict(p)
+            for p in await self._project_manager.list_projects()
+        ]
 
     async def get_project(self, project_id: str) -> Optional[ProjectInfo]:
-        metadata = await self.projects.get_project(project_id)
+        self._ensure_open()
+        metadata = await self._project_manager.get_project(project_id)
         if metadata is None:
             return None
         return _project_info_from_dict(metadata)
 
     async def delete_project(self, project_id: str) -> List[str]:
-        orphaned_session_ids = await self.projects.delete_project(project_id)
+        self._ensure_open()
+        orphaned_session_ids = await self._project_manager.delete_project(project_id)
 
         for session_id in orphaned_session_ids:
             if session_id in self._active_sessions:
-                await self.sessions.close_session(session_id)
-            await self.sessions.delete_session_data(session_id)
+                await self._session_manager.close_session(session_id)
+            await self._session_manager.delete_session_data(session_id)
 
         return orphaned_session_ids
 
@@ -201,6 +214,7 @@ class Project:
         return self.project_id
 
     async def info(self) -> Optional[ProjectInfo]:
+        self._client._ensure_open()
         if self._info is None:
             self._info = await self._client.get_project(self.project_id)
         return self._info
@@ -211,7 +225,8 @@ class Project:
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
     ) -> "Session":
-        context = await self._client.sessions.create_session(
+        self._client._ensure_open()
+        context = await self._client._session_manager.create_session(
             model=model,
             agent_id=agent_id,
             enabled_tools=enabled_tools,
@@ -220,12 +235,14 @@ class Project:
         return Session(self._client, context)
 
     async def resume_session(self, session_id: str) -> Optional["Session"]:
-        context = await self._client.sessions.get_or_resume_session(session_id)
+        self._client._ensure_open()
+        context = await self._client._session_manager.get_or_resume_session(session_id)
         if context is None:
             return None
         return Session(self._client, context)
 
     async def delete(self) -> List[str]:
+        self._client._ensure_open()
         return await self._client.delete_project(self.project_id)
 
 
@@ -253,6 +270,7 @@ class Session:
         hot_topics: Optional[List[str]] = None,
         timezone: Optional[str] = None,
     ) -> AsyncIterator[ChatEvent]:
+        self._client._ensure_open()
         from common.schema.dtypes import Message
 
         user_message = await self.context.add(Message(content=message))
@@ -269,7 +287,7 @@ class Session:
         assistant_content = None
         assistant_metadata: Dict[str, Any] = {}
 
-        async for raw_event in self._client.orchestrator.run_stream(
+        async for raw_event in self._client._orchestrator.run_stream(
             user_query=message,
             user_name=self._client.user_name,
             session_id=self.session_id,
@@ -356,19 +374,21 @@ class Session:
         )
 
     async def history(self, limit: int = 100) -> List[ConversationTurn]:
-        turns = await self._client.sessions.get_session_history_readonly(
+        self._client._ensure_open()
+        turns = await self._client._session_manager.get_session_history_readonly(
             self.session_id,
             limit=limit,
         )
         return [ConversationTurn(**turn) for turn in turns]
 
     async def close(self) -> bool:
-        return await self._client.sessions.close_session(self.session_id)
+        return await self._client._session_manager.close_session(self.session_id)
 
-    async def delete(self, force: bool = False) -> int:
+    async def delete(self) -> int:
+        self._client._ensure_open()
         if self.session_id in self._client._active_sessions:
             await self.close()
-        return await self._client.sessions.delete_session_data(self.session_id)
+        return await self._client._session_manager.delete_session_data(self.session_id)
 
 
 class SessionFiles:

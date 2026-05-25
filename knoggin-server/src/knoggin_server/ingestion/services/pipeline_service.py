@@ -23,7 +23,7 @@ from common.utils.events import emit
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.prompts import get_connection_reasoning_prompt
-from knoggin.ingestion.services.processor import TextProcessor
+from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
 

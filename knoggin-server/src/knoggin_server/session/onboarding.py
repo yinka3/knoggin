@@ -16,7 +16,7 @@ from knoggin_server.agent.prompts import (
     get_connection_reasoning_prompt,
     get_profile_extraction_prompt,
 )
-from knoggin.ingestion.services.processor import TextProcessor
+from knoggin_server.ingestion.services.processor import TextProcessor
 
 
 def _build_messages(responses: List[dict]) -> List[dict]:

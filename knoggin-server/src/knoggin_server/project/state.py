@@ -5,7 +5,7 @@ from loguru import logger
 
 from common.conf.topics_config import TopicConfig
 from infrastructure.job.scheduler import Scheduler
-from knoggin.ingestion.services.processor import TextProcessor
+from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
 

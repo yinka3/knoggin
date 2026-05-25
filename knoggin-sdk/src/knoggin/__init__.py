@@ -4,7 +4,6 @@ from .core import AgentDirectory, Knoggin, Project, Session, SessionFiles
 from .decorators import tool, tool_to_schema
 from .topics_sdk import TopicBuilder
 from .types import (
-    AgentResult,
     AgentConfig,
     ChatEvent,
     ChatResult,
@@ -18,7 +17,6 @@ from .types import (
 __all__ = [
     "AgentConfig",
     "AgentDirectory",
-    "AgentResult",
     "ChatEvent",
     "ChatResult",
     "ConversationTurn",

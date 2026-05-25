@@ -15,11 +15,11 @@ from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin_server.community.community_job import AACJob
-from knoggin.ingestion.jobs.archive_job import FactArchivalJob
-from knoggin.ingestion.jobs.cleaner_job import EntityCleanupJob
-from knoggin.ingestion.jobs.dlq_job import DLQReplayJob
-from knoggin.ingestion.services.pipeline_service import BatchProcessor
-from knoggin.ingestion.services.processor import TextProcessor
+from knoggin_server.ingestion.jobs.archive_job import FactArchivalJob
+from knoggin_server.ingestion.jobs.cleaner_job import EntityCleanupJob
+from knoggin_server.ingestion.jobs.dlq_job import DLQReplayJob
+from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.db.write_graph_db import write_batch_callback
 from knoggin_server.knowledge.jobs.merge_job import MergeDetectionJob
 from knoggin_server.knowledge.jobs.profile_job import ProfileRefinementJob

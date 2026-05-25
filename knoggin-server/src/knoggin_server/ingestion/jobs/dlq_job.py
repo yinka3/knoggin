@@ -10,7 +10,7 @@ from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
-from knoggin.ingestion.services.pipeline_service import BatchProcessor, BatchResult
+from knoggin_server.ingestion.services.pipeline_service import BatchProcessor, BatchResult
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
 

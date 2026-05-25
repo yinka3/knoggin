@@ -22,8 +22,8 @@ from common.utils.time_utils import parse_iso_time, parse_iso_time_or_now
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin_server.agent.prompts import get_lightweight_extraction_prompt
-from knoggin.ingestion.services.batch_consumer import BatchConsumer
-from knoggin.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
+from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
 from knoggin_server.knowledge.db.write_graph_db import (
     write_batch_callback,
     write_batch_to_graph,
