@@ -57,7 +57,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["common*", "knoggin*", "infrastructure*", "log*"]
+include = ["common*", "knoggin_server*", "infrastructure*", "log*"]
 
 [tool.uvicorn]
 reload-exclude = ["redis_data", "*.log"]
@@ -79,4 +79,4 @@ select = ["E", "F", "I", "W"]
 ignore = []
 
 [tool.ruff.lint.isort]
-known-first-party = ["common", "infrastructure", "knoggin", "log"]
+known-first-party = ["common", "infrastructure", "knoggin_server", "log"]

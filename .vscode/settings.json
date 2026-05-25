@@ -1,6 +1,10 @@
 {
-  "python.defaultInterpreterPath": "./.venv/bin/python",
+  "python.defaultInterpreterPath": "./.venv/Scripts/python.exe",
   "python-envs.defaultEnvManager": "ms-python.python:venv",
+  "python.analysis.extraPaths": [
+    "./knoggin-server/src",
+    "./knoggin-sdk/src"
+  ],
 
   "editor.formatOnSave": true,
   "editor.defaultFormatter": "esbenp.prettier-vscode",

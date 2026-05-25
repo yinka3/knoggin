@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Lightweight SDK for Knoggin"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "knoggin-server>=0.1.0",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -19,3 +21,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["knoggin*"]
+
+[tool.uv.sources]
+knoggin-server = { workspace = true }

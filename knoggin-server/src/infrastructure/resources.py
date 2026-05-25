@@ -14,8 +14,8 @@ from common.exceptions import ConfigurationError, DependencyError
 from infrastructure.graph_client import GraphClient
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import AsyncRedisClient
-from knoggin.knowledge.services.embedding_service import EmbeddingService
-from knoggin.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.embedding_service import EmbeddingService
+from knoggin_server.knowledge.services.entity_service import EntityManager
 from log.llm_trace import get_trace_logger
 
 

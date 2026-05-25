@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from knoggin.agent.prompts import (
+from knoggin_server.agent.prompts import (
     get_connection_reasoning_prompt,
     get_contradiction_judgment_prompt,
     get_merge_judgment_prompt,
