@@ -37,6 +37,8 @@ class CommunityTools(Tools):
             search_config=base_tools.search_cfg,
             file_rag=base_tools.file_rag,
             memory=memory_mgr,
+            graph_client=base_tools.graph_client,
+            redis=base_tools.redis,
         )
         self.community_store = community_store
         self.discussion_id = discussion_id

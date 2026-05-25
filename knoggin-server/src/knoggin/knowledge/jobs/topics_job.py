@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 from typing import Awaitable, Callable
@@ -41,6 +42,18 @@ class TopicConfigJob(BaseJob):
     @property
     def name(self) -> str:
         return "topic_config"
+
+    @staticmethod
+    def _topic_to_dict(topic_cfg) -> dict:
+        if hasattr(topic_cfg, "model_dump"):
+            return topic_cfg.model_dump()
+        if isinstance(topic_cfg, dict):
+            return copy.deepcopy(topic_cfg)
+        return {}
+
+    @classmethod
+    def _topics_to_dict(cls, config: dict) -> dict:
+        return {name: cls._topic_to_dict(cfg) for name, cfg in config.items()}
 
     async def should_run(self, ctx: JobContext) -> bool:
         count_key = RedisKeys.heartbeat_counter(ctx.user_name, ctx.session_id)
@@ -88,7 +101,8 @@ class TopicConfigJob(BaseJob):
             await self.redis.set(count_key, 0)
             return JobResult(success=True, summary="Empty conversation")
 
-        current_config = json.dumps(self.topic_config.raw, indent=2)
+        old_config = self._topics_to_dict(self.topic_config.raw)
+        current_config = json.dumps(old_config, indent=2)
 
         user_content = (
             f"## Current Config\n{current_config}\n\n"
@@ -121,23 +135,23 @@ class TopicConfigJob(BaseJob):
             name: detail.model_dump() for name, detail in result.topics.items()
         }
 
-        new_config = self.sanitize_topic_evolution(self.topic_config.raw, new_config)
+        new_config = self.sanitize_topic_evolution(old_config, new_config)
 
         if new_config is None:
             await self.redis.set(count_key, 0)
             return JobResult(success=False, summary="Rejected: destructive changes")
 
-        old_topics = set(self.topic_config.raw.keys())
+        old_topics = set(old_config.keys())
         new_topics = set(new_config.keys())
         added = new_topics - old_topics
 
         old_active = {
-            t for t, c in self.topic_config.raw.items() if c.get("active", True)
+            t for t, c in old_config.items() if c.get("active", True)
         }
         new_active = {t for t, c in new_config.items() if c.get("active", True)}
         deactivated = old_active - new_active
 
-        if not added and not deactivated and new_config == self.topic_config.raw:
+        if not added and not deactivated and new_config == old_config:
             await self.redis.set(count_key, 0)
             return JobResult(success=True, summary="No changes needed")
 

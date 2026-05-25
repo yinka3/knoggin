@@ -13,7 +13,6 @@ from common.conf.manager import ConfigManager
 from common.schema.dtypes import AgentConfig
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
-from infrastructure.resources import ResourceManager
 from knoggin.agent.executor import AgentExecutor
 from knoggin.agent.tools.registry import Tools
 from knoggin.agent.types import (
@@ -45,7 +44,7 @@ class Orchestrator:
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
         simulated_date: Optional[str] = None,
-        agent_temperature: float = 0.7,
+        agent_temperature: Optional[float] = None,
         agent_instructions: Optional[str] = None,
         agent_rules: Optional[List[str]] = None,
         agent_preferences: Optional[List[str]] = None,
@@ -80,15 +79,24 @@ class Orchestrator:
             topic_config = services["topic_config"]
 
             # Identity & Persona
-            redis = ResourceManager.get().redis
             identity = await self._resolve_agent_identity(
                 user_name,
-                redis,
+                context.redis_client,
                 agent_id,
                 agent_name_override,
                 agent_persona_override,
             )
             agent_cfg = identity["config"]
+            effective_model = model or (agent_cfg.model if agent_cfg else None)
+            effective_temperature = (
+                agent_temperature
+                if agent_temperature is not None
+                else (
+                    agent_cfg.temperature
+                    if agent_cfg and agent_cfg.temperature is not None
+                    else 0.7
+                )
+            )
 
             # Context & State Assembly
             effective_hot_topics = (
@@ -110,16 +118,16 @@ class Orchestrator:
 
             # Execution via AgentExecutor
             executor = AgentExecutor(
-                ctx, ResourceManager.get().llm_service, tools, memory_mgr
+                ctx, context.llm, tools, memory_mgr
             )
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
-                model=model,
+                model=effective_model,
                 enabled_tools=enabled_tools
                 or (agent_cfg.enabled_tools if agent_cfg else None),
                 simulated_date=simulated_date,
-                agent_temperature=agent_temperature,
+                agent_temperature=effective_temperature,
                 agent_instructions=agent_instructions
                 or (agent_cfg.instructions if agent_cfg else None),
                 agent_rules=agent_rules,
@@ -184,7 +192,7 @@ class Orchestrator:
         }
 
         memory_mgr = MemoryManager(
-            redis=ResourceManager.get().redis,
+            redis=context.redis_client,
             user_name=context.user_name,
             session_id=context.session_id,
             agent_id=agent_id or "default",
@@ -199,6 +207,8 @@ class Orchestrator:
             search_config=search_cfg,
             file_rag=context.file_rag,
             memory=memory_mgr,
+            graph_client=context.graph_client,
+            redis=context.redis_client,
         )
 
         return {

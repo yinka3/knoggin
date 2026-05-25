@@ -164,12 +164,12 @@ class ProjectManager:
         return session_ids
 
     async def add_session(self, project_id: str, session_id: str):
-        """Add a session to a project."""
+        """Add durable session membership to a project."""
         key = RedisKeys.project_sessions(self.user_name, project_id)
         await self.resources.redis.sadd(key, session_id)
 
     async def remove_session(self, project_id: str, session_id: str):
-        """Remove a session from a project."""
+        """Remove durable session membership from a project."""
         key = RedisKeys.project_sessions(self.user_name, project_id)
         await self.resources.redis.srem(key, session_id)
 
@@ -178,10 +178,18 @@ class ProjectManager:
         key = RedisKeys.project_sessions(self.user_name, project_id)
         return list(await self.resources.redis.smembers(key))
 
+    async def acquire_project_for_session(
+        self, project_id: str, session_id: str
+    ) -> ProjectState:
+        """Acquire runtime project state and record durable session membership."""
+        project_state = await self.get_or_start_project(project_id)
+        await self.add_session(project_id, session_id)
+        return project_state
+
     async def get_or_start_project(self, project_id: str) -> ProjectState:
         """Get an existing ProjectState or bootstrap a new one."""
         if project_id in self.active_projects:
-            self.active_projects[project_id].active_sessions_count += 1
+            self.active_projects[project_id].active_runtime_sessions_count += 1
             return self.active_projects[project_id]
 
         logger.info(f"Bootstrapping ProjectState for project_id: {project_id}")
@@ -272,20 +280,20 @@ class ProjectManager:
         self._register_background_jobs(
             project_state, entities, project_processor, profile_job, merge_job
         )
-        project_state.active_sessions_count = 1
+        project_state.active_runtime_sessions_count = 1
         self.active_projects[project_id] = project_state
 
         return project_state
 
     async def release_project(self, project_id: str):
-        """Decrement session count and shutdown ProjectState if no sessions left."""
+        """Release runtime project state when an active session closes."""
         if project_id not in self.active_projects:
             return
 
         state = self.active_projects[project_id]
-        state.active_sessions_count -= 1
+        state.active_runtime_sessions_count -= 1
 
-        if state.active_sessions_count <= 0:
+        if state.active_runtime_sessions_count <= 0:
             await state.shutdown()
             del self.active_projects[project_id]
             logger.info(f"Released ProjectState for project_id: {project_id}")
@@ -380,11 +388,29 @@ class ProjectManager:
         def _global_topics_updated_cb(new_topics: dict):
             asyncio.create_task(project_state.update_topics_config(new_topics))
 
-        config_mgr.subscribe(_global_topics_updated_cb, "default_topics")
-        config_mgr.subscribe(entities.update_settings, "developer_settings.entity_resolution")
-        config_mgr.subscribe(processor.update_settings, "developer_settings.nlp_pipeline")
-        config_mgr.subscribe(profile_job.update_settings, "developer_settings.jobs.profile")
-        config_mgr.subscribe(merge_job.update_settings, "developer_settings.jobs.merger")
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(_global_topics_updated_cb, "default_topics")
+        )
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                entities.update_settings, "developer_settings.entity_resolution"
+            )
+        )
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                processor.update_settings, "developer_settings.nlp_pipeline"
+            )
+        )
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                profile_job.update_settings, "developer_settings.jobs.profile"
+            )
+        )
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                merge_job.update_settings, "developer_settings.jobs.merger"
+            )
+        )
 
         scheduler.register(profile_job)
         scheduler.register(merge_job)
@@ -400,7 +426,9 @@ class ProjectManager:
             max_attempts=dlq_cfg.max_attempts,
         )
         scheduler.register(dlq_job)
-        config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
+        )
 
         clean_cfg = jobs_cfg.cleaner
         cleaner_job = EntityCleanupJob(
@@ -413,7 +441,11 @@ class ProjectManager:
             stale_junk_days=clean_cfg.stale_junk_days,
         )
         scheduler.register(cleaner_job)
-        config_mgr.subscribe(cleaner_job.update_settings, "developer_settings.jobs.cleaner")
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                cleaner_job.update_settings, "developer_settings.jobs.cleaner"
+            )
+        )
 
         arch_cfg = jobs_cfg.archival
         archival_job = FactArchivalJob(
@@ -424,7 +456,11 @@ class ProjectManager:
             fallback_interval_hours=arch_cfg.fallback_interval_hours,
         )
         scheduler.register(archival_job)
-        config_mgr.subscribe(archival_job.update_settings, "developer_settings.jobs.archival")
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                archival_job.update_settings, "developer_settings.jobs.archival"
+            )
+        )
 
         topic_cfg = jobs_cfg.topic_config
         topic_job = TopicConfigJob(
@@ -436,7 +472,11 @@ class ProjectManager:
             conversation_window=topic_cfg.conversation_window,
         )
         scheduler.register(topic_job)
-        config_mgr.subscribe(topic_job.update_settings, "developer_settings.jobs.topic_config")
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                topic_job.update_settings, "developer_settings.jobs.topic_config"
+            )
+        )
 
-        # Register the Autonomous Agent Community Job (AACJob)
-        scheduler.register(AACJob(project_state))
+        if self.dev_settings.community.enabled:
+            scheduler.register(AACJob(project_state, self.resources))

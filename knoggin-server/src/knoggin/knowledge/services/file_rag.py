@@ -8,7 +8,11 @@ from typing import Dict, List, Optional
 
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import Document
-from llama_index.core.vector_stores import VectorStoreQuery
+from llama_index.core.vector_stores import (
+    MetadataFilter,
+    MetadataFilters,
+    VectorStoreQuery,
+)
 from llama_index.vector_stores.postgres import PGVectorStore
 from loguru import logger
 from sqlalchemy import text as sql_text
@@ -61,7 +65,12 @@ MAX_FILES_PER_SESSION = 100
 
 
 class FileRAGService:
-    """Session-scoped file ingestion and retrieval via LlamaIndex + pgvector."""
+    """
+    Session-scoped file ingestion and retrieval via LlamaIndex + pgvector.
+
+    File metadata is intentionally stored on pgvector chunk rows. On a cold
+    service instance, the manifest and BM25 corpus are rebuilt from those rows.
+    """
 
     def __init__(
         self,
@@ -89,6 +98,7 @@ class FileRAGService:
         self._bm25_corpus: List[str] = []
         self._bm25_metadata: List[Dict] = []
         self._bm25_dirty = True
+        self._loaded_from_store = False
 
         # LlamaIndex components (lazy-initialised)
         self._vector_store: Optional[PGVectorStore] = None
@@ -136,10 +146,58 @@ class FileRAGService:
         tokenized = [doc.lower().split() for doc in self._bm25_corpus]
         self._bm25 = BM25Okapi(tokenized)
 
+    def _load_state_from_vector_store(self):
+        """Rebuild file manifest and BM25 source data from persisted chunks."""
+        store = self._get_vector_store()
+        filters = MetadataFilters(
+            filters=[MetadataFilter(key="session_id", value=self.session_id)]
+        )
+
+        nodes = store.get_nodes(filters=filters)
+        manifest: Dict[str, Dict] = {}
+        bm25_corpus: List[str] = []
+        bm25_metadata: List[Dict] = []
+
+        for node in nodes:
+            meta = node.metadata or {}
+            file_id = meta.get("file_id")
+            if not file_id:
+                continue
+
+            original_name = meta.get("original_name") or meta.get("file_name", file_id)
+            file_meta = manifest.setdefault(
+                file_id,
+                {
+                    "file_id": file_id,
+                    "original_name": original_name,
+                    "extension": meta.get("extension", ""),
+                    "size_bytes": meta.get("size_bytes", 0),
+                    "chunk_count": 0,
+                    "uploaded_at": meta.get("uploaded_at", ""),
+                },
+            )
+            file_meta["chunk_count"] += 1
+
+            bm25_corpus.append(node.get_content())
+            bm25_metadata.append({"file_id": file_id, "file_name": original_name})
+
+        self._manifest = manifest
+        self._bm25_corpus = bm25_corpus
+        self._bm25_metadata = bm25_metadata
+        self._bm25 = None
+        self._bm25_dirty = True
+        self._loaded_from_store = True
+
+    def _ensure_loaded_from_store(self):
+        if not self._loaded_from_store:
+            self._load_state_from_vector_store()
+
     # ── Public Interface ──────────────────────────────────────────────────
 
     async def ingest_file(self, file_path: str, original_name: str) -> Dict:
         """Chunk, embed, and store a file for RAG retrieval."""
+        await asyncio.to_thread(self._ensure_loaded_from_store)
+
         path = Path(file_path)
         ext = path.suffix.lower()
 
@@ -164,19 +222,34 @@ class FileRAGService:
             raise ValueError("File is empty or could not be read")
 
         file_id = f"file_{uuid.uuid4().hex[:8]}"
+        uploaded_at = datetime.now(timezone.utc).isoformat()
+        file_meta = {
+            "file_id": file_id,
+            "original_name": original_name,
+            "extension": ext,
+            "size_bytes": file_size,
+            "chunk_count": 0,
+            "uploaded_at": uploaded_at,
+        }
 
         # Use LlamaIndex's built-in SimpleFileNodeParser via Document ingestion.
         # We construct nodes manually so we can attach our file_id metadata.
         splitter = SentenceSplitter(chunk_size=512, chunk_overlap=50)
         doc = Document(
             text=content,
+            id_=file_id,
             metadata={
                 "file_id": file_id,
                 "file_name": original_name,
+                "original_name": original_name,
+                "extension": ext,
+                "size_bytes": file_size,
+                "uploaded_at": uploaded_at,
                 "session_id": self.session_id,
             },
         )
         nodes = splitter.get_nodes_from_documents([doc])
+        file_meta["chunk_count"] = len(nodes)
 
         # Embed all nodes async directly via our service
         texts = [n.get_content() for n in nodes]
@@ -194,14 +267,6 @@ class FileRAGService:
             self._bm25_metadata.append({"file_id": file_id, "file_name": original_name})
         self._bm25_dirty = True
 
-        file_meta = {
-            "file_id": file_id,
-            "original_name": original_name,
-            "extension": ext,
-            "size_bytes": file_size,
-            "chunk_count": len(nodes),
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        }
         self._manifest[file_id] = file_meta
 
         logger.info(
@@ -216,6 +281,8 @@ class FileRAGService:
         file_filter: str = None,
     ) -> List[Dict]:
         """Hybrid search: pgvector similarity + BM25 keyword, with reranking."""
+        await asyncio.to_thread(self._ensure_loaded_from_store)
+
         if not self._manifest:
             return []
 
@@ -295,9 +362,12 @@ class FileRAGService:
         return output
 
     def list_files(self) -> List[Dict]:
+        self._ensure_loaded_from_store()
         return list(self._manifest.values())
 
     async def delete_file(self, file_id: str) -> bool:
+        await asyncio.to_thread(self._ensure_loaded_from_store)
+
         if file_id not in self._manifest:
             return False
 
@@ -341,6 +411,7 @@ class FileRAGService:
         self._bm25_corpus = []
         self._bm25_metadata = []
         self._bm25_dirty = True
+        self._loaded_from_store = True
         self._vector_store = None
 
         logger.info(f"Cleaned up file RAG data for session {self.session_id}")

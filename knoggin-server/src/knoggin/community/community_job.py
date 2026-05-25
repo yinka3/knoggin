@@ -6,7 +6,6 @@ from common.conf.manager import ConfigManager
 
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
-from infrastructure.resources import ResourceManager
 from knoggin.community.community_manager import CommunityManager
 from knoggin.project.state import ProjectState
 
@@ -14,9 +13,9 @@ from knoggin.project.state import ProjectState
 class AACJob(BaseJob):
     """Job that periodically triggers the Autonomous Agent Community discussions."""
 
-    def __init__(self, project_state: ProjectState):
+    def __init__(self, project_state: ProjectState, resources):
         self.project_state = project_state
-        self.resources = ResourceManager.get()
+        self.resources = resources
 
     @property
     def name(self) -> str:
@@ -49,7 +48,7 @@ class AACJob(BaseJob):
             f"AAC: Starting scheduled discussion for {ctx.user_name} on project {self.project_state.project_id}"
         )
 
-        manager = CommunityManager(self.project_state, ctx.user_name)
+        manager = CommunityManager(self.project_state, ctx.user_name, self.resources)
         try:
             await manager.trigger_discussion()
 

@@ -140,6 +140,8 @@ class AsyncRedisClient:
         msg_id: int,
         turn_id: Optional[int],
         content: Optional[str] = None,
+        timestamp: Optional[str] = None,
+        role: str = "user",
     ):
         """Maps a message ID to a turn ID and optionally stores content."""
         redis = await cls.get_instance()
@@ -150,7 +152,14 @@ class AsyncRedisClient:
         if turn_id is not None:
             pipe.hset(lookup_key, str(msg_id), str(turn_id))
         if content is not None:
-            pipe.hset(content_key, str(msg_id), content)
+            payload = {
+                "id": msg_id,
+                "message": content,
+                "content": content,
+                "timestamp": timestamp or "",
+                "role": role,
+            }
+            pipe.hset(content_key, f"msg_{msg_id}", json.dumps(payload))
 
         await pipe.execute()
 

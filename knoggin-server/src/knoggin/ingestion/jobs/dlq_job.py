@@ -61,6 +61,8 @@ class DLQReplayJob(BaseJob):
     ):
         self.entities = entities
         self.processor = processor
+        if self.processor.graph_client is None:
+            raise ValueError("DLQReplayJob requires a BatchProcessor with graph_client")
         self.write_to_graph = write_to_graph
         self.redis = redis_client
         self.interval = interval

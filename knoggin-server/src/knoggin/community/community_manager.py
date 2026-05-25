@@ -11,7 +11,6 @@ from common.schema.dtypes import AgentConfig
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
-from infrastructure.resources import ResourceManager
 from knoggin.agent.executor import AgentExecutor
 from knoggin.agent.internals import (
     AgentContext,
@@ -31,10 +30,10 @@ from knoggin.session.context import Context
 class CommunityManager:
     """Orchestrates autonomous agent discussions."""
 
-    def __init__(self, project_state: ProjectState, user_name: str):
+    def __init__(self, project_state: ProjectState, user_name: str, resources):
         self.project_state = project_state
         self.user_name = user_name
-        self.resources = ResourceManager.get()
+        self.resources = resources
         self._active_discussion_id: Optional[str] = None
         self._discussion_task: Optional[asyncio.Task] = None
 
@@ -275,6 +274,8 @@ class CommunityManager:
             search_config={},
             file_rag=ctx.file_rag,
             memory=comm_memory,
+            graph_client=self.resources.graph_client,
+            redis=self.resources.redis,
         )
 
         comm_tools = CommunityTools(

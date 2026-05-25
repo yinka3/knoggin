@@ -16,6 +16,14 @@ from knoggin.knowledge.db.writers.graph_writer import GraphWriter
 
 
 class GraphClient:
+    """
+    Facade over the Postgres/AGE persistence layer.
+
+    The implementation is intentionally delegated to focused reader, writer,
+    tool-query, and community-store classes. This class keeps call sites simple
+    without making each subsystem know the storage layout.
+    """
+
     def __init__(self, dsn: str):
         self._postgres_client = PostgresClient(dsn=dsn)
         self._entity_writer = EntityWriter(self._postgres_client)

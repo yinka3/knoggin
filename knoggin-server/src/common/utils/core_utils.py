@@ -411,11 +411,17 @@ def safe_update(target_method: Callable, settings_model: Any) -> Optional[Any]:
     1. **kwargs (maps all fields)
     2. A single object (passes the model itself)
     3. Specific named parameters (maps matching fields)
+    Accepts Pydantic models and dict config subtrees.
     """
     try:
         sig = inspect.signature(target_method)
         params = list(sig.parameters.values())
-        all_settings = settings_model.model_dump()
+        if hasattr(settings_model, "model_dump"):
+            all_settings = settings_model.model_dump()
+        elif isinstance(settings_model, dict):
+            all_settings = settings_model
+        else:
+            all_settings = {}
 
         if any(p.kind == p.VAR_KEYWORD for p in params):
             valid_updates = {k: v for k, v in all_settings.items() if v is not None}

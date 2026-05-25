@@ -120,7 +120,7 @@ class ConfigManager:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self.save)
 
-    def subscribe(self, callback: Callable, path: Optional[str] = None):
+    def subscribe(self, callback: Callable, path: Optional[str] = None) -> Callable[[], None]:
         """
         Subscribe a service callback to configuration updates.
         
@@ -129,14 +129,23 @@ class ConfigManager:
             path: Pydantic attribute path (e.g. 'developer_settings.jobs.cleaner'). 
                   If provided, the callback is only triggered if this specific subtree changes.
         """
-        self.subscribers.append({
+        subscription = {
             "callback": callback,
             "path": path
-        })
+        }
+        self.subscribers.append(subscription)
         # Immediately invoke the callback with the current settings so the service initializes correctly
         current_val = self._get_nested_model(self.config, path)
         if current_val is not None:
             safe_update(callback, current_val)
+
+        def unsubscribe():
+            try:
+                self.subscribers.remove(subscription)
+            except ValueError:
+                pass
+
+        return unsubscribe
 
     def _get_nested_model(self, model: BaseModel, path: Optional[str]) -> Any:
         if not path:
@@ -170,7 +179,7 @@ class ConfigManager:
         logger.info("Applying hot-reload of runtime settings via ConfigManager...")
         
         # Fire subscribers
-        for sub in self.subscribers:
+        for sub in list(self.subscribers):
             cb = sub["callback"]
             path = sub["path"]
             

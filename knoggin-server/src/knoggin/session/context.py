@@ -47,7 +47,8 @@ class Context:
     the construction of these services from the state container itself.
     """
 
-    def __init__(self, user_name: str, topics: List[str]):
+    def __init__(self, user_name: str, topics: List[str], resources: ResourceManager):
+        self.resources = resources
         self.user_name: str = user_name
         self.active_topics: List[str] = topics
         self.model: Optional[str] = None
@@ -62,6 +63,7 @@ class Context:
         self.batch_processor: Optional[BatchProcessor] = None
         self.consumer: Optional[BatchConsumer] = None
         self.task_group = BackgroundTaskGroup("ContextTasks")
+        self.config_unsubscribers: List = []
 
     @property
     def current_config(self) -> RootConfig:
@@ -69,23 +71,23 @@ class Context:
 
     @property
     def redis_client(self):
-        return ResourceManager.get().redis
+        return self.resources.redis
 
     @property
     def graph_client(self):
-        return ResourceManager.get().graph_client
+        return self.resources.graph_client
 
     @property
     def llm(self):
-        return ResourceManager.get().llm_service
+        return self.resources.llm_service
 
     @property
     def embedding_service(self):
-        return ResourceManager.get().embedding
+        return self.resources.embedding
 
     @property
     def executor(self):
-        return ResourceManager.get().executor
+        return self.resources.executor
 
     @classmethod
     async def create(
@@ -117,6 +119,9 @@ class Context:
         )
 
     async def add(self, msg: Message) -> Message:
+        if not self.project or not self.project.scheduler or not self.consumer:
+            raise RuntimeError("Context is not fully initialized for message ingestion")
+
         # Deterministic ID: same content + session + timestamp_ns = same ID
         timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
         content_hash = hashlib.sha256(
@@ -140,31 +145,14 @@ class Context:
 
         msg.id = new_id
 
-        await self.add_to_redis(msg)
-
-        await self.redis_client.incr(
-            RedisKeys.heartbeat_counter(self.user_name, self.session_id)
-        )
-
-        buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
-        await self.redis_client.rpush(
-            buffer_key,
-            json.dumps(
-                {
-                    "id": msg.id,
-                    "message": msg.content.strip(),
-                    "timestamp": msg.timestamp.isoformat(),
-                    "role": "user",
-                }
-            ),
-        )
-
-        await self.project.scheduler.record_activity()
+        await self._persist_user_turn(msg)
+        await self._enqueue_user_message(msg)
+        await self.project.record_session_activity()
         self.consumer.signal()
         await self.refresh_session_ttls()
         return msg
 
-    async def add_to_conversation_log(
+    async def _add_to_conversation_log(
         self,
         role: str,
         content: str,
@@ -196,10 +184,9 @@ class Context:
 
         return turn_id
 
-    async def add_to_redis(self, msg: Message):
+    async def _persist_user_turn(self, msg: Message):
         """Maps a message to a turn and stores its content via the Smart Client."""
-        # First log the conversation turn (User role)
-        turn_id = await self.add_to_conversation_log(
+        turn_id = await self._add_to_conversation_log(
             role="user",
             content=msg.content.strip(),
             timestamp=msg.timestamp,
@@ -213,6 +200,26 @@ class Context:
             msg_id=msg.id,
             turn_id=turn_id,
             content=msg.content.strip(),
+            timestamp=msg.timestamp.isoformat(),
+            role="user",
+        )
+
+    async def _enqueue_user_message(self, msg: Message):
+        await self.redis_client.incr(
+            RedisKeys.heartbeat_counter(self.user_name, self.session_id)
+        )
+
+        buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
+        await self.redis_client.rpush(
+            buffer_key,
+            json.dumps(
+                {
+                    "id": msg.id,
+                    "message": msg.content.strip(),
+                    "timestamp": msg.timestamp.isoformat(),
+                    "role": "user",
+                }
+            ),
         )
 
     async def add_assistant_turn(
@@ -226,7 +233,7 @@ class Context:
         if metadata is None:
             metadata = {}
 
-        turn_id = await self.add_to_conversation_log(
+        turn_id = await self._add_to_conversation_log(
             role="assistant",
             content=content,
             timestamp=timestamp,
@@ -478,6 +485,10 @@ class Context:
         )
 
     async def shutdown(self):
+        for unsubscribe in self.config_unsubscribers:
+            unsubscribe()
+        self.config_unsubscribers.clear()
+
         if self.consumer:
             await self.consumer.stop()
 

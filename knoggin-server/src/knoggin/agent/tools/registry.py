@@ -3,7 +3,6 @@ from typing import Optional
 import httpx
 
 from common.conf.topics_config import TopicConfig
-from infrastructure.resources import ResourceManager
 from knoggin.agent.tools.graph import GraphTools
 from knoggin.agent.tools.memory import MemoryTools
 from knoggin.agent.tools.search import SearchTools
@@ -44,12 +43,17 @@ class Tools(SearchTools, GraphTools, MemoryTools):
         search_config: Optional[dict] = None,
         file_rag: Optional[FileRAGService] = None,
         memory: Optional[MemoryManager] = None,
+        graph_client=None,
+        redis=None,
     ):
+        if graph_client is None or redis is None:
+            raise ValueError("Tools requires explicit graph_client and redis")
+
         self.session_id = session_id
-        self.graph_client = ResourceManager.get().graph_client
+        self.graph_client = graph_client
         self.entities = entities
         self.user_name = user_name
-        self.redis = ResourceManager.get().redis
+        self.redis = redis
         self.embedding_service = entities.embedding_service
         self.project_id = entities.project_id
         self.readable_project_ids = entities.readable_project_ids

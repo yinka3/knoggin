@@ -69,7 +69,11 @@ class SessionAssembler:
         await self._sync_entity_counters()
 
         # Instantiate Context shell first
-        ctx = Context(self.user_name, list(project_state.topic_config.raw.keys()))
+        ctx = Context(
+            self.user_name,
+            list(project_state.topic_config.raw.keys()),
+            self.resources,
+        )
         ctx.session_id = session_id
         ctx.project_id = project_state.project_id
         ctx.project = project_state
@@ -94,7 +98,11 @@ class SessionAssembler:
         )
         ctx.consumer = consumer
 
-        ConfigManager.get().subscribe(consumer.update_settings, "developer_settings.ingestion")
+        ctx.config_unsubscribers.append(
+            ConfigManager.get().subscribe(
+                consumer.update_settings, "developer_settings.ingestion"
+            )
+        )
 
         # Initialize File RAG
         file_rag = self._init_file_rag(session_id)

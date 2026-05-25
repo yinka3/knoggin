@@ -200,11 +200,33 @@ class BatchConsumer:
                     self.session_id, "pipeline", "buffer_draining", {"queued": len(raw)}
                 )
 
-                messages = [safe_json_loads(m) for m in raw]
-                messages = [m for m in messages if m]
+                messages = []
+                invalid_count = 0
+                for item in raw:
+                    parsed = safe_json_loads(item)
+                    if (
+                        not isinstance(parsed, dict)
+                        or "id" not in parsed
+                        or "message" not in parsed
+                    ):
+                        invalid_count += 1
+                        continue
+                    messages.append(parsed)
+
+                if invalid_count:
+                    logger.warning(
+                        f"Skipping {invalid_count} corrupt buffer entries"
+                    )
+                    await emit(
+                        self.session_id,
+                        "pipeline",
+                        "buffer_invalid_entries",
+                        {"count": invalid_count},
+                    )
 
                 if not messages:
-                    break
+                    await self.redis.ltrim(self._buffer_key, len(raw), -1)
+                    continue
 
                 conversation = await self.get_session_context(
                     self.session_window, messages[0]["id"]
@@ -276,7 +298,7 @@ class BatchConsumer:
                         batches_count += 1
                         total_processed += len(messages)
                         all_msg_ids.extend([m["id"] for m in messages])
-                        await self.redis.ltrim(self._buffer_key, len(messages), -1)
+                        await self.redis.ltrim(self._buffer_key, len(raw), -1)
                         continue
 
                     has_writes = bool(
@@ -350,7 +372,7 @@ class BatchConsumer:
                 total_processed += len(messages)
                 all_msg_ids.extend([m["id"] for m in messages])
 
-                await self.redis.ltrim(self._buffer_key, len(messages), -1)
+                await self.redis.ltrim(self._buffer_key, len(raw), -1)
 
             await emit(
                 self.session_id,

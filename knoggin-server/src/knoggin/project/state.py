@@ -36,11 +36,22 @@ class ProjectState:
 
         self.profile_job: Optional[Any] = None
         self.merge_job: Optional[Any] = None
-        self.active_sessions_count = 0
+        self.active_runtime_sessions_count = 0
+        self.config_unsubscribers: list[Any] = []
+
+    async def record_session_activity(self):
+        """Record user activity against the project-level scheduler."""
+        await self.scheduler.record_activity()
+
+    def add_config_unsubscriber(self, unsubscribe):
+        self.config_unsubscribers.append(unsubscribe)
 
     async def shutdown(self):
         """Cleanly shuts down project-level background resources."""
         logger.info(f"Shutting down ProjectState resources for {self.project_id}")
+        for unsubscribe in self.config_unsubscribers:
+            unsubscribe()
+        self.config_unsubscribers.clear()
         if self.scheduler:
             await self.scheduler.stop()
         # EntityManager and others don't have explicit shutdown methods,

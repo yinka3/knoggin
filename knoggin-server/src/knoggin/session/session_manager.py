@@ -64,20 +64,23 @@ class SessionManager:
             topics_config = config.default_topics
 
         async with self._lock:
-            # Phase 1B: Ensure project exists and get its runtime state
-            # If no project_id provided, we use a global fallback for now (or raise error if strict)
             actual_project_id = project_id or "global"
-            project_state = await self.project_manager.get_or_start_project(
-                actual_project_id
+            project_state = await self.project_manager.acquire_project_for_session(
+                actual_project_id, session_id
             )
 
-            context = await Context.create(
-                user_name=self.user_name,
-                resources=self.resources,
-                session_id=session_id,
-                model=model,
-                project_state=project_state,
-            )
+            try:
+                context = await Context.create(
+                    user_name=self.user_name,
+                    resources=self.resources,
+                    session_id=session_id,
+                    model=model,
+                    project_state=project_state,
+                )
+            except Exception:
+                await self.project_manager.remove_session(actual_project_id, session_id)
+                await self.project_manager.release_project(actual_project_id)
+                raise
 
             metadata = {
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -86,13 +89,12 @@ class SessionManager:
                 "model": model,
                 "agent_id": agent_id,
                 "enabled_tools": enabled_tools,
-                "project_id": project_id,
+                "project_id": actual_project_id,
             }
 
             await self.resources.redis.hset(
                 RedisKeys.sessions(self.user_name), session_id, json.dumps(metadata)
             )
-
             self.active_sessions[session_id] = context
             logger.info(f"Created session: {session_id}")
             return context
@@ -121,17 +123,21 @@ class SessionManager:
                 return None
 
             actual_project_id = metadata.get("project_id") or "global"
-            project_state = await self.project_manager.get_or_start_project(
-                actual_project_id
+            project_state = await self.project_manager.acquire_project_for_session(
+                actual_project_id, session_id
             )
 
-            context = await Context.create(
-                user_name=self.user_name,
-                resources=self.resources,
-                session_id=session_id,
-                model=metadata.get("model"),
-                project_state=project_state,
-            )
+            try:
+                context = await Context.create(
+                    user_name=self.user_name,
+                    resources=self.resources,
+                    session_id=session_id,
+                    model=metadata.get("model"),
+                    project_state=project_state,
+                )
+            except Exception:
+                await self.project_manager.release_project(actual_project_id)
+                raise
 
             self.active_sessions[session_id] = context
 
@@ -211,6 +217,16 @@ class SessionManager:
         """
         user = self.user_name
         redis = self.resources.redis
+        project_id = None
+
+        raw_metadata = await redis.hget(RedisKeys.sessions(user), session_id)
+        if raw_metadata:
+            metadata = safe_json_loads(raw_metadata, {})
+            if metadata:
+                project_id = metadata.get("project_id") or "global"
+
+        if not project_id and session_id in self.active_sessions:
+            project_id = self.active_sessions[session_id].project_id
 
         direct_keys = RedisKeys.get_session_scoped_keys(user, session_id)
 
@@ -245,6 +261,8 @@ class SessionManager:
 
         await redis.hdel(RedisKeys.session_config(user), session_id)
         await redis.hdel(RedisKeys.sessions(user), session_id)
+        if project_id:
+            await self.project_manager.remove_session(project_id, session_id)
 
         logger.info(f"Cleaned up {deleted} Redis keys for session {session_id}")
         return deleted
