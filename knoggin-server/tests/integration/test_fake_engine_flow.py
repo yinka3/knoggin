@@ -1,0 +1,162 @@
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from common.schema.primitives import Message
+from common.utils.events import DebugEventEmitter
+from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from knoggin_server.project.project_manager import ProjectManager
+from knoggin_server.session.context import Context
+from knoggin_server.session.session_manager import SessionManager
+from tests.fixtures.factories import make_project_state
+from tests.fixtures.fakes import (
+    FakeConfigValue,
+    FakeConsumer,
+    FakeContext,
+    FakeResources,
+)
+
+
+@pytest.mark.integration
+@pytest.mark.no_network
+async def test_session_create_add_history_and_close_flow(monkeypatch):
+    resources = FakeResources()
+    project_manager = ProjectManager(resources, user_name="ada")
+    project = await project_manager.create_project("Research")
+    active_sessions = {}
+    manager = SessionManager(
+        resources=resources,
+        user_name="ada",
+        active_sessions=active_sessions,
+        project_manager=project_manager,
+    )
+    monkeypatch.setattr(AsyncRedisClient, "_instance", resources.redis)
+    monkeypatch.setattr(
+        Context,
+        "current_config",
+        property(lambda self: FakeConfigValue(conversation_context_turns=100)),
+    )
+    project_state = make_project_state(project["id"], redis=resources.redis)
+
+    async def fake_get_or_start_project(project_id, initial_topics_config=None):
+        project_state.active_runtime_sessions_count += 1
+        project_manager.active_projects[project_id] = project_state
+        return project_state
+
+    async def fake_create(**kwargs):
+        ctx = Context(kwargs["user_name"], ["General"], kwargs["resources"])
+        ctx.session_id = kwargs["session_id"]
+        ctx.project_id = kwargs["project_state"].project_id
+        ctx.project = kwargs["project_state"]
+        ctx.consumer = FakeConsumer()
+        return ctx
+
+    class FakeEmitter:
+        def __init__(self):
+            self.unregister_calls = []
+            self.emit_calls = []
+
+        async def emit(self, session_id, component, event, data=None, verbose_only=False):
+            self.emit_calls.append((session_id, component, event, data, verbose_only))
+
+        async def cleanup_scope(self, session_id):
+            pass
+
+        def unregister_session(self, project_id, session_id):
+            self.unregister_calls.append((project_id, session_id))
+
+    emitter = FakeEmitter()
+    monkeypatch.setattr(
+        project_manager,
+        "get_or_start_project",
+        fake_get_or_start_project,
+    )
+    monkeypatch.setattr(Context, "create", fake_create)
+    monkeypatch.setattr(DebugEventEmitter, "get", staticmethod(lambda: emitter))
+
+    ctx = await manager.create_session(
+        topics_config={"General": {"active": True}},
+        model="test-model",
+        project_id=project["id"],
+    )
+    timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
+    msg = await ctx.add(
+        Message(content="  hello from integration  ", timestamp=timestamp)
+    )
+    history = await manager.get_session_history_readonly(ctx.session_id)
+
+    assert msg.id == 1
+    assert history == [
+        {
+            "role": "user",
+            "content": "hello from integration",
+            "timestamp": timestamp.isoformat(),
+        }
+    ]
+    assert await project_manager.get_session_ids(project["id"]) == [ctx.session_id]
+    assert ctx.project.scheduler.activity_count == 1
+    assert ctx.consumer.signaled == 1
+
+    assert await manager.close_session(ctx.session_id) is True
+    assert active_sessions == {}
+    assert emitter.unregister_calls == [(project["id"], ctx.session_id)]
+    assert project["id"] not in project_manager.active_projects
+
+    metadata = json.loads(
+        await resources.redis.hget(RedisKeys.sessions("ada"), ctx.session_id)
+    )
+    assert metadata["project_id"] == project["id"]
+    assert metadata["last_active"]
+
+
+@pytest.mark.integration
+@pytest.mark.no_network
+async def test_project_delete_returns_sessions_for_session_data_cleanup():
+    resources = FakeResources()
+    project_manager = ProjectManager(resources, user_name="ada")
+    project = await project_manager.create_project("Scratch")
+    session_id = "session-1"
+    active_sessions = {session_id: FakeContext(session_id, project["id"])}
+    manager = SessionManager(
+        resources=resources,
+        user_name="ada",
+        active_sessions=active_sessions,
+        project_manager=project_manager,
+    )
+
+    await project_manager.add_session(project["id"], session_id)
+    await resources.redis.hset(
+        RedisKeys.sessions("ada"),
+        session_id,
+        json.dumps({"project_id": project["id"]}),
+    )
+    await resources.redis.rpush(RedisKeys.buffer("ada", session_id), "pending")
+    await resources.redis.hset(
+        RedisKeys.conversation("ada", session_id),
+        "1",
+        json.dumps(
+            {
+                "role": "user",
+                "content": "delete me",
+                "timestamp": "2026-01-02T03:04:00+00:00",
+            }
+        ),
+    )
+
+    orphaned_sessions = await project_manager.delete_project(project["id"])
+    deleted_count = await manager.delete_session_data(session_id)
+
+    assert orphaned_sessions == [session_id]
+    assert deleted_count >= 2
+    assert active_sessions[session_id].file_rag.cleanup_count == 1
+    assert await project_manager.get_project(project["id"]) is None
+    assert await resources.redis.hget(RedisKeys.sessions("ada"), session_id) is None
+    assert (
+        await resources.redis.lrange(RedisKeys.buffer("ada", session_id), 0, -1)
+        == []
+    )
+    assert (
+        await resources.redis.hget(RedisKeys.conversation("ada", session_id), "1")
+        is None
+    )

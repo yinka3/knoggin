@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Union, Optional
+from typing import Optional, Union
 
 
 def parse_iso_time(timestamp: Union[str, float, int]) -> Optional[datetime]:

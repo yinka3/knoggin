@@ -12,6 +12,7 @@ class JobContext:
 
     user_name: str
     session_id: str
+    project_id: Optional[str] = None
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None
 

@@ -3,16 +3,16 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from common.schema.dtypes import FactRecord
+from common.schema.primitives import FactRecord
 from infrastructure.postgres_client import PostgresClient
-from knoggin.community.community_store import CommunityStore
-from knoggin.knowledge.db.readers.entity_reader import EntityReader
-from knoggin.knowledge.db.readers.fact_reader import FactReader
-from knoggin.knowledge.db.readers.graph_reader import GraphReader
-from knoggin.knowledge.db.tool_queries import ToolQueries
-from knoggin.knowledge.db.writers.entity_writer import EntityWriter
-from knoggin.knowledge.db.writers.fact_writer import FactWriter
-from knoggin.knowledge.db.writers.graph_writer import GraphWriter
+from knoggin_server.community.community_store import CommunityStore
+from knoggin_server.knowledge.db.readers.entity_reader import EntityReader
+from knoggin_server.knowledge.db.readers.fact_reader import FactReader
+from knoggin_server.knowledge.db.readers.graph_reader import GraphReader
+from knoggin_server.knowledge.db.tool_queries import ToolQueries
+from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
+from knoggin_server.knowledge.db.writers.fact_writer import FactWriter
+from knoggin_server.knowledge.db.writers.graph_writer import GraphWriter
 
 
 class GraphClient:
@@ -296,11 +296,6 @@ class GraphClient:
         return await self._entity_reader.search_entities_by_embedding(
             embedding, limit, score_threshold, visible_project_ids
         )
-
-    async def search_messages_vector(
-        self, query_embedding: List[float], limit: int = 50
-    ) -> List[Tuple[int, float]]:
-        return await self._graph_reader.search_messages_vector(query_embedding, limit)
 
     async def list_entities(
         self,

@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from knoggin.agent.prompts import (
+from knoggin_server.agent.prompts import (
     get_connection_reasoning_prompt,
     get_contradiction_judgment_prompt,
     get_merge_judgment_prompt,
@@ -124,7 +124,6 @@ class TextProcessorSettings(BaseModel):
 
 
 class SearchSettings(BaseModel):
-    vector_limit: int = Field(50, ge=1)
     fts_limit: int = Field(50, ge=1)
     rerank_candidates: int = Field(45, ge=1)
     default_message_limit: int = Field(8, ge=1)
@@ -176,10 +175,6 @@ class DeveloperSettings(BaseModel):
 
 
 class RootConfig(BaseModel):
-    _warning: str = Field(
-        "This file is auto-generated. Use the UI to modify settings. Manual edits may be overwritten.",
-        alias="_warning",
-    )
     user_name: str = Field("")
     user_aliases: List[str] = Field(default_factory=list)
     user_facts: List[str] = Field(default_factory=list)

@@ -28,4 +28,7 @@ The response should contain a "judgments" field, which is a list of results.
 Each result must have:
 - index: the 1-based index from the input list.
 - is_contradiction: true or false.
+Return exactly one judgment for every numbered input pair.
+Do not return indexes that were not present in the input.
+If no pairs contradict, still return all indexes with is_contradiction=false.
 </output_format>
