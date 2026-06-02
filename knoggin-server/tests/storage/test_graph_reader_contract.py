@@ -1,0 +1,350 @@
+import json
+
+import pytest
+
+from knoggin_server.knowledge.db.readers.graph_reader import GraphReader
+from tests.fixtures.fakes import RecordingPostgresClient
+
+
+class FakePostgresReaderClient:
+    def __init__(self, rows=None):
+        self.rows = rows or []
+        self.read_calls = []
+
+    def build_cypher(
+        self,
+        cypher_query,
+        return_types="result agtype",
+        graph_name="knoggin_graph",
+    ):
+        return f"{graph_name}:{return_types}:{cypher_query}"
+
+    async def execute_read(self, query, params=None):
+        self.read_calls.append((query, params))
+        return self.rows
+
+
+class VectorLike:
+    def __init__(self, values):
+        self.values = values
+
+    def tolist(self):
+        return list(self.values)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_refuses_message_lookup_without_scope():
+    client = FakePostgresReaderClient()
+    reader = GraphReader(client)
+
+    assert (
+        await reader.get_messages_by_ids([1], user_name=None, session_ids=["s"])
+        == []
+    )
+    assert await reader.get_message_text(1, user_name="ada", session_id="") == ""
+    assert client.read_calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_get_message_text_uses_user_session_scope():
+    client = RecordingPostgresClient(
+        execute_read_results=[[{"content": '"hello graph"'}]]
+    )
+    reader = GraphReader(client)
+
+    assert await reader.get_message_text(
+        7,
+        user_name="ada",
+        session_id="session-1",
+    ) == "hello graph"
+
+    assert "MATCH (m:Message" in client.calls[0][1]
+    assert json.loads(client.calls[0][2][0]) == {
+        "id": 7,
+        "user_name": "ada",
+        "session_id": "session-1",
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_get_messages_by_ids_empty_list_skips_db():
+    client = RecordingPostgresClient()
+    reader = GraphReader(client)
+
+    assert await reader.get_messages_by_ids([], user_name="ada", session_ids=["s"]) == []
+    assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_message_lookup_uses_structured_scope_params():
+    client = FakePostgresReaderClient(
+        rows=[
+            {
+                "id": "1",
+                "user_name": '"ada"',
+                "session_id": '"session-1"',
+                "role": '"user"',
+                "content": '"hello"',
+                "timestamp": 123,
+            }
+        ]
+    )
+    reader = GraphReader(client)
+
+    rows = await reader.get_messages_by_ids(
+        [1], user_name="ada", session_ids=["session-1"]
+    )
+
+    assert rows == [
+        {
+            "id": 1,
+            "user_name": "ada",
+            "session_id": "session-1",
+            "role": "user",
+            "content": "hello",
+            "timestamp": 123,
+        }
+    ]
+    params = json.loads(client.read_calls[0][1][0])
+    assert params == {"ids": [1], "user_name": "ada", "session_ids": ["session-1"]}
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_surrounding_messages_uses_scoped_lookups():
+    client = RecordingPostgresClient(
+        execute_read_results=[
+            [
+                {
+                    "id": "2",
+                    "user_name": '"ada"',
+                    "session_id": '"session-1"',
+                    "role": '"user"',
+                    "content": '"target"',
+                    "timestamp": 200,
+                }
+            ],
+            [
+                {
+                    "id": "1",
+                    "user_name": '"ada"',
+                    "session_id": '"session-1"',
+                    "role": '"user"',
+                    "content": '"before"',
+                    "timestamp": 100,
+                }
+            ],
+            [
+                {
+                    "id": "3",
+                    "user_name": '"ada"',
+                    "session_id": '"session-1"',
+                    "role": '"assistant"',
+                    "content": '"after"',
+                    "timestamp": 300,
+                }
+            ],
+        ]
+    )
+    reader = GraphReader(client)
+
+    messages = await reader.get_surrounding_messages(
+        2,
+        forward=1,
+        target_total=3,
+        user_name="ada",
+        session_id="session-1",
+    )
+
+    assert [message["content"] for message in messages] == [
+        "before",
+        "target",
+        "after",
+    ]
+    assert len(client.calls) == 3
+    assert json.loads(client.calls[0][2][0]) == {
+        "ids": [2],
+        "user_name": "ada",
+        "session_ids": ["session-1"],
+    }
+    assert json.loads(client.calls[1][2][0]) == {
+        "ts": 200,
+        "id": 2,
+        "limit": 1,
+        "user_name": "ada",
+        "session_id": "session-1",
+    }
+    assert json.loads(client.calls[2][2][0]) == {
+        "ts": 200,
+        "id": 2,
+        "limit": 1,
+        "user_name": "ada",
+        "session_id": "session-1",
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_neighbor_ids_batch_empty_list_skips_db():
+    client = RecordingPostgresClient()
+    reader = GraphReader(client)
+
+    assert await reader.get_neighbor_ids_batch([]) == {}
+    assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_parent_child_and_neighbor_entities_use_params():
+    client = RecordingPostgresClient(
+        execute_read_results=[
+            [
+                {
+                    "id": "10",
+                    "canonical_name": "Parent",
+                    "type": "topic",
+                    "facts": ["parent fact"],
+                }
+            ],
+            [{"id": "11", "name": "Neighbor"}],
+            [
+                {
+                    "id": "12",
+                    "canonical_name": "Child",
+                    "type": "project",
+                    "facts": ["child fact"],
+                }
+            ],
+        ]
+    )
+    reader = GraphReader(client)
+
+    assert await reader.get_parent_entities(2) == [
+        {
+            "id": 10,
+            "canonical_name": "Parent",
+            "type": "topic",
+            "facts": ["parent fact"],
+        }
+    ]
+    assert await reader.get_neighbor_entities(2, limit=3) == [
+        {"id": 11, "name": "Neighbor"}
+    ]
+    assert await reader.get_child_entities(2) == [
+        {
+            "id": 12,
+            "canonical_name": "Child",
+            "type": "project",
+            "facts": ["child fact"],
+        }
+    ]
+    assert json.loads(client.calls[0][2][0]) == {"entity_id": 2}
+    assert json.loads(client.calls[1][2][0]) == {"entity_id": 2, "limit": 3}
+    assert json.loads(client.calls[2][2][0]) == {"entity_id": 2}
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_hierarchy_candidates_attach_embeddings():
+    client = RecordingPostgresClient(
+        execute_read_results=[
+            [
+                {
+                    "parent_id": "2",
+                    "parent_name": "Area",
+                    "child_id": "3",
+                    "child_name": "Task",
+                    "weight": "4",
+                }
+            ],
+            [
+                {"entity_id": 2, "embedding": VectorLike([0.1, 0.2])},
+                {"entity_id": 3, "embedding": [0.3, 0.4]},
+            ],
+        ]
+    )
+    reader = GraphReader(client)
+
+    candidates = await reader.get_hierarchy_candidates(
+        "Work",
+        "area",
+        ["task"],
+        min_weight=2,
+    )
+
+    assert candidates == [
+        {
+            "parent_id": 2,
+            "parent_name": "Area",
+            "parent_embedding": [0.1, 0.2],
+            "child_id": 3,
+            "child_name": "Task",
+            "child_embedding": [0.3, 0.4],
+            "weight": "4",
+        }
+    ]
+    assert json.loads(client.calls[0][2][0]) == {
+        "topic": "Work",
+        "parent_type": "area",
+        "child_types": ["task"],
+        "min_weight": 2,
+    }
+    assert set(client.calls[1][2][0]) == {2, 3}
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_hierarchy_candidates_skip_embedding_query_when_empty():
+    client = RecordingPostgresClient(execute_read_results=[[]])
+    reader = GraphReader(client)
+
+    assert await reader.get_hierarchy_candidates("Work", "area", ["task"]) == []
+    assert len(client.calls) == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_get_graph_stats_hydrates_counts_and_defaults_empty():
+    client = RecordingPostgresClient(
+        execute_read_results=[
+            [{"entities": "2", "facts": "3", "relationships": "4"}],
+            [],
+        ]
+    )
+    reader = GraphReader(client)
+
+    assert await reader.get_graph_stats() == {
+        "entities": 2,
+        "facts": 3,
+        "relationships": 4,
+    }
+    assert await reader.get_graph_stats() == {
+        "entities": 0,
+        "facts": 0,
+        "relationships": 0,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_neighbor_ids_batch_hydrates_sets_for_all_requested_ids():
+    client = RecordingPostgresClient(
+        execute_read_results=[
+            [
+                {"entity_id": "2", "neighbor_ids": ["3", "4"]},
+                {"entity_id": "5", "neighbor_ids": []},
+            ]
+        ]
+    )
+    reader = GraphReader(client)
+
+    assert await reader.get_neighbor_ids_batch([2, 5, 9]) == {
+        2: {3, 4},
+        5: set(),
+        9: set(),
+    }
+    assert json.loads(client.calls[0][2][0]) == {"ids": [2, 5, 9]}

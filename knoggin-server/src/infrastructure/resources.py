@@ -14,8 +14,8 @@ from common.exceptions import ConfigurationError, DependencyError
 from infrastructure.graph_client import GraphClient
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import AsyncRedisClient
-from knoggin.knowledge.services.embedding_service import EmbeddingService
-from knoggin.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.embedding_service import EmbeddingService
+from knoggin_server.knowledge.services.entity_service import EntityManager
 from log.llm_trace import get_trace_logger
 
 
@@ -45,6 +45,7 @@ class ResourceManager:
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
         self.active_entities: Optional[EntityManager] = None
+        self.config_unsubscribers: list[Any] = []
 
     @classmethod
     async def initialize(cls, num_workers: int = 4) -> "ResourceManager":
@@ -87,8 +88,12 @@ class ResourceManager:
                     agent_model=llm_config.agent_model,
                     extraction_model=llm_config.extraction_model,
                     merge_model=llm_config.merge_model,
+                    base_url=llm_config.base_url,
                     trace_logger=get_trace_logger(),
                     redis_client=instance.redis,
+                )
+                instance.config_unsubscribers.append(
+                    ConfigManager.get().subscribe(instance.llm_service.update_settings, "llm")
                 )
                 instance.embedding = EmbeddingService(device=device)
 
@@ -147,6 +152,10 @@ class ResourceManager:
 
     async def _teardown(self, wait: bool = True):
         """Internal helper to release all managed resources."""
+        for unsubscribe in self.config_unsubscribers:
+            unsubscribe()
+        self.config_unsubscribers.clear()
+
         if self.executor:
             self.executor.shutdown(wait=wait)
 

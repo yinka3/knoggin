@@ -1,6 +1,5 @@
 from typing import Iterable, List, Optional
 
-
 GLOBAL_PROJECT_SCOPE = "__global__"
 IDENTITY_ENTITY_ID = 1
 
