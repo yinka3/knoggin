@@ -48,40 +48,6 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  knoggin-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: knoggin-api
-    ports:
-      - "127.0.0.1:8000:8000"
-    volumes:
-      - ./config:/app/config
-    env_file: .env
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - DATABASE_URL=${DATABASE_URL:-postgresql://knoggin:knoggin@postgres:5432/knoggin_db}
-      - CONFIG_DIR=/app/config
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health')",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
-    restart: unless-stopped
-
 volumes:
   knoggin_pg_data:
   knoggin_redis_data:

@@ -4,9 +4,9 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 import httpx
 import instructor
 import redis.asyncio as aioredis
+import tiktoken
 from loguru import logger
 from openai import AsyncOpenAI
-import tiktoken
 
 from common.exceptions import ConfigurationError
 from common.utils.tasks import BackgroundTaskGroup

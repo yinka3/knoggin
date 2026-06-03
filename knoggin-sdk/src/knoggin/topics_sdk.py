@@ -1,6 +1,6 @@
 import re
+import warnings
 from typing import Dict, List, Optional
-from loguru import logger
 
 LABEL_PATTERN = re.compile(r'^[a-z][a-z0-9 _-]*$')
 MAX_LABEL_LEN = 30
@@ -28,7 +28,7 @@ class TopicBuilder:
         hot: bool = False,
     ) -> "TopicBuilder":
         if name in ("General", "Identity"):
-            logger.warning(f"'{name}' is auto-included. Skipping.")
+            warnings.warn(f"'{name}' is auto-included. Skipping.", stacklevel=2)
             return self
 
         clean_labels = [l for raw in (labels or []) if (l := _validate_label(raw))]

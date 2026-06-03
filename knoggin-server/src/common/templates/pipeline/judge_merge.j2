@@ -12,6 +12,17 @@ Entity A & Entity B:
 - `facts`: list of observed attributes
 </input_schema>
 
+<schema_contract>
+Return exactly this shape:
+{
+  "should_merge": bool,
+  "reasoning": str,
+  "confidence": float,
+  "new_canonical_name": str | null
+}
+Do not add fields outside this schema.
+</schema_contract>
+
 <critical_rules>
 1. **Type Mismatch is Fatal**: A "Person" and an "Organization" are NEVER the same, even if names match.
 2. **The "Common Name" Trap**: "Chris" and "Chris" are NOT the same unless specific facts (last name, job, location) confirm it.
@@ -47,5 +58,5 @@ Return your response as a JSON object matching the requested schema.
 - should_merge: True only if evidence is overwhelming.
 - reasoning: Concise justification citing specific facts.
 - confidence: 0.95+ absolute certainty, 0.75-0.94 high confidence.
-- new_canonical_name: Suggested better name if merging.
+- new_canonical_name: Suggested better name if merging; null when should_merge is false.
 </output_format>

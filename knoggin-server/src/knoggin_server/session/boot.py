@@ -1,0 +1,195 @@
+import uuid
+from typing import Callable, Optional
+
+from loguru import logger
+
+from common.conf.manager import ConfigManager
+from common.conf.topics_config import TopicConfig
+from common.utils.events import DebugEventEmitter
+from infrastructure.redis_client import RedisKeys
+from infrastructure.resources import ResourceManager
+from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
+from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.processor import TextProcessor
+from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.file_rag import FileRAGService
+from knoggin_server.project.state import ProjectState
+from knoggin_server.session.context import Context
+
+LUA_SYNC_COUNTER_SCRIPT = """
+local current = tonumber(redis.call('GET', KEYS[1])) or 0
+local proposed = tonumber(ARGV[1])
+if proposed > current then
+    redis.call('SET', KEYS[1], ARGV[1])
+end
+"""
+
+
+class SessionAssembler:
+    """
+    Wires together the infrastructure, services, and background jobs for a session.
+    Decouples construction from the Context state container.
+    """
+
+    def __init__(self, user_name: str, resources: ResourceManager):
+        self.user_name = user_name
+        self.resources = resources
+
+    @property
+    def config(self):
+        return ConfigManager.get().config
+
+    @property
+    def dev_settings(self):
+        return self.config.developer_settings
+
+    async def bootstrap(
+        self,
+        project_state: ProjectState,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Context:
+        """Perform the multi-phase boot sequence: assemble + launch."""
+        ctx = await self.assemble(project_state, session_id, model)
+        await self.launch(ctx)
+        return ctx
+
+    async def assemble(
+        self,
+        project_state: ProjectState,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Context:
+        """
+        Wires together services and infrastructure into a Context.
+        Does NOT start background loops.
+        """
+        session_id = session_id or str(uuid.uuid4())
+
+        await self._sync_entity_counters()
+
+        # Instantiate Context shell first
+        ctx = Context(
+            self.user_name,
+            list(project_state.topic_config.raw.keys()),
+            self.resources,
+        )
+        ctx.session_id = session_id
+        ctx.project_id = project_state.project_id
+        ctx.project = project_state
+        ctx.model = model
+
+        # Initialize Batch Processor
+        processor = self._init_batch_processor(
+            session_id,
+            project_state.entities,
+            project_state.pipeline,
+            project_state.topic_config,
+        )
+        processor.get_next_ent_id = ctx.get_next_ent_id
+        ctx.batch_processor = processor
+
+        # Initialize Batch Consumer with direct callbacks
+        consumer = self._init_batch_consumer(
+            session_id,
+            processor,
+            get_session_context=ctx.get_conversation_context,
+            write_to_graph=ctx._write_to_graph_callback,
+        )
+        ctx.consumer = consumer
+
+        ctx.config_unsubscribers.append(
+            ConfigManager.get().subscribe(
+                consumer.update_settings, "developer_settings.ingestion"
+            )
+        )
+
+        # Initialize File RAG
+        file_rag = self._init_file_rag(session_id)
+        ctx.file_rag = file_rag
+
+        # Register session to emitter for project event propagation
+        DebugEventEmitter.get().register_session(project_state.project_id, session_id)
+
+        return ctx
+
+    async def launch(self, ctx: Context):
+        """Starts background tasks and jobs for the context."""
+        if ctx.consumer:
+            if ctx.consumer.get_session_context is None:
+                raise RuntimeError("consumer.get_session_context callback not wired")
+            if ctx.consumer.write_to_graph is None:
+                raise RuntimeError("consumer.write_to_graph callback not wired")
+
+        if ctx.batch_processor:
+            if ctx.batch_processor._get_next_ent_id is None:
+                raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
+
+        # Start the project scheduler if not already running
+        if ctx.project and ctx.project.scheduler and not ctx.project.scheduler.running:
+            await ctx.project.scheduler.start()
+
+        if ctx.consumer:
+            ctx.consumer.start()
+
+        logger.info(f"System launched successfully for session {ctx.session_id}")
+
+    async def _sync_entity_counters(self):
+        max_id = (await self.resources.graph_client.get_max_entity_id()) or 0
+        await self.resources.redis.eval(
+            LUA_SYNC_COUNTER_SCRIPT, 1, RedisKeys.global_next_ent_id(), max_id
+        )
+
+    def _init_batch_processor(
+        self,
+        session_id: str,
+        entities: EntityManager,
+        pipeline: TextProcessor,
+        topic_config: TopicConfig,
+    ) -> BatchProcessor:
+        er_cfg = self.dev_settings.entity_resolution
+        return BatchProcessor(
+            session_id=session_id,
+            redis_client=self.resources.redis,
+            llm=self.resources.llm_service,
+            entities=entities,
+            processor=pipeline,
+            cpu_executor=self.resources.executor,
+            user_name=self.user_name,
+            topic_config=topic_config,
+            get_next_ent_id=None,
+            resolution_threshold=er_cfg.resolution_threshold,
+        )
+
+    def _init_batch_consumer(
+        self,
+        session_id: str,
+        processor: BatchProcessor,
+        get_session_context: Callable,
+        write_to_graph: Callable,
+    ) -> BatchConsumer:
+        ingest_cfg = self.dev_settings.ingestion
+        batch_size = ingest_cfg.batch_size
+        batch_timeout = ingest_cfg.batch_timeout
+        checkpoint_interval = batch_size * 4
+        session_window = batch_size * 3
+
+        return BatchConsumer(
+            user_name=self.user_name,
+            session_id=session_id,
+            graph_client=self.resources.graph_client,
+            redis=self.resources.redis,
+            processor=processor,
+            get_session_context=get_session_context,
+            write_to_graph=write_to_graph,
+            batch_size=batch_size,
+            batch_timeout=batch_timeout,
+            checkpoint_interval=checkpoint_interval,
+            session_window=session_window,
+        )
+
+    def _init_file_rag(self, session_id: str) -> FileRAGService:
+        return FileRAGService(
+            session_id=session_id,
+            embedding_service=self.resources.embedding,
+        )

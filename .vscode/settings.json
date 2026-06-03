@@ -1,6 +1,8 @@
 {
   "python.defaultInterpreterPath": "./.venv/bin/python",
   "python-envs.defaultEnvManager": "ms-python.python:venv",
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.terminal.useEnvFile": true,
 
   "editor.formatOnSave": true,
   "editor.defaultFormatter": "esbenp.prettier-vscode",

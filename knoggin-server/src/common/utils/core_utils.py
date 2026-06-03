@@ -1,12 +1,11 @@
 import asyncio
 import inspect
 import re
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
 from loguru import logger
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as SKLEARN_STOPS
-from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOPS
 from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
@@ -36,7 +35,49 @@ PRONOUNS = {
     "those",
 }
 
-STOP_WORDS = SPACY_STOPS | SKLEARN_STOPS
+STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "to",
+    "was",
+    "with",
+}
+
+
+@lru_cache(maxsize=1)
+def _stop_words() -> set[str]:
+    stop_words = set(STOP_WORDS)
+    try:
+        from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOP_WORDS
+
+        stop_words |= set(SPACY_STOP_WORDS)
+    except Exception as exc:
+        logger.debug(f"Falling back without spaCy stop words: {exc}")
+
+    try:
+        from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
+        stop_words |= set(ENGLISH_STOP_WORDS)
+    except Exception as exc:
+        logger.debug(f"Falling back without sklearn stop words: {exc}")
+
+    return stop_words
 
 
 def handle_background_task_result(task: asyncio.Task):
@@ -109,7 +150,7 @@ def validate_entity(
     if len(name) > 100:
         return False
 
-    if name.lower() in STOP_WORDS:
+    if name.lower() in _stop_words():
         return False
 
     if name.lower() in PRONOUNS:
@@ -262,6 +303,8 @@ def format_vp01_input(
     lines.append(label_block)
 
     lines.append("\n## Messages\n")
+    valid_msg_ids = [msg["id"] for msg in messages]
+    lines.append(f"Valid msg_id values: {valid_msg_ids}")
     for msg in messages:
         label = msg.get("role_label")
         if not label:
@@ -303,16 +346,24 @@ def format_vp01_input(
         "Scan messages above for proper nouns not listed in Known Entities or GLiNER extractions."
     )
     lines.append("Include the MSG id where you found each entity.")
+    lines.append("Only return msg_id values from the Valid msg_id list above.")
 
     return "\n".join(lines)
 
 
 def format_vp02_input(
-    candidates: List[Dict], messages: List[Dict], session_context: str
+    candidates: List[Dict],
+    messages: List[Dict],
+    session_context: str,
+    user_name: Optional[str] = None,
 ) -> str:
     lines = []
 
     lines.append("## Candidate Entities")
+    canonical_names = [
+        c.get("canonical_name") for c in candidates if c.get("canonical_name")
+    ]
+    lines.append(f"Valid canonical entity names: {canonical_names}")
     if candidates:
         for c in candidates:
             msg_ids = c.get("source_msgs", [])
@@ -327,6 +378,8 @@ def format_vp02_input(
         lines.append("(none)")
 
     lines.append("\n## Messages")
+    valid_msg_ids = [msg["id"] for msg in messages]
+    lines.append(f"Valid msg_id values: {valid_msg_ids}")
     if messages:
         for msg in messages:
             label = msg.get("role_label")
@@ -337,6 +390,16 @@ def format_vp02_input(
             lines.append(f'[MSG {msg["id"]}] [{label}]: "{content}"')
     else:
         lines.append("(none)")
+
+    lines.append("\n## Output Constraints")
+    lines.append("Use only Valid canonical entity names for entity_a and entity_b.")
+    lines.append("Use only Valid canonical entity names for user_connections.entity_name.")
+    lines.append("Use only Valid msg_id values from the Messages section.")
+    if user_name:
+        lines.append(
+            f'Do not put "{user_name}" in entity_a or entity_b; use user_connections instead.'
+        )
+    lines.append("Do not use Session Context as evidence for a connection.")
 
     lines.append("\n## Session Context (for pronoun resolution only)")
     if session_context:
@@ -383,6 +446,11 @@ def format_vp04_input(entities: List[Dict], conversation_text: str) -> str:
     """Format prompt for extraction verification phase."""
     lines = []
     lines.append("## Entities")
+    entity_names = [
+        ent.get("canonical_name", ent.get("entity_name", "Unknown"))
+        for ent in entities
+    ]
+    lines.append(f"Valid canonical_name values: {entity_names}")
 
     for ent in entities:
         lines.extend(_format_entity_block(ent))
@@ -390,6 +458,13 @@ def format_vp04_input(entities: List[Dict], conversation_text: str) -> str:
 
     lines.append("## Prior Conversation For Context")
     lines.append(conversation_text)
+    lines.append("")
+    lines.append("## Output Constraints")
+    lines.append("Use only Valid canonical_name values.")
+    lines.append(
+        "Use source_msg_id only when the fact is grounded in a [MSG_<id>] or [MSG <id>] line above."
+    )
+    lines.append("Use exact existing fact text for supersedes or invalidates.")
 
     return "\n".join(lines)
 
@@ -411,11 +486,17 @@ def safe_update(target_method: Callable, settings_model: Any) -> Optional[Any]:
     1. **kwargs (maps all fields)
     2. A single object (passes the model itself)
     3. Specific named parameters (maps matching fields)
+    Accepts Pydantic models and dict config subtrees.
     """
     try:
         sig = inspect.signature(target_method)
         params = list(sig.parameters.values())
-        all_settings = settings_model.model_dump()
+        if hasattr(settings_model, "model_dump"):
+            all_settings = settings_model.model_dump()
+        elif isinstance(settings_model, dict):
+            all_settings = settings_model
+        else:
+            all_settings = {}
 
         if any(p.kind == p.VAR_KEYWORD for p in params):
             valid_updates = {k: v for k, v in all_settings.items() if v is not None}

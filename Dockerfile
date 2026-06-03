@@ -41,7 +41,5 @@ RUN mkdir -p /app/config
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/knoggin-server/src"
 
-EXPOSE 8000
-
-# Updated entry point to match project reorganization
-CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+# knoggin-server currently ships as an engine package. An API entry point should
+# be supplied by the embedding application rather than this image.

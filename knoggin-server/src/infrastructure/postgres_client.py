@@ -41,6 +41,7 @@ class PostgresClient:
                 max_size=self.max_size,
                 kwargs={"autocommit": False, "row_factory": dict_row},
                 configure=_configure_async_conn,
+                open=False,
             )
             await self.async_pool.open()
 

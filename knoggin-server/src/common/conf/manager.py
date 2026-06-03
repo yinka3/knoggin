@@ -16,6 +16,10 @@ from common.utils.core_utils import safe_update
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
 CONFIG_FILE_YAML = CONFIG_DIR / "knoggin.yml"
 CONFIG_FILE_JSON = CONFIG_DIR / "knoggin.json"
+CONFIG_FILE_NOTICE = (
+    "# This configuration file is managed by Knoggin.\n"
+    "# Manual edits may be overwritten by the app.\n\n"
+)
 
 
 def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -39,11 +43,11 @@ class ConfigManager:
     def __init__(self):
         if ConfigManager._instance is not None:
             raise Exception("ConfigManager is a singleton. Use ConfigManager.get()")
-        
+
         self.config: RootConfig = RootConfig()
         self.subscribers: List[Dict[str, Any]] = []
         self._async_lock = asyncio.Lock()
-        
+
         self.load()
 
     @classmethod
@@ -78,7 +82,7 @@ class ConfigManager:
                 self.config = RootConfig()
         else:
             self.config = RootConfig()
-            
+
         # Ensure it is immediately saved as YAML to commit migration
         if not CONFIG_FILE_YAML.exists() or CONFIG_FILE_JSON.exists():
             self.save()
@@ -89,15 +93,16 @@ class ConfigManager:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             # Use model_dump(mode="json") to get YAML-compatible primitive types (e.g. str dates)
             data = self.config.model_dump(mode="json")
-            
+
             old_umask = os.umask(0o177)
             try:
                 fd, temp_path = tempfile.mkstemp(dir=CONFIG_DIR, text=True)
                 try:
                     with os.fdopen(fd, "w") as f:
+                        f.write(CONFIG_FILE_NOTICE)
                         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
                     os.replace(temp_path, CONFIG_FILE_YAML)
-                    
+
                     # Cleanup old JSON file
                     if CONFIG_FILE_JSON.exists():
                         try:
@@ -120,7 +125,7 @@ class ConfigManager:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self.save)
 
-    def subscribe(self, callback: Callable, path: Optional[str] = None):
+    def subscribe(self, callback: Callable, path: Optional[str] = None) -> Callable[[], None]:
         """
         Subscribe a service callback to configuration updates.
         
@@ -129,14 +134,23 @@ class ConfigManager:
             path: Pydantic attribute path (e.g. 'developer_settings.jobs.cleaner'). 
                   If provided, the callback is only triggered if this specific subtree changes.
         """
-        self.subscribers.append({
+        subscription = {
             "callback": callback,
             "path": path
-        })
+        }
+        self.subscribers.append(subscription)
         # Immediately invoke the callback with the current settings so the service initializes correctly
         current_val = self._get_nested_model(self.config, path)
         if current_val is not None:
             safe_update(callback, current_val)
+
+        def unsubscribe():
+            try:
+                self.subscribers.remove(subscription)
+            except ValueError:
+                pass
+
+        return unsubscribe
 
     def _get_nested_model(self, model: BaseModel, path: Optional[str]) -> Any:
         if not path:
@@ -156,32 +170,32 @@ class ConfigManager:
         """
         current_data = self.config.model_dump()
         updated_data = deep_merge(current_data, updates)
-        
+
         try:
             new_config = RootConfig(**updated_data)
         except Exception as e:
             logger.error(f"Failed to validate configuration updates: {e}")
             return False
-            
+
         old_config = self.config
         self.config = new_config
         self.save()
-        
+
         logger.info("Applying hot-reload of runtime settings via ConfigManager...")
-        
+
         # Fire subscribers
-        for sub in self.subscribers:
+        for sub in list(self.subscribers):
             cb = sub["callback"]
             path = sub["path"]
-            
+
             old_val = self._get_nested_model(old_config, path)
             new_val = self._get_nested_model(new_config, path)
-            
+
             # Only trigger callback if the specific path has changed
             if old_val != new_val:
                 try:
                     safe_update(cb, new_val)
                 except Exception as e:
                     logger.error(f"Error calling configuration subscriber {cb.__name__}: {e}")
-                    
+
         return True

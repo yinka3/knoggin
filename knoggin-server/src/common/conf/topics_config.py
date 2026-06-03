@@ -182,7 +182,7 @@ class TopicConfig:
                 topic_cfg = TopicSchema(**topic_cfg_dict)
             else:
                 topic_cfg = topic_cfg_dict
-                
+
             if topic_name in self._config:
                 old_labels = set(self._config[topic_name].labels)
                 new_labels = set(topic_cfg.labels)
