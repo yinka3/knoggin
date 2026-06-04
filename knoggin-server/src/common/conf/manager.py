@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import tempfile
 import threading
@@ -15,7 +14,6 @@ from common.utils.core_utils import safe_update
 
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
 CONFIG_FILE_YAML = CONFIG_DIR / "knoggin.yml"
-CONFIG_FILE_JSON = CONFIG_DIR / "knoggin.json"
 CONFIG_FILE_NOTICE = (
     "# This configuration file is managed by Knoggin.\n"
     "# Manual edits may be overwritten by the app.\n\n"
@@ -34,7 +32,7 @@ def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any
 
 class ConfigManager:
     """
-    A unified, thread-safe Configuration Engine serving as an Event Bus.
+    A unified, thread-safe Configuration Event Bus.
     Handles YAML I/O, Pydantic validation, and dispatches targeted config updates to subscribed services.
     """
     _instance: Optional["ConfigManager"] = None
@@ -58,7 +56,7 @@ class ConfigManager:
         return cls._instance
 
     def load(self):
-        """Loads configuration from YAML (or JSON if migrating)."""
+        """Loads configuration from YAML."""
         data = None
         if CONFIG_FILE_YAML.exists():
             try:
@@ -66,13 +64,6 @@ class ConfigManager:
                     data = yaml.safe_load(f)
             except Exception as e:
                 logger.error(f"Failed to load knoggin.yml: {e}")
-        elif CONFIG_FILE_JSON.exists():
-            try:
-                with open(CONFIG_FILE_JSON, "r") as f:
-                    data = json.load(f)
-                logger.info("Migrating configuration from JSON to YAML.")
-            except Exception as e:
-                logger.error(f"Failed to load knoggin.json: {e}")
 
         if data:
             try:
@@ -83,8 +74,7 @@ class ConfigManager:
         else:
             self.config = RootConfig()
 
-        # Ensure it is immediately saved as YAML to commit migration
-        if not CONFIG_FILE_YAML.exists() or CONFIG_FILE_JSON.exists():
+        if not CONFIG_FILE_YAML.exists():
             self.save()
 
     def save(self) -> bool:
@@ -102,13 +92,6 @@ class ConfigManager:
                         f.write(CONFIG_FILE_NOTICE)
                         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
                     os.replace(temp_path, CONFIG_FILE_YAML)
-
-                    # Cleanup old JSON file
-                    if CONFIG_FILE_JSON.exists():
-                        try:
-                            os.remove(CONFIG_FILE_JSON)
-                        except OSError:
-                            pass
                 except Exception as write_err:
                     os.unlink(temp_path)
                     raise write_err

@@ -1,9 +1,10 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Dict, List
 
 from loguru import logger
 
+from common.utils.time_utils import get_now, get_now_iso
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -31,7 +32,7 @@ class CommunityStore:
                             "id": discussion_id,
                             "topic": topic,
                             "agent_ids": agent_ids,
-                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "ts": get_now_iso(),
                         }
                     ),
                 ),
@@ -59,7 +60,7 @@ class CommunityStore:
                             "agent_id": agent_id,
                             "content": content,
                             "role": role,
-                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "ts": get_now_iso(),
                         }
                     ),
                 ),
@@ -81,7 +82,7 @@ class CommunityStore:
                     json.dumps(
                         {
                             "id": discussion_id,
-                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "ts": get_now_iso(),
                         }
                     ),
                 ),
@@ -108,7 +109,7 @@ class CommunityStore:
                             "parent_id": parent_id,
                             "child_id": child_id,
                             "detail": detail,
-                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "ts": get_now_iso(),
                         }
                     ),
                 ),
@@ -260,9 +261,7 @@ class CommunityStore:
             return []
 
     async def delete_old_discussions(self, retention_days: int = 30) -> int:
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=retention_days)
-        ).isoformat()
+        cutoff = (get_now() - timedelta(days=retention_days)).isoformat()
         cypher = """
         MATCH (d:AAC_Discussion)
         WHERE d.created_at < $cutoff

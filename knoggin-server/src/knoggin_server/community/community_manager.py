@@ -1,6 +1,5 @@
 import asyncio
 import uuid
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from loguru import logger
@@ -10,6 +9,7 @@ from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent_contracts import AgentConfig
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.executor import AgentExecutor
 from knoggin_server.agent.system_prompt import get_agent_prompt
@@ -399,7 +399,7 @@ class CommunityManager:
 
         base_prompt = get_agent_prompt(
             user_name=self.user_name,
-            current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            current_time=get_now().strftime("%Y-%m-%d %H:%M UTC"),
             persona=seeding_agent.persona,
             agent_name=seeding_agent.name,
             memory_context=agent_memory_context,

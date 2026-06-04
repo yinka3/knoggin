@@ -11,6 +11,22 @@ class GraphReader:
         self.client = client
         self.graph_name = graph_name
 
+    def _parse_vector(self, val) -> List[float]:
+        if val is None:
+            return []
+        if hasattr(val, "tolist"):
+            return [float(x) for x in val.tolist()]
+        if isinstance(val, str):
+            raw = val.strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = raw.strip("[]").split(",")
+            return [float(x) for x in parsed if str(x).strip()]
+        return [float(x) for x in val]
+
     async def get_message_text(
         self, message_id: int, user_name: str, session_id: str
     ) -> str:
@@ -366,11 +382,7 @@ class GraphReader:
                 (entity_ids,),
             )
             embs = {
-                r["entity_id"]: (
-                    r["embedding"].tolist()
-                    if hasattr(r["embedding"], "tolist")
-                    else list(r["embedding"])
-                )
+                r["entity_id"]: self._parse_vector(r["embedding"])
                 for r in emb_res
             }
 

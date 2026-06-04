@@ -7,6 +7,14 @@ from psycopg.rows import dict_row
 
 from infrastructure.postgres_client import PostgresClient
 
+DB_URL = os.environ.get(
+    "KNOGGIN_TEST_DATABASE_URL",
+    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db"
+)
+REDIS_URL = os.environ.get(
+    "KNOGGIN_TEST_REDIS_URL",
+    "redis://localhost:6379/1"
+)
 
 EXPECTED_TABLES = {
     "entity_search",
@@ -23,26 +31,9 @@ EXPECTED_INDEXES = {
     "fact_search_project_idx",
 }
 
-
-requires_real_infra = pytest.mark.skipif(
-    not os.environ.get("KNOGGIN_TEST_DATABASE_URL")
-    or not os.environ.get("KNOGGIN_TEST_REDIS_URL"),
-    reason=(
-        "Set KNOGGIN_TEST_DATABASE_URL and KNOGGIN_TEST_REDIS_URL to run real "
-        "infra smoke tests."
-    ),
-)
-
-
-requires_real_postgres = pytest.mark.skipif(
-    not os.environ.get("KNOGGIN_TEST_DATABASE_URL"),
-    reason="Set KNOGGIN_TEST_DATABASE_URL to run real Postgres infra tests.",
-)
-
-
 def _execute_direct_read(query, params=None, load_age=True):
     with psycopg.connect(
-        os.environ["KNOGGIN_TEST_DATABASE_URL"],
+        DB_URL,
         autocommit=True,
         row_factory=dict_row,
     ) as conn:
@@ -59,11 +50,10 @@ def _execute_direct_read(query, params=None, load_age=True):
 @pytest.mark.requires_redis
 @pytest.mark.requires_pgvector
 @pytest.mark.slow
-@requires_real_infra
 async def test_real_postgres_and_redis_connections_are_available():
     import redis.asyncio as redis
 
-    redis_client = redis.from_url(os.environ["KNOGGIN_TEST_REDIS_URL"])
+    redis_client = redis.from_url(REDIS_URL)
 
     try:
         assert _execute_direct_read("SELECT 1 AS ok", load_age=False) == [{"ok": 1}]
@@ -76,7 +66,6 @@ async def test_real_postgres_and_redis_connections_are_available():
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.slow
-@requires_real_postgres
 async def test_real_postgres_extensions_search_path_and_graph_are_ready():
     extension_rows = _execute_direct_read(
         "SELECT extname FROM pg_extension WHERE extname IN ('age', 'vector')",
@@ -99,7 +88,6 @@ async def test_real_postgres_extensions_search_path_and_graph_are_ready():
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.slow
-@requires_real_postgres
 async def test_real_postgres_schema_tables_and_indexes_are_present():
     table_rows = _execute_direct_read(
         """
@@ -143,7 +131,6 @@ async def test_real_postgres_schema_tables_and_indexes_are_present():
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.slow
-@requires_real_postgres
 async def test_real_age_cypher_query_executes_through_postgres_client():
     query = PostgresClient.build_cypher("RETURN 1 AS ok", "ok agtype")
 
@@ -155,14 +142,10 @@ async def test_real_age_cypher_query_executes_through_postgres_client():
 @pytest.mark.integration
 @pytest.mark.requires_redis
 @pytest.mark.slow
-@pytest.mark.skipif(
-    not os.environ.get("KNOGGIN_TEST_REDIS_URL"),
-    reason="Set KNOGGIN_TEST_REDIS_URL to run real Redis infra tests.",
-)
 async def test_real_redis_server_metadata_is_available():
     import redis.asyncio as redis
 
-    redis_client = redis.from_url(os.environ["KNOGGIN_TEST_REDIS_URL"])
+    redis_client = redis.from_url(REDIS_URL)
 
     try:
         assert await redis_client.ping() is True

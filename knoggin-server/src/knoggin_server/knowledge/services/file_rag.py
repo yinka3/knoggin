@@ -3,7 +3,6 @@ import math
 import os
 import re
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -17,6 +16,8 @@ from llama_index.core.vector_stores import (
 from llama_index.vector_stores.postgres import PGVectorStore
 from loguru import logger
 from sqlalchemy import text as sql_text
+
+from common.utils.time_utils import get_now_iso
 
 try:
     from markitdown import MarkItDown
@@ -228,7 +229,7 @@ class FileRAGService:
             raise ValueError("File is empty or could not be read")
 
         file_id = f"file_{uuid.uuid4().hex[:8]}"
-        uploaded_at = datetime.now(timezone.utc).isoformat()
+        uploaded_at = get_now_iso()
         file_meta = {
             "file_id": file_id,
             "original_name": original_name,

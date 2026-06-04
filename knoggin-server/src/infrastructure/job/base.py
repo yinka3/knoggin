@@ -11,10 +11,15 @@ class JobContext:
     """Context passed to every job method."""
 
     user_name: str
-    session_id: str
+    scope_id: str
     project_id: Optional[str] = None
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None
+
+    @property
+    def session_id(self) -> str:
+        """Compatibility alias for legacy callers; prefer scope_id in jobs."""
+        return self.scope_id
 
 
 @dataclass

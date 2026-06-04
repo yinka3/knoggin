@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,8 +11,8 @@ from common.schema.contracts import (
     FactResolutionSummary,
 )
 from common.schema.primitives import FactRecord
-from common.utils.data_utils import extract_fact_with_source
 from common.utils.events import emit
+from common.utils.time_utils import get_now
 from infrastructure.graph_client import GraphClient
 from infrastructure.llm_client import LLMService
 from knoggin_server.agent.prompts import get_contradiction_judgment_prompt
@@ -50,7 +50,7 @@ class FactResolutionUtils:
         Invalidate old facts and create new ones. Creates first, invalidates after.
         Returns the final set of active facts.
         """
-        now = datetime.now(timezone.utc)
+        now = get_now()
 
         to_invalidate = set(merge_result.to_invalidate)
         contradicted_fact_ids = set()
@@ -64,7 +64,7 @@ class FactResolutionUtils:
         facts_to_create = []
 
         for fact_update in merge_result.new_contents:
-            content, msg_id = extract_fact_with_source(fact_update)
+            content, msg_id = fact_update.content, fact_update.source_msg_id
 
             if (
                 msg_id is not None

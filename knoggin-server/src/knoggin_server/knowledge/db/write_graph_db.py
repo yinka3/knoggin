@@ -309,7 +309,6 @@ async def execute_graph_mutation_plan(
         await graph_client.update_entity_aliases(
             alias_update_map, project_id=plan.scope.project_id
         )
-        logger.info(f"Persisted alias updates for {len(alias_update_map)} entities")
 
     entity_payloads, relationship_payloads = plan.to_graph_payloads()
     if entity_payloads or relationship_payloads:

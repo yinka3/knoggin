@@ -1,8 +1,20 @@
 # Knoggin Server Codebase Knowledge
 
+Note: this document is AI-generated and should be treated as a navigational index, not a substitute for verifying behavior against the code.
+
 Target root: `knoggin-server`  
 Generated for: future LLM agents implementing features, fixing bugs, and refactoring safely  
 Scope rule used: only files under `knoggin-server` were read or analyzed.
+
+## Current State Update
+
+This document was originally generated as a broad codebase map. Recent stabilization work changed several important truths:
+
+- Storage has been hardened around `PostgresClient`, Apache AGE writers/readers, pgvector string bindings, and graph mutation contracts. The `tests/storage/` suite is currently a core regression boundary.
+- Runtime assembly has focused fake-backed coverage for `SessionAssembler` and `ProjectManager.get_or_start_project`.
+- Wall-clock time is centralized in `src/common/utils/time_utils.py`; production code should use `get_now()`, `get_now_iso()`, `get_now_ms()`, or `get_now_unix()` instead of direct `datetime.now(...)` / `time.time()`.
+- `tests/session/` does not exist; session/runtime coverage currently lives under `tests/runtime/` and `tests/unit/session/`.
+- Project-scoped background jobs now use `Scheduler.scope_id` / `JobContext.scope_id` for scheduler scope. `session_id` remains as a compatibility alias in the scheduler context, but new job code should prefer `scope_id`.
 
 ## 1. High-Level Overview
 
@@ -70,56 +82,60 @@ GLOSSARY_DELTA: Context, ProjectState, BatchProcessor, BatchConsumer, EntityMana
 
 Generated from in-scope files only. `__pycache__`, `.pytest_cache`, `.ruff_cache`, and package metadata were ignored for analysis.
 
-| Priority | Path | Type | Lines | HASH8 | Notes |
-|---|---:|---|---:|---|---|
-| P0 | `pyproject.toml` | config | 87 | d1172bdb | Package identity and dependencies |
-| P0 | `src/infrastructure/resources.py` | runtime | 148 | dc08c375 | Global resource singleton |
-| P0 | `src/knoggin_server/session/session_manager.py` | runtime | 238 | cac8d0c8 | Session CRUD/resume/delete |
-| P0 | `src/knoggin_server/session/context.py` | runtime | 422 | 91aa1d19 | Active session state, add message, history |
-| P0 | `src/knoggin_server/session/boot.py` | runtime | 167 | d4b56e4a | Session assembly and launch |
-| P0 | `src/knoggin_server/project/project_manager.py` | runtime | 426 | 151eafb3 | Project runtime and job registration |
-| P0 | `src/knoggin_server/project/state.py` | runtime | 55 | c61d7d32 | Project-level shared state |
-| P0 | `src/infrastructure/redis_client.py` | infra | 331 | 37793b9c | Redis singleton and key taxonomy |
-| P0 | `src/infrastructure/postgres_client.py` | infra | 117 | b04a3702 | AGE/pgvector pool wrapper |
-| P0 | `src/infrastructure/graph_client.py` | infra | 363 | c4635338 | Storage facade |
-| P0 | `src/infrastructure/schema.sql` | db schema | 56 | 8dd1ff31 | pgvector and FTS tables |
-| P0 | `src/knoggin_server/ingestion/services/batch_consumer.py` | ingestion | 335 | e05f9377 | Redis buffer draining and DLQ |
-| P0 | `src/knoggin_server/ingestion/services/pipeline_service.py` | ingestion | 800 | e8b027da | Batch extraction and resolution |
-| P0 | `src/knoggin_server/ingestion/services/processor.py` | ingestion | 447 | 7b01be5e | NER pipeline |
-| P0 | `src/knoggin_server/knowledge/services/entity_service.py` | knowledge | 546 | 0a34354d | Entity cache/resolution/merge candidate detection |
-| P0 | `src/knoggin_server/knowledge/db/write_graph_db.py` | persistence | 374 | 3f83786f | Typed graph mutation plan |
-| P0 | `src/knoggin_server/agent/orchestrator.py` | agent | 200 | 13dd32b0 | Agent entry point |
-| P0 | `src/knoggin_server/agent/executor.py` | agent | 509 | 646a194e | Agent reasoning loop |
-| P1 | `src/common/schema/contracts.py` | schema | 525 | bb7af001 | Engine handoff models |
-| P1 | `src/common/schema/primitives.py` | schema | 149 | f24ab578 | Entity, Connection, Fact, Message |
-| P1 | `src/common/schema/settings.py` | config schema | 215 | 74aebb3f | RootConfig and settings |
-| P1 | `src/common/conf/manager.py` | config | 171 | 5a34d336 | YAML config and subscriptions |
-| P1 | `src/common/conf/topics_config.py` | config | 213 | 3e81e5de | Topic config helpers |
-| P1 | `src/infrastructure/job/scheduler.py` | jobs | 200 | a7ad5e79 | Project job monitor |
-| P1 | `src/infrastructure/llm_client.py` | infra | 411 | f333068a | OpenAI/OpenRouter service |
-| P1 | `src/knoggin_server/knowledge/services/embedding_service.py` | ML | 134 | 60c0eaa8 | SentenceTransformer and reranker |
-| P1 | `src/knoggin_server/knowledge/services/memory_service.py` | memory | 374 | 68062df0 | Session and working memory |
-| P1 | `src/knoggin_server/knowledge/services/file_rag.py` | RAG | 350 | a5dbce4b | File ingestion/search |
-| P1 | `src/knoggin_server/knowledge/jobs/profile_job.py` | jobs | 714 | 9264dbf0 | Fact/profile refinement |
-| P1 | `src/knoggin_server/knowledge/jobs/merge_job.py` | jobs | 630 | 9c21ab40 | Merge/hierarchy detection |
-| P1 | `src/knoggin_server/knowledge/jobs/topics_job.py` | jobs | 219 | 542cc3d0 | Topic evolution |
-| P1 | `src/knoggin_server/ingestion/jobs/dlq_job.py` | jobs | 458 | c0c772c5 | Dead-letter replay |
-| P1 | `src/knoggin_server/ingestion/jobs/cleaner_job.py` | jobs | 135 | 8137c5ac | Orphan cleanup |
-| P1 | `src/knoggin_server/ingestion/jobs/archive_job.py` | jobs | 94 | e9431871 | Invalidated fact archival |
-| P1 | `src/knoggin_server/agent/tools/registry.py` | agent tools | 66 | 6714c5bc | Tool composition and dispatch map |
-| P1 | `src/knoggin_server/agent/tools/search.py` | agent tools | 792 | 5491bfbb | Message/entity/file/web search |
-| P1 | `src/knoggin_server/agent/tools/graph.py` | agent tools | 298 | 6c3fa24b | Graph tools |
-| P1 | `src/common/schema/tool_schema.py` | agent tools | 349 | 40518db8 | Tool schemas sent to LLM |
-| P1 | `src/knoggin_server/agent/services/agent_manager.py` | agent | 170 | 77d99968 | Agent CRUD/defaults |
-| P1 | `src/knoggin_server/community/community_manager.py` | AAC | 554 | 192a0142 | Autonomous discussions |
-| P1 | `src/knoggin_server/community/community_store.py` | AAC storage | 279 | 7b7685c7 | AAC AGE nodes |
-| P2 | `tests/runtime/test_session_lifecycle.py` | tests | 154 | 31ccdc10 | Session contract |
-| P2 | `tests/integration/test_fake_engine_flow.py` | tests | 142 | 662afd3b | Fake end-to-end lifecycle |
-| P2 | `tests/ingestion/test_batch_consumer.py` | tests | 117 | 42405f72 | Buffer/DLQ behavior |
-| P2 | `tests/storage/test_entity_writer_contract.py` | tests | 240 | 6d3e77e5 | Persistence contract |
-| P2 | `tests/storage/test_fact_writer_contract.py` | tests | 218 | 93146c20 | Fact persistence contract |
-| P2 | `tests/knowledge/test_file_rag.py` | tests | 174 | fc10ecd8 | File RAG contract |
-| P2 | `tests/agent/test_orchestrator.py` | tests | 151 | 8edcacd1 | Agent orchestration contract |
+| Priority |                                                         Path | Type          |   Lines | HASH8    | Notes                                                     |
+| -------- | -----------------------------------------------------------: | ------------- | ------: | -------- | --------------------------------------------------------- |
+| P0       |                                             `pyproject.toml` | config        |      87 | d1172bdb | Package identity and dependencies                         |
+| P0       |                            `src/infrastructure/resources.py` | runtime       |     148 | dc08c375 | Global resource singleton                                 |
+| P0       |              `src/knoggin_server/session/session_manager.py` | runtime       |     238 | cac8d0c8 | Session CRUD/resume/delete                                |
+| P0       |                      `src/knoggin_server/session/context.py` | runtime       |     422 | 91aa1d19 | Active session state, add message, history                |
+| P0       |                         `src/knoggin_server/session/boot.py` | runtime       |     167 | d4b56e4a | Session assembly and launch                               |
+| P0       |              `src/knoggin_server/project/project_manager.py` | runtime       |     426 | 151eafb3 | Project runtime and job registration                      |
+| P0       |                        `src/knoggin_server/project/state.py` | runtime       |      55 | c61d7d32 | Project-level shared state                                |
+| P0       |                         `src/infrastructure/redis_client.py` | infra         |     331 | 37793b9c | Redis singleton and key taxonomy                          |
+| P0       |                      `src/infrastructure/postgres_client.py` | infra         |     117 | b04a3702 | AGE/pgvector pool wrapper                                 |
+| P0       |                         `src/infrastructure/graph_client.py` | infra         |     363 | c4635338 | Storage facade                                            |
+| P0       |                              `src/infrastructure/schema.sql` | db schema     |      56 | 8dd1ff31 | pgvector and FTS tables                                   |
+| P0       |    `src/knoggin_server/ingestion/services/batch_consumer.py` | ingestion     |     335 | e05f9377 | Redis buffer draining and DLQ                             |
+| P0       |  `src/knoggin_server/ingestion/services/pipeline_service.py` | ingestion     |     800 | e8b027da | Batch extraction and resolution                           |
+| P0       |         `src/knoggin_server/ingestion/services/processor.py` | ingestion     |     447 | 7b01be5e | NER pipeline                                              |
+| P0       |    `src/knoggin_server/knowledge/services/entity_service.py` | knowledge     |     546 | 0a34354d | Entity cache/resolution/merge candidate detection         |
+| P0       |          `src/knoggin_server/knowledge/db/write_graph_db.py` | persistence   |     374 | 3f83786f | Typed graph mutation plan                                 |
+| P0       |                   `src/knoggin_server/agent/orchestrator.py` | agent         |     200 | 13dd32b0 | Agent entry point                                         |
+| P0       |                       `src/knoggin_server/agent/executor.py` | agent         |     509 | 646a194e | Agent reasoning loop                                      |
+| P1       |                             `src/common/schema/contracts.py` | schema        |     525 | bb7af001 | Engine handoff models                                     |
+| P1       |                            `src/common/schema/primitives.py` | schema        |     149 | f24ab578 | Entity, Connection, Fact, Message                         |
+| P1       |                              `src/common/schema/settings.py` | config schema |     215 | 74aebb3f | RootConfig and settings                                   |
+| P1       |                                 `src/common/conf/manager.py` | config        |     171 | 5a34d336 | YAML config and subscriptions                             |
+| P1       |                           `src/common/conf/topics_config.py` | config        |     213 | 3e81e5de | Topic config helpers                                      |
+| P1       |                             `src/common/utils/time_utils.py` | time          | current | current  | Central UTC wall-clock delegates and test clock           |
+| P1       |                        `src/infrastructure/job/scheduler.py` | jobs          |     200 | a7ad5e79 | Project job monitor                                       |
+| P1       |                           `src/infrastructure/llm_client.py` | infra         |     411 | f333068a | OpenAI/OpenRouter service                                 |
+| P1       | `src/knoggin_server/knowledge/services/embedding_service.py` | ML            |     134 | 60c0eaa8 | SentenceTransformer and reranker                          |
+| P1       |    `src/knoggin_server/knowledge/services/memory_service.py` | memory        |     374 | 68062df0 | Session and working memory                                |
+| P1       |          `src/knoggin_server/knowledge/services/file_rag.py` | RAG           |     350 | a5dbce4b | File ingestion/search                                     |
+| P1       |           `src/knoggin_server/knowledge/jobs/profile_job.py` | jobs          |     714 | 9264dbf0 | Fact/profile refinement                                   |
+| P1       |             `src/knoggin_server/knowledge/jobs/merge_job.py` | jobs          |     630 | 9c21ab40 | Merge/hierarchy detection                                 |
+| P1       |            `src/knoggin_server/knowledge/jobs/topics_job.py` | jobs          |     219 | 542cc3d0 | Topic evolution                                           |
+| P1       |               `src/knoggin_server/ingestion/jobs/dlq_job.py` | jobs          |     458 | c0c772c5 | Dead-letter replay                                        |
+| P1       |           `src/knoggin_server/ingestion/jobs/cleaner_job.py` | jobs          |     135 | 8137c5ac | Orphan cleanup                                            |
+| P1       |           `src/knoggin_server/ingestion/jobs/archive_job.py` | jobs          |      94 | e9431871 | Invalidated fact archival                                 |
+| P1       |                 `src/knoggin_server/agent/tools/registry.py` | agent tools   |      66 | 6714c5bc | Tool composition and dispatch map                         |
+| P1       |                   `src/knoggin_server/agent/tools/search.py` | agent tools   |     792 | 5491bfbb | Message/entity/file/web search                            |
+| P1       |                    `src/knoggin_server/agent/tools/graph.py` | agent tools   |     298 | 6c3fa24b | Graph tools                                               |
+| P1       |                           `src/common/schema/tool_schema.py` | agent tools   |     349 | 40518db8 | Tool schemas sent to LLM                                  |
+| P1       |         `src/knoggin_server/agent/services/agent_manager.py` | agent         |     170 | 77d99968 | Agent CRUD/defaults                                       |
+| P1       |          `src/knoggin_server/community/community_manager.py` | AAC           |     554 | 192a0142 | Autonomous discussions                                    |
+| P1       |            `src/knoggin_server/community/community_store.py` | AAC storage   |     279 | 7b7685c7 | AAC AGE nodes                                             |
+| P2       |                    `tests/runtime/test_session_lifecycle.py` | tests         |     154 | 31ccdc10 | Session contract                                          |
+| P2       |                    `tests/runtime/test_session_assembler.py` | tests         | current | current  | SessionAssembler boot and launch wiring                   |
+| P2       |                   `tests/runtime/test_project_membership.py` | tests         | current | current  | Project membership and fake-backed project boot contracts |
+| P2       |                 `tests/integration/test_fake_engine_flow.py` | tests         |     142 | 662afd3b | Fake end-to-end lifecycle                                 |
+| P2       |                     `tests/ingestion/test_batch_consumer.py` | tests         |     117 | 42405f72 | Buffer/DLQ behavior                                       |
+| P2       |               `tests/storage/test_entity_writer_contract.py` | tests         |     240 | 6d3e77e5 | Persistence contract                                      |
+| P2       |                 `tests/storage/test_fact_writer_contract.py` | tests         |     218 | 93146c20 | Fact persistence contract                                 |
+| P2       |                           `tests/knowledge/test_file_rag.py` | tests         |     174 | fc10ecd8 | File RAG contract                                         |
+| P2       |                           `tests/agent/test_orchestrator.py` | tests         |     151 | 8edcacd1 | Agent orchestration contract                              |
+| P2       |                       `tests/unit/common/test_time_utils.py` | tests         | current | current  | Central clock and frozen-time default-factory contracts   |
 
 ## 3. System Architecture Deep Dive
 
@@ -267,6 +283,12 @@ Configuration:
 - `ConfigManager` loads YAML from `CONFIG_DIR/knoggin.yml` or migrates JSON, validates as `RootConfig`, and hot-reloads subscribers by path in `src/common/conf/manager.py`.
 - Runtime services subscribe to specific config paths in `ProjectManager._register_background_jobs` and `SessionAssembler.assemble`.
 
+Time:
+
+- `src/common/utils/time_utils.py` is the central wall-clock API. Use `get_now()` for UTC `datetime`, `get_now_iso()` for ISO strings, `get_now_ms()` for epoch milliseconds, and `get_now_unix()` for epoch seconds.
+- `TestClock`, `set_test_clock`, `reset_clock`, and `frozen_time` allow tests to freeze system time across schemas, jobs, storage, and agent prompt generation.
+- Do not replace monotonic/event-loop timing such as `asyncio` loop subscriber activity with wall-clock delegates.
+
 Caching and performance:
 
 - `EntityManager` uses large `LRUCache` instances for entity profiles and aliases, plus a TTL cache for generic tokens in `src/knoggin_server/knowledge/services/entity_service.py`.
@@ -280,7 +302,7 @@ Caching and performance:
 INDEX_VERSION: phase-2
 FILE_MAP_SUMMARY: Backbone read: resources, Redis, Postgres, GraphClient, sessions, context, project manager/state, scheduler, ingestion, graph-write planner, schemas, config, agent executor/orchestrator/tools, jobs, memory, file RAG, AAC.
 OPEN_QUESTIONS: The caller/API layer that invokes ResourceManager, SessionManager, ProjectManager, and Orchestrator is not present in this target root.
-KNOWN_RISKS: Project-level jobs use project_id as scheduler session_id in several RedisKeys call sites, so "session_id" can mean "project_id" in job contexts.
+KNOWN_RISKS: Project-level schedulers pass the project id through `Scheduler.scope_id` and `JobContext.scope_id`; old `session_id` compatibility aliases still exist and can obscure the intended scope naming.
 GLOSSARY_DELTA: Dirty entity, DLQ, GraphMutationPlan, EvidenceRef, Architect mode, Librarian mode, Working memory, Topic evolution.
 ```
 
@@ -337,6 +359,7 @@ Business value: project scopes let the user separate memory by work area while s
 Tests:
 
 - `tests/runtime/test_project_membership.py` verifies durable project membership.
+- `tests/runtime/test_project_membership.py` also includes a fake-backed `get_or_start_project` contract for cached project state reuse, scheduler project scope, and background job registration names.
 - `tests/integration/test_fake_engine_flow.py` verifies project delete returns sessions for cleanup.
 
 ### 4.4 Session Lifecycle
@@ -356,6 +379,7 @@ Tests:
 
 - `tests/runtime/test_session_lifecycle.py` covers create, resume, close, failure rollback, and cleanup.
 - `tests/integration/test_fake_engine_flow.py` covers create-add-history-close flow.
+- `tests/runtime/test_session_assembler.py` covers `SessionAssembler.assemble` and `launch` wiring without launching heavy model/database infrastructure.
 
 ### 4.5 Context And Message Ingestion
 
@@ -572,19 +596,19 @@ Business value: automated multi-agent reflection can surface insights from the u
 
 ## 5. Cross-Feature Interaction Map
 
-| Feature | Reads From | Writes To | Triggers |
-|---|---|---|---|
-| Session create/resume | Redis session metadata, project metadata | active_sessions, Redis sessions, project_sessions | Context assembly |
-| Context.add | Message input, config limits | Redis conversation, message_content, buffer, heartbeat | BatchConsumer signal, scheduler activity |
-| BatchConsumer | Redis buffer/history | Graph message nodes, message_search, DLQ, checkpoints | Graph write, dirty entities |
-| BatchProcessor | TopicConfig, EntityManager, LLM, embeddings | BatchResult only | Graph mutation planner |
-| Graph mutation | EntityManager cache, BatchResult | AGE graph, entity_search, dirty_entities | Profile refinement and merge queue |
-| Profile refinement | dirty_entities, conversation, graph facts | Fact nodes, fact_search, entity profile, merge_queue | MergeDetectionJob |
-| Merge detection | merge_queue, graph facts, EntityManager | Graph merges, Redis proposals/intents | Cleanup, future resolution quality |
-| Topic evolution | heartbeat counter, conversation | TopicConfig in Redis, refreshed mappings | Future NER/extraction behavior |
-| Agent run | Redis agent config, memory, files, graph | Events, optional memory writes | User response |
-| File RAG | Uploaded files, pgvector table | Session file chunks | Agent `search_files` |
-| AAC | Graph context, agents, working memory | AAC graph nodes/messages, spawned agents | Scheduled discussions |
+| Feature               | Reads From                                  | Writes To                                              | Triggers                                 |
+| --------------------- | ------------------------------------------- | ------------------------------------------------------ | ---------------------------------------- |
+| Session create/resume | Redis session metadata, project metadata    | active_sessions, Redis sessions, project_sessions      | Context assembly                         |
+| Context.add           | Message input, config limits                | Redis conversation, message_content, buffer, heartbeat | BatchConsumer signal, scheduler activity |
+| BatchConsumer         | Redis buffer/history                        | Graph message nodes, message_search, DLQ, checkpoints  | Graph write, dirty entities              |
+| BatchProcessor        | TopicConfig, EntityManager, LLM, embeddings | BatchResult only                                       | Graph mutation planner                   |
+| Graph mutation        | EntityManager cache, BatchResult            | AGE graph, entity_search, dirty_entities               | Profile refinement and merge queue       |
+| Profile refinement    | dirty_entities, conversation, graph facts   | Fact nodes, fact_search, entity profile, merge_queue   | MergeDetectionJob                        |
+| Merge detection       | merge_queue, graph facts, EntityManager     | Graph merges, Redis proposals/intents                  | Cleanup, future resolution quality       |
+| Topic evolution       | heartbeat counter, conversation             | TopicConfig in Redis, refreshed mappings               | Future NER/extraction behavior           |
+| Agent run             | Redis agent config, memory, files, graph    | Events, optional memory writes                         | User response                            |
+| File RAG              | Uploaded files, pgvector table              | Session file chunks                                    | Agent `search_files`                     |
+| AAC                   | Graph context, agents, working memory       | AAC graph nodes/messages, spawned agents               | Scheduled discussions                    |
 
 ### Phase 3 State Block
 
@@ -602,7 +626,7 @@ GLOSSARY_DELTA: Profile refinement, topic evolution, dead letter queue, HITL mer
 
 - `project_id` is required for most graph writes. Writers intentionally reject missing scope.
 - The identity root is `IDENTITY_ENTITY_ID` from `src/common/scoping.py`. Relationship writes allow edges to identity across project scope, and merge/delete logic protects identity.
-- Jobs often receive a `JobContext.session_id` that is actually the project id because project schedulers are created with `session_id=project_id` in `ProjectManager.get_or_start_project`. Be precise before changing Redis key calls in jobs.
+- Project-level jobs receive a `JobContext.scope_id` whose value is the project id because `ProjectManager.get_or_start_project` constructs `Scheduler(user, project_id, ..., project_id=project_id)`. `JobContext.session_id` is only a compatibility alias; prefer `scope_id` in new job code and tests.
 
 ### Redis Is The Runtime Bus
 
@@ -656,6 +680,17 @@ Graph nodes/edges and helper tables are maintained together:
 
 If you add a new persisted graph concept, decide whether it also needs vector or FTS helper rows.
 
+### Time Must Use The Central Clock
+
+Runtime wall-clock calls should go through `common.utils.time_utils`. Use the format that matches the stored field:
+
+- ISO JSON/metadata: `get_now_iso()`
+- UTC `datetime`: `get_now()`
+- epoch milliseconds for AGE/message recency fields: `get_now_ms()`
+- epoch seconds for elapsed job checks and DLQ-style metadata: `get_now_unix()`
+
+Tests can freeze time with `set_test_clock(...)` / `reset_clock()` or `frozen_time(...)`. Avoid direct `datetime.now(...)` or `time.time()` in runtime code unless implementing `SystemClock`.
+
 ### File RAG Uses Per-Session Tables
 
 `FileRAGService` creates pgvector tables named from the session id through LlamaIndex, while `schema.sql` also defines a general `public.file_chunks` table. Current service code uses LlamaIndex `PGVectorStore` per-session tables, not direct writes to `public.file_chunks`.
@@ -670,7 +705,7 @@ Do not add route-level assumptions to this code. Within this root, the public AP
 INDEX_VERSION: phase-4
 FILE_MAP_SUMMARY: Gotchas documented around Redis runtime state, project/session naming, zombie/phantom guards, LLM validation, hybrid storage sync, and missing HTTP layer.
 OPEN_QUESTIONS: Whether `public.file_chunks` is legacy schema or reserved for a future direct table path is not resolved from in-scope code.
-KNOWN_RISKS: Reusing session_id parameters for project_id in jobs is easy to break during refactors.
+KNOWN_RISKS: Project job scope is clearer through `ctx.scope_id`, but legacy `ctx.session_id` aliases still exist and should not be reintroduced in new job code.
 GLOSSARY_DELTA: Phantom entity, zombie entity, identity root, helper table, evidence ref.
 ```
 
@@ -802,6 +837,7 @@ Defined in `RedisKeys` in `src/infrastructure/redis_client.py`.
 - Hot topic: active topic prioritized for memory prompt injection.
 - Working memory: agent-level prompt memory in categories `rules`, `preferences`, and `icks`.
 - AAC: Autonomous Agent Community, a scheduled multi-agent discussion feature.
+- Central clock: `common.utils.time_utils` delegates that provide UTC wall-clock time and frozen-time controls for tests.
 
 ### External Dependencies
 
@@ -829,12 +865,12 @@ These are referenced by in-scope files but their internals were not inspected.
 
 ### Assumptions Table
 
-| Assumption | Confidence | Basis |
-|---|---:|---|
-| This root is an engine/library rather than full HTTP server. | High | No FastAPI app/router found by search; entry points are service classes. |
-| API/web layer lives outside this target root or is not built yet. | Medium | FastAPI dependency exists, but no route code exists in-scope. |
-| `public.file_chunks` may be legacy or reserved. | Medium | `schema.sql` creates it, but `FileRAGService` uses LlamaIndex per-session tables. |
-| Project jobs intentionally key many Redis structures by project id. | High | `Scheduler` is created with `session_id=project_id` in `ProjectManager`. |
+| Assumption                                                          | Confidence | Basis                                                                                        |
+| ------------------------------------------------------------------- | ---------: | -------------------------------------------------------------------------------------------- |
+| This root is an engine/library rather than full HTTP server.        |       High | No FastAPI app/router found by search; entry points are service classes.                     |
+| API/web layer lives outside this target root or is not built yet.   |     Medium | FastAPI dependency exists, but no route code exists in-scope.                                |
+| `public.file_chunks` may be legacy or reserved.                     |     Medium | `schema.sql` creates it, but `FileRAGService` uses LlamaIndex per-session tables.            |
+| Project jobs intentionally key many Redis structures by project id. |       High | `Scheduler` is created with its `scope_id` argument set to `project_id` in `ProjectManager`. |
 
 ### Phase 5 State Block
 
@@ -851,23 +887,25 @@ GLOSSARY_DELTA: Architect, Librarian, evidence ref, dirty entity, AAC, working m
 Test groups:
 
 - `tests/smoke/test_imports.py`: import boundaries and stale package import checks.
-- `tests/runtime/`: session lifecycle, project membership, context add.
+- `tests/runtime/`: session lifecycle, session assembler wiring, project membership/project boot, context add.
 - `tests/integration/`: fake engine flow and real infra smoke contracts.
 - `tests/ingestion/`: message mapping, batch consumer, DLQ, engine contracts, extraction fallbacks.
 - `tests/storage/`: storage readers/writers, Postgres client, graph client facade, tool queries.
 - `tests/knowledge/`: memory service and file RAG behavior.
 - `tests/agent/`: orchestrator and agent manager.
-- `tests/unit/`: common utils, Redis keys, project state, session metadata.
+- `tests/unit/`: common utils including the central clock, Redis keys, project state, session metadata.
 
 Recommended test commands:
 
-```powershell
-pytest tests/runtime tests/ingestion tests/knowledge tests/agent tests/storage -m "not requires_postgres and not requires_redis"
-pytest tests/integration/test_fake_engine_flow.py
-pytest tests/storage/test_postgres_client.py -m requires_postgres
+```bash
+uv run pytest tests/unit -q
+uv run pytest tests/runtime -q
+uv run pytest tests/integration/test_fake_engine_flow.py -q
+uv run pytest tests/storage -q
+uv run pytest -q
 ```
 
-The repository marks real infrastructure tests with markers such as `requires_postgres`, `requires_pgvector`, and `requires_redis` in `pyproject.toml`.
+The repository marks real infrastructure tests with markers such as `requires_postgres`, `requires_pgvector`, and `requires_redis` in `pyproject.toml`. In the current local environment, the full suite has been green after storage/runtime/clock stabilization.
 
 ## 9. Safe Change Guidance
 
@@ -878,7 +916,8 @@ When adding a feature:
 3. If it writes graph data, add both AGE and helper-table behavior if search requires it.
 4. If it uses LLM output, add a Pydantic contract in `src/common/schema/contracts.py` or another schema file, then validate and sanitize output.
 5. If it participates in background work, implement `BaseJob`, register it in `ProjectManager._register_background_jobs`, and subscribe to config if settings are runtime-tunable.
-6. Add tests in the matching test group. Storage contracts should assert query shape and scope guards.
+6. Use `common.utils.time_utils` for wall-clock values and add frozen-clock tests for time-sensitive behavior.
+7. Add tests in the matching test group. Storage contracts should assert query shape and scope guards.
 
 When refactoring:
 
@@ -894,6 +933,6 @@ When refactoring:
 INDEX_VERSION: phase-6
 FILE_MAP_SUMMARY: Master knowledge document assembled under codebase-analysis-docs/CODEBASE_KNOWLEDGE.md. Assets directory exists at codebase-analysis-docs/assets.
 OPEN_QUESTIONS: Locate/confirm the client-facing API layer outside this root before adding endpoints. Confirm whether schema.sql file_chunks is active or legacy.
-KNOWN_RISKS: Redis key migration, project/session id ambiguity, graph/helper-table drift, expensive external ML model initialization, and LLM-output validation are the main change hazards.
+KNOWN_RISKS: Redis key migration, scheduler scope naming aliases, graph/helper-table drift, expensive external ML model initialization, and LLM-output validation are the main change hazards.
 GLOSSARY_DELTA: Complete glossary included.
 ```

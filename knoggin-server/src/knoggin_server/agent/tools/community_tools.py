@@ -1,11 +1,11 @@
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import Dict, List
 
 from common.conf.manager import ConfigManager
 from common.schema.agent_contracts import AgentConfig
 from common.utils.events import emit_community
+from common.utils.time_utils import get_now_iso
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.community.community_store import CommunityStore
@@ -68,7 +68,7 @@ class CommunityTools(Tools):
         payload = json.dumps(
             {
                 "content": content,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": get_now_iso(),
                 "discussion_id": self.discussion_id,
             }
         )
@@ -107,7 +107,7 @@ class CommunityTools(Tools):
             RedisKeys.agents(self.user_name), new_id, json.dumps(new_agent.to_dict())
         )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = get_now_iso()
         seeded_counts = {"rules": 0, "preferences": 0, "icks": 0}
 
         initial_data = {

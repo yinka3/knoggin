@@ -1,7 +1,6 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 from functools import partial
 from typing import Dict, List, Optional
 
@@ -11,6 +10,7 @@ from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig
 from common.scoping import build_readable_project_ids
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now_iso
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
@@ -53,6 +53,7 @@ class ProjectManager:
     ) -> dict:
         """Create a new project and store its metadata in Redis."""
         project_id = str(uuid.uuid4())
+        now = get_now_iso()
 
         metadata = {
             "id": project_id,
@@ -60,8 +61,8 @@ class ProjectManager:
             "description": description,
             "access_mode": access_mode,
             "allowed_projects": allowed_projects or [],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": now,
+            "updated_at": now,
         }
 
         key = RedisKeys.projects(self.user_name)
@@ -107,12 +108,14 @@ class ProjectManager:
         return meta
 
     async def get_readable_project_ids(self, project_id: str) -> List[str]:
-        """Return projects readable from project_id: global identity, own project, and allowed projects."""
+        """Return projects readable from project_id."""
         meta = await self.get_project(project_id)
         allowed = meta.get("allowed_projects", []) if meta else []
 
         if allowed:
-            existing = await self.resources.redis.hgetall(RedisKeys.projects(self.user_name))
+            existing = await self.resources.redis.hgetall(
+                RedisKeys.projects(self.user_name)
+            )
             allowed = [pid for pid in allowed if pid in existing]
 
         return build_readable_project_ids(project_id, allowed)
@@ -137,7 +140,7 @@ class ProjectManager:
             updated = True
 
         if updated:
-            meta["updated_at"] = datetime.now(timezone.utc).isoformat()
+            meta["updated_at"] = get_now_iso()
             # session_count is dynamic, don't store it in hash
             meta_to_save = {k: v for k, v in meta.items() if k != "session_count"}
             key = RedisKeys.projects(self.user_name)
@@ -146,7 +149,7 @@ class ProjectManager:
         return meta
 
     async def delete_project(self, project_id: str) -> List[str]:
-        """Delete project metadata and return orphaned session IDs for caller to clean up."""
+        """Delete project metadata and return orphaned session IDs."""
         # Get orphaned sessions
         session_ids = await self.get_session_ids(project_id)
 
@@ -267,8 +270,9 @@ class ProjectManager:
         )
 
         # Project-Level Batch Processor (for DLQ Replay)
+        project_scope_id = project_id
         project_processor = BatchProcessor(
-            session_id=project_id,
+            scope_id=project_scope_id,
             redis_client=self.resources.redis,
             llm=self.resources.llm_service,
             entities=entities,
@@ -286,8 +290,8 @@ class ProjectManager:
         await self._verify_user_entity(entities)
 
         # Scheduler & Background Jobs
-        # Project background jobs use the scheduler's session_id field as a
-        # project scope id because their Redis queues are project-scoped.
+        # Project background jobs use the project id as their scheduler scope
+        # because their Redis queues are project-scoped.
         scheduler = Scheduler(
             self.user_name,
             project_id,

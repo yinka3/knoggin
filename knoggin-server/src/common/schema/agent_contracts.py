@@ -1,10 +1,10 @@
 """Agent-facing contract models."""
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, List, Optional
 
-from common.utils.time_utils import parse_iso_time
+from common.utils.time_utils import get_now, parse_iso_time
 
 
 @dataclass
@@ -19,7 +19,7 @@ class AgentConfig:
     is_default: bool = False
     is_spawned: bool = False
     spawned_by: Optional[str] = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=get_now)
 
     def to_dict(self) -> Dict:
         return {
@@ -52,5 +52,5 @@ class AgentConfig:
             is_default=data.get("is_default", False),
             is_spawned=data.get("is_spawned", False),
             spawned_by=data.get("spawned_by"),
-            created_at=created or datetime.now(timezone.utc),
+            created_at=created or get_now(),
         )

@@ -56,12 +56,12 @@ class TopicConfigJob(BaseJob):
         return {name: cls._topic_to_dict(cfg) for name, cfg in config.items()}
 
     async def should_run(self, ctx: JobContext) -> bool:
-        count_key = RedisKeys.heartbeat_counter(ctx.user_name, ctx.session_id)
+        count_key = RedisKeys.heartbeat_counter(ctx.user_name, ctx.scope_id)
         count = await self.redis.get(count_key)
         if int(count or 0) < self.interval_msgs:
             return False
 
-        buffer_key = RedisKeys.buffer(ctx.user_name, ctx.session_id)
+        buffer_key = RedisKeys.buffer(ctx.user_name, ctx.scope_id)
         buffer_len = await self.redis.llen(buffer_key)
         if buffer_len > 0:
             return False
@@ -69,10 +69,10 @@ class TopicConfigJob(BaseJob):
         return True
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        count_key = RedisKeys.heartbeat_counter(ctx.user_name, ctx.session_id)
+        count_key = RedisKeys.heartbeat_counter(ctx.user_name, ctx.scope_id)
 
-        sorted_key = RedisKeys.recent_conversation(ctx.user_name, ctx.session_id)
-        conv_key = RedisKeys.conversation(ctx.user_name, ctx.session_id)
+        sorted_key = RedisKeys.recent_conversation(ctx.user_name, ctx.scope_id)
+        conv_key = RedisKeys.conversation(ctx.user_name, ctx.scope_id)
 
         turn_ids = await self.redis.zrevrange(
             sorted_key, 0, self.conversation_window - 1
@@ -112,7 +112,7 @@ class TopicConfigJob(BaseJob):
         system = get_topic_evolution_prompt(ctx.user_name)
 
         await emit(
-            ctx.session_id,
+            ctx.scope_id,
             "job",
             "llm_call",
             {"stage": "topic_evolution", "prompt": user_content},
@@ -172,7 +172,7 @@ class TopicConfigJob(BaseJob):
 
         logger.info(f"[HEARTBEAT] {summary}")
         await emit(
-            ctx.session_id,
+            ctx.scope_id,
             "job",
             "topic_config_evolved",
             {

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
@@ -12,6 +11,7 @@ from common.exceptions import ToolExecutionError
 from common.schema.tool_schema import get_filtered_schemas
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now
 from infrastructure.llm_client import LLMService
 from knoggin_server.agent.formatters import (
     format_entity_results,
@@ -70,7 +70,9 @@ class AgentExecutor:
 
         # Prepare environment
         tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
-        current_time = simulated_date or datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
+        current_time = simulated_date or get_now().astimezone(tz).strftime(
+            "%Y-%m-%d %H:%M %Z"
+        )
 
         if self.memory_mgr:
             (

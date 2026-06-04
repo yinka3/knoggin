@@ -1,11 +1,11 @@
 import json
 import re
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
 from common.scoping import IDENTITY_ENTITY_ID
+from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -409,7 +409,7 @@ class ToolQueries:
         if not entity_name or not entity_name.strip():
             return []
 
-        cutoff_ms = int((time.time() - (hours * 3600)) * 1000)
+        cutoff_ms = get_now_ms() - (hours * 3600 * 1000)
         cypher = """
         MATCH (e:Entity {canonical_name: $name})-[r:RELATED_TO]-(target:Entity)
         WHERE r.last_seen > $cutoff

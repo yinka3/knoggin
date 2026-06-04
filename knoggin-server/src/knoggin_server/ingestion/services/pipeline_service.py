@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -26,6 +25,7 @@ from common.schema.contracts import (
 from common.schema.primitives import ConnectionRecord
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
+from common.utils.time_utils import get_now_unix
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.prompts import get_connection_reasoning_prompt
@@ -50,7 +50,7 @@ BOOST_LLM_BATCH_SIZE = 15
 class BatchProcessor:
     def __init__(
         self,
-        session_id: str,
+        scope_id: str,
         redis_client: aioredis.Redis,
         llm: LLMService,
         entities: EntityManager,
@@ -63,7 +63,7 @@ class BatchProcessor:
         connection_prompt: str = None,
         graph_client=None,
     ):
-        self.session_id = session_id
+        self.scope_id = scope_id
         self.graph_client = graph_client
         self.redis = redis_client
         self.llm = llm
@@ -75,6 +75,11 @@ class BatchProcessor:
         self._get_next_ent_id = get_next_ent_id
         self.resolution_threshold = resolution_threshold
         self.connection_prompt = connection_prompt
+
+    @property
+    def session_id(self) -> str:
+        """Compatibility alias for legacy payloads; prefer scope_id internally."""
+        return self.scope_id
 
     @property
     def get_next_ent_id(self):
@@ -92,12 +97,12 @@ class BatchProcessor:
         Caller responsible for lock acquisition and publishing results.
         """
         with logger.contextualize(
-            user=self.user_name, session=self.session_id, component="BatchProcessor"
+            user=self.user_name, session=self.scope_id, component="BatchProcessor"
         ):
             result = BatchResult()
             result.set_scope(
                 self.user_name,
-                self.session_id,
+                self.scope_id,
                 getattr(self.entities, "project_id", None),
             )
             if result.scope:
@@ -119,7 +124,7 @@ class BatchProcessor:
             )
 
             await emit(
-                self.session_id,
+                self.scope_id,
                 "pipeline",
                 "batch_start",
                 {"size": len(messages), "msg_ids": [m["id"] for m in messages]},
@@ -127,10 +132,10 @@ class BatchProcessor:
 
             try:
                 mentions = await self._extract_mentions(
-                    messages, self.session_id, result.trace, result.issues
+                    messages, self.scope_id, result.trace, result.issues
                 )
                 await emit(
-                    self.session_id,
+                    self.scope_id,
                     "pipeline",
                     "mentions_extracted",
                     {
@@ -158,7 +163,7 @@ class BatchProcessor:
                 res = await self._resolve_mentions(mentions, messages)
 
                 await emit(
-                    self.session_id,
+                    self.scope_id,
                     "pipeline",
                     "resolution_complete",
                     {
@@ -188,7 +193,7 @@ class BatchProcessor:
                         result.work_unit.issues = list(result.issues)
                         result.work_unit.mark_failed(result.error)
                     await emit(
-                        self.session_id,
+                        self.scope_id,
                         "pipeline",
                         "connections_failed",
                         {"entity_count": len(res.entity_ids)},
@@ -200,7 +205,7 @@ class BatchProcessor:
                     len(mc.user_connections) for mc in user_connections
                 )
                 await emit(
-                    self.session_id,
+                    self.scope_id,
                     "pipeline",
                     "connections_extracted",
                     {
@@ -235,7 +240,7 @@ class BatchProcessor:
                     result.work_unit.issues = list(result.issues)
 
                 await emit(
-                    self.session_id,
+                    self.scope_id,
                     "pipeline",
                     "batch_complete",
                     {
@@ -443,7 +448,7 @@ class BatchProcessor:
                                 [name.strip()],
                                 typ,
                                 topic,
-                                self.session_id,
+                                self.scope_id,
                                 source_context,
                             )
                             new_ids.add(ent_id)
@@ -659,7 +664,7 @@ class BatchProcessor:
         )
 
         await emit(
-            self.session_id,
+            self.scope_id,
             "pipeline",
             "llm_call",
             {"stage": "connections", "prompt": user_03},
@@ -703,7 +708,7 @@ class BatchProcessor:
                     trace.relationships_seen = 0
                     trace.user_relationships_seen = 0
             await emit(
-                self.session_id,
+                self.scope_id,
                 "pipeline",
                 "llm_fallback",
                 {"stage": "connections", "fallback": "empty_connections"},
@@ -848,15 +853,15 @@ class BatchProcessor:
     ) -> bool:
         """Store failed batch in DLQ with stage info for smart retry."""
 
-        dlq_key = RedisKeys.dlq(self.user_name, self.session_id)
+        dlq_key = RedisKeys.dlq(self.user_name, self.scope_id)
         entry = {
-            "timestamp": time.time(),
+            "timestamp": get_now_unix(),
             "error": error,
             "attempt": attempt,
             "stage": stage,
             "batch_size": len(messages),
             "user_name": self.user_name,
-            "session_id": self.session_id,
+            "session_id": self.scope_id,
             "project_id": self.entities.project_id,
             "messages": messages,
         }
@@ -872,7 +877,7 @@ class BatchProcessor:
             logger.warning(f"DLQ [{stage}]: {len(messages)} messages stored")
 
             await emit(
-                self.session_id,
+                self.scope_id,
                 "pipeline",
                 "dlq_enqueued",
                 {

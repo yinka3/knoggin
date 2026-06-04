@@ -256,8 +256,8 @@ class RedisKeys:
         return f"last_profile_update:{user}:{project_id}:{entity_id}"
 
     @staticmethod
-    def profile_complete(user: str, session_id: str) -> str:
-        return f"profile_complete:{user}:{session_id}"
+    def profile_complete(user: str, scope_id: str) -> str:
+        return f"profile_complete:{user}:{scope_id}"
 
     @staticmethod
     def get_session_scoped_keys(user: str, session: str) -> list[str]:
@@ -318,26 +318,26 @@ class RedisKeys:
         return f"merge_undo:{session}:{primary_id}:{secondary_id}"
 
     @staticmethod
-    def user_profile_ran(user: str, session: str) -> str:
-        return f"user_profile_ran:{user}:{session}"
+    def user_profile_ran(user: str, scope_id: str) -> str:
+        return f"user_profile_ran:{user}:{scope_id}"
 
     @staticmethod
     def merge_intent(
-        user: str, session: str, primary_id: int, secondary_id: int
+        user: str, scope_id: str, primary_id: int, secondary_id: int
     ) -> str:
-        return f"merge_intent:{user}:{session}:{primary_id}:{secondary_id}"
+        return f"merge_intent:{user}:{scope_id}:{primary_id}:{secondary_id}"
 
     @staticmethod
-    def merge_intents_index(user: str, session: str) -> str:
-        return f"merge_intents_index:{user}:{session}"
+    def merge_intents_index(user: str, scope_id: str) -> str:
+        return f"merge_intents_index:{user}:{scope_id}"
 
     @staticmethod
-    def job_last_run(job_name: str, user: str, session: str) -> str:
-        return f"last_run:{job_name}:{user}:{session}"
+    def job_last_run(job_name: str, user: str, scope_id: str) -> str:
+        return f"last_run:{job_name}:{user}:{scope_id}"
 
     @staticmethod
-    def job_pending(user: str, session: str, job_name: str) -> str:
-        return f"pending:{user}:{session}:{job_name}"
+    def job_pending(user: str, scope_id: str, job_name: str) -> str:
+        return f"pending:{user}:{scope_id}:{job_name}"
 
     @staticmethod
     def agent_memory(user: str, session: str, topic: str) -> str:

@@ -1,10 +1,10 @@
 import json
-import time
 from typing import Dict, List, Optional
 
 from loguru import logger
 
 from common.scoping import IDENTITY_ENTITY_ID
+from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -14,7 +14,7 @@ class GraphWriter:
         self.graph_name = graph_name
 
     def _current_time_ms(self) -> int:
-        return int(time.time() * 1000)
+        return get_now_ms()
 
     @staticmethod
     def _require_project_id(project_id: Optional[str], operation: str) -> str:

@@ -78,14 +78,6 @@ class FactWriter:
                     })
                     CREATE (e)-[:HAS_FACT]->(f)
                     WITH f, item
-                    FOREACH (_ IN CASE WHEN item.source_msg_id IS NOT NULL THEN [1] ELSE [] END |
-                        MERGE (m:Message {
-                            user_name: item.source_user_name,
-                            session_id: item.source_session_id,
-                            id: item.source_msg_id
-                        })
-                        MERGE (f)-[:EXTRACTED_FROM]->(m)
-                    )
                     RETURN count(f)
                     """
 
@@ -111,6 +103,26 @@ class FactWriter:
                             f"Failed to create facts for entity {entity_id} (parent may not exist)"
                         )
 
+                    # Handle message links without FOREACH
+                    msg_params = [p for p in fact_params if p["source_msg_id"] is not None]
+                    if msg_params:
+                        cypher_m = """
+                        UNWIND $batch AS item
+                        MATCH (f:Fact {id: item.id})
+                        MERGE (m:Message {
+                            user_name: item.source_user_name,
+                            session_id: item.source_session_id,
+                            id: item.source_msg_id
+                        })
+                        MERGE (f)-[:EXTRACTED_FROM]->(m)
+                        RETURN count(f)
+                        """
+                        await cur.execute(
+                            self.client.build_cypher(cypher_m),
+                            (json.dumps({"batch": msg_params}),),
+                        )
+
+
                     # Write to Postgres fact_search table (Vectors)
                     for f in facts:
                         if f.embedding:
@@ -129,7 +141,7 @@ class FactWriter:
                                     entity_id,
                                     user_name,
                                     project_id,
-                                    f.embedding,
+                                    json.dumps(f.embedding),
                                     f.invalid_at,
                                 ),
                             )

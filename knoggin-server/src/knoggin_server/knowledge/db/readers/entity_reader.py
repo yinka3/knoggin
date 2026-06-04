@@ -1,10 +1,11 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
 from common.scoping import IDENTITY_ENTITY_ID
+from common.utils.time_utils import get_now
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -15,7 +16,31 @@ class EntityReader:
 
     def _parse_agtype(self, val):
         """Basic helper to unwrap agtype returned by psycopg (often just standard dicts/lists/scalars if configured, but safe to handle)."""
+        if not val:
+            return val
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except json.JSONDecodeError:
+                pass
         return val
+
+    def _parse_vector(self, val) -> List[float]:
+        """Normalize pgvector values across adapter and text-returning drivers."""
+        if val is None:
+            return []
+        if hasattr(val, "tolist"):
+            return [float(x) for x in val.tolist()]
+        if isinstance(val, str):
+            raw = val.strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = raw.strip("[]").split(",")
+            return [float(x) for x in parsed if str(x).strip()]
+        return [float(x) for x in val]
 
     def _scope_params(self, visible_project_ids: Optional[List[str]] = None) -> Dict:
         return {
@@ -40,11 +65,7 @@ class EntityReader:
         try:
             result = await self.client.execute_read(query, (entity_id,))
             if result and result[0]["embedding"]:
-                # pgvector returns a list or ndarray
-                emb = result[0]["embedding"]
-                if hasattr(emb, "tolist"):
-                    return emb.tolist()
-                return list(emb)
+                return self._parse_vector(result[0]["embedding"])
             return []
         except Exception as e:
             logger.error(f"Failed to get embedding for entity {entity_id}: {e}")
@@ -178,17 +199,19 @@ class EntityReader:
             if not res:
                 return None
             row = res[0]
+            embedding = await self.get_entity_embedding(entity_id)
             return {
                 "id": int(row["id"]) if row["id"] else None,
-                "session_id": row["session_id"],
-                "project_id": row["project_id"],
-                "canonical_name": row["canonical_name"],
-                "aliases": row["aliases"] or [],
-                "type": row["type"],
-                "topic": row["topic"],
+                "session_id": self._parse_agtype(row["session_id"]),
+                "project_id": self._parse_agtype(row["project_id"]),
+                "canonical_name": self._parse_agtype(row["canonical_name"]),
+                "aliases": self._parse_agtype(row["aliases"]) or [],
+                "type": self._parse_agtype(row["type"]),
+                "topic": self._parse_agtype(row["topic"]),
                 "last_mentioned": float(row["last_mentioned"] or 0),
                 "last_updated": float(row["last_updated"] or 0),
-                "last_profiled_msg_id": row["last_profiled_msg_id"],
+                "last_profiled_msg_id": self._parse_agtype(row["last_profiled_msg_id"]),
+                "embedding": embedding,
             }
         except Exception as e:
             logger.error(f"Failed to get entity {entity_id}: {e}")
@@ -229,7 +252,10 @@ class EntityReader:
 
             # Fetch embeddings
             emb_res = await self.client.execute_read(emb_query, (entity_ids,))
-            embeddings_map = {row["entity_id"]: row["embedding"] for row in emb_res}
+            embeddings_map = {
+                row["entity_id"]: self._parse_vector(row["embedding"])
+                for row in emb_res
+            }
 
             entities = []
             for row in res:
@@ -237,14 +263,14 @@ class EntityReader:
                 entities.append(
                     {
                         "id": eid,
-                        "session_id": row["session_id"],
-                        "canonical_name": row["canonical_name"],
-                        "aliases": row["aliases"] or [],
-                        "type": row["type"],
-                        "topic": row["topic"],
+                        "session_id": self._parse_agtype(row["session_id"]),
+                        "canonical_name": self._parse_agtype(row["canonical_name"]),
+                        "aliases": self._parse_agtype(row["aliases"]) or [],
+                        "type": self._parse_agtype(row["type"]),
+                        "topic": self._parse_agtype(row["topic"]),
                         "last_mentioned": float(row["last_mentioned"] or 0),
                         "last_updated": float(row["last_updated"] or 0),
-                        "last_profiled_msg_id": row["last_profiled_msg_id"],
+                        "last_profiled_msg_id": self._parse_agtype(row["last_profiled_msg_id"]),
                         "embedding": embeddings_map.get(eid, []),
                     }
                 )
@@ -402,11 +428,7 @@ class EntityReader:
             res = await self.client.execute_read(query, ("{}",))
             emb_res = await self.client.execute_read(emb_query)
             embeddings_map = {
-                row["entity_id"]: (
-                    row["embedding"].tolist()
-                    if hasattr(row["embedding"], "tolist")
-                    else list(row["embedding"])
-                )
+                row["entity_id"]: self._parse_vector(row["embedding"])
                 for row in emb_res
             }
 
@@ -585,7 +607,7 @@ class EntityReader:
     async def get_recently_active_entities(
         self, days: int = 7, limit: int = 10
     ) -> List[Dict]:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (get_now() - timedelta(days=days)).isoformat()
         cypher = """
         MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
         WHERE f.valid_at > $cutoff

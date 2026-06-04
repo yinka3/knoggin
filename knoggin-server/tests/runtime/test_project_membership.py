@@ -2,11 +2,117 @@ import json
 
 import pytest
 
-from common.schema.settings import TopicSchema
+from common.schema.contracts import BatchResult
+from common.schema.settings import DeveloperSettings, RootConfig, TopicSchema
+from common.scoping import GLOBAL_PROJECT_SCOPE
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.project.project_manager import ProjectManager
 from tests.fixtures.fakes import FakeResources
+
+
+class RecordingConfigManager:
+    def __init__(self):
+        self.config = RootConfig(developer_settings=DeveloperSettings())
+        self.subscriptions = []
+
+    def subscribe(self, callback, path):
+        self.subscriptions.append((callback, path))
+
+        def unsubscribe():
+            pass
+
+        return unsubscribe
+
+
+class RecordingScheduler:
+    instances = []
+
+    def __init__(self, user_name, scope_id, redis, project_id=None):
+        self.user_name = user_name
+        self.scope_id = scope_id
+        self.redis = redis
+        self.project_id = project_id or scope_id
+        self._jobs = {}
+        self.__class__.instances.append(self)
+
+    @property
+    def session_id(self):
+        return self.scope_id
+
+    @property
+    def running(self):
+        return False
+
+    def register(self, job):
+        self._jobs[job.name] = job
+        return self
+
+
+class RecordingEntityManager:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.hierarchy_config = kwargs["hierarchy_config"]
+        self.registered_entities = []
+        self.__class__.instances.append(self)
+
+    async def get_id(self, name):
+        return 1
+
+    async def register_entity(self, *args):
+        self.registered_entities.append(args)
+
+    async def get_known_aliases(self):
+        return {}
+
+    async def get_profile(self, name):
+        return None
+
+    def update_settings(self, config):
+        self.updated_settings = config
+
+
+class RecordingTextProcessor:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.refresh_count = 0
+        self.__class__.instances.append(self)
+
+    def refresh_topic_mappings(self):
+        self.refresh_count += 1
+
+
+class RecordingBatchProcessor:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.refresh_count = 0
+        self.__class__.instances.append(self)
+
+    def refresh_topic_mappings(self):
+        self.refresh_count += 1
+
+    def update_settings(self, config):
+        self.updated_settings = config
+
+
+class RecordingJob:
+    def __init__(self, name, *args, **kwargs):
+        self.name = name
+        self.args = args
+        self.kwargs = kwargs
+
+    def update_settings(self, config):
+        self.updated_settings = config
+
+
+def recording_job_factory(name):
+    return lambda *args, **kwargs: RecordingJob(name, *args, **kwargs)
 
 
 @pytest.mark.runtime
@@ -81,11 +187,133 @@ async def test_project_topic_config_seed_does_not_overwrite_existing_config():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_get_or_start_project_caches_state_and_registers_project_jobs(
+    monkeypatch,
+):
+    RecordingScheduler.instances = []
+    RecordingEntityManager.instances = []
+    RecordingTextProcessor.instances = []
+    RecordingBatchProcessor.instances = []
+
+    config_manager = RecordingConfigManager()
+    resources = FakeResources()
+    manager = ProjectManager(resources=resources, user_name="ada")
+
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.ConfigManager.get",
+        staticmethod(lambda: config_manager),
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.EntityManager",
+        RecordingEntityManager,
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.TextProcessor",
+        RecordingTextProcessor,
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.BatchProcessor",
+        RecordingBatchProcessor,
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.Scheduler",
+        RecordingScheduler,
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.ProfileRefinementJob",
+        recording_job_factory("profile_refinement"),
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.MergeDetectionJob",
+        recording_job_factory("merge_detection"),
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.DLQReplayJob",
+        recording_job_factory("dlq_auto_replay"),
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.EntityCleanupJob",
+        recording_job_factory("entity_cleanup"),
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.FactArchivalJob",
+        recording_job_factory("fact_archival"),
+    )
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.TopicConfigJob",
+        recording_job_factory("topic_config"),
+    )
+    graph_write_calls = []
+
+    async def fake_write_batch_callback(result, **kwargs):
+        graph_write_calls.append((result, kwargs))
+        return True, None
+
+    monkeypatch.setattr(
+        "knoggin_server.project.project_manager.write_batch_callback",
+        fake_write_batch_callback,
+    )
+
+    project_state = await manager.get_or_start_project(
+        "project-1",
+        initial_topics_config={"DeepWork": TopicSchema(active=True)},
+    )
+    reused_state = await manager.get_or_start_project("project-1")
+
+    assert reused_state is project_state
+    assert project_state.active_runtime_sessions_count == 2
+    assert manager.active_projects["project-1"] is project_state
+    assert project_state.readable_project_ids == [GLOBAL_PROJECT_SCOPE, "project-1"]
+
+    scheduler = RecordingScheduler.instances[0]
+    assert scheduler.scope_id == "project-1"
+    assert scheduler.project_id == "project-1"
+    assert project_state.scheduler is scheduler
+    assert list(scheduler._jobs) == [
+        "profile_refinement",
+        "merge_detection",
+        "dlq_auto_replay",
+        "entity_cleanup",
+        "fact_archival",
+        "topic_config",
+    ]
+
+    assert RecordingEntityManager.instances[0].kwargs["project_id"] == "project-1"
+    assert RecordingEntityManager.instances[0].kwargs["readable_project_ids"] == [
+        GLOBAL_PROJECT_SCOPE,
+        "project-1",
+    ]
+    assert RecordingBatchProcessor.instances[0].kwargs["scope_id"] == "project-1"
+    assert len(config_manager.subscriptions) == 9
+
+    dlq_job = scheduler._jobs["dlq_auto_replay"]
+    batch_result = BatchResult()
+    assert await dlq_job.kwargs["write_to_graph"](batch_result) == (True, None)
+    assert graph_write_calls == [
+        (
+            batch_result,
+            {
+                "graph_client": resources.graph_client,
+                "entities": project_state.entities,
+                "session_id": "project-1",
+                "project_id": "project-1",
+                "user_name": "ada",
+                "redis_client": resources.redis,
+            },
+        )
+    ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_project_scheduler_context_uses_project_scope_id():
     redis = FakeResources().redis
     scheduler = Scheduler("ada", "project-1", redis, project_id="project-1")
 
     ctx = await scheduler._build_context()
 
+    assert scheduler.scope_id == "project-1"
+    assert scheduler.session_id == "project-1"
+    assert ctx.scope_id == "project-1"
     assert ctx.session_id == "project-1"
     assert ctx.project_id == "project-1"

@@ -1,6 +1,5 @@
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import Callable, Dict, List, NamedTuple, Optional
 
 import redis.asyncio as aioredis
@@ -18,6 +17,7 @@ from common.schema.memory import (
     WorkingMemoryListResult,
     WorkingMemoryRemoveResult,
 )
+from common.utils.time_utils import get_now_iso
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from knoggin_server.agent.formatters import format_memory_context
@@ -128,7 +128,7 @@ class MemoryManager:
             {
                 "content": content,
                 "topic": normalized,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": get_now_iso(),
                 "source_session": self.session_id,
             }
         )
@@ -248,7 +248,7 @@ class MemoryManager:
         payload = json.dumps(
             {
                 "content": content,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": get_now_iso(),
             }
         )
         await self.redis.hset(key, mem_id, payload)

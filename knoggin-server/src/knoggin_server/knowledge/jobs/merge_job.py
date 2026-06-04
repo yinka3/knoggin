@@ -1,6 +1,5 @@
 import asyncio
 import json
-from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
@@ -17,6 +16,7 @@ from common.utils.data_utils import (
 )
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now, get_now_iso
 from infrastructure.graph_client import GraphClient
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
@@ -64,7 +64,7 @@ class MergeDetectionJob(BaseJob):
         return "merge_detection"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
+        merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.scope_id)
         queue_size = await self.redis.scard(merge_key)
         return queue_size > 0
 
@@ -76,9 +76,9 @@ class MergeDetectionJob(BaseJob):
 
     async def execute(self, ctx: JobContext) -> JobResult:
         with logger.contextualize(
-            user=ctx.user_name, job=self.name, session=ctx.session_id
+            user=ctx.user_name, job=self.name, session=ctx.scope_id
         ):
-            merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
+            merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.scope_id)
 
             dirty_raw = await self.redis.srandmember(merge_key, 50)
 
@@ -89,7 +89,7 @@ class MergeDetectionJob(BaseJob):
 
             logger.info(f"Merge detection starting: {len(dirty_ids)} dirty entities")
             await emit(
-                ctx.session_id,
+                ctx.scope_id,
                 "job",
                 "merge_job_started",
                 {"dirty_count": len(dirty_ids)},
@@ -207,7 +207,7 @@ class MergeDetectionJob(BaseJob):
                 )
 
                 if success:
-                    now = datetime.now(timezone.utc)
+                    now = get_now()
                     for fact_id in duplicate_fact_ids:
                         try:
                             await self.graph_client.invalidate_fact(
@@ -235,7 +235,7 @@ class MergeDetectionJob(BaseJob):
 
     async def recover_pending_merges(self, ctx: JobContext):
         """Scan Redis for intents that didn't complete and finish them."""
-        index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.session_id)
+        index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.scope_id)
         intent_keys = await self.redis.smembers(index_key)
 
         if not intent_keys:
@@ -265,7 +265,7 @@ class MergeDetectionJob(BaseJob):
             # but if the transaction aborted during the crash, skipping it fully fragments the Graph DB.
             # We MUST explicitly re-run the DB transaction to guarantee safety before finalizing.
             db_success = await self._execute_merge_db_only(
-                p_id, s_id, item.get("duplicate_fact_ids", []), ctx.session_id
+                p_id, s_id, item.get("duplicate_fact_ids", []), ctx.scope_id
             )
 
             if db_success:
@@ -296,7 +296,7 @@ class MergeDetectionJob(BaseJob):
         considers the merge complete. It does NOT perform the DB merge itself.
         """
 
-        project_id = ctx.project_id or ctx.session_id
+        project_id = ctx.project_id or ctx.scope_id
         async with self.entities.resolution_lock:
             p_id = merge_info["primary_id"]
             s_id = merge_info["secondary_id"]
@@ -335,11 +335,11 @@ class MergeDetectionJob(BaseJob):
                 logger.exception(f"Finalize merge failed for {p_id}<-{s_id}: {e}")
             finally:
                 # Always mark dirty so profile refinement picks up any incomplete work
-                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
+                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.scope_id)
                 await self.redis.sadd(dirty_key, str(p_id))
 
             await emit(
-                ctx.session_id,
+                ctx.scope_id,
                 "job",
                 "entities_merged",
                 {
@@ -452,7 +452,7 @@ class MergeDetectionJob(BaseJob):
         # Step 2: Run LLM judgments in parallel with a semaphore
         sem = asyncio.Semaphore(5)
         results = await asyncio.gather(
-            *[self._judge_with_sem(c, ctx.session_id, sem) for c in llm_tasks]
+            *[self._judge_with_sem(c, ctx.scope_id, sem) for c in llm_tasks]
         )
 
         # Step 3: Categorize results
@@ -481,7 +481,7 @@ class MergeDetectionJob(BaseJob):
 
         logger.info(f"Merge split: {len(auto_merge)} auto, {len(hitl)} HITL")
         await emit(
-            ctx.session_id,
+            ctx.scope_id,
             "job",
             "merge_judgments_complete",
             {
@@ -538,7 +538,7 @@ class MergeDetectionJob(BaseJob):
         successful = 0
         failed = 0
 
-        index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.session_id)
+        index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.scope_id)
 
         for item in final_merge_list:
             item_dict: dict = item
@@ -546,13 +546,13 @@ class MergeDetectionJob(BaseJob):
             s_id: int = item_dict["secondary_id"]
 
             intent_key = RedisKeys.merge_intent(
-                ctx.user_name, ctx.session_id, p_id, s_id
+                ctx.user_name, ctx.scope_id, p_id, s_id
             )
             await self.redis.set(intent_key, json.dumps(item_dict))
             await self.redis.sadd(index_key, intent_key)
 
             db_success = await self._execute_merge_db_only(
-                p_id, s_id, item_dict["duplicate_fact_ids"], ctx.session_id
+                p_id, s_id, item_dict["duplicate_fact_ids"], ctx.scope_id
             )
 
             if db_success:
@@ -595,7 +595,7 @@ class MergeDetectionJob(BaseJob):
             return "0 hierarchy edges"
 
         created = 0
-        project_id = ctx.project_id or ctx.session_id
+        project_id = ctx.project_id or ctx.scope_id
 
         for topic, type_rules in self.topic_config.hierarchy.items():
             if not type_rules:
@@ -622,7 +622,7 @@ class MergeDetectionJob(BaseJob):
                         )
 
                         await emit(
-                            ctx.session_id,
+                            ctx.scope_id,
                             "job",
                             "hierarchy_created",
                             {
@@ -639,7 +639,7 @@ class MergeDetectionJob(BaseJob):
         self, ctx: JobContext, proposals: list, merged_ids: set
     ) -> int:
         stored = 0
-        proposal_key = RedisKeys.merge_proposals(ctx.user_name, ctx.session_id)
+        proposal_key = RedisKeys.merge_proposals(ctx.user_name, ctx.scope_id)
 
         for candidate in proposals:
             if (
@@ -654,7 +654,7 @@ class MergeDetectionJob(BaseJob):
                 "primary_name": candidate.get("primary_name", "Unknown"),
                 "secondary_name": candidate.get("secondary_name", "Unknown"),
                 "llm_score": candidate["llm_score"],
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": get_now_iso(),
                 "status": "pending",
             }
 
@@ -690,7 +690,7 @@ class MergeDetectionJob(BaseJob):
     async def on_shutdown(self, ctx: JobContext) -> None:
         """Set pending flag so next session picks up merge work."""
         await self.redis.set(
-            RedisKeys.job_pending(ctx.user_name, ctx.session_id, self.name), "true"
+            RedisKeys.job_pending(ctx.user_name, ctx.scope_id, self.name), "true"
         )
         logger.debug("Merge detection pending flag set")
 

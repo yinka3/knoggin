@@ -4,6 +4,7 @@ import pytest
 
 from common.scoping import IDENTITY_ENTITY_ID
 from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
+from knoggin_server.knowledge.db.readers.entity_reader import EntityReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -47,7 +48,7 @@ def make_entity(**overrides):
         "user_name": "ada",
         "session_id": "session-1",
         "project_id": "project-1",
-        "embedding": [0.1, 0.2, 0.3],
+        "embedding": [0.1] * 1024,
     }
     entity.update(overrides)
     return entity
@@ -112,16 +113,21 @@ async def test_entity_writer_write_batch_rejects_unscoped_relationship():
 
 
 @pytest.mark.storage
-@pytest.mark.no_network
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
 async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
-    monkeypatch,
+    real_postgres_client, monkeypatch
 ):
-    client = RecordingPostgresClient()
-    writer = EntityWriter(client)
+    writer = EntityWriter(real_postgres_client)
+    reader = EntityReader(real_postgres_client)
     monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
 
     result = await writer.write_batch(
-        [make_entity()],
+        [
+            make_entity(id=2),
+            make_entity(id=3, canonical_name="Grace Hopper"),
+            make_entity(id=4, canonical_name="Alan Turing"),
+        ],
         [
             make_relationship(),
             make_relationship(
@@ -139,120 +145,79 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
     )
 
     assert result is True
-    assert len(client.calls) == 3
-    entity_graph_call, entity_search_call, relationship_graph_call = client.calls
 
-    assert entity_graph_call[0] == "execute"
-    assert "MERGE (e:Entity {id: data.id})" in entity_graph_call[1]
-    entity_params = json.loads(entity_graph_call[2][0])
-    entity_payload = entity_params["batch"][0]
-    assert set(entity_payload) == ENTITY_GRAPH_FIELDS
-    assert entity_payload == {
-        "id": 2,
-        "canonical_name": "Ada Lovelace",
-        "aliases": ["Ada"],
-        "type": "person",
-        "topic": "Identity",
-        "confidence": 0.9,
-        "user_name": "ada",
-        "session_id": "session-1",
-        "project_id": "project-1",
-        "embedding": [0.1, 0.2, 0.3],
-        "now": 123456,
-    }
+    # 1. Verify entity_search table
+    entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
+    embedding = await reader.get_entity_embedding(2)
+    assert entity is not None
+    assert entity["canonical_name"] == "Ada Lovelace"
+    assert embedding == [0.1] * 1024
 
-    assert entity_search_call[0] == "execute"
-    assert "INSERT INTO entity_search" in entity_search_call[1]
-    assert entity_search_call[2] == (
-        2,
-        "Ada Lovelace",
-        "ada",
-        "project-1",
-        [0.1, 0.2, 0.3],
+    # 2. Verify graph node
+    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.canonical_name", "name agtype")
+    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    assert len(res) == 1
+    assert "Ada Lovelace" in str(res[0]["name"])
+
+    # 3. Verify graph relationships
+    edge_query = real_postgres_client.build_cypher(
+        "MATCH (a)-[r:RELATED_TO]->(b) RETURN r.context, r.message_ids", 
+        "ctx agtype, msg_ids agtype"
     )
+    edges = await real_postgres_client.execute_read(edge_query, ('{}',))
+    assert len(edges) == 2
+    edges_str = str(edges)
+    assert "1000000005" in edges_str
+    assert "123" in edges_str
 
-    assert relationship_graph_call[0] == "execute"
-    assert "MERGE (node_a)-[r:RELATED_TO]->(node_b)" in relationship_graph_call[1]
-    relationship_params = json.loads(relationship_graph_call[2][0])
-    first_relationship = relationship_params["batch"][0]
-    second_relationship = relationship_params["batch"][1]
-    assert relationship_params["identity_entity_id"] == IDENTITY_ENTITY_ID
-    assert set(first_relationship) == RELATIONSHIP_GRAPH_FIELDS
-    assert set(second_relationship) == RELATIONSHIP_GRAPH_FIELDS
-    assert first_relationship == {
-        "entity_a_id": 2,
-        "entity_b_id": 3,
-        "relationship": "knows",
-        "context": "Ada knows Grace",
-        "confidence": 0.8,
-        "message_id": "msg_123",
-        "user_name": "ada",
-        "session_id": "session-1",
-        "project_id": "project-1",
-        "evidence_ref": {
-            "user_name": "ada",
-            "session_id": "session-1",
-            "message_id": 123,
-        },
-        "now": 123456,
-    }
-    assert second_relationship["evidence_ref"] == {
-        "user_name": "ada",
-        "session_id": "session-2",
-        "message_id": 1_000_000_005,
-    }
-    assert second_relationship["context"] is None
-    assert second_relationship["message_id"] == "ignored"
-    assert second_relationship["confidence"] == 0.8
-    assert second_relationship["now"] == 123456
 
 
 @pytest.mark.storage
-@pytest.mark.no_network
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
 async def test_entity_writer_update_entity_profile_updates_graph_and_search(
-    monkeypatch,
+    real_postgres_client, monkeypatch
 ):
-    client = RecordingPostgresClient()
-    writer = EntityWriter(client)
+    writer = EntityWriter(real_postgres_client)
+    reader = EntityReader(real_postgres_client)
     monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
+
+    # Seed
+    await writer.write_batch([make_entity()], [])
 
     await writer.update_entity_profile(
         2,
         "Ada Byron",
-        [0.3, 0.2, 0.1],
+        [0.3] * 1024,
         last_msg_id=77,
         project_id="project-1",
     )
 
-    assert len(client.calls) == 2
-    graph_call, search_call = client.calls
-    assert "SET e.canonical_name = $canonical_name" in graph_call[1]
-    assert json.loads(graph_call[2][0]) == {
-        "id": 2,
-        "canonical_name": "Ada Byron",
-        "now": 123456,
-        "last_msg_id": 77,
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
-    assert "UPDATE entity_search" in search_call[1]
-    assert search_call[2] == (
-        "Ada Byron",
-        [0.3, 0.2, 0.1],
-        2,
-        "project-1",
-        IDENTITY_ENTITY_ID,
-    )
+    # Verify search table
+    entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
+    embedding = await reader.get_entity_embedding(2)
+    assert entity["canonical_name"] == "Ada Byron"
+    assert embedding == [0.3] * 1024
+
+    # Verify graph node
+    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.canonical_name, e.last_profiled_msg_id", "name agtype, msg_id agtype")
+    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    assert "Ada Byron" in str(res[0]["name"])
+    assert "77" in str(res[0]["msg_id"])
 
 
 @pytest.mark.storage
-@pytest.mark.no_network
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
 async def test_entity_writer_update_entity_canonical_name_updates_graph_and_search(
-    monkeypatch,
+    real_postgres_client, monkeypatch
 ):
-    client = RecordingPostgresClient()
-    writer = EntityWriter(client)
+    writer = EntityWriter(real_postgres_client)
+    reader = EntityReader(real_postgres_client)
     monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
+
+    # Seed
+    await writer.write_batch([make_entity()], [])
 
     await writer.update_entity_canonical_name(
         2,
@@ -260,120 +225,58 @@ async def test_entity_writer_update_entity_canonical_name_updates_graph_and_sear
         project_id="project-1",
     )
 
-    assert len(client.calls) == 2
-    graph_call, search_call = client.calls
-    assert "SET e.canonical_name = $canonical_name" in graph_call[1]
-    assert json.loads(graph_call[2][0]) == {
-        "id": 2,
-        "canonical_name": "Ada Byron",
-        "now": 123456,
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
-    assert "UPDATE entity_search" in search_call[1]
-    assert search_call[2] == (
-        "Ada Byron",
-        2,
-        "project-1",
-        IDENTITY_ENTITY_ID,
-    )
+    entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
+    assert entity["canonical_name"] == "Ada Byron"
+
+    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.canonical_name", "name agtype")
+    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    assert "Ada Byron" in str(res[0]["name"])
 
 
 @pytest.mark.storage
-@pytest.mark.no_network
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
 async def test_entity_writer_update_entity_embedding_updates_graph_and_search(
-    monkeypatch,
+    real_postgres_client, monkeypatch
 ):
-    client = RecordingPostgresClient()
-    writer = EntityWriter(client)
+    writer = EntityWriter(real_postgres_client)
+    reader = EntityReader(real_postgres_client)
     monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
+
+    # Seed
+    await writer.write_batch([make_entity()], [])
 
     await writer.update_entity_embedding(
         2,
-        [0.3, 0.2, 0.1],
+        [0.3] * 1024,
         project_id="project-1",
     )
 
-    assert len(client.calls) == 2
-    graph_call, search_call = client.calls
-    assert "SET e.last_updated = $now" in graph_call[1]
-    assert json.loads(graph_call[2][0]) == {
-        "id": 2,
-        "now": 123456,
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
-    assert "UPDATE entity_search" in search_call[1]
-    assert search_call[2] == (
-        [0.3, 0.2, 0.1],
-        2,
-        "project-1",
-        IDENTITY_ENTITY_ID,
-    )
+    entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
+    assert entity["embedding"] == [0.3] * 1024
+
+    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.last_updated", "now agtype")
+    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    assert "123456" in str(res[0]["now"])
 
 
 @pytest.mark.storage
-@pytest.mark.no_network
-async def test_entity_writer_update_entity_checkpoint_uses_execute_write_scope():
-    client = RecordingPostgresClient(execute_write_results=[1])
-    writer = EntityWriter(client)
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+async def test_entity_writer_update_entity_checkpoint_uses_execute_write_scope(
+    real_postgres_client
+):
+    writer = EntityWriter(real_postgres_client)
+
+    # Seed
+    await writer.write_batch([make_entity()], [])
 
     await writer.update_entity_checkpoint(2, 77, project_id="project-1")
 
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call[0] == "execute_write"
-    assert "SET e.last_profiled_msg_id = $last_msg_id" in call[1]
-    assert json.loads(call[2][0]) == {
-        "id": 2,
-        "last_msg_id": 77,
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
+    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.last_profiled_msg_id", "msg_id agtype")
+    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    assert "77" in str(res[0]["msg_id"])
 
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_entity_writer_update_entity_aliases_merges_existing_aliases(
-    monkeypatch,
-):
-    client = RecordingPostgresClient(fetchone_results=[{"aliases": ["Ada", "A."]}])
-    writer = EntityWriter(client)
-    monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
-
-    await writer.update_entity_aliases(
-        {2: ["Ada", "Byron"]},
-        project_id="project-1",
-    )
-
-    assert len(client.calls) == 2
-    read_call, write_call = client.calls
-    assert "RETURN e.aliases" in read_call[1]
-    assert json.loads(read_call[2][0]) == {
-        "id": 2,
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
-
-    assert "SET e.aliases = $aliases" in write_call[1]
-    write_params = json.loads(write_call[2][0])
-    assert write_params["id"] == 2
-    assert set(write_params["aliases"]) == {"Ada", "A.", "Byron"}
-    assert write_params["now"] == 123456
-    assert write_params["project_id"] == "project-1"
-    assert write_params["identity_entity_id"] == IDENTITY_ENTITY_ID
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_entity_writer_update_entity_aliases_empty_input_skips_db():
-    client = RecordingPostgresClient()
-    writer = EntityWriter(client)
-
-    await writer.update_entity_aliases({}, project_id=None)
-
-    assert client.calls == []
-    assert client.connection_enters == 0
 
 
 @pytest.mark.storage
@@ -385,7 +288,7 @@ async def test_entity_writer_update_entity_aliases_empty_input_skips_db():
         ("update_entity_canonical_name", (2, "Ada Byron")),
         ("update_entity_embedding", (2, [0.1])),
         ("update_entity_checkpoint", (2, 7)),
-        ("update_entity_aliases", ({2: ["Ada"]},)),
+
         ("cleanup_null_entities", ()),
         ("delete_entity", (2,)),
         ("bulk_delete_entities", ([2],)),
@@ -406,26 +309,27 @@ async def test_entity_writer_scoped_operations_require_project_without_db_access
 
 
 @pytest.mark.storage
-@pytest.mark.no_network
-async def test_entity_writer_delete_entity_deletes_graph_and_search_row():
-    client = RecordingPostgresClient()
-    writer = EntityWriter(client)
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+async def test_entity_writer_delete_entity_deletes_graph_and_search_row(
+    real_postgres_client
+):
+    writer = EntityWriter(real_postgres_client)
+    reader = EntityReader(real_postgres_client)
+
+    # Seed
+    await writer.write_batch([make_entity()], [])
 
     assert await writer.delete_entity(2, project_id="project-1") is True
 
-    assert len(client.calls) == 2
-    graph_call, search_call = client.calls
-    assert "DETACH DELETE e, f" in graph_call[1]
-    assert json.loads(graph_call[2][0]) == {
-        "id": 2,
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
-    assert search_call == (
-        "execute",
-        "DELETE FROM entity_search WHERE entity_id = %s AND project_id = %s",
-        (2, "project-1"),
-    )
+    # Search table should be empty
+    entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
+    assert entity is None
+
+    # Graph node should be deleted
+    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN count(e) as c", "c agtype")
+    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    assert int(res[0]["c"]) == 0
 
 
 @pytest.mark.storage

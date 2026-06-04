@@ -2,8 +2,9 @@ import fnmatch
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
+
+from common.utils.time_utils import get_now_iso
 
 
 class FakePipeline:
@@ -119,6 +120,12 @@ class FakeRedis:
     async def scard(self, key):
         return len(self.sets.get(key, set()))
 
+    async def srandmember(self, key, number=None):
+        values = sorted(self.sets.get(key, set()))
+        if number is None:
+            return values[0] if values else None
+        return values[: int(number)]
+
     async def delete(self, *keys):
         deleted = 0
         for key in keys:
@@ -155,6 +162,11 @@ class FakeRedis:
         if nx and key in self.strings:
             return False
         self.strings[key] = str(value)
+        return True
+
+    async def setex(self, key, ttl, value):
+        self.strings[key] = str(value)
+        self.expirations.append((key, ttl))
         return True
 
     async def rpush(self, key, value):
@@ -311,7 +323,9 @@ class FakeProjectManager:
         self.add_session_calls: list[tuple[str, str]] = []
         self.remove_session_calls: list[tuple[str, str]] = []
 
-    async def acquire_project_for_session(self, project_id, session_id, topics_config=None):
+    async def acquire_project_for_session(
+        self, project_id, session_id, topics_config=None
+    ):
         self.acquire_calls.append((project_id, session_id))
         if self.project_state is not None:
             return self.project_state
@@ -343,7 +357,7 @@ class FakeConfigValue:
 
 
 def make_turn_payload(role="user", content="hello", timestamp=None, user_msg_id=1):
-    timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+    timestamp = timestamp or get_now_iso()
     return json.dumps(
         {
             "role": role,

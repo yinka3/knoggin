@@ -1,10 +1,11 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List
 
 from loguru import logger
 
 from common.schema.primitives import FactRecord
+from common.utils.time_utils import get_now
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -12,6 +13,22 @@ class FactReader:
     def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
+
+    def _parse_vector(self, val) -> List[float]:
+        if val is None:
+            return []
+        if hasattr(val, "tolist"):
+            return [float(x) for x in val.tolist()]
+        if isinstance(val, str):
+            raw = val.strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = raw.strip("[]").split(",")
+            return [float(x) for x in parsed if str(x).strip()]
+        return [float(x) for x in val]
 
     def _hydrate_fact(self, record, embedding: List[float] = None) -> FactRecord:
         """Convert DB record to FactRecord."""
@@ -159,7 +176,10 @@ class FactReader:
                 return []
 
             fact_ids = [row["fact_id"] for row in search_res]
-            embeddings_map = {row["fact_id"]: row["embedding"] for row in search_res}
+            embeddings_map = {
+                row["fact_id"]: self._parse_vector(row["embedding"])
+                for row in search_res
+            }
 
             # 2. Fetch those specific facts from graph
             cypher = """
@@ -186,13 +206,9 @@ class FactReader:
                     if isinstance(row["id"], str)
                     else str(row["id"])
                 )
-                emb = embeddings_map.get(fid)
-                if emb and hasattr(emb, "tolist"):
-                    emb = emb.tolist()
-                elif emb:
-                    emb = list(emb)
-
-                results.append(self._hydrate_fact(row, embedding=emb))
+                results.append(
+                    self._hydrate_fact(row, embedding=embeddings_map.get(fid, []))
+                )
 
             return results
 
@@ -240,7 +256,7 @@ class FactReader:
             return []
 
     async def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (get_now() - timedelta(days=days)).isoformat()
         cypher = """
         MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
         WHERE f.valid_at > $cutoff

@@ -1,6 +1,5 @@
 import asyncio
 import uuid
-from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 
 from loguru import logger
@@ -11,6 +10,7 @@ from common.schema.contracts import ConnectionsResult, EntityProfilesResult
 from common.schema.primitives import FactRecord
 from common.scoping import GLOBAL_PROJECT_SCOPE
 from common.utils.core_utils import format_vp02_input, format_vp04_input
+from common.utils.time_utils import get_now
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin_server.agent.prompts import (
@@ -72,7 +72,7 @@ async def _create_user_entity(resources: ResourceManager, user_name: str) -> int
 
     fact_embeddings = await resources.embedding.encode(fact_contents)
 
-    now = datetime.now(timezone.utc)
+    now = get_now()
     facts = [
         FactRecord(
             id=str(uuid.uuid4()),
@@ -343,7 +343,7 @@ async def _extract_and_save_profiles(
                             FactRecord(
                                 id=str(uuid.uuid4()),
                                 content=fact_update.content,
-                                valid_at=datetime.now(timezone.utc),
+                                valid_at=get_now(),
                                 embedding=fact_embedding,
                                 source_entity_id=ent_id,
                                 source_msg_id=fact_update.source_msg_id,

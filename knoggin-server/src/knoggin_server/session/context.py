@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -23,7 +23,7 @@ from common.utils.core_utils import (
 )
 from common.utils.events import DebugEventEmitter, emit
 from common.utils.tasks import BackgroundTaskGroup
-from common.utils.time_utils import parse_iso_time_or_now
+from common.utils.time_utils import get_now, parse_iso_time_or_now
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin_server.agent.prompts import get_lightweight_extraction_prompt
@@ -339,7 +339,7 @@ class Context:
                     id=f"fact_{uuid.uuid4().hex[:16]}",
                     source_entity_id=target_id,
                     content=fact_content,
-                    valid_at=datetime.now(timezone.utc),
+                    valid_at=get_now(),
                     source_msg_id=user_msg_id,
                     confidence=0.9,
                     embedding=fact_embeddings[i],

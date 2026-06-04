@@ -101,8 +101,9 @@ async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
     )
 
     assert count == 1
-    assert len(client.calls) == 2
-    graph_call, search_call = client.calls
+    assert len(client.calls) == 3
+    graph_call, msg_call, search_call = client.calls
+    
     assert "CREATE (f:Fact" in graph_call[1]
     graph_params = json.loads(graph_call[2][0])
     fact_payload = graph_params["batch"][0]
@@ -127,6 +128,10 @@ async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
         "session_id": "session-1",
         "project_id": "project-1",
     }
+    
+    assert "MERGE (m:Message" in msg_call[1]
+    msg_params = json.loads(msg_call[2][0])
+    assert msg_params["batch"][0]["source_msg_id"] == 7
 
     assert "INSERT INTO fact_search" in search_call[1]
     assert search_call[2] == (
@@ -134,7 +139,7 @@ async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
         2,
         "ada",
         "project-1",
-        [0.1, 0.2, 0.3],
+        "[0.1, 0.2, 0.3]",
         None,
     )
 

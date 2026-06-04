@@ -112,10 +112,12 @@ class GraphClient:
 
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], project_id: Optional[str] = None
-    ):
+    ) -> None:
         return await self._entity_writer.update_entity_aliases(
             alias_updates, project_id=project_id
         )
+
+
 
     async def create_hierarchy_edge(
         self, parent_id: int, child_id: int, project_id: Optional[str] = None
@@ -313,7 +315,7 @@ class GraphClient:
         self, entity_id: int, visible_project_ids: List[str] = None
     ) -> Optional[Dict]:
         return await self._entity_reader.get_entity_by_id(
-            entity_id=entity_id, visible_project_ids=visible_project_ids
+            entity_id, visible_project_ids
         )
 
     async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:

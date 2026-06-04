@@ -1,9 +1,8 @@
 """Engine contract models for LLM outputs and pipeline handoffs."""
 
 import json
-import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Set
 from uuid import uuid4
 
@@ -17,6 +16,7 @@ from common.schema.primitives import (
     ProfileUpdate,
 )
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now, get_now_unix
 
 
 class NERResult(BaseModel):
@@ -184,7 +184,7 @@ class EngineResourceProfile(BaseModel):
 class EngineWorkTrace(BaseModel):
     """Timing and attempt metadata for an engine work unit."""
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=get_now)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
@@ -262,7 +262,7 @@ class EngineWorkUnit(BaseModel):
 
     def mark_running(self) -> None:
         self.status = "running"
-        self.trace.started_at = datetime.now(timezone.utc)
+        self.trace.started_at = get_now()
 
     def mark_succeeded(self, summary: Optional[str] = None) -> None:
         self.status = "succeeded"
@@ -300,7 +300,7 @@ class EngineWorkUnit(BaseModel):
         )
 
     def _finish(self) -> None:
-        self.trace.finished_at = datetime.now(timezone.utc)
+        self.trace.finished_at = get_now()
         if self.trace.started_at:
             delta = self.trace.finished_at - self.trace.started_at
             self.trace.duration_ms = int(delta.total_seconds() * 1000)
@@ -619,7 +619,7 @@ class DLQEntry:
     session_text: str
     error: str
     attempt: int = 1
-    timestamp: float = field(default_factory=time.time)
+    timestamp: float = field(default_factory=get_now_unix)
     batch_size: int = field(init=False)
 
     def __post_init__(self):

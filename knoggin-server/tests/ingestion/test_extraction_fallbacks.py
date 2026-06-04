@@ -27,7 +27,7 @@ class FakeEntities:
 
 def make_processor(llm_response):
     return BatchProcessor(
-        session_id="session-1",
+        scope_id="session-1",
         redis_client=None,
         llm=FakeLLM(llm_response),
         entities=FakeEntities(),

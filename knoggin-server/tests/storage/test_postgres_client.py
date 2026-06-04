@@ -1,9 +1,12 @@
 import os
-
 import pytest
 
 from infrastructure.postgres_client import PostgresClient
 
+DB_URL = os.environ.get(
+    "KNOGGIN_TEST_DATABASE_URL",
+    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db"
+)
 
 @pytest.mark.storage
 @pytest.mark.no_network
@@ -23,13 +26,9 @@ def test_build_cypher_wraps_query_with_graph_and_return_types():
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.slow
-@pytest.mark.skipif(
-    not os.environ.get("KNOGGIN_TEST_DATABASE_URL"),
-    reason="Set KNOGGIN_TEST_DATABASE_URL to run real Postgres storage tests.",
-)
 async def test_postgres_client_connects_when_test_database_is_configured():
     client = PostgresClient(
-        os.environ["KNOGGIN_TEST_DATABASE_URL"],
+        DB_URL,
         min_size=0,
         max_size=2,
     )

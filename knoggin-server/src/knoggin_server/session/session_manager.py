@@ -1,7 +1,6 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -9,6 +8,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.utils.events import DebugEventEmitter
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now_iso
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.services.file_rag import FileRAGService
 from knoggin_server.project.project_manager import ProjectManager
@@ -82,10 +82,11 @@ class SessionManager:
                 await self.project_manager.release_project(actual_project_id)
                 raise
 
+            now = get_now_iso()
             metadata = {
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": now,
                 "topics_config": self._serialize_topics_config(topics_config),
-                "last_active": datetime.now(timezone.utc).isoformat(),
+                "last_active": now,
                 "model": model,
                 "agent_id": agent_id,
                 "enabled_tools": enabled_tools,
@@ -141,7 +142,7 @@ class SessionManager:
 
             self.active_sessions[session_id] = context
 
-            metadata["last_active"] = datetime.now(timezone.utc).isoformat()
+            metadata["last_active"] = get_now_iso()
             await self.resources.redis.hset(
                 RedisKeys.sessions(self.user_name), session_id, json.dumps(metadata)
             )
@@ -174,7 +175,7 @@ class SessionManager:
         if raw:
             metadata = safe_json_loads(raw, {})
             if metadata:
-                metadata["last_active"] = datetime.now(timezone.utc).isoformat()
+                metadata["last_active"] = get_now_iso()
                 await self.resources.redis.hset(
                     RedisKeys.sessions(self.user_name), session_id, json.dumps(metadata)
                 )

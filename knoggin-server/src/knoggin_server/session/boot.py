@@ -149,7 +149,7 @@ class SessionAssembler:
     ) -> BatchProcessor:
         er_cfg = self.dev_settings.entity_resolution
         return BatchProcessor(
-            session_id=session_id,
+            scope_id=session_id,
             redis_client=self.resources.redis,
             llm=self.resources.llm_service,
             entities=entities,

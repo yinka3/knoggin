@@ -1,10 +1,10 @@
 import json
-import time
 from typing import Dict, List, Optional
 
 from loguru import logger
 
 from common.scoping import IDENTITY_ENTITY_ID
+from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -14,7 +14,7 @@ class EntityWriter:
         self.graph_name = graph_name
 
     def _current_time_ms(self) -> int:
-        return int(time.time() * 1000)
+        return get_now_ms()
 
     @staticmethod
     def _require_scope(data: Dict, fields: List[str], label: str) -> None:
@@ -87,43 +87,47 @@ class EntityWriter:
                         cypher_e = """
                         UNWIND $batch AS data
                         MERGE (e:Entity {id: data.id})
-                        ON CREATE SET
-                            e.user_name = data.user_name,
+                        SET e.user_name = data.user_name,
                             e.session_id = data.session_id,
                             e.project_id = data.project_id,
                             e.canonical_name = data.canonical_name,
-                            e.aliases = data.aliases,
-                            e.type = data.type,
+                            e.type = coalesce(e.type, data.type),
                             e.confidence = data.confidence,
                             e.last_updated = data.now,
                             e.last_mentioned = data.now
-                        ON MATCH SET
-                            e.user_name = data.user_name,
-                            e.session_id = data.session_id,
-                            e.project_id = data.project_id,
-                            e.canonical_name = data.canonical_name,
-                            e.confidence = data.confidence,
-                            e.last_updated = data.now,
-                            e.last_mentioned = data.now
-                            
-                        WITH e, data
-                        // Handle aliases in AGE (concatenation via python pre-processing is safer, but we try AGE array functions if possible,
-                        // or we just overwrite if it's a batch update, but we need to merge aliases)
-                        // For AGE, to avoid agtype list concat errors, we'll overwrite with data.aliases if this is new, 
-                        // but ideally we'd merge them. For now, we set them.
-                        // (We will handle alias merges explicitly in update_entity_aliases)
                         
-                        FOREACH (_ IN CASE WHEN data.topic IS NOT NULL AND data.topic <> "" THEN [1] ELSE [] END |
-                            MERGE (t:Topic {name: data.topic})
-                            MERGE (e)-[:BELONGS_TO]->(t)
-                        )
+                        WITH e, data, coalesce(e.aliases, []) + coalesce(data.aliases, []) AS all_aliases
+                        WITH e, CASE WHEN size(all_aliases) = 0 THEN [null] ELSE all_aliases END AS safe_aliases
+                        UNWIND safe_aliases AS alias
+                        WITH e, collect(DISTINCT alias) AS merged_aliases
+                        WITH e, [x IN merged_aliases WHERE x IS NOT NULL] AS final_aliases
+                        SET e.aliases = final_aliases
+                        
                         RETURN e.id
                         """
-                        # We run the graph query
                         await cur.execute(
                             self.client.build_cypher(cypher_e),
                             (json.dumps({"batch": entity_params}),),
                         )
+                        
+                        # Handle topics in AGE without FOREACH
+                        topic_params = [
+                            {"id": e["id"], "topic": e["topic"]}
+                            for e in entities
+                            if e.get("topic")
+                        ]
+                        if topic_params:
+                            cypher_t = """
+                            UNWIND $batch AS data
+                            MATCH (e:Entity {id: data.id})
+                            MERGE (t:Topic {name: data.topic})
+                            MERGE (e)-[:BELONGS_TO]->(t)
+                            RETURN count(e)
+                            """
+                            await cur.execute(
+                                self.client.build_cypher(cypher_t),
+                                (json.dumps({"batch": topic_params}),),
+                            )
 
                         # 2. Write Hybrid Search Data (Vectors)
                         for e in entities:
@@ -143,7 +147,7 @@ class EntityWriter:
                                         e["canonical_name"],
                                         e["user_name"],
                                         e["project_id"],
-                                        e["embedding"],
+                                        json.dumps(e["embedding"]),
                                     ),
                                 )
 
@@ -157,7 +161,15 @@ class EntityWriter:
                                 f"Relationship {r.get('entity_a_id')}:{r.get('entity_b_id')}",
                             )
                             r_clean = r.copy()
-                            r_clean["evidence_ref"] = self._build_evidence_ref(r)
+                            # Sort IDs in python to avoid AGE MERGE planner bugs with variables
+                            a_id, b_id = r["entity_a_id"], r["entity_b_id"]
+                            if a_id > b_id:
+                                a_id, b_id = b_id, a_id
+                            r_clean["entity_a_id"] = a_id
+                            r_clean["entity_b_id"] = b_id
+                            
+                            # Serialize to string to prevent AGE backend crashes when concatenating map objects
+                            r_clean["evidence_ref"] = json.dumps(self._build_evidence_ref(r))
                             r_clean["confidence"] = r.get("confidence", 1.0)
                             r_clean["now"] = now_ms
                             rel_params.append(r_clean)
@@ -168,25 +180,24 @@ class EntityWriter:
                         MATCH (b:Entity {id: rel.entity_b_id})
                         WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
                           AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
-                        WITH a, b, rel,
-                            CASE WHEN a.id < b.id THEN a ELSE b END AS node_a,
-                            CASE WHEN a.id < b.id THEN b ELSE a END AS node_b
-                        MERGE (node_a)-[r:RELATED_TO]->(node_b)
-                        ON CREATE SET
-                            r.weight = 1,
-                            r.confidence = rel.confidence,
-                            r.last_seen = rel.now,
-                            r.message_ids = [rel.evidence_ref],
-                            r.context = rel.context
-                        ON MATCH SET
-                            r.weight = r.weight + 1,
-                            r.confidence = CASE WHEN rel.confidence > r.confidence THEN rel.confidence ELSE r.confidence END,
+                        MERGE (a)-[r:RELATED_TO]->(b)
+                        SET r.weight = coalesce(r.weight, 0) + 1,
+                            r.confidence = CASE 
+                                WHEN r.confidence IS NULL THEN rel.confidence 
+                                WHEN rel.confidence > r.confidence THEN rel.confidence 
+                                ELSE r.confidence 
+                            END,
                             r.last_seen = rel.now,
                             r.message_ids = CASE
+                                WHEN r.message_ids IS NULL THEN [rel.evidence_ref]
                                 WHEN rel.evidence_ref IN coalesce(r.message_ids, []) THEN r.message_ids
                                 ELSE coalesce(r.message_ids, []) + [rel.evidence_ref]
                             END,
-                            r.context = CASE WHEN rel.context IS NOT NULL THEN rel.context ELSE r.context END
+                            r.context = CASE 
+                                WHEN r.context IS NULL THEN rel.context
+                                WHEN rel.context IS NOT NULL THEN rel.context 
+                                ELSE r.context 
+                            END
                         RETURN count(r)
                         """
                         await cur.execute(
@@ -251,7 +262,7 @@ class EntityWriter:
                         """,
                         (
                             canonical_name,
-                            embedding,
+                            json.dumps(embedding),
                             entity_id,
                             project_id,
                             IDENTITY_ENTITY_ID,
@@ -337,7 +348,7 @@ class EntityWriter:
                         WHERE entity_id = %s
                           AND (project_id = %s OR entity_id = %s)
                         """,
-                        (embedding, entity_id, project_id, IDENTITY_ENTITY_ID),
+                        (json.dumps(embedding), entity_id, project_id, IDENTITY_ENTITY_ID),
                     )
 
     async def update_entity_checkpoint(
@@ -366,59 +377,45 @@ class EntityWriter:
 
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], project_id: Optional[str] = None
-    ):
+    ) -> None:
+        project_id = self._require_project_id(project_id, "update_entity_aliases")
         if not alias_updates:
             return
-        project_id = self._require_project_id(project_id, "update_entity_aliases")
 
-        async with self.client.async_pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    for eid, new_aliases in alias_updates.items():
-                        read_cyp = """
-                        MATCH (e:Entity {id: $id})
-                        WHERE e.project_id = $project_id OR e.id = $identity_entity_id
-                        RETURN e.aliases
-                        """
-                        await cur.execute(
-                            self.client.build_cypher(read_cyp, "aliases agtype"),
-                            (
-                                json.dumps(
-                                    {
-                                        "id": eid,
-                                        "project_id": project_id,
-                                        "identity_entity_id": IDENTITY_ENTITY_ID,
-                                    }
-                                ),
-                            ),
-                        )
-                        row = await cur.fetchone()
-                        existing = row["aliases"] if row and row["aliases"] else []
-                        combined = list(set(existing + new_aliases))
+        params = [
+            {"id": entity_id, "aliases": aliases}
+            for entity_id, aliases in alias_updates.items()
+            if aliases
+        ]
+        if not params:
+            return
 
-                        # Write back
-                        write_cyp = """
-                        MATCH (e:Entity {id: $id})
-                        WHERE e.project_id = $project_id OR e.id = $identity_entity_id
-                        SET e.aliases = $aliases, e.last_updated = $now
-                        RETURN e.id
-                        """
-                        await cur.execute(
-                            self.client.build_cypher(write_cyp),
-                            (
-                                json.dumps(
-                                    {
-                                        "id": eid,
-                                        "aliases": combined,
-                                        "now": self._current_time_ms(),
-                                        "project_id": project_id,
-                                        "identity_entity_id": IDENTITY_ENTITY_ID,
-                                    }
-                                ),
-                            ),
-                        )
-
-        logger.debug(f"Updated aliases for {len(alias_updates)} entities")
+        cypher = """
+        UNWIND $batch AS data
+        MATCH (e:Entity {id: data.id})
+        WHERE e.project_id = $project_id OR e.id = $identity_entity_id
+        WITH e, coalesce(e.aliases, []) + coalesce(data.aliases, []) AS all_aliases
+        WITH e, CASE WHEN size(all_aliases) = 0 THEN [null] ELSE all_aliases END AS safe_aliases
+        UNWIND safe_aliases AS alias
+        WITH e, collect(DISTINCT alias) AS merged_aliases
+        WITH e, [x IN merged_aliases WHERE x IS NOT NULL] AS final_aliases
+        SET e.aliases = final_aliases,
+            e.last_updated = $now
+        RETURN count(e)
+        """
+        await self.client.execute_write(
+            self.client.build_cypher(cypher),
+            (
+                json.dumps(
+                    {
+                        "batch": params,
+                        "project_id": project_id,
+                        "identity_entity_id": IDENTITY_ENTITY_ID,
+                        "now": self._current_time_ms(),
+                    }
+                ),
+            ),
+        )
 
     async def cleanup_null_entities(self, project_id: Optional[str] = None) -> int:
         project_id = self._require_project_id(project_id, "cleanup_null_entities")

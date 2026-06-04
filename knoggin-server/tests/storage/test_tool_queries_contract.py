@@ -3,6 +3,7 @@ import json
 import pytest
 
 from common.scoping import IDENTITY_ENTITY_ID
+from common.utils.time_utils import reset_clock, set_test_clock
 from knoggin_server.knowledge.db.tool_queries import ToolQueries
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -311,7 +312,7 @@ async def test_get_related_entities_applies_topic_and_project_scope():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_get_recent_activity_applies_filters_and_hydrates_rows(monkeypatch):
+async def test_get_recent_activity_applies_filters_and_hydrates_rows():
     client = RecordingPostgresClient(
         execute_read_results=[
             [
@@ -324,14 +325,17 @@ async def test_get_recent_activity_applies_filters_and_hydrates_rows(monkeypatch
         ]
     )
     queries = ToolQueries(client)
-    monkeypatch.setattr("knoggin_server.knowledge.db.tool_queries.time.time", lambda: 1000)
+    set_test_clock(1000)
 
-    result = await queries.get_recent_activity(
-        "Ada",
-        active_topics=["Identity"],
-        hours=2,
-        visible_project_ids=["project-1"],
-    )
+    try:
+        result = await queries.get_recent_activity(
+            "Ada",
+            active_topics=["Identity"],
+            hours=2,
+            visible_project_ids=["project-1"],
+        )
+    finally:
+        reset_clock()
 
     assert result == [
         {

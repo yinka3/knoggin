@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from common.utils.time_utils import parse_iso_time
+from common.utils.time_utils import get_now, parse_iso_time
 
 # ═══════════════════════════════════════════════════════════════════
 #  ENTITY — any discrete concept in the knowledge graph
@@ -128,7 +128,7 @@ class FactRecord(Fact):
     )
     id: str = Field(..., description="Unique fact identifier")
     source_entity_id: int = Field(..., description="DB ID of the source entity")
-    valid_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    valid_at: datetime = Field(default_factory=get_now)
     invalid_at: Optional[datetime] = None
     confidence: float = 1.0
     source: str = "user"
@@ -175,7 +175,7 @@ class Message(BaseModel):
 
     content: str = Field(..., description="The message text")
     id: int = Field(-1, description="DB-assigned message ID")
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=get_now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 

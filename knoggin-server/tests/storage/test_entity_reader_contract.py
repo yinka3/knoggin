@@ -90,7 +90,8 @@ async def test_entity_reader_get_entity_by_id_applies_visible_project_scope():
                     "last_updated": "456.0",
                     "last_profiled_msg_id": 77,
                 }
-            ]
+            ],
+            [{"embedding": VectorLike([0.1, 0.2, 0.3])}],
         ]
     )
     reader = EntityReader(client)
@@ -108,6 +109,7 @@ async def test_entity_reader_get_entity_by_id_applies_visible_project_scope():
         "last_mentioned": 123.0,
         "last_updated": 456.0,
         "last_profiled_msg_id": 77,
+        "embedding": [0.1, 0.2, 0.3],
     }
     params = json.loads(client.calls[0][2][0])
     assert params == {
@@ -116,6 +118,11 @@ async def test_entity_reader_get_entity_by_id_applies_visible_project_scope():
         "visible_project_ids": ["project-1"],
         "identity_entity_id": IDENTITY_ENTITY_ID,
     }
+    assert client.calls[1] == (
+        "execute_read",
+        "SELECT embedding FROM entity_search WHERE entity_id = %s",
+        (2,),
+    )
 
 
 @pytest.mark.storage
