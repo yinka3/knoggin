@@ -49,13 +49,16 @@ class PostgresClient:
 
             # Sync pool initialized in thread to avoid blocking event loop
             def _init_sync():
-                return ConnectionPool(
+                pool = ConnectionPool(
                     conninfo=self.dsn,
                     min_size=self.min_size,
                     max_size=self.max_size,
                     kwargs={"autocommit": False, "row_factory": dict_row},
                     configure=_configure_sync_conn,
+                    open=False,
                 )
+                pool.open()
+                return pool
 
             self.sync_pool = await asyncio.to_thread(_init_sync)
 

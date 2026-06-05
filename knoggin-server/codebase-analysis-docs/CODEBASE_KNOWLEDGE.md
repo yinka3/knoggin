@@ -439,6 +439,20 @@ Hidden dependencies:
 - `TopicConfig.active_topics` filters extracted mentions before resolution.
 - Entity resolution assumes candidates are already hydrated in `EntityManager.entity_profiles`; `get_candidate_ids` drops candidates not in the local cache after vector/fuzzy search.
 
+Entity resolution boundaries:
+
+- The resolver is intentionally conservative. It is designed to avoid false merges even if that means leaving duplicate entities behind for later merge detection.
+- It can reliably resolve exact known aliases/canonical names, high-scoring fuzzy matches, and high-scoring vector matches against already-known entities.
+- It can sometimes boost a borderline candidate when the current message is relevant to that entity's stored facts or when graph neighbors overlap with other entities matched in the same batch.
+- New mentions are only deduplicated within the same batch by exact lowercased mention text. For example, `IBM` and `International Business Machines` can become separate new entities if neither form already resolves to an existing candidate.
+- Alias equivalence, acronyms, nicknames, and renamed entities are mostly handled after the fact by profile refinement plus `MergeDetectionJob`, not by the initial `_resolve_mentions` pass.
+- Sparse common names remain ambiguous by design. The merge prompt explicitly rejects same-name entities such as `Chris` vs `Chris` unless facts confirm identity.
+- Cross-topic or type-confused matches are hard to merge. Cross-topic candidates need high fuzzy similarity and matching type before LLM judgment, and type mismatch is treated as fatal by the merge prompt.
+- Entity extraction may intentionally skip mass-market brands, platforms, and locations when they are only background context or tools, because `extract_entities.j2` includes a ubiquity filter.
+- Relationship extraction is evidence-bound: co-mentions, different events, and session-context-only evidence are rejected. Session context may help pronoun resolution but is not itself evidence for a connection.
+- Long-range identity reasoning is limited. Initial resolution uses the current mention, current batch/message context, existing aliases, embeddings, facts, and graph signals; it does not run a broad historical "who is this really?" reasoning pass.
+- Merge detection also has conservative filters: direct edges, hierarchy edges, shared neighbors, sparse facts, low cosine similarity, and low LLM confidence can all cause possible duplicates to remain separate.
+
 ### 4.8 Graph Writes And Storage
 
 Purpose: safely persist graph mutations and searchable indexes.

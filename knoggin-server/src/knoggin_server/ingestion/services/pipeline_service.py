@@ -483,6 +483,9 @@ class BatchProcessor:
         Signal 3: LLM fact relevance (batched, single call)
         Signal 4: Connection co-occurrence
         """
+        if not candidate_pairs:
+            return {}
+
         results = {}
 
         # Vector Embed Messages and Query Neighbors
@@ -494,14 +497,15 @@ class BatchProcessor:
         unique_msg_ids = list({msg_id for _, _, msg_id in candidate_pairs})
         msg_embeddings = {}
         if unique_msg_ids:
-            texts_to_embed = [
-                msg_text_map[m] for m in unique_msg_ids if m in msg_text_map
-            ]
+            msg_ids_to_embed = [m for m in unique_msg_ids if m in msg_text_map]
+            texts_to_embed = [msg_text_map[m] for m in msg_ids_to_embed]
             if texts_to_embed:
                 embeddings = await self.entities.embedding_service.encode(
                     texts_to_embed
                 )
-                msg_embeddings = {m: emb for m, emb in zip(unique_msg_ids, embeddings)}
+                msg_embeddings = {
+                    m: emb for m, emb in zip(msg_ids_to_embed, embeddings)
+                }
 
         # Signal 3: Fact relevance via LLM (RAG injected)
         llm_pairs = []
@@ -513,9 +517,15 @@ class BatchProcessor:
                 return cid, b_score, m_text, []
 
             # Vector search facts for this specific entity against the message
-            facts = await self.entities.search_relevant_facts(
-                cid, msg_embeddings[m_id], limit=5
-            )
+            try:
+                facts = await self.entities.search_relevant_facts(
+                    cid, msg_embeddings[m_id], limit=5
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Fact search failed for candidate {cid}, using base score: {e}"
+                )
+                facts = []
             return cid, b_score, m_text, facts
 
         tasks = [fetch_candidate_facts(c, b, m) for c, b, m in candidate_pairs]
@@ -523,7 +533,7 @@ class BatchProcessor:
             rag_results = await asyncio.gather(*tasks)
             for cid, b_score, m_text, facts in rag_results:
                 if not facts:
-                    results[cid] = b_score
+                    results[cid] = max(results.get(cid, b_score), b_score)
                     continue
 
                 fact_strs = [f.content for f in facts]
@@ -641,12 +651,14 @@ class BatchProcessor:
             profile = await self.entities.get_profile(ent_id)
             if profile:
                 canonical_name = profile["canonical_name"]
+                mentions = self.entities.get_mentions_for_id(ent_id)
                 valid_entity_names.add(canonical_name.lower())
+                valid_entity_names.update(mention.lower() for mention in mentions)
                 candidates.append(
                     {
                         "canonical_name": canonical_name,
                         "type": profile["type"],
-                        "mentions": self.entities.get_mentions_for_id(ent_id),
+                        "mentions": mentions,
                         "source_msgs": entity_msg_map.get(ent_id, []),
                     }
                 )

@@ -258,6 +258,10 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Optional: restrict search to a specific file by name.",
                     },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max chunks to return (default 5).",
+                    },
                 },
                 "required": ["query"],
             },

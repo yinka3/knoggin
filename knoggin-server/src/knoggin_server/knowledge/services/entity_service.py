@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -7,7 +8,6 @@ from typing import Dict, List, Optional, Tuple
 from cachetools import LRUCache, TTLCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
-from redis import asyncio
 
 from common.schema.primitives import FactRecord
 from common.schema.settings import EntityResolutionSettings
