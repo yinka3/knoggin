@@ -232,6 +232,7 @@ class FakeRedis:
 class FakeGraphClient:
     def __init__(self):
         self.saved_message_logs = []
+        self.recent_project_messages = []
 
     async def get_max_entity_id(self):
         return 0
@@ -239,6 +240,21 @@ class FakeGraphClient:
     async def save_message_logs(self, messages):
         self.saved_message_logs.append(messages)
         return True
+
+    async def get_recent_project_messages(
+        self, user_name, project_id, limit, before_message_id=None
+    ):
+        messages = [
+            message
+            for message in self.recent_project_messages
+            if message.get("user_name", user_name) == user_name
+            and message.get("project_id", project_id) == project_id
+            and (
+                before_message_id is None
+                or int(message.get("id", 0)) <= int(before_message_id)
+            )
+        ]
+        return messages[-limit:]
 
 
 class FakeEmbeddingService:

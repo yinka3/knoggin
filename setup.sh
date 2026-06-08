@@ -17,6 +17,9 @@ POSTGRES_USER=knoggin
 POSTGRES_PASSWORD=${PG_PW}
 POSTGRES_DB=knoggin_db
 DATABASE_URL=postgresql://knoggin:${PG_PW}@postgres:5432/knoggin_db
+KNOGGIN_GPU=false
+KNOGGIN_EMBEDDING_MODEL=dunzhang/stella_en_1.5B_v5
+KNOGGIN_RERANKER_MODEL=BAAI/bge-reranker-large
 EOF
 
 echo "Generated .env with secure passwords"

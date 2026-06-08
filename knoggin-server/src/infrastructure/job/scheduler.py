@@ -23,13 +23,11 @@ class Scheduler:
     def __init__(
         self,
         user_name: str,
-        scope_id: str,
+        project_id: str,
         redis: aioredis.Redis,
-        project_id: Optional[str] = None,
     ):
         self.user_name = user_name
-        self.scope_id = scope_id
-        self.project_id = project_id or scope_id
+        self.project_id = project_id
         self.redis = redis
         self._jobs: Dict[str, BaseJob] = {}
         self._last_runs: Dict[str, datetime] = {}
@@ -41,11 +39,6 @@ class Scheduler:
     def running(self) -> bool:
         return self._is_running
 
-    @property
-    def session_id(self) -> str:
-        """Compatibility alias for legacy callers; prefer scope_id."""
-        return self.scope_id
-
     def register(self, job: BaseJob) -> "Scheduler":
         """Register a job. Returns self for chaining."""
         self._jobs[job.name] = job
@@ -56,7 +49,6 @@ class Scheduler:
         idle_seconds = await self._get_idle_seconds()
         return JobContext(
             user_name=self.user_name,
-            scope_id=self.scope_id,
             project_id=self.project_id,
             idle_seconds=idle_seconds,
         )
@@ -69,7 +61,7 @@ class Scheduler:
 
         self._monitor_task = asyncio.create_task(self._monitor_loop())
         await emit(
-            self.scope_id,
+            self.project_id,
             "job",
             "scheduler_started",
             {"jobs": list(self._jobs.keys())},
@@ -108,21 +100,21 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"Job {job.name} shutdown failed: {e}")
 
-        await emit(self.scope_id, "job", "scheduler_stopped", {})
+        await emit(self.project_id, "job", "scheduler_stopped", {})
 
         logger.info("Scheduler stopped")
 
     async def record_activity(self):
         """Record user activity timestamp. Call on each user message."""
         await self.redis.set(
-            RedisKeys.last_activity(self.user_name, self.scope_id),
+            RedisKeys.project_last_activity(self.user_name, self.project_id),
             get_now_iso(),
         )
 
     async def _get_idle_seconds(self) -> float:
         """Calculate seconds since last user activity."""
         last_activity = await self.redis.get(
-            RedisKeys.last_activity(self.user_name, self.scope_id)
+            RedisKeys.project_last_activity(self.user_name, self.project_id)
         )
         if not last_activity:
             return 0.0
@@ -139,7 +131,7 @@ class Scheduler:
             if not getattr(job, "enabled", True):
                 continue
             pending_key = RedisKeys.job_pending(
-                self.user_name, self.scope_id, job_name
+                self.user_name, self.project_id, job_name
             )
             if await self.redis.get(pending_key):
                 logger.info(f"Found pending work for job: {job_name}")
@@ -185,13 +177,13 @@ class Scheduler:
     async def _execute_job(self, job: BaseJob, ctx: JobContext):
         """Execute a single job with error handling."""
         logger.info(f"Executing job: {job.name}")
-        await emit(ctx.scope_id, "job", "started", {"name": job.name})
+        await emit(ctx.project_id, "job", "started", {"name": job.name})
         try:
             result = await asyncio.wait_for(
                 job.execute(ctx), timeout=self.JOB_EXECUTION_TIMEOUT
             )
             await emit(
-                ctx.scope_id,
+                ctx.project_id,
                 "job",
                 "completed",
                 {
@@ -218,11 +210,11 @@ class Scheduler:
             logger.error(
                 f"Job {job.name} timed out after {self.JOB_EXECUTION_TIMEOUT}s"
             )
-            await emit(ctx.scope_id, "job", "timeout", {"name": job.name})
+            await emit(ctx.project_id, "job", "timeout", {"name": job.name})
 
         except Exception as e:
             await emit(
-                ctx.scope_id, "job", "failed", {"name": job.name, "error": str(e)}
+                ctx.project_id, "job", "failed", {"name": job.name, "error": str(e)}
             )
             logger.error(f"Job {job.name} execution failed: {e}")
 

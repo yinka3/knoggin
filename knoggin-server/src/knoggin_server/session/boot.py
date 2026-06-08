@@ -81,7 +81,7 @@ class SessionAssembler:
 
         # Initialize Batch Processor
         processor = self._init_batch_processor(
-            session_id,
+            project_state.project_id,
             project_state.entities,
             project_state.pipeline,
             project_state.topic_config,
@@ -142,14 +142,14 @@ class SessionAssembler:
 
     def _init_batch_processor(
         self,
-        session_id: str,
+        project_id: str,
         entities: EntityManager,
         pipeline: TextProcessor,
         topic_config: TopicConfig,
     ) -> BatchProcessor:
         er_cfg = self.dev_settings.entity_resolution
         return BatchProcessor(
-            scope_id=session_id,
+            project_id=project_id,
             redis_client=self.resources.redis,
             llm=self.resources.llm_service,
             entities=entities,
@@ -159,6 +159,9 @@ class SessionAssembler:
             topic_config=topic_config,
             get_next_ent_id=None,
             resolution_threshold=er_cfg.resolution_threshold,
+            common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
+            context_support_epsilon=er_cfg.context_support_epsilon,
+            sparse_context_verbs=er_cfg.sparse_context_verbs,
         )
 
     def _init_batch_consumer(

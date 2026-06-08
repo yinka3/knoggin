@@ -9,7 +9,7 @@ from loguru import logger
 from common.conf.topics_config import TopicConfig
 from common.schema.contracts import TopicConfigResult
 from common.utils.events import emit
-from common.utils.json_utils import safe_json_loads
+from infrastructure.graph_client import GraphClient
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
@@ -29,12 +29,14 @@ class TopicConfigJob(BaseJob):
         topic_config: TopicConfig,
         update_callback: Callable[[dict], Awaitable[None]],
         redis_client: aioredis.Redis,
+        graph_client: GraphClient,
         interval_msgs: int = 40,
         conversation_window: int = 50,
     ):
         self.llm = llm
         self.topic_config = topic_config
         self.redis = redis_client
+        self.graph_client = graph_client
         self.update_callback = update_callback
         self.interval_msgs = interval_msgs
         self.conversation_window = conversation_window
@@ -56,44 +58,37 @@ class TopicConfigJob(BaseJob):
         return {name: cls._topic_to_dict(cfg) for name, cfg in config.items()}
 
     async def should_run(self, ctx: JobContext) -> bool:
-        count_key = RedisKeys.heartbeat_counter(ctx.user_name, ctx.scope_id)
+        count_key = RedisKeys.project_heartbeat_counter(ctx.user_name, ctx.project_id)
         count = await self.redis.get(count_key)
         if int(count or 0) < self.interval_msgs:
             return False
 
-        buffer_key = RedisKeys.buffer(ctx.user_name, ctx.scope_id)
-        buffer_len = await self.redis.llen(buffer_key)
-        if buffer_len > 0:
-            return False
+        session_ids = await self.redis.smembers(
+            RedisKeys.project_sessions(ctx.user_name, ctx.project_id)
+        )
+        for session_id in session_ids:
+            buffer_key = RedisKeys.buffer(ctx.user_name, session_id)
+            if await self.redis.llen(buffer_key) > 0:
+                return False
 
         return True
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        count_key = RedisKeys.heartbeat_counter(ctx.user_name, ctx.scope_id)
+        count_key = RedisKeys.project_heartbeat_counter(ctx.user_name, ctx.project_id)
 
-        sorted_key = RedisKeys.recent_conversation(ctx.user_name, ctx.scope_id)
-        conv_key = RedisKeys.conversation(ctx.user_name, ctx.scope_id)
-
-        turn_ids = await self.redis.zrevrange(
-            sorted_key, 0, self.conversation_window - 1
+        messages = await self.graph_client.get_recent_project_messages(
+            ctx.user_name,
+            ctx.project_id,
+            self.conversation_window,
         )
-        if not turn_ids:
+        if not messages:
             await self.redis.set(count_key, 0)
             return JobResult(success=True, summary="No conversation to evaluate")
 
-        turn_ids = list(reversed(turn_ids))
-        turn_data = await self.redis.hmget(conv_key, *turn_ids)
-
         lines = []
-        for turn_id, raw in zip(turn_ids, turn_data):
-            if not raw:
-                continue
-            parsed = safe_json_loads(raw)
-            if not parsed or not isinstance(parsed, dict):
-                logger.warning(f"Corrupt turn data for {turn_id}, skipping")
-                continue
-            role = "USER" if parsed.get("role") == "user" else "AGENT"
-            lines.append(f"[{role}]: {parsed.get('content', '')}")
+        for msg in messages:
+            role = "USER" if msg.get("role") == "user" else "AGENT"
+            lines.append(f"[{role}]: {msg.get('content', '')}")
 
         conversation_text = "\n".join(lines)
 
@@ -112,7 +107,7 @@ class TopicConfigJob(BaseJob):
         system = get_topic_evolution_prompt(ctx.user_name)
 
         await emit(
-            ctx.scope_id,
+            ctx.project_id,
             "job",
             "llm_call",
             {"stage": "topic_evolution", "prompt": user_content},
@@ -172,7 +167,7 @@ class TopicConfigJob(BaseJob):
 
         logger.info(f"[HEARTBEAT] {summary}")
         await emit(
-            ctx.scope_id,
+            ctx.project_id,
             "job",
             "topic_config_evolved",
             {

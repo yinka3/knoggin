@@ -323,7 +323,9 @@ async def execute_graph_mutation_plan(
             dirty_key, *[str(entity_id) for entity_id in plan.dirty_entity_ids]
         )
         await redis_client.delete(
-            RedisKeys.profile_complete(plan.scope.user_name, plan.scope.project_id)
+            RedisKeys.project_profile_complete(
+                plan.scope.user_name, plan.scope.project_id
+            )
         )
         dirty_count = len(plan.dirty_entity_ids)
 

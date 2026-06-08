@@ -28,17 +28,12 @@ class RecordingConfigManager:
 class RecordingScheduler:
     instances = []
 
-    def __init__(self, user_name, scope_id, redis, project_id=None):
+    def __init__(self, user_name, project_id, redis):
         self.user_name = user_name
-        self.scope_id = scope_id
+        self.project_id = project_id
         self.redis = redis
-        self.project_id = project_id or scope_id
         self._jobs = {}
         self.__class__.instances.append(self)
-
-    @property
-    def session_id(self):
-        return self.scope_id
 
     @property
     def running(self):
@@ -153,7 +148,9 @@ async def test_project_topic_config_is_seeded_from_session_topics_when_missing()
         {"DeepWork": TopicSchema(active=True, labels=["practice"])},
     )
 
-    raw = await resources.redis.hget(RedisKeys.session_config("ada"), "project-1")
+    raw = await resources.redis.hget(
+        RedisKeys.project_topic_config("ada"), "project-1"
+    )
     assert json.loads(raw) == {
         "DeepWork": {
             "active": True,
@@ -171,7 +168,7 @@ async def test_project_topic_config_seed_does_not_overwrite_existing_config():
     resources = FakeResources()
     manager = ProjectManager(resources=resources, user_name="ada")
     await resources.redis.hset(
-        RedisKeys.session_config("ada"),
+        RedisKeys.project_topic_config("ada"),
         "project-1",
         json.dumps({"Existing": {"active": True}}),
     )
@@ -181,7 +178,9 @@ async def test_project_topic_config_seed_does_not_overwrite_existing_config():
         {"New": TopicSchema(active=True)},
     )
 
-    raw = await resources.redis.hget(RedisKeys.session_config("ada"), "project-1")
+    raw = await resources.redis.hget(
+        RedisKeys.project_topic_config("ada"), "project-1"
+    )
     assert json.loads(raw) == {"Existing": {"active": True}}
 
 
@@ -266,7 +265,6 @@ async def test_get_or_start_project_caches_state_and_registers_project_jobs(
     assert project_state.readable_project_ids == [GLOBAL_PROJECT_SCOPE, "project-1"]
 
     scheduler = RecordingScheduler.instances[0]
-    assert scheduler.scope_id == "project-1"
     assert scheduler.project_id == "project-1"
     assert project_state.scheduler is scheduler
     assert list(scheduler._jobs) == [
@@ -283,11 +281,12 @@ async def test_get_or_start_project_caches_state_and_registers_project_jobs(
         GLOBAL_PROJECT_SCOPE,
         "project-1",
     ]
-    assert RecordingBatchProcessor.instances[0].kwargs["scope_id"] == "project-1"
+    assert RecordingBatchProcessor.instances[0].kwargs["project_id"] == "project-1"
     assert len(config_manager.subscriptions) == 9
 
     dlq_job = scheduler._jobs["dlq_auto_replay"]
     batch_result = BatchResult()
+    batch_result.set_scope("ada", "session-1", "project-1")
     assert await dlq_job.kwargs["write_to_graph"](batch_result) == (True, None)
     assert graph_write_calls == [
         (
@@ -295,7 +294,7 @@ async def test_get_or_start_project_caches_state_and_registers_project_jobs(
             {
                 "graph_client": resources.graph_client,
                 "entities": project_state.entities,
-                "session_id": "project-1",
+                "session_id": "session-1",
                 "project_id": "project-1",
                 "user_name": "ada",
                 "redis_client": resources.redis,
@@ -306,14 +305,14 @@ async def test_get_or_start_project_caches_state_and_registers_project_jobs(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_project_scheduler_context_uses_project_scope_id():
+async def test_project_scheduler_context_uses_project_id():
     redis = FakeResources().redis
-    scheduler = Scheduler("ada", "project-1", redis, project_id="project-1")
+    scheduler = Scheduler("ada", "project-1", redis)
 
     ctx = await scheduler._build_context()
 
-    assert scheduler.scope_id == "project-1"
-    assert scheduler.session_id == "project-1"
-    assert ctx.scope_id == "project-1"
-    assert ctx.session_id == "project-1"
+    assert scheduler.project_id == "project-1"
     assert ctx.project_id == "project-1"
+    assert not hasattr(scheduler, "session_id")
+    assert not hasattr(ctx, "session_id")
+    assert not hasattr(ctx, "scope_id")

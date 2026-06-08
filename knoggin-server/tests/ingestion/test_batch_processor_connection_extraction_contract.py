@@ -95,6 +95,7 @@ async def extract(
         entity_msg_map=entity_msg_map,
         messages=MESSAGES,
         session_text="[USER]: prior context",
+        session_id="session-1",
         trace=trace,
         issues=issues,
     )

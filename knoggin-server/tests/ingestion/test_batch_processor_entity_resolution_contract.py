@@ -4,7 +4,10 @@ import pytest
 
 from common.schema.contracts import BulkRelevanceResult, RelevanceResult
 from common.schema.primitives import FactRecord
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.pipeline_service import (
+    BOOST_LLM_BATCH_SIZE,
+    BatchProcessor,
+)
 from knoggin_server.knowledge.services.entity_service import EntityManager
 from tests.fixtures.factories import make_topic_config
 
@@ -139,7 +142,7 @@ def make_harness():
         return next(next_ids)
 
     processor = BatchProcessor(
-        scope_id="session-1",
+        project_id="project-1",
         redis_client=None,
         llm=FakeLLM(),
         entities=entities,
@@ -346,8 +349,8 @@ async def test_boost_candidates_fact_and_neighbor_boosts_combine():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_duplicate_candidate_rows_keep_max_score():
-    processor, _, _, _ = make_harness()
-    reversed_processor, _, _, _ = make_harness()
+    processor, _, graph, _ = make_harness()
+    reversed_processor, _, reversed_graph, _ = make_harness()
 
     scores = await processor._boost_candidates(
         [(101, 0.7, 1), (101, 0.9, 2)],
@@ -368,6 +371,8 @@ async def test_boost_candidates_duplicate_candidate_rows_keep_max_score():
 
     assert scores == {101: pytest.approx(0.9)}
     assert reversed_scores == {101: pytest.approx(0.9)}
+    assert graph.neighbor_calls == [[101]]
+    assert reversed_graph.neighbor_calls == [[101]]
 
 
 @pytest.mark.ingestion
@@ -406,6 +411,59 @@ async def test_boost_candidates_fact_search_failure_falls_back_to_base_score():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_boost_candidates_batches_large_fact_relevance_requests():
+    processor, _, graph, _ = make_harness()
+    processor.llm = FakeLLM(relevance=[True] * BOOST_LLM_BATCH_SIZE)
+    candidate_pairs = [
+        (1000 + index, 0.8, 1) for index in range(BOOST_LLM_BATCH_SIZE + 1)
+    ]
+    for candidate_id, _, _ in candidate_pairs:
+        graph.relevant_facts_by_entity[candidate_id] = [
+            make_fact(candidate_id, f"Candidate {candidate_id} is relevant.")
+        ]
+
+    scores = await processor._boost_candidates(
+        candidate_pairs,
+        {1: "The message is related to every candidate fact."},
+        batch_matched_ids=set(),
+    )
+
+    assert len(processor.llm.calls) == 2
+    assert len(graph.fact_searches) == BOOST_LLM_BATCH_SIZE + 1
+    assert scores == {
+        candidate_id: pytest.approx(0.85)
+        for candidate_id, _, _ in candidate_pairs
+    }
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_boost_candidates_embeds_each_unique_message_once():
+    processor, _, _, embedding = make_harness()
+
+    scores = await processor._boost_candidates(
+        [(101, 0.8, 1), (202, 0.7, 1), (303, 0.6, 2)],
+        {
+            1: "Shared message text.",
+            2: "Different message text.",
+        },
+        batch_matched_ids=set(),
+    )
+
+    assert scores == {
+        101: pytest.approx(0.8),
+        202: pytest.approx(0.7),
+        303: pytest.approx(0.6),
+    }
+    assert len(embedding.batch_calls) == 1
+    assert set(embedding.batch_calls[0]) == {
+        "Shared message text.",
+        "Different message text.",
+    }
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_resolve_mentions_registers_new_entities_when_no_candidates():
     processor, entities, _, _ = make_harness()
 
@@ -415,6 +473,7 @@ async def test_resolve_mentions_registers_new_entities_when_no_candidates():
             (1, "Knoggin", "project", "General"),
         ],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [1001, 1002]
@@ -439,12 +498,34 @@ async def test_resolve_mentions_reuses_exact_known_alias_candidate():
     result = await processor._resolve_mentions(
         [(1, "Bob", "person", "Identity")],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [102]
     assert result.new_ids == set()
     assert result.alias_ids == set()
     assert result.entity_msg_map == {102: [1]}
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_resolve_mentions_reused_entity_preserves_multiple_source_messages():
+    processor, entities, _, _ = make_harness()
+    await seed_entity(entities, 102, "Alice")
+
+    result = await processor._resolve_mentions(
+        [
+            (1, "Alice", "person", "Identity"),
+            (2, "Alice", "person", "Identity"),
+        ],
+        MESSAGES,
+        "session-1",
+    )
+
+    assert result.entity_ids == [102]
+    assert result.new_ids == set()
+    assert result.alias_ids == set()
+    assert result.entity_msg_map == {102: [1, 2]}
 
 
 @pytest.mark.ingestion
@@ -456,6 +537,7 @@ async def test_resolve_mentions_reuses_high_confidence_fuzzy_candidate():
     result = await processor._resolve_mentions(
         [(1, "Robert Chn", "person", "Identity")],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [102]
@@ -473,11 +555,13 @@ async def test_resolve_mentions_uses_vector_candidate_when_cache_name_does_not_m
     result = await processor._resolve_mentions(
         [(2, "project planning app", "tool", "General")],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [202]
     assert result.new_ids == set()
     assert result.entity_msg_map == {202: [2]}
+    assert graph.vector_searches[-1]["visible_project_ids"] == ["project-1"]
 
 
 @pytest.mark.ingestion
@@ -490,6 +574,7 @@ async def test_resolve_mentions_creates_new_entity_when_candidate_below_threshol
     result = await processor._resolve_mentions(
         [(2, "work tracker", "tool", "General")],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [1001]
@@ -509,6 +594,7 @@ async def test_resolve_mentions_deduplicates_repeated_new_name_within_batch():
             (2, "alice", "person", "Identity"),
         ],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [1001]
@@ -530,6 +616,7 @@ async def test_resolve_mentions_embeds_unique_nonblank_names_only():
             (2, "Linear", "tool", "General"),
         ],
         MESSAGES,
+        "session-1",
     )
 
     assert len(embedding.batch_calls) == 1
@@ -546,6 +633,7 @@ async def test_resolve_mentions_records_alias_updates_for_existing_match():
     result = await processor._resolve_mentions(
         [(1, "Bobby", "person", "Identity")],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [102]
@@ -570,6 +658,7 @@ async def test_resolve_mentions_graph_neighbor_boost_can_cross_threshold():
             (1, "memory graph project", "project", "General"),
         ],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [401, 301]
@@ -591,11 +680,45 @@ async def test_resolve_mentions_fact_relevance_boost_crosses_threshold_with_fake
     result = await processor._resolve_mentions(
         [(2, "workspace notes tool", "tool", "General")],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == [501]
     assert result.new_ids == set()
     assert result.entity_msg_map == {501: [2]}
+    assert len(processor.llm.calls) == 1
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_resolve_mentions_irrelevant_facts_keep_weak_ambiguous_match_separate():
+    processor, entities, graph, embedding = make_harness()
+    processor.llm = FakeLLM(relevance=False)
+    await seed_entity(entities, 601, "OpenAI Alice")
+    graph.vector_results[vector_for(embedding, "Design Alice")] = [(601, 0.83)]
+    graph.relevant_facts_by_entity[601] = [
+        make_fact(601, "OpenAI Alice works on research partnerships.")
+    ]
+    messages = [
+        {
+            "id": 3,
+            "message": "Design Alice finalized the onboarding mockups.",
+            "timestamp": "2026-01-01T00:02:00+00:00",
+            "role": "user",
+        }
+    ]
+
+    result = await processor._resolve_mentions(
+        [(3, "Design Alice", "person", "Identity")],
+        messages,
+        "session-1",
+    )
+
+    assert result.entity_ids == [1001]
+    assert result.new_ids == {1001}
+    assert result.alias_ids == set()
+    assert result.entity_msg_map == {1001: [3]}
+    assert (await entities.get_profile(601))["canonical_name"] == "OpenAI Alice"
     assert len(processor.llm.calls) == 1
 
 
@@ -608,6 +731,7 @@ async def test_resolve_mentions_registration_failure_skips_entity_without_crashi
     result = await processor._resolve_mentions(
         [(1, "Alice", "person", "Identity")],
         MESSAGES,
+        "session-1",
     )
 
     assert result.entity_ids == []
@@ -633,8 +757,12 @@ async def test_resolve_mentions_serializes_resolution_with_entity_lock():
     entities.register_entity = slow_register
 
     first, second = await asyncio.gather(
-        processor._resolve_mentions([(1, "Alice", "person", "Identity")], MESSAGES),
-        processor._resolve_mentions([(2, "Bob", "person", "Identity")], MESSAGES),
+        processor._resolve_mentions(
+            [(1, "Alice", "person", "Identity")], MESSAGES, "session-1"
+        ),
+        processor._resolve_mentions(
+            [(2, "Bob", "person", "Identity")], MESSAGES, "session-1"
+        ),
     )
 
     assert first.entity_ids == [1001]

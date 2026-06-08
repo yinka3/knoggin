@@ -255,15 +255,9 @@ class SessionManager:
             )
             temp_rag.cleanup_session()
 
-        job_names = ["cleaner", "profile", "merger", "dlq", "archival"]
-        for job in job_names:
-            direct_keys.append(RedisKeys.job_last_run(job, user, session_id))
-            direct_keys.append(RedisKeys.job_pending(user, session_id, job))
-
         if direct_keys:
             deleted += await redis.delete(*direct_keys)
 
-        await redis.hdel(RedisKeys.session_config(user), session_id)
         await redis.hdel(RedisKeys.sessions(user), session_id)
         if project_id:
             await self.project_manager.remove_session(project_id, session_id)

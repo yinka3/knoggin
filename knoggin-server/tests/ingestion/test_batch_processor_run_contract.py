@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from common.schema.contracts import (
@@ -8,9 +10,11 @@ from common.schema.contracts import (
     ValidationIssue,
 )
 from common.schema.primitives import ConnectionRecord
+from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
 from knoggin_server.knowledge.services.entity_service import EntityManager
 from tests.fixtures.factories import make_topic_config
+from tests.fixtures.fakes import FakeRedis
 from tests.ingestion.test_batch_processor_entity_resolution_contract import (
     FakeEmbeddingService,
     FakeGraphClient,
@@ -48,7 +52,7 @@ class FakeEntities:
 
 def make_processor():
     return BatchProcessor(
-        scope_id="session-1",
+        project_id="project-1",
         redis_client=None,
         llm=None,
         entities=FakeEntities(),
@@ -58,6 +62,26 @@ def make_processor():
         topic_config=make_topic_config(),
         get_next_ent_id=lambda: 999,
     )
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_processor_dlq_uses_project_key_and_real_session_id():
+    redis = FakeRedis()
+    processor = make_processor()
+    processor.redis = redis
+
+    success = await processor.move_to_dead_letter(
+        [{"id": 1, "message": "hello"}],
+        "TimeoutError",
+        session_id="session-1",
+    )
+
+    assert success is True
+    raw = await redis.lrange(RedisKeys.dlq("ada", "project-1"), 0, -1)
+    entry = json.loads(raw[0])
+    assert entry["session_id"] == "session-1"
+    assert entry["project_id"] == "project-1"
 
 
 def fake_resolution_result():
@@ -137,7 +161,7 @@ def make_processor_with_real_resolution():
         return next(next_ids)
 
     processor = BatchProcessor(
-        scope_id="session-1",
+        project_id="project-1",
         redis_client=None,
         llm=FakeLLM(),
         entities=entities,
@@ -158,11 +182,17 @@ async def test_batch_processor_run_happy_path_builds_graph_write_result():
     async def extract_mentions(messages, session_id, trace, issues):
         return list(FAKE_MENTIONS)
 
-    async def resolve_mentions(mentions, messages):
+    async def resolve_mentions(mentions, messages, session_id):
         return fake_resolution_result()
 
     async def extract_connections(
-        entity_ids, entity_msg_map, messages, session_text, trace=None, issues=None
+        entity_ids,
+        entity_msg_map,
+        messages,
+        session_text,
+        session_id,
+        trace=None,
+        issues=None,
     ):
         return fake_relationships(), fake_user_relationships()
 
@@ -170,7 +200,9 @@ async def test_batch_processor_run_happy_path_builds_graph_write_result():
     processor._resolve_mentions = resolve_mentions
     processor._extract_connections = extract_connections
 
-    result = await processor.run(FAKE_MESSAGES, session_text="[USER]: prior context")
+    result = await processor.run(
+        FAKE_MESSAGES, session_text="[USER]: prior context", session_id="session-1"
+    )
 
     assert result.success is True
     assert result.error is None
@@ -210,7 +242,13 @@ async def test_batch_processor_run_with_real_resolution_builds_graph_write_resul
         return list(FAKE_MENTIONS)
 
     async def extract_connections(
-        entity_ids, entity_msg_map, messages, session_text, trace=None, issues=None
+        entity_ids,
+        entity_msg_map,
+        messages,
+        session_text,
+        session_id,
+        trace=None,
+        issues=None,
     ):
         seen_entity_msg_map.update(entity_msg_map)
         return fake_relationships(), fake_user_relationships()
@@ -218,7 +256,9 @@ async def test_batch_processor_run_with_real_resolution_builds_graph_write_resul
     processor._extract_mentions = extract_mentions
     processor._extract_connections = extract_connections
 
-    result = await processor.run(FAKE_MESSAGES, session_text="[USER]: prior context")
+    result = await processor.run(
+        FAKE_MESSAGES, session_text="[USER]: prior context", session_id="session-1"
+    )
 
     assert result.success is True
     assert result.error is None
@@ -253,7 +293,7 @@ async def test_batch_processor_run_empty_batch_marks_work_unit_skipped():
     processor._resolve_mentions = fail_if_called
     processor._extract_connections = fail_if_called
 
-    result = await processor.run([], session_text="")
+    result = await processor.run([], session_text="", session_id="session-1")
 
     assert result.success is True
     assert result.entity_ids == []
@@ -277,7 +317,9 @@ async def test_batch_processor_run_no_mentions_skips_resolution():
     processor._resolve_mentions = fail_if_called
     processor._extract_connections = fail_if_called
 
-    result = await processor.run(FAKE_MESSAGES, session_text="")
+    result = await processor.run(
+        FAKE_MESSAGES, session_text="", session_id="session-1"
+    )
 
     assert result.success is True
     assert result.entity_ids == []
@@ -302,7 +344,7 @@ async def test_batch_processor_run_filters_blank_mentions_before_resolution():
             (1, "Alice", "person", "Identity"),
         ]
 
-    async def resolve_mentions(mentions, messages):
+    async def resolve_mentions(mentions, messages, session_id):
         seen_mentions.extend(mentions)
         return ResolutionResult(
             entity_ids=[101],
@@ -313,7 +355,13 @@ async def test_batch_processor_run_filters_blank_mentions_before_resolution():
         )
 
     async def extract_connections(
-        entity_ids, entity_msg_map, messages, session_text, trace=None, issues=None
+        entity_ids,
+        entity_msg_map,
+        messages,
+        session_text,
+        session_id,
+        trace=None,
+        issues=None,
     ):
         return [], []
 
@@ -321,7 +369,9 @@ async def test_batch_processor_run_filters_blank_mentions_before_resolution():
     processor._resolve_mentions = resolve_mentions
     processor._extract_connections = extract_connections
 
-    result = await processor.run(FAKE_MESSAGES[:1], session_text="")
+    result = await processor.run(
+        FAKE_MESSAGES[:1], session_text="", session_id="session-1"
+    )
 
     assert result.success is True
     assert seen_mentions == [(1, "Alice", "person", "Identity")]
@@ -336,11 +386,17 @@ async def test_batch_processor_run_marks_failed_when_connections_fail():
     async def extract_mentions(messages, session_id, trace, issues):
         return list(FAKE_MENTIONS)
 
-    async def resolve_mentions(mentions, messages):
+    async def resolve_mentions(mentions, messages, session_id):
         return fake_resolution_result()
 
     async def extract_connections(
-        entity_ids, entity_msg_map, messages, session_text, trace=None, issues=None
+        entity_ids,
+        entity_msg_map,
+        messages,
+        session_text,
+        session_id,
+        trace=None,
+        issues=None,
     ):
         return None, None
 
@@ -348,7 +404,9 @@ async def test_batch_processor_run_marks_failed_when_connections_fail():
     processor._resolve_mentions = resolve_mentions
     processor._extract_connections = extract_connections
 
-    result = await processor.run(FAKE_MESSAGES, session_text="")
+    result = await processor.run(
+        FAKE_MESSAGES, session_text="", session_id="session-1"
+    )
 
     assert result.success is False
     assert result.error == "Connection extraction failed (VP-03)"
@@ -371,7 +429,9 @@ async def test_batch_processor_run_marks_failed_when_extraction_raises():
     processor._resolve_mentions = fail_if_called
     processor._extract_connections = fail_if_called
 
-    result = await processor.run(FAKE_MESSAGES, session_text="")
+    result = await processor.run(
+        FAKE_MESSAGES, session_text="", session_id="session-1"
+    )
 
     assert result.success is False
     assert "mention boom" in result.error
@@ -403,7 +463,9 @@ async def test_batch_processor_run_attaches_validation_issues_to_work_unit():
     processor._resolve_mentions = fail_if_called
     processor._extract_connections = fail_if_called
 
-    result = await processor.run(FAKE_MESSAGES, session_text="")
+    result = await processor.run(
+        FAKE_MESSAGES, session_text="", session_id="session-1"
+    )
 
     assert len(result.issues) == 1
     assert result.work_unit.issues == result.issues
@@ -426,7 +488,7 @@ async def test_batch_processor_run_preserves_trace_fields():
         trace.llm_mentions_accepted = 2
         return list(FAKE_MENTIONS[:2])
 
-    async def resolve_mentions(mentions, messages):
+    async def resolve_mentions(mentions, messages, session_id):
         return ResolutionResult(
             entity_ids=[101, 102],
             new_ids={101, 102},
@@ -436,7 +498,13 @@ async def test_batch_processor_run_preserves_trace_fields():
         )
 
     async def extract_connections(
-        entity_ids, entity_msg_map, messages, session_text, trace=None, issues=None
+        entity_ids,
+        entity_msg_map,
+        messages,
+        session_text,
+        session_id,
+        trace=None,
+        issues=None,
     ):
         trace.relationship_model = "fake-relationship-model"
         trace.relationship_prompt = "VEGAPUNK-02"
@@ -448,7 +516,9 @@ async def test_batch_processor_run_preserves_trace_fields():
     processor._resolve_mentions = resolve_mentions
     processor._extract_connections = extract_connections
 
-    result = await processor.run(FAKE_MESSAGES, session_text="")
+    result = await processor.run(
+        FAKE_MESSAGES, session_text="", session_id="session-1"
+    )
 
     assert result.success is True
     assert result.trace.entity_model == "fake-ner-model"

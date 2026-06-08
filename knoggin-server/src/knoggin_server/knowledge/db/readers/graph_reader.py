@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from loguru import logger
 
@@ -109,6 +109,69 @@ class GraphReader:
             ]
         except Exception as e:
             logger.error(f"Failed to fetch messages by ids: {e}")
+            return []
+
+    async def get_recent_project_messages(
+        self,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        before_message_id: Optional[int] = None,
+    ) -> List[Dict]:
+        if not user_name or not project_id:
+            logger.warning("Refusing unsafe project message lookup without user/project scope")
+            return []
+        if limit <= 0:
+            return []
+
+        params = {
+            "user_name": user_name,
+            "project_id": project_id,
+            "limit": limit,
+            "before_message_id": before_message_id,
+        }
+        before_clause = (
+            "AND m.id <= $before_message_id"
+            if before_message_id is not None
+            else ""
+        )
+        cypher = f"""
+        MATCH (m:Message)
+        WHERE m.user_name = $user_name
+        AND m.project_id = $project_id
+        {before_clause}
+        RETURN m.id, m.user_name, m.session_id, m.role, m.content, m.timestamp
+        ORDER BY m.id DESC
+        LIMIT $limit
+        """
+        query = self.client.build_cypher(
+            cypher,
+            "id agtype, user_name agtype, session_id agtype, role agtype, content agtype, timestamp agtype",
+        )
+        try:
+            rows = await self.client.execute_read(query, (json.dumps(params),))
+
+            def parse(row):
+                return {
+                    "id": int(row["id"]),
+                    "user_name": row["user_name"].strip('"')
+                    if isinstance(row["user_name"], str)
+                    else row["user_name"],
+                    "session_id": row["session_id"].strip('"')
+                    if isinstance(row["session_id"], str)
+                    else row["session_id"],
+                    "role": row["role"].strip('"')
+                    if isinstance(row["role"], str)
+                    else row["role"],
+                    "content": row["content"].strip('"')
+                    if isinstance(row["content"], str)
+                    else row["content"],
+                    "timestamp": row["timestamp"],
+                }
+
+            return [parse(row) for row in reversed(rows)]
+        except Exception as e:
+            logger.error(f"Failed to fetch recent project messages: {e}")
             return []
 
     async def get_surrounding_messages(

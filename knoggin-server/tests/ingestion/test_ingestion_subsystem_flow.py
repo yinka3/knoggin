@@ -283,7 +283,7 @@ async def make_harness(
         return next(next_ids)
 
     batch_processor = BatchProcessor(
-        scope_id="session-1",
+        project_id="project-1",
         redis_client=redis,
         llm=llm,
         entities=entities,
@@ -388,6 +388,7 @@ async def test_ingestion_subsystem_no_mentions_saves_logs_and_skips_graph_write(
     assert write_to_graph.calls == []
     assert await redis.get(consumer._checkpoint_key) == "1"
     assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "1"
+    assert await redis.get(RedisKeys.project_last_processed("ada", "project-1")) == "1"
 
 
 @pytest.mark.ingestion

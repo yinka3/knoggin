@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import redis.asyncio as aioredis
 from loguru import logger
+from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
 from common.schema.contracts import (
@@ -23,6 +25,7 @@ from common.schema.contracts import (
     ValidationIssue,
 )
 from common.schema.primitives import ConnectionRecord
+from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
 from common.utils.time_utils import get_now_unix
@@ -50,7 +53,7 @@ BOOST_LLM_BATCH_SIZE = 15
 class BatchProcessor:
     def __init__(
         self,
-        scope_id: str,
+        project_id: str,
         redis_client: aioredis.Redis,
         llm: LLMService,
         entities: EntityManager,
@@ -59,11 +62,16 @@ class BatchProcessor:
         user_name: str,
         topic_config: TopicConfig,
         get_next_ent_id,
-        resolution_threshold: float = 0.85,
+        resolution_threshold: Optional[float] = None,
+        common_word_frequency_threshold: Optional[float] = None,
+        context_support_epsilon: Optional[float] = None,
+        sparse_context_verbs: Optional[List[str]] = None,
         connection_prompt: str = None,
         graph_client=None,
     ):
-        self.scope_id = scope_id
+        if not project_id:
+            raise ValueError("BatchProcessor requires project_id")
+        self.project_id = project_id
         self.graph_client = graph_client
         self.redis = redis_client
         self.llm = llm
@@ -73,13 +81,32 @@ class BatchProcessor:
         self.user_name = user_name
         self.topic_config = topic_config
         self._get_next_ent_id = get_next_ent_id
-        self.resolution_threshold = resolution_threshold
+        er_defaults = EntityResolutionSettings()
+        self.resolution_threshold = (
+            er_defaults.resolution_threshold
+            if resolution_threshold is None
+            else resolution_threshold
+        )
+        self.common_word_frequency_threshold = (
+            er_defaults.common_word_frequency_threshold
+            if common_word_frequency_threshold is None
+            else common_word_frequency_threshold
+        )
+        self.context_support_epsilon = (
+            er_defaults.context_support_epsilon
+            if context_support_epsilon is None
+            else context_support_epsilon
+        )
+        self.sparse_context_verbs = {
+            verb.strip().lower()
+            for verb in (
+                er_defaults.sparse_context_verbs
+                if sparse_context_verbs is None
+                else sparse_context_verbs
+            )
+            if verb and verb.strip()
+        }
         self.connection_prompt = connection_prompt
-
-    @property
-    def session_id(self) -> str:
-        """Compatibility alias for legacy payloads; prefer scope_id internally."""
-        return self.scope_id
 
     @property
     def get_next_ent_id(self):
@@ -91,19 +118,47 @@ class BatchProcessor:
     def get_next_ent_id(self, fn):
         self._get_next_ent_id = fn
 
-    async def run(self, messages: List[Dict], session_text: str) -> BatchResult:
+    def refresh_topic_mappings(self) -> None:
+        if hasattr(self.processor, "refresh_topic_mappings"):
+            self.processor.refresh_topic_mappings()
+
+    def update_settings(self, config) -> None:
+        if isinstance(config, EntityResolutionSettings):
+            self.resolution_threshold = config.resolution_threshold
+            self.common_word_frequency_threshold = (
+                config.common_word_frequency_threshold
+            )
+            self.context_support_epsilon = config.context_support_epsilon
+            self.sparse_context_verbs = {
+                verb.strip().lower()
+                for verb in config.sparse_context_verbs
+                if verb and verb.strip()
+            }
+            return
+
+        if hasattr(self.processor, "update_settings"):
+            self.processor.update_settings(config)
+
+    async def run(
+        self, messages: List[Dict], session_text: str, *, session_id: str
+    ) -> BatchResult:
         """
-        Process a batch of messages. Returns BatchResult with entity IDs and connections.
+        Process a batch of messages.
+
+        Returns BatchResult with entity IDs and connections.
         Caller responsible for lock acquisition and publishing results.
         """
+        if not session_id:
+            raise ValueError("BatchProcessor.run requires session_id")
+
         with logger.contextualize(
-            user=self.user_name, session=self.scope_id, component="BatchProcessor"
+            user=self.user_name, session=session_id, component="BatchProcessor"
         ):
             result = BatchResult()
             result.set_scope(
                 self.user_name,
-                self.scope_id,
-                getattr(self.entities, "project_id", None),
+                session_id,
+                self.project_id,
             )
             if result.scope:
                 result.work_unit = EngineWorkUnit.for_message_batch(
@@ -120,11 +175,12 @@ class BatchProcessor:
             result.trace.message_ids = [m["id"] for m in messages]
 
             logger.debug(
-                f"Processing batch of {len(messages)} messages: {[m['id'] for m in messages]}"
+                f"Processing batch of {len(messages)} messages: "
+                f"{[m['id'] for m in messages]}"
             )
 
             await emit(
-                self.scope_id,
+                session_id,
                 "pipeline",
                 "batch_start",
                 {"size": len(messages), "msg_ids": [m["id"] for m in messages]},
@@ -132,10 +188,10 @@ class BatchProcessor:
 
             try:
                 mentions = await self._extract_mentions(
-                    messages, self.scope_id, result.trace, result.issues
+                    messages, session_id, result.trace, result.issues
                 )
                 await emit(
-                    self.scope_id,
+                    session_id,
                     "pipeline",
                     "mentions_extracted",
                     {
@@ -160,10 +216,10 @@ class BatchProcessor:
                         result.work_unit.mark_succeeded("No mentions found")
                     return result
 
-                res = await self._resolve_mentions(mentions, messages)
+                res = await self._resolve_mentions(mentions, messages, session_id)
 
                 await emit(
-                    self.scope_id,
+                    session_id,
                     "pipeline",
                     "resolution_complete",
                     {
@@ -182,6 +238,7 @@ class BatchProcessor:
                     res.entity_msg_map,
                     messages,
                     session_text,
+                    session_id,
                     result.trace,
                     result.issues,
                 )
@@ -193,7 +250,7 @@ class BatchProcessor:
                         result.work_unit.issues = list(result.issues)
                         result.work_unit.mark_failed(result.error)
                     await emit(
-                        self.scope_id,
+                        session_id,
                         "pipeline",
                         "connections_failed",
                         {"entity_count": len(res.entity_ids)},
@@ -205,7 +262,7 @@ class BatchProcessor:
                     len(mc.user_connections) for mc in user_connections
                 )
                 await emit(
-                    self.scope_id,
+                    session_id,
                     "pipeline",
                     "connections_extracted",
                     {
@@ -240,7 +297,7 @@ class BatchProcessor:
                     result.work_unit.issues = list(result.issues)
 
                 await emit(
-                    self.scope_id,
+                    session_id,
                     "pipeline",
                     "batch_complete",
                     {
@@ -249,14 +306,28 @@ class BatchProcessor:
                         "success": result.success,
                         "trace": {
                             "llm_mentions_seen": result.trace.llm_mentions_seen,
-                            "llm_mentions_accepted": result.trace.llm_mentions_accepted,
-                            "llm_mentions_rejected": result.trace.llm_mentions_rejected,
+                            "llm_mentions_accepted": (
+                                result.trace.llm_mentions_accepted
+                            ),
+                            "llm_mentions_rejected": (
+                                result.trace.llm_mentions_rejected
+                            ),
                             "relationships_seen": result.trace.relationships_seen,
-                            "relationships_accepted": result.trace.relationships_accepted,
-                            "relationships_rejected": result.trace.relationships_rejected,
-                            "user_relationships_seen": result.trace.user_relationships_seen,
-                            "user_relationships_accepted": result.trace.user_relationships_accepted,
-                            "user_relationships_rejected": result.trace.user_relationships_rejected,
+                            "relationships_accepted": (
+                                result.trace.relationships_accepted
+                            ),
+                            "relationships_rejected": (
+                                result.trace.relationships_rejected
+                            ),
+                            "user_relationships_seen": (
+                                result.trace.user_relationships_seen
+                            ),
+                            "user_relationships_accepted": (
+                                result.trace.user_relationships_accepted
+                            ),
+                            "user_relationships_rejected": (
+                                result.trace.user_relationships_rejected
+                            ),
                             "fallbacks": result.trace.fallbacks,
                             "issues": len(result.issues),
                         },
@@ -265,7 +336,8 @@ class BatchProcessor:
 
                 if result.work_unit:
                     result.work_unit.mark_succeeded(
-                        f"{len(result.entity_ids)} entities, {total_pairs + total_user_pairs} relationships"
+                        f"{len(result.entity_ids)} entities, "
+                        f"{total_pairs + total_user_pairs} relationships"
                     )
                 return result
 
@@ -299,13 +371,13 @@ class BatchProcessor:
                     f"Skipping mention '{text}' — topic '{topic}' could not be resolved"
                 )
                 continue
-            
+
             if norm_topic not in self.topic_config.active_topics:
                 logger.debug(
                     f"Skipping mention '{text}' — topic '{norm_topic}' is inactive"
                 )
                 continue
-                
+
             normalized_mentions.append((msg_id, text, typ, norm_topic))
 
         logger.debug(
@@ -314,7 +386,10 @@ class BatchProcessor:
         return normalized_mentions
 
     async def _resolve_mentions(
-        self, mentions: List[Tuple[int, str, str, str]], messages: List[Dict]
+        self,
+        mentions: List[Tuple[int, str, str, str]],
+        messages: List[Dict],
+        session_id: str,
     ) -> ResolutionResult:
         """
         Deterministic entity resolution using 4 scoring signals.
@@ -412,14 +487,25 @@ class BatchProcessor:
                 # Candidate match
                 if entry[0] == "candidate":
                     top_id = entry[1]
-                    boosted = boosted_scores.get(top_id, entry[2])
+                    base_score = entry[2]
+                    boosted = boosted_scores.get(top_id, base_score)
 
                     if boosted >= self.resolution_threshold:
-                        ent_id = top_id
-                        batch_matched_ids.add(ent_id)
+                        profile = await self.entities.get_profile(top_id)
+                        message_text = msg_text_map.get(msg_id, "")
+                        if profile and self._should_accept_candidate(
+                            name,
+                            typ,
+                            topic,
+                            message_text,
+                            profile,
+                            base_score,
+                            boosted,
+                            top_id,
+                        ):
+                            ent_id = top_id
+                            batch_matched_ids.add(ent_id)
 
-                        profile = await self.entities.get_profile(ent_id)
-                        if profile:
                             existing_id, aliases_added, new_aliases = (
                                 self.entities.validate_existing(
                                     profile["canonical_name"], [name.strip()]
@@ -448,7 +534,7 @@ class BatchProcessor:
                                 [name.strip()],
                                 typ,
                                 topic,
-                                self.scope_id,
+                                session_id,
                                 source_context,
                             )
                             new_ids.add(ent_id)
@@ -471,6 +557,214 @@ class BatchProcessor:
                 entity_msg_map=entity_msg_map,
                 alias_updates=alias_updates,
             )
+
+    def _should_accept_candidate(
+        self,
+        name: str,
+        mention_type: str,
+        mention_topic: str,
+        message_text: str,
+        profile: Dict,
+        base_score: float,
+        boosted_score: float,
+        candidate_id: int,
+    ) -> bool:
+        compatibility = self._is_schema_compatible(
+            mention_type, mention_topic, profile
+        )
+        if compatibility == "incompatible":
+            return False
+
+        if not self._candidate_needs_context_confirmation(
+            name, mention_type, message_text, profile, compatibility
+        ):
+            return True
+
+        return self._has_contextual_support(
+            name,
+            message_text,
+            profile,
+            compatibility,
+            base_score,
+            boosted_score,
+            candidate_id,
+        )
+
+    def _label_topics(self, label: str) -> Set[str]:
+        if not label:
+            return set()
+
+        label_lower = label.strip().lower()
+        if not label_lower:
+            return set()
+
+        topics = set()
+        for topic_name, config in self.topic_config.raw.items():
+            if not config.active:
+                continue
+            labels = {configured.lower() for configured in config.labels}
+            if label_lower in labels:
+                topics.add(topic_name)
+        return topics
+
+    def _normalize_resolution_topic(self, topic: str) -> Optional[str]:
+        if not topic:
+            return None
+
+        normalized = self.topic_config.normalize_topic(topic.strip())
+        if normalized == "General":
+            return None
+        return normalized
+
+    def _is_schema_compatible(
+        self, mention_type: str, mention_topic: str, profile: Dict
+    ) -> str:
+        mention_type_lower = (mention_type or "").strip().lower()
+        profile_type_lower = (profile.get("type") or "").strip().lower()
+
+        if mention_type_lower and mention_type_lower == profile_type_lower:
+            return "compatible"
+
+        mention_topic_normalized = self._normalize_resolution_topic(mention_topic)
+        profile_topic_normalized = self._normalize_resolution_topic(
+            profile.get("topic") or ""
+        )
+        if (
+            mention_topic_normalized
+            and profile_topic_normalized
+            and mention_topic_normalized == profile_topic_normalized
+        ):
+            return "compatible"
+
+        mention_label_topics = self._label_topics(mention_type_lower)
+        profile_label_topics = self._label_topics(profile_type_lower)
+        if mention_label_topics and profile_label_topics:
+            if mention_label_topics & profile_label_topics:
+                return "compatible"
+            return "incompatible"
+
+        return "neutral"
+
+    def _candidate_needs_context_confirmation(
+        self,
+        name: str,
+        mention_type: str,
+        message_text: str,
+        profile: Dict,
+        compatibility: str,
+    ) -> bool:
+        if compatibility == "incompatible":
+            return True
+
+        if (
+            compatibility == "neutral"
+            and mention_type
+            and profile.get("type")
+            and mention_type.strip().lower()
+            != (profile.get("type") or "").strip().lower()
+        ):
+            return True
+
+        return self._is_sparse_context(
+            name, message_text, mention_type
+        ) or self._is_common_word_mention(name)
+
+    def _is_sparse_context(
+        self, name: str, message_text: str, mention_type: str
+    ) -> bool:
+        name_tokens = self._word_tokens(name)
+        if len(name_tokens) != 1:
+            return False
+
+        mention_type_lower = (mention_type or "").strip().lower()
+        if mention_type_lower and mention_type_lower not in {"person", "identity"}:
+            return False
+
+        context_tokens = [
+            token
+            for token in self._word_tokens(message_text)
+            if token not in set(name_tokens)
+        ]
+        if len(context_tokens) <= 3:
+            return True
+
+        content_tokens = [
+            token
+            for token in context_tokens
+            if token not in self.sparse_context_verbs and len(token) > 2
+        ]
+        return len(content_tokens) <= 1
+
+    def _is_common_word_mention(self, name: str) -> bool:
+        tokens = self._word_tokens(name)
+        if len(tokens) != 1:
+            return False
+
+        token = tokens[0]
+        if len(token) <= 2:
+            return False
+
+        return word_frequency(token, "en") >= self.common_word_frequency_threshold
+
+    def _has_contextual_support(
+        self,
+        name: str,
+        message_text: str,
+        profile: Dict,
+        compatibility: str,
+        base_score: float,
+        boosted_score: float,
+        candidate_id: int,
+    ) -> bool:
+        if boosted_score > base_score + self.context_support_epsilon:
+            return True
+
+        canonical = profile.get("canonical_name") or ""
+        if (
+            compatibility == "compatible"
+            and name.strip().lower() == canonical.strip().lower()
+        ):
+            return True
+
+        mentions = self.entities.get_mentions_for_id(candidate_id)
+        if self._is_acronym_alias(name, canonical, mentions):
+            return True
+
+        return compatibility == "compatible" and self._has_rich_context(
+            name, message_text
+        )
+
+    def _has_rich_context(self, name: str, message_text: str) -> bool:
+        name_tokens = set(self._word_tokens(name))
+        context_tokens = [
+            token
+            for token in self._word_tokens(message_text)
+            if token not in name_tokens
+        ]
+        content_tokens = [
+            token
+            for token in context_tokens
+            if token not in self.sparse_context_verbs and len(token) > 2
+        ]
+        return len(content_tokens) >= 3
+
+    def _is_acronym_alias(
+        self, name: str, canonical_name: str, aliases: List[str]
+    ) -> bool:
+        mention = name.strip().lower()
+        if not mention or len(mention) < 2 or not mention.isalnum():
+            return False
+
+        for known_name in [canonical_name, *aliases]:
+            initials = "".join(
+                token[0] for token in self._word_tokens(known_name)
+            )
+            if initials and mention == initials:
+                return True
+        return False
+
+    def _word_tokens(self, text: str) -> List[str]:
+        return re.findall(r"[a-z0-9]+", (text or "").lower())
 
     async def _boost_candidates(
         self,
@@ -552,14 +846,18 @@ class BatchProcessor:
                     lines.append(f'{i}. Message: "{msg}" | Facts: {", ".join(facts)}')
 
                 prompt = (
-                    "For each index, determine if the message relates to the entity's facts.\n\n"
+                    "For each index, determine if the message relates to the "
+                    "entity's facts.\n\n"
                     + "\n".join(lines)
                 )
 
                 try:
                     bulk_relevance: BulkRelevanceResult = await self.llm.call_llm(
                         response_model=BulkRelevanceResult,
-                        system="You are a relevance judge. For each provided pair (message + entity facts), decide if they are related.",
+                        system=(
+                            "You are a relevance judge. For each provided pair "
+                            "(message + entity facts), decide if they are related."
+                        ),
                         user=prompt,
                         temperature=0.0,
                     )
@@ -614,6 +912,7 @@ class BatchProcessor:
         entity_msg_map: Dict[int, List[int]],
         messages: List[Dict],
         session_text: str,
+        session_id: str,
         trace: Optional[ExtractionTrace] = None,
         issues: Optional[List[ValidationIssue]] = None,
     ) -> Tuple[List[MessageConnections], List[MessageUserConnections]]:
@@ -676,7 +975,7 @@ class BatchProcessor:
         )
 
         await emit(
-            self.scope_id,
+            session_id,
             "pipeline",
             "llm_call",
             {"stage": "connections", "prompt": user_03},
@@ -692,7 +991,8 @@ class BatchProcessor:
             )
         except Exception as e:
             logger.warning(
-                f"VP-02 connection extraction failed, continuing without connections: {e}"
+                "VP-02 connection extraction failed, continuing without "
+                f"connections: {e}"
             )
             if trace is not None:
                 trace.fallbacks.append(
@@ -720,7 +1020,7 @@ class BatchProcessor:
                     trace.relationships_seen = 0
                     trace.user_relationships_seen = 0
             await emit(
-                self.scope_id,
+                session_id,
                 "pipeline",
                 "llm_fallback",
                 {"stage": "connections", "fallback": "empty_connections"},
@@ -800,7 +1100,10 @@ class BatchProcessor:
                     trace.user_relationships_rejected += 1
                 record_issue(
                     code="invalid_user_connection_msg_id",
-                    message=f"VP-02 returned invalid user connection msg_id {conn.msg_id}",
+                    message=(
+                        "VP-02 returned invalid user connection msg_id "
+                        f"{conn.msg_id}"
+                    ),
                     item_ref=f"user->{conn.entity_name}",
                     metadata={
                         "msg_id": conn.msg_id,
@@ -817,7 +1120,10 @@ class BatchProcessor:
                     trace.user_relationships_rejected += 1
                 record_issue(
                     code="invalid_user_connection_entity",
-                    message="VP-02 returned a user connection with an unknown entity name",
+                    message=(
+                        "VP-02 returned a user connection with an unknown "
+                        "entity name"
+                    ),
                     item_ref=f"user->{conn.entity_name}",
                     metadata={"entity_name": conn.entity_name},
                 )
@@ -862,10 +1168,15 @@ class BatchProcessor:
         session_text: str = None,
         batch_result: BatchResult = None,
         attempt: int = 1,
+        *,
+        session_id: str,
     ) -> bool:
         """Store failed batch in DLQ with stage info for smart retry."""
 
-        dlq_key = RedisKeys.dlq(self.user_name, self.scope_id)
+        if not session_id:
+            raise ValueError("move_to_dead_letter requires session_id")
+
+        dlq_key = RedisKeys.dlq(self.user_name, self.project_id)
         entry = {
             "timestamp": get_now_unix(),
             "error": error,
@@ -873,8 +1184,8 @@ class BatchProcessor:
             "stage": stage,
             "batch_size": len(messages),
             "user_name": self.user_name,
-            "session_id": self.scope_id,
-            "project_id": self.entities.project_id,
+            "session_id": session_id,
+            "project_id": self.project_id,
             "messages": messages,
         }
 
@@ -889,7 +1200,7 @@ class BatchProcessor:
             logger.warning(f"DLQ [{stage}]: {len(messages)} messages stored")
 
             await emit(
-                self.scope_id,
+                session_id,
                 "pipeline",
                 "dlq_enqueued",
                 {

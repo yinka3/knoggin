@@ -65,10 +65,12 @@ class TopicConfig:
 
     @classmethod
     async def load(
-        cls, redis_client: aioredis.Redis, user_name: str, session_id: str
+        cls, redis_client: aioredis.Redis, user_name: str, project_id: str
     ) -> "TopicConfig":
         """Load config from Redis."""
-        raw = await redis_client.hget(RedisKeys.session_config(user_name), session_id)
+        raw = await redis_client.hget(
+            RedisKeys.project_topic_config(user_name), project_id
+        )
         if raw:
             try:
                 raw_dict = safe_json_loads(raw)
@@ -83,13 +85,13 @@ class TopicConfig:
             config = copy.deepcopy(cls.DEFAULT_CONFIG)
         return cls(config)
 
-    async def save(self, redis_client: aioredis.Redis, user_name: str, session_id: str):
+    async def save(self, redis_client: aioredis.Redis, user_name: str, project_id: str):
         """Persist config to Redis."""
         dumped = {k: v.model_dump() for k, v in self._config.items()}
         await redis_client.hset(
-            RedisKeys.session_config(user_name), session_id, json.dumps(dumped)
+            RedisKeys.project_topic_config(user_name), project_id, json.dumps(dumped)
         )
-        logger.debug(f"TopicConfig saved for session {session_id}")
+        logger.debug(f"TopicConfig saved for project {project_id}")
 
     def _clear_cache(self):
         """Clear all cached derived values."""

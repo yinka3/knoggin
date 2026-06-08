@@ -10,7 +10,6 @@ from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import (
     FakeGraphClient,
     FakePipeline,
-    FakeRedis,
     FakeResources,
     FakeScheduler,
 )
@@ -168,7 +167,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
 
     processor = RecordingBatchProcessor.instances[0]
     assert ctx.batch_processor is processor
-    assert processor.kwargs["scope_id"] == "session-1"
+    assert processor.kwargs["project_id"] == "project-1"
     assert processor.kwargs["redis_client"] is harness.resources.redis
     assert processor.kwargs["llm"] is harness.resources.llm_service
     assert processor.kwargs["entities"] is harness.project_state.entities

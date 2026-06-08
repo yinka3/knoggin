@@ -147,6 +147,12 @@ def test_graph_client_community_property(graph_client):
         # --- Graph Reader (13) ---
         ("get_message_text", "graph_reader", (1, "ada", "session-1"), {}),
         ("get_messages_by_ids", "graph_reader", ([1, 2],), {"user_name": "ada", "session_ids": ["session-1"]}),
+        (
+            "get_recent_project_messages",
+            "graph_reader",
+            ("ada", "project-1", 20),
+            {"before_message_id": None},
+        ),
         ("get_surrounding_messages", "graph_reader", (1, 3, 10), {"user_name": "ada", "session_id": "session-1"}),
         ("get_neighbor_ids", "graph_reader", (1,), {}),
         ("get_parent_entities", "graph_reader", (1,), {}),

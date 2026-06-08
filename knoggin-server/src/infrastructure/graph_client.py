@@ -193,6 +193,20 @@ class GraphClient:
             ids, user_name=user_name, session_ids=session_ids
         )
 
+    async def get_recent_project_messages(
+        self,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        before_message_id: Optional[int] = None,
+    ) -> List[Dict]:
+        return await self._graph_reader.get_recent_project_messages(
+            user_name,
+            project_id,
+            limit,
+            before_message_id=before_message_id,
+        )
+
     async def get_surrounding_messages(
         self,
         message_id: int,

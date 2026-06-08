@@ -7,9 +7,9 @@ from common.schema.contracts import (
     GraphMutationPlan,
     MessageConnections,
     MessageUserConnections,
+    UserConnectionRecord,
 )
 from common.schema.primitives import ConnectionRecord
-from common.schema.contracts import UserConnectionRecord
 from common.scoping import IDENTITY_ENTITY_ID
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.db import write_graph_db
@@ -338,7 +338,7 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
     graph = FakeGraphMutationClient()
     entities = FakeEntityManagerForPlan()
     redis = FakeRedis()
-    profile_key = RedisKeys.profile_complete("ada", "project-1")
+    profile_key = RedisKeys.project_profile_complete("ada", "project-1")
     await redis.set(profile_key, "done")
     plan = await build_graph_mutation_plan(
         batch,

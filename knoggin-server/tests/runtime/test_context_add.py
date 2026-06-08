@@ -55,6 +55,7 @@ async def test_context_add_persists_maps_enqueues_and_signals_consumer(context):
     mapping_key = RedisKeys.msg_to_turn_lookup("ada", "session-1")
     content_key = RedisKeys.message_content("ada", "session-1")
     buffer_key = RedisKeys.buffer("ada", "session-1")
+    project_heartbeat_key = RedisKeys.project_heartbeat_counter("ada", "project-1")
 
     assert json.loads(resources.redis.hashes[conv_key]["1"])["content"] == "hello world"
     assert resources.redis.zsets[recent_key]["1"] == timestamp.timestamp()
@@ -76,6 +77,7 @@ async def test_context_add_persists_maps_enqueues_and_signals_consumer(context):
         "timestamp": timestamp.isoformat(),
         "role": "user",
     }
+    assert await resources.redis.get(project_heartbeat_key) == "1"
     assert resources.redis.expirations
 
 

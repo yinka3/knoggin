@@ -37,23 +37,23 @@ class FactArchivalJob(BaseJob):
     async def should_run(self, ctx: JobContext) -> bool:
         profile_done = (
             await self.redis.get(
-                RedisKeys.profile_complete(ctx.user_name, ctx.scope_id)
+                RedisKeys.project_profile_complete(ctx.user_name, ctx.project_id)
             )
             is not None
         )
 
         if profile_done:
             await self.redis.delete(
-                RedisKeys.profile_complete(ctx.user_name, ctx.scope_id)
+                RedisKeys.project_profile_complete(ctx.user_name, ctx.project_id)
             )
             return True
 
         last_run_ts = await self.redis.get(
-            RedisKeys.job_last_run(self.name, ctx.user_name, ctx.scope_id)
+            RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id)
         )
         if not last_run_ts:
             await self.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.scope_id),
+                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
                 get_now_unix(),
             )
             return False
@@ -67,9 +67,9 @@ class FactArchivalJob(BaseJob):
 
     async def execute(self, ctx: JobContext) -> JobResult:
         with logger.contextualize(
-            user=ctx.user_name, job=self.name, session=ctx.scope_id
+            user=ctx.user_name, job=self.name, project=ctx.project_id
         ):
-            project_id = ctx.project_id or ctx.scope_id
+            project_id = ctx.project_id
             cutoff = get_now() - timedelta(days=self.retention_days)
 
             deleted_count = await self.graph_client.delete_old_invalidated_facts(
@@ -80,7 +80,7 @@ class FactArchivalJob(BaseJob):
             if deleted_count > 0:
                 logger.info(summary)
                 await emit(
-                    ctx.scope_id,
+                    ctx.project_id,
                     "job",
                     "facts_archived",
                     {
@@ -90,7 +90,7 @@ class FactArchivalJob(BaseJob):
                 )
 
             await self.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.scope_id),
+                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
                 get_now_unix(),
             )
 

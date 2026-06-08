@@ -115,6 +115,64 @@ async def test_graph_reader_message_lookup_uses_structured_scope_params():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_graph_reader_recent_project_messages_use_project_scope():
+    client = FakePostgresReaderClient(
+        rows=[
+            {
+                "id": "3",
+                "user_name": '"ada"',
+                "session_id": '"session-b"',
+                "role": '"user"',
+                "content": '"newer"',
+                "timestamp": 456,
+            },
+            {
+                "id": "2",
+                "user_name": '"ada"',
+                "session_id": '"session-a"',
+                "role": '"user"',
+                "content": '"older"',
+                "timestamp": 123,
+            },
+        ]
+    )
+    reader = GraphReader(client)
+
+    rows = await reader.get_recent_project_messages(
+        "ada", "project-1", 2, before_message_id=3
+    )
+
+    assert rows == [
+        {
+            "id": 2,
+            "user_name": "ada",
+            "session_id": "session-a",
+            "role": "user",
+            "content": "older",
+            "timestamp": 123,
+        },
+        {
+            "id": 3,
+            "user_name": "ada",
+            "session_id": "session-b",
+            "role": "user",
+            "content": "newer",
+            "timestamp": 456,
+        },
+    ]
+    query, params = client.read_calls[0]
+    assert "m.project_id = $project_id" in query
+    assert "m.id <= $before_message_id" in query
+    assert json.loads(params[0]) == {
+        "user_name": "ada",
+        "project_id": "project-1",
+        "limit": 2,
+        "before_message_id": 3,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_graph_reader_surrounding_messages_uses_scoped_lookups():
     client = RecordingPostgresClient(
         execute_read_results=[

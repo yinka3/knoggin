@@ -12,14 +12,15 @@ from tests.fixtures.fakes import FakeGraphClient, FakeRedis
 class FakeProcessor:
     def __init__(self, result=None, *, raise_on_run=False, dlq_success=True):
         self.entities = type("Entities", (), {"project_id": "project-1"})()
+        self.project_id = "project-1"
         self.result = result or BatchResult()
         self.raise_on_run = raise_on_run
         self.dlq_success = dlq_success
         self.run_calls = []
         self.dlq_calls = []
 
-    async def run(self, messages, session_text):
-        self.run_calls.append((messages, session_text))
+    async def run(self, messages, session_text, *, session_id):
+        self.run_calls.append((messages, session_text, session_id))
         if self.raise_on_run:
             raise RuntimeError("processor boom")
         return self.result
@@ -168,6 +169,7 @@ async def test_batch_consumer_skips_corrupt_entries_and_processes_valid_messages
                 }
             ],
             "",
+            "session-1",
         )
     ]
     assert graph_client.saved_message_logs == [
@@ -184,6 +186,7 @@ async def test_batch_consumer_skips_corrupt_entries_and_processes_valid_messages
         ]
     ]
     assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "1"
+    assert await redis.get(RedisKeys.project_last_processed("ada", "project-1")) == "1"
     assert await redis.get(consumer._checkpoint_key) == "1"
 
 
@@ -224,6 +227,7 @@ async def test_batch_consumer_dlqs_message_log_failures_and_drains_processed_bat
     ]
     assert error.startswith("MESSAGE_LOG_SAVE_FAILED")
     assert kwargs["stage"] == "message_log"
+    assert kwargs["session_id"] == "session-1"
 
 
 @pytest.mark.ingestion
@@ -249,6 +253,7 @@ async def test_batch_consumer_formats_session_context_and_calls_processor():
         (
             [message],
             "[USER]: Earlier user turn.\n[ASSISTANT]: Earlier assistant turn.",
+            "session-1",
         )
     ]
 
@@ -269,6 +274,7 @@ async def test_batch_consumer_success_without_graph_writes_skips_write_to_graph(
     assert write_to_graph.calls == []
     assert await redis.get(consumer._checkpoint_key) == "1"
     assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "1"
+    assert await redis.get(RedisKeys.project_last_processed("ada", "project-1")) == "1"
 
 
 @pytest.mark.ingestion
@@ -309,6 +315,7 @@ async def test_batch_consumer_processor_failure_goes_to_processing_dlq():
     assert error == "boom"
     assert kwargs["stage"] == "processing"
     assert kwargs["session_text"] == ""
+    assert kwargs["session_id"] == "session-1"
 
 
 @pytest.mark.ingestion
@@ -324,6 +331,7 @@ async def test_batch_consumer_processor_exception_goes_to_processing_dlq():
     _, error, kwargs = processor.dlq_calls[0]
     assert error.startswith("Fatal exception: processor boom")
     assert kwargs["stage"] == "processing"
+    assert kwargs["session_id"] == "session-1"
 
 
 @pytest.mark.ingestion
@@ -344,6 +352,7 @@ async def test_batch_consumer_graph_write_failure_goes_to_graph_write_dlq():
     assert error == "graph failed"
     assert kwargs["stage"] == "graph_write"
     assert kwargs["batch_result"] is processor.result
+    assert kwargs["session_id"] == "session-1"
 
 
 @pytest.mark.ingestion
@@ -362,6 +371,7 @@ async def test_batch_consumer_graph_write_exception_goes_to_graph_write_dlq():
     _, error, kwargs = processor.dlq_calls[0]
     assert error == "write boom"
     assert kwargs["stage"] == "graph_write"
+    assert kwargs["session_id"] == "session-1"
 
 
 @pytest.mark.ingestion
@@ -381,6 +391,7 @@ async def test_batch_consumer_graph_write_timeout_goes_to_graph_write_dlq():
     _, error, kwargs = processor.dlq_calls[0]
     assert error == "GRAPH_WRITE_TIMEOUT"
     assert kwargs["stage"] == "graph_write"
+    assert kwargs["session_id"] == "session-1"
 
 
 @pytest.mark.ingestion
@@ -435,6 +446,7 @@ async def test_batch_consumer_sets_last_processed_to_max_message_id():
     await consumer._drain_buffer(flush_partial=True)
 
     assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "3"
+    assert await redis.get(RedisKeys.project_last_processed("ada", "project-1")) == "3"
 
 
 @pytest.mark.ingestion
@@ -456,6 +468,7 @@ async def test_batch_consumer_processes_multiple_batches_in_one_drain():
         [make_message(1), make_message(2)],
         [make_message(3)],
     ]
+    assert [call[2] for call in processor.run_calls] == ["session-1", "session-1"]
 
 
 @pytest.mark.ingestion

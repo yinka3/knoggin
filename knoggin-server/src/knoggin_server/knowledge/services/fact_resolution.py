@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 from loguru import logger
@@ -45,6 +45,7 @@ class FactResolutionUtils:
         contradiction_prompt: Optional[str] = None,
         user_name: Optional[str] = None,
         project_id: Optional[str] = None,
+        source_session_by_msg_id: Optional[Mapping[int, str]] = None,
     ) -> FactResolutionSummary:
         """
         Invalidate old facts and create new ones. Creates first, invalidates after.
@@ -83,6 +84,17 @@ class FactResolutionUtils:
                 invalid_source_msg_ids.append(msg_id)
                 msg_id = None
 
+            source_session_id = None
+            if msg_id is not None and source_session_by_msg_id is not None:
+                source_session_id = source_session_by_msg_id.get(msg_id)
+                if not source_session_id:
+                    logger.warning(
+                        f"[{session_id}] FactResolutionUtils: "
+                        f"No source session found for valid msg_id {msg_id}"
+                    )
+                    invalid_source_msg_ids.append(msg_id)
+                    msg_id = None
+
             embedding = await embedding_service.encode_single(content)
 
             contradicted_ids = await FactResolutionUtils.detect_contradictions(
@@ -112,6 +124,8 @@ class FactResolutionUtils:
                 content=content,
                 valid_at=now,
                 source_msg_id=msg_id,
+                source_user_name=user_name if source_session_id else None,
+                source_session_id=source_session_id,
                 embedding=embedding,
                 source_entity_id=entity_id,
             )
@@ -120,11 +134,14 @@ class FactResolutionUtils:
 
         if facts_to_create:
             try:
+                fallback_session_id = (
+                    None if source_session_by_msg_id is not None else session_id
+                )
                 count = await graph_client.create_facts_batch(
                     entity_id,
                     facts_to_create,
                     user_name=user_name,
-                    session_id=session_id,
+                    session_id=fallback_session_id,
                     project_id=project_id,
                 )
                 logger.debug(f"Created {count} facts for entity {entity_id}")

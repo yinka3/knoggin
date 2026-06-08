@@ -93,9 +93,21 @@ class ResourceManager:
                     redis_client=instance.redis,
                 )
                 instance.config_unsubscribers.append(
-                    ConfigManager.get().subscribe(instance.llm_service.update_settings, "llm")
+                    ConfigManager.get().subscribe(
+                        instance.llm_service.update_settings, "llm"
+                    )
                 )
-                instance.embedding = EmbeddingService(device=device)
+                embedding_model = os.getenv(
+                    "KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"
+                )
+                reranker_model = os.getenv(
+                    "KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"
+                )
+                instance.embedding = EmbeddingService(
+                    embedding_model=embedding_model,
+                    reranker_model=reranker_model,
+                    device=device,
+                )
 
                 async def load_spacy():
                     exclude = ["ner", "lemmatizer", "attribute_ruler"]

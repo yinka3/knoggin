@@ -201,7 +201,7 @@ class ProjectManager:
         self, project_id: str, initial_topics_config: Optional[dict] = None
     ) -> None:
         existing_topics = await self.resources.redis.hget(
-            RedisKeys.session_config(self.user_name), project_id
+            RedisKeys.project_topic_config(self.user_name), project_id
         )
         if existing_topics:
             return
@@ -213,7 +213,7 @@ class ProjectManager:
         )
         topics_json = json.dumps(self._serialize_topics_config(topics_config_dict))
         await self.resources.redis.hset(
-            RedisKeys.session_config(self.user_name),
+            RedisKeys.project_topic_config(self.user_name),
             project_id,
             topics_json,
         )
@@ -269,10 +269,8 @@ class ProjectManager:
             ),
         )
 
-        # Project-Level Batch Processor (for DLQ Replay)
-        project_scope_id = project_id
         project_processor = BatchProcessor(
-            scope_id=project_scope_id,
+            project_id=project_id,
             redis_client=self.resources.redis,
             llm=self.resources.llm_service,
             entities=entities,
@@ -285,19 +283,14 @@ class ProjectManager:
                 RedisKeys.global_next_ent_id()
             ),
             resolution_threshold=er_cfg.resolution_threshold,
+            common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
+            context_support_epsilon=er_cfg.context_support_epsilon,
+            sparse_context_verbs=er_cfg.sparse_context_verbs,
         )
 
         await self._verify_user_entity(entities)
 
-        # Scheduler & Background Jobs
-        # Project background jobs use the project id as their scheduler scope
-        # because their Redis queues are project-scoped.
-        scheduler = Scheduler(
-            self.user_name,
-            project_id,
-            self.resources.redis,
-            project_id=project_id,
-        )
+        scheduler = Scheduler(self.user_name, project_id, self.resources.redis)
         profile_job = self._init_profile_job(entities)
         merge_job = self._init_merge_job(entities, t_config)
 
@@ -406,11 +399,13 @@ class ProjectManager:
         config_mgr = ConfigManager.get()
 
         async def _dlq_write_callback(result):
+            if not result.scope or not result.scope.session_id:
+                return False, "DLQ graph replay missing source session_id"
             return await write_batch_callback(
                 result,
                 graph_client=self.resources.graph_client,
                 entities=entities,
-                session_id=project_id,
+                session_id=result.scope.session_id,
                 project_id=project_id,
                 user_name=self.user_name,
                 redis_client=self.resources.redis,
@@ -434,9 +429,13 @@ class ProjectManager:
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(_global_topics_updated_cb, "default_topics")
         )
+        def _entity_resolution_updated(config):
+            entities.update_settings(config)
+            processor.update_settings(config)
+
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(
-                entities.update_settings, "developer_settings.entity_resolution"
+                _entity_resolution_updated, "developer_settings.entity_resolution"
             )
         )
         project_state.add_config_unsubscriber(
@@ -511,6 +510,7 @@ class ProjectManager:
             topic_config=topic_config,
             update_callback=_update_topics_callback,
             redis_client=self.resources.redis,
+            graph_client=self.resources.graph_client,
             interval_msgs=topic_cfg.interval_msgs,
             conversation_window=topic_cfg.conversation_window,
         )

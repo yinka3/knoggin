@@ -234,7 +234,9 @@ class BatchConsumer:
                 session_text = self._format_session_text(conversation)
 
                 try:
-                    result = await self.processor.run(messages, session_text)
+                    result = await self.processor.run(
+                        messages, session_text, session_id=self.session_id
+                    )
                 except Exception as e:
                     logger.error(f"Fatal error during BatchProcessor computation: {e}")
                     result = BatchResult(
@@ -247,6 +249,7 @@ class BatchConsumer:
                         result.error,
                         stage="processing",
                         session_text=session_text,
+                        session_id=self.session_id,
                     )
                     if not dlq_success:
                         logger.critical(
@@ -270,7 +273,7 @@ class BatchConsumer:
                             "role": msg.get("role", "user"),
                             "user_name": self.user_name,
                             "session_id": self.session_id,
-                            "project_id": self.processor.entities.project_id,
+                            "project_id": self.processor.project_id,
                             "timestamp": msg.get("timestamp", ""),
                         }
                         for msg in messages
@@ -287,6 +290,7 @@ class BatchConsumer:
                             stage="message_log",
                             session_text=session_text,
                             batch_result=result,
+                            session_id=self.session_id,
                         )
                         if not dlq_success:
                             logger.critical(
@@ -326,6 +330,7 @@ class BatchConsumer:
                             error_msg or "GRAPH_WRITE_FAILED [unknown]",
                             stage="graph_write",
                             batch_result=result,
+                            session_id=self.session_id,
                         )
                         if not dlq_success:
                             logger.critical(
@@ -358,6 +363,12 @@ class BatchConsumer:
                             await self.redis.set(
                                 RedisKeys.last_processed(
                                     self.user_name, self.session_id
+                                ),
+                                last_id,
+                            )
+                            await self.redis.set(
+                                RedisKeys.project_last_processed(
+                                    self.user_name, self.processor.project_id
                                 ),
                                 last_id,
                             )

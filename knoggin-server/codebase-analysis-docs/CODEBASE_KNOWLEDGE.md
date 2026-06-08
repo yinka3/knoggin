@@ -14,7 +14,8 @@ This document was originally generated as a broad codebase map. Recent stabiliza
 - Runtime assembly has focused fake-backed coverage for `SessionAssembler` and `ProjectManager.get_or_start_project`.
 - Wall-clock time is centralized in `src/common/utils/time_utils.py`; production code should use `get_now()`, `get_now_iso()`, `get_now_ms()`, or `get_now_unix()` instead of direct `datetime.now(...)` / `time.time()`.
 - `tests/session/` does not exist; session/runtime coverage currently lives under `tests/runtime/` and `tests/unit/session/`.
-- Project-scoped background jobs now use `Scheduler.scope_id` / `JobContext.scope_id` for scheduler scope. `session_id` remains as a compatibility alias in the scheduler context, but new job code should prefer `scope_id`.
+- Project-scoped background jobs use explicit `project_id`; live ingestion and message provenance use real `session_id`. The old `scope_id` / scheduler `session_id` compatibility aliases were removed.
+- AGE graph data and Postgres helper tables are documented in `codebase-analysis-docs/AGE_POSTGRES_DATA_FLOW.md`.
 
 ## 1. High-Level Overview
 
@@ -253,7 +254,6 @@ Storage is hybrid:
 
 - Apache AGE graph stores nodes and edges: `Entity`, `Message`, `Fact`, `Topic`, `Preference`, `AAC_Discussion`, `AAC_Message`, `AAC_Agent`, `RELATED_TO`, `HAS_FACT`, `EXTRACTED_FROM`, `BELONGS_TO`, `PART_OF`, `SPAWNED`.
 - Postgres relational helper tables store vectors and FTS:
-  - `file_chunks(file_id, session_id, chunk_index, content, metadata, embedding vector(1024))`
   - `entity_search(entity_id, canonical_name, user_name, project_id, embedding vector(1024))`
   - `message_search(message_id, user_name, session_id, content_tsvector)`
   - `fact_search(fact_id, entity_id, user_name, project_id, embedding vector(1024), invalid_at)`
@@ -707,7 +707,7 @@ Tests can freeze time with `set_test_clock(...)` / `reset_clock()` or `frozen_ti
 
 ### File RAG Uses Per-Session Tables
 
-`FileRAGService` creates pgvector tables named from the session id through LlamaIndex, while `schema.sql` also defines a general `public.file_chunks` table. Current service code uses LlamaIndex `PGVectorStore` per-session tables, not direct writes to `public.file_chunks`.
+`FileRAGService` creates pgvector tables named from the session id through LlamaIndex (e.g. `file_chunks_{session_id}`). These are dynamic per-session tables managed by LlamaIndex's `PGVectorStore`, not static schema tables.
 
 ### No In-Repo HTTP Routes
 
@@ -718,7 +718,7 @@ Do not add route-level assumptions to this code. Within this root, the public AP
 ```text
 INDEX_VERSION: phase-4
 FILE_MAP_SUMMARY: Gotchas documented around Redis runtime state, project/session naming, zombie/phantom guards, LLM validation, hybrid storage sync, and missing HTTP layer.
-OPEN_QUESTIONS: Whether `public.file_chunks` is legacy schema or reserved for a future direct table path is not resolved from in-scope code.
+OPEN_QUESTIONS: None remaining for this phase.
 KNOWN_RISKS: Project job scope is clearer through `ctx.scope_id`, but legacy `ctx.session_id` aliases still exist and should not be reintroduced in new job code.
 GLOSSARY_DELTA: Phantom entity, zombie entity, identity root, helper table, evidence ref.
 ```
@@ -883,7 +883,6 @@ These are referenced by in-scope files but their internals were not inspected.
 | ------------------------------------------------------------------- | ---------: | -------------------------------------------------------------------------------------------- |
 | This root is an engine/library rather than full HTTP server.        |       High | No FastAPI app/router found by search; entry points are service classes.                     |
 | API/web layer lives outside this target root or is not built yet.   |     Medium | FastAPI dependency exists, but no route code exists in-scope.                                |
-| `public.file_chunks` may be legacy or reserved.                     |     Medium | `schema.sql` creates it, but `FileRAGService` uses LlamaIndex per-session tables.            |
 | Project jobs intentionally key many Redis structures by project id. |       High | `Scheduler` is created with its `scope_id` argument set to `project_id` in `ProjectManager`. |
 
 ### Phase 5 State Block
@@ -946,7 +945,7 @@ When refactoring:
 ```text
 INDEX_VERSION: phase-6
 FILE_MAP_SUMMARY: Master knowledge document assembled under codebase-analysis-docs/CODEBASE_KNOWLEDGE.md. Assets directory exists at codebase-analysis-docs/assets.
-OPEN_QUESTIONS: Locate/confirm the client-facing API layer outside this root before adding endpoints. Confirm whether schema.sql file_chunks is active or legacy.
+OPEN_QUESTIONS: Locate/confirm the client-facing API layer outside this root before adding endpoints.
 KNOWN_RISKS: Redis key migration, scheduler scope naming aliases, graph/helper-table drift, expensive external ML model initialization, and LLM-output validation are the main change hazards.
 GLOSSARY_DELTA: Complete glossary included.
 ```

@@ -82,11 +82,10 @@ class FanoutConfigManager:
 class FanoutScheduler:
     instances = []
 
-    def __init__(self, user_name, scope_id, redis, project_id=None):
+    def __init__(self, user_name, project_id, redis):
         self.user_name = user_name
-        self.scope_id = scope_id
         self.redis = redis
-        self.project_id = project_id or scope_id
+        self.project_id = project_id
         self._jobs = {}
         self.stopped = 0
         self.__class__.instances.append(self)
@@ -221,7 +220,8 @@ async def test_project_config_subscriptions_are_registered_and_initialized(
     )
 
     processor = FanoutBatchProcessor.instances[0]
-    assert len(processor.updated_settings) == 1
+    assert len(processor.updated_settings) == 2
+    assert isinstance(processor.updated_settings[0], EntityResolutionSettings)
     assert isinstance(processor.updated_settings[-1], TextProcessorSettings)
 
     assert scheduler._jobs["profile_refinement"].volume_threshold == 15
@@ -288,6 +288,7 @@ async def test_project_config_updates_fan_out_to_runtime_services(monkeypatch):
     config_manager.emit("developer_settings.search", object())
 
     assert project_state.entities.updated_settings[-1] is entity_update
+    assert entity_update in processor.updated_settings
     assert processor.updated_settings[-1] is nlp_update
 
     profile_job = scheduler._jobs["profile_refinement"]
@@ -320,7 +321,7 @@ async def test_project_config_updates_fan_out_to_runtime_services(monkeypatch):
     assert topic_job.conversation_window == 35
 
     assert len(project_state.entities.updated_settings) == 2
-    assert len(processor.updated_settings) == 2
+    assert len(processor.updated_settings) == 4
 
 
 @pytest.mark.runtime
@@ -341,7 +342,7 @@ async def test_default_topics_fanout_updates_project_topics(monkeypatch):
     await asyncio.sleep(0)
 
     raw = await project_state.redis_client.hget(
-        RedisKeys.session_config("ada"),
+        RedisKeys.project_topic_config("ada"),
         "project-1",
     )
     saved = json.loads(raw)

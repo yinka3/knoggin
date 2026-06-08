@@ -25,13 +25,13 @@ FROZEN_AT = "2024-01-01T00:00:00+00:00"
 
 
 def job_context() -> JobContext:
-    return JobContext(user_name="ada", scope_id="project-1", project_id="project-1")
+    return JobContext(user_name="ada", project_id="project-1")
 
 
 class ProcessorWithGraphClient:
     graph_client = object()
 
-    async def run(self, messages, session_text):
+    async def run(self, messages, session_text, *, session_id):
         raise AssertionError("processor.run should not be reached in clock tests")
 
 
@@ -100,13 +100,13 @@ class ProfileEntities:
 @pytest.mark.no_network
 async def test_scheduler_uses_frozen_wall_clock_for_activity_idle_and_last_run():
     redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis, project_id="project-1")
+    scheduler = Scheduler("ada", "project-1", redis)
     job = FakeSchedulerJob()
     ctx = job_context()
 
     with frozen_time(FROZEN_AT) as clock:
         await scheduler.record_activity()
-        activity_key = RedisKeys.last_activity("ada", "project-1")
+        activity_key = RedisKeys.project_last_activity("ada", "project-1")
         assert await redis.get(activity_key) == "2024-01-01T00:00:00+00:00"
 
         clock.advance(seconds=45)
@@ -118,9 +118,9 @@ async def test_scheduler_uses_frozen_wall_clock_for_activity_idle_and_last_run()
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_scheduler_pending_checks_use_scope_id():
+async def test_scheduler_pending_checks_use_project_id():
     redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis, project_id="project-1")
+    scheduler = Scheduler("ada", "project-1", redis)
     job = FakeSchedulerJob()
     scheduler.register(job)
     captured_contexts = []
@@ -137,8 +137,10 @@ async def test_scheduler_pending_checks_use_scope_id():
 
     assert await redis.get(RedisKeys.job_pending("ada", "project-1", job.name)) is None
     assert await redis.get(RedisKeys.job_pending("ada", "session-1", job.name)) == "1"
-    assert captured_contexts[0].scope_id == "project-1"
     assert captured_contexts[0].project_id == "project-1"
+    assert not hasattr(scheduler, "session_id")
+    assert not hasattr(captured_contexts[0], "session_id")
+    assert not hasattr(captured_contexts[0], "scope_id")
 
 @pytest.mark.runtime
 @pytest.mark.no_network
@@ -243,7 +245,7 @@ async def test_fact_archival_uses_frozen_interval_marker_and_cutoff():
     )
     ctx = job_context()
     last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
-    profile_complete_key = RedisKeys.profile_complete("ada", "project-1")
+    profile_complete_key = RedisKeys.project_profile_complete("ada", "project-1")
 
     with frozen_time(FROZEN_AT) as clock:
         assert await job.should_run(ctx) is False
@@ -383,7 +385,7 @@ async def test_profile_refinement_targeted_recency_and_markers_use_frozen_unix(
 
     recent_key = RedisKeys.last_profile_update("ada", "project-1", 2)
     old_key = RedisKeys.last_profile_update("ada", "project-1", 3)
-    profile_complete_key = RedisKeys.profile_complete("ada", "project-1")
+    profile_complete_key = RedisKeys.project_profile_complete("ada", "project-1")
 
     with frozen_time(FROZEN_AT):
         await redis.set(recent_key, get_now_unix() - 30)

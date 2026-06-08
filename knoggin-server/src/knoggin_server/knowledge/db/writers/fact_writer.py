@@ -103,13 +103,14 @@ class FactWriter:
                             f"Failed to create facts for entity {entity_id} (parent may not exist)"
                         )
 
-                    # Handle message links without FOREACH
+                    # Link only to persisted messages. Do not create placeholder
+                    # Message nodes from source_msg_id values.
                     msg_params = [p for p in fact_params if p["source_msg_id"] is not None]
                     if msg_params:
                         cypher_m = """
                         UNWIND $batch AS item
                         MATCH (f:Fact {id: item.id})
-                        MERGE (m:Message {
+                        MATCH (m:Message {
                             user_name: item.source_user_name,
                             session_id: item.source_session_id,
                             id: item.source_msg_id

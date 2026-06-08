@@ -213,6 +213,11 @@ class Context:
         await self.redis_client.incr(
             RedisKeys.heartbeat_counter(self.user_name, self.session_id)
         )
+        if not self.project_id:
+            raise RuntimeError("Context cannot enqueue messages without project_id")
+        await self.redis_client.incr(
+            RedisKeys.project_heartbeat_counter(self.user_name, self.project_id)
+        )
 
         buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
         await self.redis_client.rpush(

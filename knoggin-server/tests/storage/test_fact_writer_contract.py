@@ -7,7 +7,6 @@ from common.schema.primitives import FactRecord
 from knoggin_server.knowledge.db.writers.fact_writer import FactWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
-
 CREATE_FACTS_GRAPH_FIELDS = {
     "entity_id",
     "batch",
@@ -129,7 +128,8 @@ async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
         "project_id": "project-1",
     }
     
-    assert "MERGE (m:Message" in msg_call[1]
+    assert "MATCH (m:Message" in msg_call[1]
+    assert "MERGE (m:Message" not in msg_call[1]
     msg_params = json.loads(msg_call[2][0])
     assert msg_params["batch"][0]["source_msg_id"] == 7
 
