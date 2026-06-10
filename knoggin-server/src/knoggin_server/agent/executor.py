@@ -100,6 +100,7 @@ class AgentExecutor:
 
         # Reasoning Loop
         needs_replanning = False
+        needs_final_synthesis = False
 
         while self.ctx.state.attempt_count < self.ctx.config.max_attempts:
             if (
@@ -116,8 +117,8 @@ class AgentExecutor:
             current_model = None
             current_reasoning = None
 
-            if self.ctx.state.attempt_count == 1 or needs_replanning:
-                # Architect Mode: Strategic planning, use the heavier model
+            if self.ctx.state.attempt_count == 1 or needs_replanning or needs_final_synthesis:
+                # Architect Mode: Strategic planning or final synthesis
                 current_mode_name = "Architect"
                 current_model = model or self.llm.agent_model
                 current_reasoning = "high"
@@ -125,11 +126,19 @@ class AgentExecutor:
                     logger.info(
                         "AgentExecutor: Escalating back to Architect for re-planning."
                     )
+                elif needs_final_synthesis:
+                    logger.info(
+                        "AgentExecutor: Architect performing final synthesis/review."
+                    )
             else:
                 # Librarian Mode: Execution, use the lighter extraction model
                 current_mode_name = "Librarian"
                 current_model = model or self.llm.extraction_model
                 current_reasoning = "medium"
+
+            # Reset flags so the next turn defaults back to Librarian unless triggered again
+            needs_replanning = False
+            needs_final_synthesis = False
 
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
@@ -154,12 +163,15 @@ class AgentExecutor:
                 event_type = event.get("event")
                 data = event.get("data")
 
-                if event_type == "done":
-                    # If step returned FinalResponse or Clarification, we're done
-                    if isinstance(data, (FinalResponse, ClarificationRequest)):
-                        yield self._wrap_final_response(data)
-                        return
+                if event_type == "formatting_error":
+                    logger.warning(
+                        f"AgentExecutor: Model emitted text without tool calls. Returning error to loop."
+                    )
+                    current_results = [{"error": data}]
+                    last_result = current_results
+                    break
 
+                if event_type == "done":
                     # If step returned ToolCalls (List[ToolCall]), execute them
                     if isinstance(data, list):
                         current_results = []
@@ -170,6 +182,25 @@ class AgentExecutor:
                             )
                             needs_replanning = True
                             break
+
+                        # Intercept submit_answer before tool execution
+                        submit = next(
+                            (tc for tc in data if tc.name == "submit_answer"),
+                            None,
+                        )
+                        if submit:
+                            content = submit.args.get("content", "")
+                            response = FinalResponse(content=content)
+
+                            if current_mode_name == "Librarian":
+                                logger.info(
+                                    "AgentExecutor: Librarian believes we have the answer. Promoting to Architect for final synthesis."
+                                )
+                                needs_final_synthesis = True
+                                break
+
+                            yield self._wrap_final_response(response)
+                            return
 
                         # Intercept clarification before tool execution
                         clarification = next(
@@ -209,6 +240,28 @@ class AgentExecutor:
 
                         last_result = current_results
                         await self._manage_context_size()
+
+                        # Track consecutive empty results for deterministic replanning
+                        all_empty = all(
+                            "error" in r or not r.get("result", {}).get("data")
+                            for r in current_results
+                        ) if current_results else True
+
+                        if all_empty:
+                            self.ctx.state.consecutive_empty_results += 1
+                            if (
+                                self.ctx.state.consecutive_empty_results
+                                >= self.ctx.config.empty_result_replan_threshold
+                            ):
+                                logger.info(
+                                    f"AgentExecutor: {self.ctx.state.consecutive_empty_results} "
+                                    "consecutive empty results. Forcing replan."
+                                )
+                                needs_replanning = True
+                                self.ctx.state.consecutive_empty_results = 0
+                        else:
+                            self.ctx.state.consecutive_empty_results = 0
+
                         break
                 else:
                     yield event
@@ -294,10 +347,10 @@ class AgentExecutor:
                         u["approximate"] = True
                     self._accumulate_usage(u)
                     if not pending_tool_calls:
-                        # Final Response
+                        # Model chatted without calling tools. This is a formatting error.
                         yield {
-                            "event": "done",
-                            "data": FinalResponse(content=content_accumulator.strip()),
+                            "event": "formatting_error",
+                            "data": "Error: You must either call an investigative tool or call submit_answer. Do not output raw text.",
                         }
                     else:
                         yield {"event": "done", "data": pending_tool_calls}
@@ -309,7 +362,7 @@ class AgentExecutor:
 
     @staticmethod
     def _safe_parse_args(json_str: str) -> Dict:
-        """Secure tool argument parsing using json and Pydantic validation."""
+        """Parse tool arguments from JSON string with LLM formatting fixups."""
         # Try standard JSON
         parsed = safe_json_loads(json_str)
         if isinstance(parsed, dict):
@@ -460,6 +513,11 @@ class AgentExecutor:
 
     async def _fallback(self) -> Dict:
         """Unified fallback when agent exhausts attempts."""
+        logger.warning(
+            f"AgentExecutor: Entering fallback after {self.ctx.state.attempt_count} attempts, "
+            f"{self.ctx.state.call_count} tool calls. "
+            f"Evidence: {self.ctx.evidence.has_any()}"
+        )
         if self.ctx.evidence.has_any():
             summary = await self._generate_fallback_summary()
             return {
@@ -471,6 +529,7 @@ class AgentExecutor:
                     "sources": self.ctx.evidence.sources
                     if self.ctx.evidence.sources
                     else None,
+                    "fallback": True,
                 },
             }
         else:
@@ -479,6 +538,7 @@ class AgentExecutor:
                 "data": {
                     "question": "I'm having trouble with that. Could you rephrase?",
                     "usage": self.ctx.state.usage,
+                    "fallback": True,
                 },
             }
 

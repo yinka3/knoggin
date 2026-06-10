@@ -303,6 +303,7 @@ class ProjectManager:
             user_name=self.user_name,
             redis_client=self.resources.redis,
             readable_project_ids=readable_project_ids,
+            batch_processor=project_processor,
         )
         project_state.profile_job = profile_job
         project_state.merge_job = merge_job

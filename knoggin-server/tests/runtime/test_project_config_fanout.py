@@ -328,6 +328,7 @@ async def test_project_config_updates_fan_out_to_runtime_services(monkeypatch):
 @pytest.mark.no_network
 async def test_default_topics_fanout_updates_project_topics(monkeypatch):
     project_state, config_manager = await boot_project(monkeypatch)
+    processor = FanoutBatchProcessor.instances[0]
 
     new_topics = {
         "NewTopic": {
@@ -353,7 +354,7 @@ async def test_default_topics_fanout_updates_project_topics(monkeypatch):
         "DeepWork": {"DeepWork": ["Practice"]},
         "NewTopic": {"NewTopic": ["Child"]},
     }
-    assert project_state.pipeline.refresh_count == 1
+    assert processor.refresh_count == 1
 
 
 @pytest.mark.runtime

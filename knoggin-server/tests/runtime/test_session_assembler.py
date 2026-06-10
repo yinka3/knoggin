@@ -100,15 +100,31 @@ def assembler_harness(monkeypatch):
     config_manager = RecordingConfigManager()
     emitter = RecordingEmitter()
     resources = FakeResources(graph_client=RecordingGraphClient())
+    entities = object()
+    pipeline = FakePipeline()
+
+    async def get_next_ent_id():
+        return 42
+
+    shared_processor = RecordingBatchProcessor(
+        project_id="project-1",
+        redis_client=resources.redis,
+        llm=resources.llm_service,
+        entities=entities,
+        processor=pipeline,
+        topic_config=make_topic_config(),
+        get_next_ent_id=get_next_ent_id,
+    )
     project_state = ProjectState(
         project_id="project-1",
-        topic_config=make_topic_config(),
-        entities=object(),
-        pipeline=FakePipeline(),
+        topic_config=shared_processor.kwargs["topic_config"],
+        entities=entities,
+        pipeline=pipeline,
         scheduler=FakeScheduler(),
         user_name="ada",
         redis_client=resources.redis,
         readable_project_ids=["project-1"],
+        batch_processor=shared_processor,
     )
 
     monkeypatch.setattr(
@@ -118,10 +134,6 @@ def assembler_harness(monkeypatch):
     monkeypatch.setattr(
         "knoggin_server.session.boot.DebugEventEmitter.get",
         staticmethod(lambda: emitter),
-    )
-    monkeypatch.setattr(
-        "knoggin_server.session.boot.BatchProcessor",
-        RecordingBatchProcessor,
     )
     monkeypatch.setattr(
         "knoggin_server.session.boot.BatchConsumer",
@@ -138,6 +150,8 @@ def assembler_harness(monkeypatch):
         emitter=emitter,
         project_state=project_state,
         resources=resources,
+        batch_processor=shared_processor,
+        get_next_ent_id=get_next_ent_id,
     )
 
 
@@ -165,7 +179,8 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert len(harness.resources.redis.evals) == 1
     assert harness.resources.redis.evals[0][1] == (RedisKeys.global_next_ent_id(), 41)
 
-    processor = RecordingBatchProcessor.instances[0]
+    assert RecordingBatchProcessor.instances == [harness.batch_processor]
+    processor = harness.batch_processor
     assert ctx.batch_processor is processor
     assert processor.kwargs["project_id"] == "project-1"
     assert processor.kwargs["redis_client"] is harness.resources.redis
@@ -173,7 +188,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert processor.kwargs["entities"] is harness.project_state.entities
     assert processor.kwargs["processor"] is harness.project_state.pipeline
     assert processor.kwargs["topic_config"] is harness.project_state.topic_config
-    assert processor.get_next_ent_id == ctx.get_next_ent_id
+    assert processor.get_next_ent_id is harness.get_next_ent_id
 
     consumer = RecordingBatchConsumer.instances[0]
     assert ctx.consumer is consumer

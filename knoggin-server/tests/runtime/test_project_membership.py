@@ -282,6 +282,7 @@ async def test_get_or_start_project_caches_state_and_registers_project_jobs(
         "project-1",
     ]
     assert RecordingBatchProcessor.instances[0].kwargs["project_id"] == "project-1"
+    assert project_state.batch_processor is RecordingBatchProcessor.instances[0]
     assert len(config_manager.subscriptions) == 9
 
     dlq_job = scheduler._jobs["dlq_auto_replay"]

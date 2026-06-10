@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from loguru import logger
 
 from common.exceptions import ToolExecutionError
+from common.schema.tool_schema import TOOL_SCHEMAS
 from common.utils.time_utils import parse_iso_time_or_now
 from knoggin_server.agent.formatters import (
     format_entity_results,
@@ -16,6 +17,31 @@ from knoggin_server.agent.formatters import (
 )
 from knoggin_server.agent.tools.registry import TOOL_DISPATCH, Tools
 from knoggin_server.agent.types import AgentContext, RetrievedEvidence
+
+_TOOL_PARAM_TYPES: Dict[str, Dict[str, str]] = {}
+for _schema in TOOL_SCHEMAS:
+    _fn = _schema.get("function", {})
+    _name = _fn.get("name", "")
+    _props = _fn.get("parameters", {}).get("properties", {})
+    _TOOL_PARAM_TYPES[_name] = {k: v.get("type", "string") for k, v in _props.items()}
+
+
+def _coerce_arg(value, expected_type: str):
+    """Best-effort coercion of LLM-provided arg values to declared schema types."""
+    if value is None:
+        return value
+    if expected_type == "integer":
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return value
+    if expected_type == "string":
+        if isinstance(value, str):
+            return value
+        return str(value)
+    return value
 
 
 def build_user_message(
@@ -56,7 +82,9 @@ def build_user_message(
             tool = r.get("tool", "unknown")
             data = r.get("result", {}).get("data")
 
-            if tool in (
+            if "error" in r:
+                msg += f"- `{tool}`: Error - {r['error']}\n"
+            elif tool in (
                 "search_messages",
                 "search_entity",
                 "get_connections",
@@ -71,11 +99,12 @@ def build_user_message(
                 data_val = data if isinstance(data, list) else []
                 count = len(data_val)
                 if count > 0:
-                    msg += f"- `{tool}`: Found {count} items. (See 'Retrieved Context' below)\n"
+                    msg += (
+                        f"- `{tool}`: Found {count} items. "
+                        "(See 'Retrieved Context' below)\n"
+                    )
                 else:
                     msg += f"- `{tool}`: No results found.\n"
-            elif "error" in r:
-                msg += f"- `{tool}`: Error - {r['error']}\n"
             else:
                 if not data:
                     msg += f"- `{tool}`: No results found\n"
@@ -83,7 +112,10 @@ def build_user_message(
                     msg += f"- `{tool}`: {json.dumps(data, indent=2, default=str)}\n"
 
     if ctx.hot_topic_context:
-        msg += f"\n**Hot topic context (pre-fetched):**\n{format_hot_topic_context(ctx.hot_topic_context)}\n"
+        msg += (
+            "\n**Hot topic context (pre-fetched):**\n"
+            f"{format_hot_topic_context(ctx.hot_topic_context)}\n"
+        )
 
     if ctx.evidence.has_any():
         msg += "\n**Accumulated context:**\n"
@@ -183,7 +215,10 @@ def _format_evidence(
             )
 
     if evidence.hierarchy:
-        msg += f"\n**Hierarchy results:**\n{format_hierarchy_results(evidence.hierarchy)}\n"
+        msg += (
+            "\n**Hierarchy results:**\n"
+            f"{format_hierarchy_results(evidence.hierarchy)}\n"
+        )
 
     if evidence.facts:
         msg += f"\n**Fact check results:**\n{format_fact_results(evidence.facts)}\n"
@@ -267,7 +302,7 @@ def _normalize_file_chunks(data: List[Dict]) -> List[Dict]:
 
 def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
     """
-    Merge the newly retrieved tool results into the agent's accumulated evidence context.
+    Merge newly retrieved tool results into accumulated evidence context.
     Prevents duplicate entries and applies ranking or limits where required.
     """
     if not result or "error" in result:
@@ -402,6 +437,12 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
 
     try:
         kwargs = {k: args.get(k) for k in param_keys if k in args}
+
+        param_types = _TOOL_PARAM_TYPES.get(name, {})
+        for k, v in kwargs.items():
+            if k in param_types:
+                kwargs[k] = _coerce_arg(v, param_types[k])
+
         result = await method(**kwargs)
         return {"data": result}
     except Exception as e:

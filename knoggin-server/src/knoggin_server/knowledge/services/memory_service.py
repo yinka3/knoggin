@@ -17,8 +17,8 @@ from common.schema.memory import (
     WorkingMemoryListResult,
     WorkingMemoryRemoveResult,
 )
-from common.utils.time_utils import get_now_iso
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now_iso
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from knoggin_server.agent.formatters import format_memory_context
 
@@ -94,7 +94,10 @@ class MemoryManager:
         if len(content) > MAX_CONTENT_LEN:
             return MemorySaveResult(
                 success=False,
-                error=f"Memory too long ({len(content)} chars). Max {MAX_CONTENT_LEN}. Condense and retry.",
+                error=(
+                    f"Memory too long ({len(content)} chars). "
+                    f"Max {MAX_CONTENT_LEN}. Condense and retry."
+                ),
             )
 
         normalized = self.topic_config.normalize_topic(topic) if topic else None
@@ -105,7 +108,7 @@ class MemoryManager:
                     success=False, error="No active topics available."
                 )
             return MemorySaveResult(
-                success=False, 
+                success=False,
                 error=f"Topic '{topic}' is invalid. Active topics are: {active_list}"
             )
 
@@ -119,8 +122,11 @@ class MemoryManager:
         if len(existing) >= MAX_BLOCK_SIZE:
             return MemorySaveResult(
                 success=False,
-                error=f"Memory block '{normalized}' is full ({MAX_BLOCK_SIZE}/{MAX_BLOCK_SIZE}). "
-                "Use forget_memory to remove outdated entries first.",
+                error=(
+                    f"Memory block '{normalized}' is full "
+                    f"({MAX_BLOCK_SIZE}/{MAX_BLOCK_SIZE}). "
+                    "Use forget_memory to remove outdated entries first."
+                ),
             )
 
         mem_id = f"mem_{uuid.uuid4().hex[:8]}"
@@ -184,13 +190,16 @@ class MemoryManager:
         self,
         hot_topics: List[str] = None,
     ) -> MemoryListResult:
-        """Fetch session memory blocks. Always includes General + hot topics."""
+        """Fetch requested active session memory blocks."""
         topics_to_fetch: List[str] = []
-        if self.topic_config.is_active("General"):
-            topics_to_fetch.append("General")
         for t in hot_topics or []:
-            if t not in topics_to_fetch:
-                topics_to_fetch.append(t)
+            normalized = self.topic_config.alias_lookup.get(t.lower()) if t else None
+            if (
+                normalized
+                and self.topic_config.is_active(normalized)
+                and normalized not in topics_to_fetch
+            ):
+                topics_to_fetch.append(normalized)
 
         blocks: Dict[str, List[MemoryEntry]] = {}
         for topic in topics_to_fetch:
@@ -230,7 +239,10 @@ class MemoryManager:
         if category not in WorkingMemoryStrings._fields:
             return WorkingMemoryAddResult(
                 success=False,
-                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
+                error=(
+                    "Invalid category. Must be one of: "
+                    f"{WorkingMemoryStrings._fields}"
+                ),
             )
 
         if not content or not content.strip():
@@ -240,7 +252,10 @@ class MemoryManager:
         if len(content) > MAX_CONTENT_LEN:
             return WorkingMemoryAddResult(
                 success=False,
-                error=f"Working memory too long ({len(content)} chars). Max {MAX_CONTENT_LEN}.",
+                error=(
+                    f"Working memory too long ({len(content)} chars). "
+                    f"Max {MAX_CONTENT_LEN}."
+                ),
             )
 
         mem_id = f"mem_{uuid.uuid4().hex[:8]}"
@@ -277,7 +292,10 @@ class MemoryManager:
         if category not in WorkingMemoryStrings._fields:
             return WorkingMemoryRemoveResult(
                 success=False,
-                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
+                error=(
+                    "Invalid category. Must be one of: "
+                    f"{WorkingMemoryStrings._fields}"
+                ),
             )
 
         key = RedisKeys.agent_working_memory(self.agent_id, category)
@@ -340,7 +358,10 @@ class MemoryManager:
         if category not in WorkingMemoryStrings._fields:
             return WorkingMemoryClearResult(
                 success=False,
-                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
+                error=(
+                    "Invalid category. Must be one of: "
+                    f"{WorkingMemoryStrings._fields}"
+                ),
             )
 
         key = RedisKeys.agent_working_memory(self.agent_id, category)

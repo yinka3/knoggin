@@ -52,7 +52,9 @@ class TopicConfig:
     """
 
     DEFAULT_CONFIG: Dict[str, TopicSchema] = {
-        "General": TopicSchema(active=True, hot=False, labels=[], hierarchy={}, aliases=[])
+        "General": TopicSchema(
+            active=True, hot=False, labels=[], hierarchy={}, aliases=[]
+        )
     }
 
     def __init__(self, config: Dict[str, TopicSchema]):
@@ -190,7 +192,8 @@ class TopicConfig:
                 new_labels = set(topic_cfg.labels)
                 if old_labels != new_labels:
                     logger.warning(
-                        f"Labels modified for '{topic_name}': {old_labels} → {new_labels}"
+                        f"Labels modified for '{topic_name}': "
+                        f"{old_labels} → {new_labels}"
                     )
             else:
                 logger.info(f"Adding new topic via update: {topic_name}")
@@ -229,7 +232,7 @@ class TopicConfig:
         logger.info(f"Topic '{topic_name}' active={active}")
 
     def validate_hot_topics(self, hot_topics: List[str]) -> List[str]:
-        """Filter hot topics to only include active ones."""
+        """Normalize and filter hot topics to configured active topics."""
         if not hot_topics:
             return []
 
@@ -238,7 +241,11 @@ class TopicConfig:
         invalid = []
 
         for topic in hot_topics:
-            canonical = self.normalize_topic(topic)
+            canonical = (
+                self.alias_lookup.get(topic.strip().lower())
+                if isinstance(topic, str) and topic.strip()
+                else None
+            )
             if canonical and canonical in active:
                 if canonical not in valid:
                     valid.append(canonical)

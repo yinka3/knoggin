@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from common.utils.time_utils import reset_clock, set_test_clock
 from knoggin_server.knowledge.db.readers.fact_reader import FactReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -183,8 +184,12 @@ async def test_fact_reader_get_recent_facts_strips_quoted_age_strings():
         ]
     )
     reader = FactReader(client)
+    set_test_clock("2026-01-08T12:00:00+00:00")
 
-    facts = await reader.get_recent_facts(days=3, limit=4)
+    try:
+        facts = await reader.get_recent_facts(days=3, limit=4)
+    finally:
+        reset_clock()
 
     assert facts == [
         {
@@ -197,7 +202,7 @@ async def test_fact_reader_get_recent_facts_strips_quoted_age_strings():
     ]
     params = json.loads(client.calls[0][2][0])
     assert params["limit"] == 4
-    assert "cutoff" in params
+    assert params["cutoff"] == "2026-01-05T12:00:00+00:00"
 
 
 @pytest.mark.storage

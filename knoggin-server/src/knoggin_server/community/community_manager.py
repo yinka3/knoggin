@@ -1,11 +1,12 @@
 import asyncio
 import uuid
+from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
+from common.schema.aac_schema import AAC_READ_TOOL_NAMES, AAC_SPECIFIC_SCHEMAS
 from common.schema.agent_contracts import AgentConfig
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
@@ -14,7 +15,6 @@ from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.executor import AgentExecutor
 from knoggin_server.agent.system_prompt import get_agent_prompt
 from knoggin_server.agent.tools.community_tools import CommunityTools
-from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.agent.types import (
     AgentContext,
     AgentRunConfig,
@@ -25,6 +25,25 @@ from knoggin_server.knowledge.services.memory_service import MemoryManager
 from knoggin_server.project.state import ProjectState
 from knoggin_server.session.boot import SessionAssembler
 from knoggin_server.session.context import Context
+
+COMMUNITY_ENABLED_TOOLS = AAC_READ_TOOL_NAMES
+
+COMMUNITY_RUN_CONFIG = AgentRunConfig(
+    max_calls=5,
+    max_attempts=6,
+    max_history_turns=4,
+    max_accumulated_messages=10,
+    max_consecutive_errors=2,
+    tool_limits=(
+        ("search_entity", 4),
+        ("fact_check", 6),
+        ("get_connections", 3),
+        ("search_messages", 3),
+        ("save_memory", 4),
+        ("save_insight", 4),
+        ("spawn_specialist", 2),
+    ),
+)
 
 
 class CommunityManager:
@@ -38,7 +57,7 @@ class CommunityManager:
         self._discussion_task: Optional[asyncio.Task] = None
 
     async def _get_agent_working_memory(self, agent_id: str) -> Dict[str, List[str]]:
-        """Fetch and safely parse an agent's working memory (rules, preferences, icks)."""
+        """Fetch and safely parse an agent's working memory."""
         memory_mgr = MemoryManager(
             redis=self.resources.redis,
             user_name=self.user_name,
@@ -55,8 +74,17 @@ class CommunityManager:
         }
 
     async def _is_discussion_active(self) -> bool:
-        return await self.resources.redis.exists(
-            RedisKeys.community_discussion_active()
+        return bool(await self.resources.redis.get(self._active_discussion_key()))
+
+    def _active_discussion_key(self) -> str:
+        return (
+            f"{RedisKeys.community_discussion_active()}:"
+            f"{self.user_name}:{self.project_state.project_id}"
+        )
+
+    async def _agent_exists(self, agent_id: str) -> bool:
+        return bool(
+            await self.resources.redis.hget(RedisKeys.agents(self.user_name), agent_id)
         )
 
     async def _get_default_agent_id(self) -> str:
@@ -103,9 +131,7 @@ class CommunityManager:
         raw_agent_ids = seed_data.get("agent_ids", [])
         valid_agent_ids = []
         for aid in raw_agent_ids:
-            if aid == "default_stella" or await self.resources.redis.hexists(
-                RedisKeys.agents(self.user_name), aid
-            ):
+            if aid == "default_stella" or await self._agent_exists(aid):
                 valid_agent_ids.append(aid)
             else:
                 logger.warning(f"AAC: Seeded agent_id '{aid}' not found, skipping")
@@ -119,7 +145,7 @@ class CommunityManager:
 
         topic = seed_data["topic"]
         await self.resources.redis.set(
-            RedisKeys.community_discussion_active(), discussion_id
+            self._active_discussion_key(), discussion_id
         )
         await self.resources.graph_client.community.create_discussion(
             discussion_id, topic, valid_agent_ids
@@ -139,7 +165,7 @@ class CommunityManager:
                 logger.error(f"AAC discussion {discussion_id} error: {e}")
             finally:
                 await self.resources.redis.delete(
-                    RedisKeys.community_discussion_active()
+                    self._active_discussion_key()
                 )
                 self._active_discussion_id = None
                 try:
@@ -178,11 +204,12 @@ class CommunityManager:
 
         for turn in range(max_turns):
             active_id = await self.resources.redis.get(
-                RedisKeys.community_discussion_active()
+                self._active_discussion_key()
             )
             if not active_id or active_id != discussion_id:
                 logger.info(
-                    f"AAC [{discussion_id}]: Discussion manually closed or superseded. Aborting loop."
+                    f"AAC [{discussion_id}]: Discussion manually closed or "
+                    "superseded. Aborting loop."
                 )
                 break
 
@@ -204,7 +231,8 @@ class CommunityManager:
                 )
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"AAC [{discussion_id}]: Turn {turn} timed out after 20 minutes. Closing discussion."
+                    f"AAC [{discussion_id}]: Turn {turn} timed out after "
+                    "20 minutes. Closing discussion."
                 )
                 break
 
@@ -266,14 +294,12 @@ class CommunityManager:
             topic_config=ctx.project.topic_config,
         )
 
-        base_tools = Tools(
-            user_name=self.user_name,
+        base_tools = SimpleNamespace(
             entities=ctx.project.entities,
             session_id=ctx.session_id,
             topic_config=ctx.project.topic_config,
-            search_config={},
+            search_cfg={},
             file_rag=ctx.file_rag,
-            memory=comm_memory,
             graph_client=self.resources.graph_client,
             redis=self.resources.redis,
         )
@@ -289,7 +315,7 @@ class CommunityManager:
         )
 
         agent_ctx = AgentContext(
-            config=AgentRunConfig(),
+            config=COMMUNITY_RUN_CONFIG,
             state=agent_state,
             evidence=evidence,
             user_name=self.user_name,
@@ -311,54 +337,61 @@ class CommunityManager:
             memory_mgr=comm_memory,
         )
 
-        community_enabled_tools = [
-            "search_entity",
-            "get_connections",
-            "search_messages",
-            "get_recent_activity",
-            "find_path",
-            "get_hierarchy",
-            "fact_check",
-            "web_search",
-            "news_search",
-        ]
-
         full_response: str = ""
+        enabled_tools, client_tools = self._resolve_agent_tools(agent)
 
-        async for event in executor.execute(
-            agent_rules=agent_rules,
-            agent_preferences=agent_preferences,
-            agent_icks=agent_icks,
-            enabled_tools=community_enabled_tools,
-            client_tools=AAC_SPECIFIC_SCHEMAS,
-        ):
-            e_type = event.get("event")
-            data = event.get("data", {})
+        try:
+            async for event in executor.execute(
+                model=agent.model,
+                agent_temperature=agent.temperature,
+                agent_instructions=agent.instructions,
+                agent_rules=agent_rules,
+                agent_preferences=agent_preferences,
+                agent_icks=agent_icks,
+                enabled_tools=enabled_tools,
+                client_tools=client_tools,
+            ):
+                e_type = event.get("event")
+                data = event.get("data", {})
 
-            if e_type == "token":
-                full_response += data.get("content", "")
-            elif e_type == "thinking":
-                reasoning = data.get("content", "")
-                if reasoning:
-                    await emit_community(
-                        self.user_name,
-                        "community",
-                        "agent_reasoning",
-                        {
-                            "discussion_id": discussion_id,
-                            "agent_id": agent.id,
-                            "reasoning": reasoning,
-                        },
-                    )
-            elif e_type == "tool_end":
-                if data.get("tool") == "spawn_specialist":
-                    res = data.get("result", "")
-                    if "ID:" in res:
-                        new_id = res.split("ID:")[1].split()[0]
-                        if new_id not in participants:
-                            participants.append(new_id)
+                if e_type == "token":
+                    full_response += data.get("content", "")
+                elif e_type == "response":
+                    full_response = data.get("content", "").strip()
+                    break
+                elif e_type == "clarification":
+                    full_response = data.get("question", "").strip()
+                    break
+                elif e_type == "thinking":
+                    reasoning = data.get("content", "")
+                    if reasoning:
+                        await emit_community(
+                            self.user_name,
+                            "community",
+                            "agent_reasoning",
+                            {
+                                "discussion_id": discussion_id,
+                                "agent_id": agent.id,
+                                "reasoning": reasoning,
+                            },
+                        )
+        finally:
+            await comm_tools.close()
 
         return full_response.strip() if full_response else None
+
+    def _resolve_agent_tools(self, agent: AgentConfig) -> tuple[List[str], List[Dict]]:
+        if not agent.enabled_tools:
+            return COMMUNITY_ENABLED_TOOLS, AAC_SPECIFIC_SCHEMAS
+
+        allowed = set(agent.enabled_tools)
+        enabled_tools = [name for name in COMMUNITY_ENABLED_TOOLS if name in allowed]
+        client_tools = [
+            schema
+            for schema in AAC_SPECIFIC_SCHEMAS
+            if schema["function"]["name"] in allowed
+        ]
+        return enabled_tools, client_tools
 
     async def _seed_discussion(self) -> Optional[Dict]:
         """Use seeding agent to analyze graph and initiate a discussion."""
@@ -413,14 +446,17 @@ class CommunityManager:
     <seeding_role>
     You are the SEEDING AGENT for an autonomous community discussion.
 
-    Your job is to analyze the knowledge graph context below and initiate a meaningful discussion.
+    Your job is to analyze the knowledge graph context below and initiate a
+    meaningful discussion.
 
     You must decide:
     1. TOPIC: What specific subject should agents discuss? Be concrete, not vague.
-    2. OBJECTIVE: What should they achieve? (e.g., resolve a contradiction, explore a connection, brainstorm applications, debate a decision)
+    2. OBJECTIVE: What should they achieve? (e.g., resolve a contradiction,
+       explore a connection, brainstorm applications, debate a decision)
     3. DISCUSSION_TYPE: "brainstorm" | "debate" | "investigation" | "synthesis"
     4. REASONING: Why this topic now? What makes it valuable?
-    5. AGENT_IDS: Which agents should participate? Pick 2-4 agents whose personas are relevant. You may include yourself.
+    5. AGENT_IDS: Which agents should participate? Pick 2-4 agents whose
+       personas are relevant. You may include yourself.
 
     Guidelines:
     - Prioritize topics with recent activity or unresolved questions
@@ -464,7 +500,12 @@ class CommunityManager:
             },
         )
 
-        response = await self.resources.llm_service.call_llm(system_prompt, user_prompt)
+        response = await self.resources.llm_service.call_llm(
+            system_prompt,
+            user_prompt,
+            model=seeding_agent.model,
+            temperature=seeding_agent.temperature,
+        )
 
         try:
             clean = response.strip() if response else ""
@@ -520,7 +561,9 @@ class CommunityManager:
 
         return {
             "topic": "Knowledge graph exploration and insight discovery",
-            "objective": "Find interesting patterns or connections in the user's knowledge",
+            "objective": (
+                "Find interesting patterns or connections in the user's knowledge"
+            ),
             "discussion_type": "brainstorm",
             "reasoning": "Fallback due to seeding failure",
             "agent_ids": [seeding_agent.id],
@@ -621,6 +664,19 @@ class CommunityManager:
         raw_agents = await self.resources.redis.hgetall(
             RedisKeys.agents(self.user_name)
         )
+
+        if not raw_agents:
+            return ["default_stella"], "- STELLA (default): General purpose assistant."
+
+        pool_ids = (
+            ConfigManager.get().config.developer_settings.community.agent_pool_ids
+        )
+        if pool_ids:
+            raw_agents = {
+                aid: raw
+                for aid, raw in raw_agents.items()
+                if aid in pool_ids
+            }
 
         if not raw_agents:
             return ["default_stella"], "- STELLA (default): General purpose assistant."

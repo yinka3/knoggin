@@ -40,6 +40,10 @@ class FakePipelineWriter:
         self.commands.append(("hdel", key, fields))
         return self
 
+    def hget(self, key, field):
+        self.commands.append(("hget", key, field))
+        return self
+
     async def execute(self):
         results = []
         for command in self.commands:
@@ -59,6 +63,9 @@ class FakePipelineWriter:
             elif name == "hdel":
                 _, key, fields = command
                 results.append(await self.redis.hdel(key, *fields))
+            elif name == "hget":
+                _, key, field = command
+                results.append(await self.redis.hget(key, field))
         return results
 
 
@@ -217,6 +224,14 @@ class FakeRedis:
 
     async def zscore(self, key, member):
         return self.zsets.get(key, {}).get(str(member))
+
+    async def zrank(self, key, member):
+        items = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1])
+        target = str(member)
+        for index, (item, _) in enumerate(items):
+            if item == target:
+                return index
+        return None
 
     async def zremrangebyrank(self, key, start, end):
         items = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1])
