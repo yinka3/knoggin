@@ -6,12 +6,16 @@ from loguru import logger
 from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
+from knoggin_server.knowledge.db.writers.age_projection_writer import (
+    AgeProjectionWriter,
+)
 
 
 class GraphWriter:
     def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
+        self.projection = AgeProjectionWriter(client, graph_name=graph_name)
 
     def _current_time_ms(self) -> int:
         return get_now_ms()
@@ -34,6 +38,76 @@ class GraphWriter:
             merged.append(ref)
         return merged
 
+    @staticmethod
+    def _relationship_id(project_id: str, entity_a_id: int, entity_b_id: int) -> str:
+        a_id, b_id = sorted((entity_a_id, entity_b_id))
+        return f"{project_id}:{a_id}:{b_id}"
+
+    @staticmethod
+    def _clean_string(value):
+        if isinstance(value, str):
+            return value.strip('"')
+        return value
+
+    @classmethod
+    def _dedupe_aliases(cls, *alias_groups) -> List[str]:
+        aliases = []
+        seen = set()
+        for group in alias_groups:
+            if group is None:
+                continue
+            values = group if isinstance(group, list) else [group]
+            for value in values:
+                alias = cls._clean_string(value)
+                if not alias or alias in seen:
+                    continue
+                seen.add(alias)
+                aliases.append(alias)
+        return aliases
+
+    @staticmethod
+    def _normalize_evidence_refs(value) -> List[Dict]:
+        if not value:
+            return []
+        refs = json.loads(value) if isinstance(value, str) else value
+        if isinstance(refs, dict):
+            refs = [refs]
+        return [ref for ref in refs if ref]
+
+    @classmethod
+    def _relationship_projection_params(cls, rows: List[Dict]) -> List[Dict]:
+        params = []
+        for row in rows:
+            evidence_refs = [
+                json.dumps(ref, sort_keys=True)
+                for ref in cls._normalize_evidence_refs(row.get("evidence_refs"))
+            ]
+            params.append(
+                {
+                    "project_id": row["project_id"],
+                    "entity_a_id": int(row["entity_a_id"]),
+                    "entity_b_id": int(row["entity_b_id"]),
+                    "weight": int(row.get("weight") or 1),
+                    "confidence": float(row.get("confidence") or 0),
+                    "context": row.get("context"),
+                    "last_seen": int(row.get("last_seen_ms") or 0),
+                    "message_ids": evidence_refs,
+                }
+            )
+        return params
+
+    @staticmethod
+    def _hierarchy_projection_params(rows: List[Dict]) -> List[Dict]:
+        return [
+            {
+                "project_id": row["project_id"],
+                "parent_id": int(row["parent_id"]),
+                "child_id": int(row["child_id"]),
+                "created_at": int(row.get("created_at_ms") or 0),
+            }
+            for row in rows
+        ]
+
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         if not messages:
             return True
@@ -44,21 +118,6 @@ class GraphWriter:
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # Write to Graph
-                    cypher = """
-                    UNWIND $batch AS msg
-                    MERGE (m:Message {
-                        user_name: msg.user_name,
-                        session_id: msg.session_id,
-                        id: msg.id
-                    })
-                    SET m.content = msg.content,
-                        m.role = msg.role,
-                        m.timestamp = msg.timestamp,
-                        m.project_id = msg.project_id
-                    RETURN count(m)
-                    """
-
                     batch_params = []
                     for msg in messages:
                         missing = [
@@ -68,7 +127,8 @@ class GraphWriter:
                         ]
                         if missing:
                             raise ValueError(
-                                f"Message {msg.get('id')} missing required scope fields: {missing}"
+                                f"Message {msg.get('id')} missing required scope "
+                                f"fields: {missing}"
                             )
 
                         batch_params.append(
@@ -85,18 +145,55 @@ class GraphWriter:
                             }
                         )
 
-                    await cur.execute(
-                        self.client.build_cypher(cypher),
-                        (json.dumps({"batch": batch_params}),),
-                    )
+                    # Write canonical messages first.
+                    for msg in batch_params:
+                        await cur.execute(
+                            """
+                            INSERT INTO messages (
+                                user_name,
+                                session_id,
+                                message_id,
+                                project_id,
+                                role,
+                                content,
+                                timestamp_ms
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (user_name, session_id, message_id)
+                            DO UPDATE SET
+                                project_id = EXCLUDED.project_id,
+                                role = EXCLUDED.role,
+                                content = EXCLUDED.content,
+                                timestamp_ms = EXCLUDED.timestamp_ms
+                            """,
+                            (
+                                msg["user_name"],
+                                msg["session_id"],
+                                msg["id"],
+                                msg["project_id"],
+                                msg["role"],
+                                msg["content"],
+                                msg["timestamp"],
+                            ),
+                        )
+
+                    # Temporarily keep AGE Message nodes for Fact EXTRACTED_FROM
+                    # links until facts are moved to canonical Postgres tables.
+                    await self.projection.project_messages(cur, batch_params)
 
                     # Write to Hybrid Full Text Search Table
                     for msg in messages:
                         await cur.execute(
                             """
-                            INSERT INTO message_search (message_id, user_name, session_id, content_tsvector)
+                            INSERT INTO message_search (
+                                message_id,
+                                user_name,
+                                session_id,
+                                content_tsvector
+                            )
                             VALUES (%s, %s, %s, to_tsvector('english', %s))
-                            ON CONFLICT (user_name, session_id, message_id) DO UPDATE SET
+                            ON CONFLICT (user_name, session_id, message_id)
+                            DO UPDATE SET
                                 content_tsvector = EXCLUDED.content_tsvector
                             """,
                             (
@@ -114,35 +211,68 @@ class GraphWriter:
         self, parent_id: int, child_id: int, project_id: Optional[str] = None
     ) -> bool:
         project_id = self._require_project_id(project_id, "create_hierarchy_edge")
-        cypher = """
-        MATCH (child:Entity {id: $child_id})
-        MATCH (parent:Entity {id: $parent_id})
-        WHERE child.project_id = $project_id
-          AND parent.project_id = $project_id
-          AND NOT (child)-[:PART_OF]->(parent)
-        CREATE (child)-[:PART_OF {created_at: $now}]->(parent)
-        RETURN true as created
-        """
+        if not self.client.async_pool:
+            raise RuntimeError("PostgresClient async_pool is not initialized")
 
         try:
-            res = await self.client.execute_write(
-                self.client.build_cypher(cypher, "created agtype"),
-                (
-                    json.dumps(
-                        {
-                            "child_id": child_id,
-                            "parent_id": parent_id,
-                            "project_id": project_id,
-                            "now": self._current_time_ms(),
-                        }
-                    ),
-                ),
-            )
-            # execute_write returns rowcount, which will be > 0 if the edge was created successfully.
-            return res > 0
+            now_ms = self._current_time_ms()
+            async with self.client.async_pool.connection() as conn:
+                async with conn.transaction():
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            INSERT INTO hierarchy_edges (
+                                project_id,
+                                parent_id,
+                                child_id,
+                                created_at_ms
+                            )
+                            SELECT %s, %s, %s, %s
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM entities
+                                WHERE entity_id = %s
+                                  AND project_id = %s
+                            )
+                            AND EXISTS (
+                                SELECT 1
+                                FROM entities
+                                WHERE entity_id = %s
+                                  AND project_id = %s
+                            )
+                            ON CONFLICT (project_id, parent_id, child_id)
+                            DO NOTHING
+                            RETURNING parent_id
+                            """,
+                            (
+                                project_id,
+                                parent_id,
+                                child_id,
+                                now_ms,
+                                parent_id,
+                                project_id,
+                                child_id,
+                                project_id,
+                            ),
+                        )
+                        canonical_record = await cur.fetchone()
+                        if not canonical_record:
+                            return False
+
+                        projected = (
+                            await self.projection.create_hierarchy_edge_with_cursor(
+                                cur,
+                                parent_id,
+                                child_id,
+                                project_id,
+                                now_ms,
+                            )
+                        )
+                        return projected
         except Exception as e:
             logger.error(
-                f"Failed to create hierarchy edge ({child_id})-[:PART_OF]->({parent_id}): {e}"
+                "Failed to create hierarchy edge "
+                f"({child_id})-[:PART_OF]->({parent_id}): {e}"
             )
             return False
 
@@ -150,28 +280,44 @@ class GraphWriter:
         self, entity_a_id: int, entity_b_id: int, project_id: Optional[str] = None
     ) -> bool:
         project_id = self._require_project_id(project_id, "delete_relationship")
-        cypher = """
-        MATCH (a:Entity {id: $a_id})-[r:RELATED_TO]-(b:Entity {id: $b_id})
-        WHERE (a.project_id = $project_id OR a.id = $identity_entity_id)
-          AND (b.project_id = $project_id OR b.id = $identity_entity_id)
-        DELETE r
-        RETURN count(r)
-        """
+        if not self.client.async_pool:
+            raise RuntimeError("PostgresClient async_pool is not initialized")
+
         try:
-            res = await self.client.execute_write(
-                self.client.build_cypher(cypher, "deleted agtype"),
-                (
-                    json.dumps(
-                        {
-                            "a_id": entity_a_id,
-                            "b_id": entity_b_id,
-                            "project_id": project_id,
-                            "identity_entity_id": IDENTITY_ENTITY_ID,
-                        }
-                    ),
-                ),
+            relationship_id = self._relationship_id(
+                project_id,
+                entity_a_id,
+                entity_b_id,
             )
-            return res > 0
+            async with self.client.async_pool.connection() as conn:
+                async with conn.transaction():
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            DELETE FROM relationship_evidence_refs
+                            WHERE relationship_id = %s
+                            """,
+                            (relationship_id,),
+                        )
+                        await cur.execute(
+                            """
+                            DELETE FROM relationships
+                            WHERE relationship_id = %s
+                            RETURNING relationship_id
+                            """,
+                            (relationship_id,),
+                        )
+                        canonical_record = await cur.fetchone()
+                        projected_deleted = (
+                            await self.projection.delete_relationship_with_cursor(
+                                cur,
+                                entity_a_id,
+                                entity_b_id,
+                                project_id,
+                            )
+                        )
+
+            return bool(canonical_record or projected_deleted)
         except Exception as e:
             logger.error(
                 f"Failed to delete relationship ({entity_a_id}, {entity_b_id}): {e}"
@@ -247,329 +393,426 @@ class GraphWriter:
             async with self.client.async_pool.connection() as conn:
                 async with conn.transaction():
                     async with conn.cursor() as cur:
-                        # Validate both exist
-                        cypher_validate = """
-                        MATCH (p:Entity {id: $primary_id})
-                        MATCH (s:Entity {id: $secondary_id})
-                        WHERE p.project_id = $project_id
-                          AND s.project_id = $project_id
-                        RETURN p.canonical_name as p_name,
-                            p.aliases as p_aliases,
-                            p.confidence as p_conf,
-                            p.last_mentioned as p_last,
-                            s.canonical_name as s_name,
-                            s.aliases as s_aliases,
-                            s.confidence as s_conf,
-                            s.last_mentioned as s_last
-                        """
-                        q_val = self.client.build_cypher(
-                            cypher_validate,
-                            "p_name agtype, p_aliases agtype, p_conf agtype, p_last agtype, s_name agtype, s_aliases agtype, s_conf agtype, s_last agtype",
-                        )
                         await cur.execute(
-                            q_val,
+                            """
+                            SELECT
+                                p.canonical_name AS p_name,
+                                p.confidence AS p_conf,
+                                p.last_mentioned_ms AS p_last,
+                                s.canonical_name AS s_name,
+                                s.confidence AS s_conf,
+                                s.last_mentioned_ms AS s_last,
+                                COALESCE(
+                                    array_agg(DISTINCT p_alias.alias)
+                                    FILTER (WHERE p_alias.alias IS NOT NULL),
+                                    ARRAY[]::text[]
+                                ) AS p_aliases,
+                                COALESCE(
+                                    array_agg(DISTINCT s_alias.alias)
+                                    FILTER (WHERE s_alias.alias IS NOT NULL),
+                                    ARRAY[]::text[]
+                                ) AS s_aliases
+                            FROM entities p
+                            JOIN entities s
+                              ON s.entity_id = %s
+                             AND s.project_id = %s
+                            LEFT JOIN entity_aliases p_alias
+                              ON p_alias.entity_id = p.entity_id
+                            LEFT JOIN entity_aliases s_alias
+                              ON s_alias.entity_id = s.entity_id
+                            WHERE p.entity_id = %s
+                              AND p.project_id = %s
+                            GROUP BY
+                                p.entity_id,
+                                p.canonical_name,
+                                p.confidence,
+                                p.last_mentioned_ms,
+                                s.entity_id,
+                                s.canonical_name,
+                                s.confidence,
+                                s.last_mentioned_ms
+                            """,
                             (
-                                json.dumps(
-                                    {
-                                        "primary_id": primary_id,
-                                        "secondary_id": secondary_id,
-                                        "project_id": project_id,
-                                        "identity_entity_id": IDENTITY_ENTITY_ID,
-                                    }
-                                ),
+                                secondary_id,
+                                project_id,
+                                primary_id,
+                                project_id,
                             ),
                         )
                         check = await cur.fetchone()
 
                         if not check:
                             logger.error(
-                                f"Merge failed: one or both entities not found ({primary_id}, {secondary_id})"
+                                "Merge failed: one or both entities not found "
+                                f"({primary_id}, {secondary_id})"
                             )
                             return False
 
-                        p_aliases = check["p_aliases"] or []
-                        s_aliases = check["s_aliases"] or []
-                        s_name_raw = (
-                            check["s_name"].strip('"')
-                            if isinstance(check["s_name"], str)
-                            else check["s_name"]
-                        )
-
+                        s_name_raw = self._clean_string(check["s_name"])
                         p_conf = float(check["p_conf"] or 0)
                         s_conf = float(check["s_conf"] or 0)
                         p_last = int(check["p_last"] or 0)
                         s_last = int(check["s_last"] or 0)
 
-                        combined_aliases = list(
-                            set(p_aliases + s_aliases + [s_name_raw])
+                        combined_aliases = self._dedupe_aliases(
+                            check.get("p_aliases"),
+                            check.get("s_aliases"),
+                            [s_name_raw],
                         )
                         new_conf = s_conf if s_conf > p_conf else p_conf
                         new_last = s_last if s_last > p_last else p_last
-
-                        # Update primary
-                        cypher_upd_p = """
-                        MATCH (p:Entity {id: $primary_id})
-                        SET p.aliases = $aliases,
-                            p.last_updated = $now,
-                            p.confidence = $conf,
-                            p.last_mentioned = $last
-                        """
+                        now_ms = self._current_time_ms()
                         await cur.execute(
-                            self.client.build_cypher(cypher_upd_p),
-                            (
-                                json.dumps(
-                                    {
-                                        "primary_id": primary_id,
-                                        "aliases": combined_aliases,
-                                        "now": self._current_time_ms(),
-                                        "conf": new_conf,
-                                        "last": new_last,
-                                    }
-                                ),
-                            ),
-                        )
-
-                        # Remove direct relationship
-                        cypher_del_direct = """
-                        MATCH (p:Entity {id: $primary_id})-[r:RELATED_TO]-(s:Entity {id: $secondary_id})
-                        DELETE r
-                        """
-                        await cur.execute(
-                            self.client.build_cypher(cypher_del_direct),
-                            (
-                                json.dumps(
-                                    {
-                                        "primary_id": primary_id,
-                                        "secondary_id": secondary_id,
-                                    }
-                                ),
-                            ),
-                        )
-
-                        # Array Consolidation for RELATED_TO
-                        cypher_fetch_edges = """
-                        MATCH (e:Entity)-[r:RELATED_TO]-(target:Entity)
-                        WHERE e.id IN [$primary_id, $secondary_id]
-                        RETURN e.id as source_id, target.id as target_id, r.weight as weight, r.confidence as conf, r.message_ids as msg_ids, r.last_seen as last_seen
-                        """
-                        q_edges = self.client.build_cypher(
-                            cypher_fetch_edges,
-                            "source_id agtype, target_id agtype, weight agtype, conf agtype, msg_ids agtype, last_seen agtype",
-                        )
-                        await cur.execute(
-                            q_edges,
-                            (
-                                json.dumps(
-                                    {
-                                        "primary_id": primary_id,
-                                        "secondary_id": secondary_id,
-                                    }
-                                ),
-                            ),
-                        )
-                        edge_rows = await cur.fetchall()
-
-                        merged_edges = {}
-                        for row in edge_rows:
-                            t_id = int(row["target_id"])
-                            w = int(row["weight"] or 1)
-                            c = float(row["conf"] or 0)
-                            ls = int(row["last_seen"] or 0)
-                            m_ids = row["msg_ids"] or []
-
-                            if t_id not in merged_edges:
-                                merged_edges[t_id] = {
-                                    "weight": w,
-                                    "conf": c,
-                                    "msg_ids": m_ids,
-                                    "last_seen": ls,
-                                }
-                            else:
-                                merged_edges[t_id]["weight"] += w
-                                if c > merged_edges[t_id]["conf"]:
-                                    merged_edges[t_id]["conf"] = c
-                                if ls > merged_edges[t_id]["last_seen"]:
-                                    merged_edges[t_id]["last_seen"] = ls
-                                merged_edges[t_id]["msg_ids"] = self._merge_evidence_refs(
-                                    merged_edges[t_id]["msg_ids"], m_ids
-                                )
-
-                        if merged_edges:
-                            cypher_del_edges = """
-                            MATCH (e:Entity)-[r:RELATED_TO]-(target:Entity)
-                            WHERE e.id IN [$primary_id, $secondary_id]
-                            DELETE r
                             """
+                            UPDATE entities
+                            SET confidence = %s,
+                                last_mentioned_ms = %s,
+                                last_updated_ms = %s
+                            WHERE entity_id = %s
+                              AND project_id = %s
+                            """,
+                            (
+                                new_conf,
+                                new_last,
+                                now_ms,
+                                primary_id,
+                                project_id,
+                            ),
+                        )
+                        for alias in combined_aliases:
+                            if not alias:
+                                continue
                             await cur.execute(
-                                self.client.build_cypher(cypher_del_edges),
-                                (
-                                    json.dumps(
-                                        {
-                                            "primary_id": primary_id,
-                                            "secondary_id": secondary_id,
-                                        }
-                                    ),
-                                ),
-                            )
-
-                            edges_batch = []
-                            for t_id, props in merged_edges.items():
-                                edges_batch.append(
-                                    {
-                                        "target_id": t_id,
-                                        "weight": props["weight"],
-                                        "conf": props["conf"],
-                                        "msg_ids": props["msg_ids"],
-                                        "last_seen": props["last_seen"],
-                                    }
-                                )
-
-                            cypher_write_edges = """
-                            UNWIND $batch AS edge
-                            MATCH (p:Entity {id: $primary_id})
-                            MATCH (t:Entity {id: edge.target_id})
-                            WITH p, t, edge,
-                                CASE WHEN p.id < t.id THEN p ELSE t END AS node_a,
-                                CASE WHEN p.id < t.id THEN t ELSE p END AS node_b
-                            CREATE (node_a)-[r:RELATED_TO {
-                                weight: edge.weight,
-                                confidence: edge.conf,
-                                message_ids: edge.msg_ids,
-                                last_seen: edge.last_seen
-                            }]->(node_b)
-                            """
-                            await cur.execute(
-                                self.client.build_cypher(cypher_write_edges),
-                                (
-                                    json.dumps(
-                                        {"primary_id": primary_id, "batch": edges_batch}
-                                    ),
-                                ),
-                            )
-
-                        # Transfer HAS_FACT, BELONGS_TO, PART_OF (children)
-                        cypher_transfer_facts = """
-                        MATCH (s:Entity {id: $secondary_id})-[r:HAS_FACT]->(f:Fact)
-                        MATCH (p:Entity {id: $primary_id})
-                        MERGE (p)-[:HAS_FACT]->(f)
-                        SET f.source_entity_id = $primary_id
-                        DELETE r
-                        """
-                        await cur.execute(
-                            self.client.build_cypher(cypher_transfer_facts),
-                            (
-                                json.dumps(
-                                    {
-                                        "primary_id": primary_id,
-                                        "secondary_id": secondary_id,
-                                    }
-                                ),
-                            ),
-                        )
-
-                        cypher_transfer_topics = """
-                        MATCH (s:Entity {id: $secondary_id})-[r:BELONGS_TO]->(t:Topic)
-                        MATCH (p:Entity {id: $primary_id})
-                        MERGE (p)-[:BELONGS_TO]->(t)
-                        DELETE r
-                        """
-                        await cur.execute(
-                            self.client.build_cypher(cypher_transfer_topics),
-                            (
-                                json.dumps(
-                                    {
-                                        "primary_id": primary_id,
-                                        "secondary_id": secondary_id,
-                                    }
-                                ),
-                            ),
-                        )
-
-                        cypher_transfer_children = """
-                        MATCH (child:Entity)-[r:PART_OF]->(s:Entity {id: $secondary_id})
-                        MATCH (p:Entity {id: $primary_id})
-                        MERGE (child)-[:PART_OF]->(p)
-                        DELETE r
-                        """
-                        await cur.execute(
-                            self.client.build_cypher(cypher_transfer_children),
-                            (
-                                json.dumps(
-                                    {
-                                        "primary_id": primary_id,
-                                        "secondary_id": secondary_id,
-                                    }
-                                ),
-                            ),
-                        )
-
-                        # Parent transfer with conflict detection
-                        cypher_parents = """
-                        MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->(s_parent:Entity)
-                        MATCH (p:Entity {id: $primary_id})
-                        OPTIONAL MATCH (p)-[:PART_OF]->(p_parent:Entity)
-                        RETURN s_parent.id AS s_parent_id, p_parent.id AS p_parent_id
-                        """
-                        await cur.execute(
-                            self.client.build_cypher(
-                                cypher_parents, "s_parent_id agtype, p_parent_id agtype"
-                            ),
-                            (
-                                json.dumps(
-                                    {
-                                        "primary_id": primary_id,
-                                        "secondary_id": secondary_id,
-                                    }
-                                ),
-                            ),
-                        )
-                        record_4c = await cur.fetchone()
-
-                        if record_4c and record_4c["s_parent_id"] is not None:
-                            if record_4c["p_parent_id"] is not None:
-                                logger.warning(
-                                    f"Hierarchy conflict during merge: primary {primary_id} and secondary {secondary_id} both have parents. Dropping secondary's parent edge."
-                                )
-                                cypher_del_s_parent = "MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->() DELETE r"
-                                await cur.execute(
-                                    self.client.build_cypher(cypher_del_s_parent),
-                                    (json.dumps({"secondary_id": secondary_id}),),
-                                )
-                            else:
-                                cypher_trans_parent = """
-                                MATCH (s:Entity {id: $secondary_id})-[r:PART_OF]->(parent:Entity)
-                                MATCH (p:Entity {id: $primary_id})
-                                MERGE (p)-[:PART_OF]->(parent)
-                                DELETE r
                                 """
+                                INSERT INTO entity_aliases (entity_id, alias)
+                                VALUES (%s, %s)
+                                ON CONFLICT (entity_id, alias) DO NOTHING
+                                """,
+                                (primary_id, alias),
+                            )
+
+                        await cur.execute(
+                            """
+                            UPDATE facts
+                            SET entity_id = %s
+                            WHERE entity_id = %s
+                              AND project_id = %s
+                            """,
+                            (primary_id, secondary_id, project_id),
+                        )
+
+                        await cur.execute(
+                            """
+                            SELECT *
+                            FROM relationships
+                            WHERE project_id = %s
+                              AND (
+                                  entity_a_id = %s
+                                  OR entity_b_id = %s
+                              )
+                            """,
+                            (project_id, secondary_id, secondary_id),
+                        )
+                        canonical_relationships = await cur.fetchall()
+                        for rel in canonical_relationships:
+                            old_relationship_id = rel["relationship_id"]
+                            rel_a = int(rel["entity_a_id"])
+                            rel_b = int(rel["entity_b_id"])
+                            target_id = rel_b if rel_a == secondary_id else rel_a
+
+                            if target_id == primary_id:
                                 await cur.execute(
-                                    self.client.build_cypher(cypher_trans_parent),
-                                    (
-                                        json.dumps(
-                                            {
-                                                "primary_id": primary_id,
-                                                "secondary_id": secondary_id,
-                                            }
-                                        ),
+                                    """
+                                    DELETE FROM relationship_evidence_refs
+                                    WHERE relationship_id = %s
+                                    """,
+                                    (old_relationship_id,),
+                                )
+                                await cur.execute(
+                                    """
+                                    DELETE FROM relationships
+                                    WHERE relationship_id = %s
+                                    """,
+                                    (old_relationship_id,),
+                                )
+                                continue
+
+                            new_a, new_b = sorted((primary_id, target_id))
+                            new_relationship_id = self._relationship_id(
+                                project_id,
+                                new_a,
+                                new_b,
+                            )
+                            await cur.execute(
+                                """
+                                INSERT INTO relationships (
+                                    relationship_id,
+                                    user_name,
+                                    project_id,
+                                    entity_a_id,
+                                    entity_b_id,
+                                    weight,
+                                    confidence,
+                                    context,
+                                    last_seen_ms
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (relationship_id) DO UPDATE SET
+                                    weight = relationships.weight + EXCLUDED.weight,
+                                    confidence = GREATEST(
+                                        relationships.confidence,
+                                        EXCLUDED.confidence
                                     ),
+                                    context = COALESCE(
+                                        EXCLUDED.context,
+                                        relationships.context
+                                    ),
+                                    last_seen_ms = GREATEST(
+                                        COALESCE(relationships.last_seen_ms, 0),
+                                        COALESCE(EXCLUDED.last_seen_ms, 0)
+                                    )
+                                """,
+                                (
+                                    new_relationship_id,
+                                    rel["user_name"],
+                                    project_id,
+                                    new_a,
+                                    new_b,
+                                    rel["weight"],
+                                    rel["confidence"],
+                                    rel["context"],
+                                    rel["last_seen_ms"],
+                                ),
+                            )
+                            await cur.execute(
+                                """
+                                INSERT INTO relationship_evidence_refs (
+                                    relationship_id,
+                                    user_name,
+                                    session_id,
+                                    message_id
+                                )
+                                SELECT %s, user_name, session_id, message_id
+                                FROM relationship_evidence_refs
+                                WHERE relationship_id = %s
+                                ON CONFLICT (
+                                    relationship_id,
+                                    user_name,
+                                    session_id,
+                                    message_id
+                                ) DO NOTHING
+                                """,
+                                (new_relationship_id, old_relationship_id),
+                            )
+                            if new_relationship_id != old_relationship_id:
+                                await cur.execute(
+                                    """
+                                    DELETE FROM relationship_evidence_refs
+                                    WHERE relationship_id = %s
+                                    """,
+                                    (old_relationship_id,),
+                                )
+                                await cur.execute(
+                                    """
+                                    DELETE FROM relationships
+                                    WHERE relationship_id = %s
+                                    """,
+                                    (old_relationship_id,),
                                 )
 
-                        # Delete Secondary from Graph
-                        cypher_del_s = (
-                            "MATCH (s:Entity {id: $secondary_id}) DETACH DELETE s"
-                        )
                         await cur.execute(
-                            self.client.build_cypher(cypher_del_s),
-                            (json.dumps({"secondary_id": secondary_id}),),
+                            """
+                            INSERT INTO hierarchy_edges (
+                                project_id,
+                                parent_id,
+                                child_id,
+                                created_at_ms
+                            )
+                            SELECT project_id, %s, child_id, created_at_ms
+                            FROM hierarchy_edges
+                            WHERE project_id = %s
+                              AND parent_id = %s
+                              AND child_id <> %s
+                            ON CONFLICT (project_id, parent_id, child_id)
+                            DO NOTHING
+                            """,
+                            (primary_id, project_id, secondary_id, primary_id),
                         )
 
-                        # Dual-Write Cleanup
+                        await cur.execute(
+                            """
+                            SELECT parent_id
+                            FROM hierarchy_edges
+                            WHERE project_id = %s
+                              AND child_id = %s
+                              AND parent_id <> %s
+                            LIMIT 1
+                            """,
+                            (project_id, primary_id, secondary_id),
+                        )
+                        primary_parent = await cur.fetchone()
+
+                        await cur.execute(
+                            """
+                            SELECT parent_id, created_at_ms
+                            FROM hierarchy_edges
+                            WHERE project_id = %s
+                              AND child_id = %s
+                              AND parent_id <> %s
+                            LIMIT 1
+                            """,
+                            (project_id, secondary_id, primary_id),
+                        )
+                        secondary_parent = await cur.fetchone()
+
+                        if secondary_parent and not primary_parent:
+                            await cur.execute(
+                                """
+                                INSERT INTO hierarchy_edges (
+                                    project_id,
+                                    parent_id,
+                                    child_id,
+                                    created_at_ms
+                                )
+                                VALUES (%s, %s, %s, %s)
+                                ON CONFLICT (project_id, parent_id, child_id)
+                                DO NOTHING
+                                """,
+                                (
+                                    project_id,
+                                    secondary_parent["parent_id"],
+                                    primary_id,
+                                    secondary_parent["created_at_ms"],
+                                ),
+                            )
+
+                        await cur.execute(
+                            """
+                            DELETE FROM hierarchy_edges
+                            WHERE project_id = %s
+                              AND (
+                                  parent_id = %s
+                                  OR child_id = %s
+                              )
+                            """,
+                            (project_id, secondary_id, secondary_id),
+                        )
+
+                        await cur.execute(
+                            """
+                            SELECT
+                                rel.relationship_id,
+                                rel.user_name,
+                                rel.project_id,
+                                rel.entity_a_id,
+                                rel.entity_b_id,
+                                rel.weight,
+                                rel.confidence,
+                                rel.context,
+                                rel.last_seen_ms,
+                                COALESCE(
+                                    json_agg(
+                                        json_build_object(
+                                            'user_name', ref.user_name,
+                                            'session_id', ref.session_id,
+                                            'message_id', ref.message_id
+                                        )
+                                    )
+                                    FILTER (
+                                        WHERE ref.relationship_id IS NOT NULL
+                                    ),
+                                    '[]'
+                                ) AS evidence_refs
+                            FROM relationships rel
+                            LEFT JOIN relationship_evidence_refs ref
+                              ON ref.relationship_id = rel.relationship_id
+                            WHERE rel.project_id = %s
+                              AND (
+                                  rel.entity_a_id = %s
+                                  OR rel.entity_b_id = %s
+                              )
+                            GROUP BY rel.relationship_id
+                            """,
+                            (project_id, primary_id, primary_id),
+                        )
+                        relationship_projection_rows = await cur.fetchall()
+                        relationship_projection = (
+                            self._relationship_projection_params(
+                                relationship_projection_rows
+                            )
+                        )
+
+                        await cur.execute(
+                            """
+                            SELECT project_id, parent_id, child_id, created_at_ms
+                            FROM hierarchy_edges
+                            WHERE project_id = %s
+                              AND (
+                                  parent_id = %s
+                                  OR child_id = %s
+                              )
+                            """,
+                            (project_id, primary_id, primary_id),
+                        )
+                        hierarchy_projection_rows = await cur.fetchall()
+                        hierarchy_projection = self._hierarchy_projection_params(
+                            hierarchy_projection_rows
+                        )
+
+                        await self.projection.update_merged_entity(
+                            cur,
+                            primary_id,
+                            project_id,
+                            combined_aliases,
+                            new_conf,
+                            new_last,
+                            now_ms,
+                        )
+                        await self.projection.transfer_merged_entity_dependencies(
+                            cur,
+                            primary_id,
+                            secondary_id,
+                        )
+                        await self.projection.replace_relationships_for_entities(
+                            cur,
+                            project_id,
+                            [primary_id, secondary_id],
+                            relationship_projection,
+                        )
+                        await self.projection.replace_hierarchy_edges_for_entities(
+                            cur,
+                            project_id,
+                            [primary_id, secondary_id],
+                            hierarchy_projection,
+                        )
+                        await self.projection.delete_entity_projection(
+                            cur,
+                            secondary_id,
+                            project_id,
+                        )
+
+                        await cur.execute(
+                            "DELETE FROM entity_aliases WHERE entity_id = %s",
+                            (secondary_id,),
+                        )
+                        await cur.execute(
+                            """
+                            DELETE FROM entities
+                            WHERE entity_id = %s
+                              AND project_id = %s
+                            """,
+                            (secondary_id, project_id),
+                        )
                         await cur.execute(
                             "DELETE FROM entity_search WHERE entity_id = %s",
                             (secondary_id,),
                         )
                         await cur.execute(
-                            "UPDATE fact_search SET entity_id = %s WHERE entity_id = %s",
+                            """
+                            UPDATE fact_search
+                            SET entity_id = %s
+                            WHERE entity_id = %s
+                            """,
                             (primary_id, secondary_id),
                         )
 

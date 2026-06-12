@@ -3,9 +3,9 @@ import json
 import pytest
 
 from common.scoping import IDENTITY_ENTITY_ID
+from knoggin_server.knowledge.db.readers.graph_reader import GraphReader
 from knoggin_server.knowledge.db.writers.graph_writer import GraphWriter
 from tests.fixtures.fakes import RecordingPostgresClient
-
 
 MESSAGE_GRAPH_FIELDS = {
     "id",
@@ -17,27 +17,25 @@ MESSAGE_GRAPH_FIELDS = {
     "timestamp",
 }
 
-MERGE_VALIDATION_FIELDS = {
-    "primary_id",
-    "secondary_id",
+MESSAGE_SQL_PARAMS = (
+    "ada",
+    "session-1",
+    7,
+    "project-1",
+    "user",
+    "hello graph",
+    123456,
+)
+
+MERGE_RELATIONSHIP_PROJECTION_FIELDS = {
     "project_id",
-    "identity_entity_id",
-}
-
-MERGE_UPDATE_PRIMARY_FIELDS = {
-    "primary_id",
-    "aliases",
-    "now",
-    "conf",
-    "last",
-}
-
-MERGE_EDGE_FIELDS = {
-    "target_id",
+    "entity_a_id",
+    "entity_b_id",
     "weight",
-    "conf",
-    "msg_ids",
+    "confidence",
+    "context",
     "last_seen",
+    "message_ids",
 }
 
 
@@ -88,8 +86,13 @@ async def test_graph_writer_save_message_logs_writes_graph_and_search_rows(
     )
 
     assert saved is True
-    assert len(client.calls) == 2
-    graph_call, search_call = client.calls
+    assert len(client.calls) == 3
+    canonical_call, graph_call, search_call = client.calls
+
+    assert canonical_call[0] == "execute"
+    assert "INSERT INTO messages" in canonical_call[1]
+    assert "ON CONFLICT (user_name, session_id, message_id)" in canonical_call[1]
+    assert canonical_call[2] == MESSAGE_SQL_PARAMS
 
     assert graph_call[0] == "execute"
     assert "MERGE (m:Message" in graph_call[1]
@@ -119,6 +122,65 @@ async def test_graph_writer_save_message_logs_writes_graph_and_search_rows(
     assert client.transaction_exits == 1
     assert client.cursor_enters == 1
     assert client.cursor_exits == 1
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_graph_writer_save_message_logs_persists_canonical_messages(
+    real_postgres_client,
+    monkeypatch,
+):
+    writer = GraphWriter(real_postgres_client)
+    reader = GraphReader(real_postgres_client)
+    monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
+
+    saved = await writer.save_message_logs(
+        [
+            {
+                "id": 7,
+                "content": "hello canonical message",
+                "role": "user",
+                "user_name": "ada",
+                "session_id": "session-1",
+                "project_id": "project-1",
+            }
+        ]
+    )
+
+    rows = await real_postgres_client.execute_read(
+        """
+        SELECT
+            user_name,
+            session_id,
+            message_id,
+            project_id,
+            role,
+            content,
+            timestamp_ms
+        FROM messages
+        WHERE user_name = %s
+          AND session_id = %s
+          AND message_id = %s
+        """,
+        ("ada", "session-1", 7),
+    )
+
+    assert saved is True
+    assert rows == [
+        {
+            "user_name": "ada",
+            "session_id": "session-1",
+            "message_id": 7,
+            "project_id": "project-1",
+            "role": "user",
+            "content": "hello canonical message",
+            "timestamp_ms": 123456,
+        }
+    ]
+    assert await reader.get_message_text(7, "ada", "session-1") == (
+        "hello canonical message"
+    )
 
 
 @pytest.mark.storage
@@ -181,7 +243,12 @@ async def test_graph_writer_save_message_logs_rejects_missing_scope_without_exec
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_writer_create_hierarchy_edge_uses_project_scope(monkeypatch):
-    client = RecordingPostgresClient(execute_write_results=[1])
+    client = RecordingPostgresClient(
+        fetchone_results=[
+            {"parent_id": 2},
+            {"created": True},
+        ],
+    )
     writer = GraphWriter(client)
     monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
 
@@ -191,11 +258,23 @@ async def test_graph_writer_create_hierarchy_edge_uses_project_scope(monkeypatch
         project_id="project-1",
     ) is True
 
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call[0] == "execute_write"
-    assert "CREATE (child)-[:PART_OF" in call[1]
-    assert json.loads(call[2][0]) == {
+    assert len(client.calls) == 2
+    canonical_call, projection_call = client.calls
+    assert canonical_call[0] == "execute"
+    assert "INSERT INTO hierarchy_edges" in canonical_call[1]
+    assert canonical_call[2] == (
+        "project-1",
+        2,
+        3,
+        123456,
+        2,
+        "project-1",
+        3,
+        "project-1",
+    )
+    assert projection_call[0] == "execute"
+    assert "CREATE (child)-[:PART_OF" in projection_call[1]
+    assert json.loads(projection_call[2][0]) == {
         "child_id": 3,
         "parent_id": 2,
         "project_id": "project-1",
@@ -207,7 +286,7 @@ async def test_graph_writer_create_hierarchy_edge_uses_project_scope(monkeypatch
 @pytest.mark.no_network
 async def test_graph_writer_create_hierarchy_edge_returns_false_on_db_failure():
     client = RecordingPostgresClient(
-        execute_write_exceptions=[RuntimeError("graph down")]
+        execute_exceptions=[RuntimeError("graph down")]
     )
     writer = GraphWriter(client)
 
@@ -222,7 +301,12 @@ async def test_graph_writer_create_hierarchy_edge_returns_false_on_db_failure():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_writer_delete_relationship_uses_project_and_identity_scope():
-    client = RecordingPostgresClient(execute_write_results=[1])
+    client = RecordingPostgresClient(
+        fetchone_results=[
+            {"relationship_id": "project-1:2:3"},
+            {"deleted": "1"},
+        ],
+    )
     writer = GraphWriter(client)
 
     assert await writer.delete_relationship(
@@ -231,11 +315,17 @@ async def test_graph_writer_delete_relationship_uses_project_and_identity_scope(
         project_id="project-1",
     ) is True
 
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call[0] == "execute_write"
-    assert "DELETE r" in call[1]
-    assert json.loads(call[2][0]) == {
+    assert len(client.calls) == 3
+    evidence_call, canonical_call, projection_call = client.calls
+    assert evidence_call[0] == "execute"
+    assert "DELETE FROM relationship_evidence_refs" in evidence_call[1]
+    assert evidence_call[2] == ("project-1:2:3",)
+    assert canonical_call[0] == "execute"
+    assert "DELETE FROM relationships" in canonical_call[1]
+    assert canonical_call[2] == ("project-1:2:3",)
+    assert projection_call[0] == "execute"
+    assert "DELETE r" in projection_call[1]
+    assert json.loads(projection_call[2][0]) == {
         "a_id": 2,
         "b_id": 3,
         "project_id": "project-1",
@@ -246,7 +336,12 @@ async def test_graph_writer_delete_relationship_uses_project_and_identity_scope(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_writer_delete_relationship_returns_false_on_zero_rows():
-    client = RecordingPostgresClient(execute_write_results=[0])
+    client = RecordingPostgresClient(
+        fetchone_results=[
+            None,
+            {"deleted": "0"},
+        ],
+    )
     writer = GraphWriter(client)
 
     assert await writer.delete_relationship(
@@ -354,14 +449,9 @@ async def test_graph_writer_merge_entities_returns_false_when_validation_misses(
     assert len(client.calls) == 1
     call = client.calls[0]
     assert call[0] == "execute"
-    assert "MATCH (p:Entity {id: $primary_id})" in call[1]
-    assert "MATCH (s:Entity {id: $secondary_id})" in call[1]
-    assert json.loads(call[2][0]) == {
-        "primary_id": 2,
-        "secondary_id": 3,
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
+    assert "FROM entities p" in call[1]
+    assert "JOIN entities s" in call[1]
+    assert call[2] == (3, "project-1", 2, "project-1")
 
 
 @pytest.mark.storage
@@ -372,36 +462,65 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     client = RecordingPostgresClient(
         fetchone_results=[
             {
-                "p_name": '"Ada Lovelace"',
+                "p_name": "Ada Lovelace",
                 "p_aliases": ["Ada"],
-                "p_conf": "0.4",
-                "p_last": "100",
-                "s_name": '"Countess Lovelace"',
+                "p_conf": 0.4,
+                "p_last": 100,
+                "s_name": "Countess Lovelace",
                 "s_aliases": ["Augusta"],
-                "s_conf": "0.9",
-                "s_last": "200",
+                "s_conf": 0.9,
+                "s_last": 200,
             },
+            None,
             None,
         ],
         fetchall_results=[
             [
                 {
-                    "source_id": "2",
-                    "target_id": "9",
-                    "weight": "2",
-                    "conf": "0.4",
-                    "msg_ids": [{"message_id": 1}],
-                    "last_seen": "100",
+                    "relationship_id": "project-1:3:9",
+                    "user_name": "ada",
+                    "project_id": "project-1",
+                    "entity_a_id": 3,
+                    "entity_b_id": 9,
+                    "weight": 3,
+                    "confidence": 0.9,
+                    "context": "works with",
+                    "last_seen_ms": 200,
                 },
+            ],
+            [
                 {
-                    "source_id": "3",
-                    "target_id": "9",
-                    "weight": "3",
-                    "conf": "0.9",
-                    "msg_ids": [{"message_id": 2}],
-                    "last_seen": "200",
-                },
-            ]
+                    "relationship_id": "project-1:2:9",
+                    "user_name": "ada",
+                    "project_id": "project-1",
+                    "entity_a_id": 2,
+                    "entity_b_id": 9,
+                    "weight": 5,
+                    "confidence": 0.9,
+                    "context": "works with",
+                    "last_seen_ms": 200,
+                    "evidence_refs": [
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 1,
+                        },
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 2,
+                        },
+                    ],
+                }
+            ],
+            [
+                {
+                    "project_id": "project-1",
+                    "parent_id": 10,
+                    "child_id": 2,
+                    "created_at_ms": 111,
+                }
+            ],
         ],
     )
     writer = GraphWriter(client)
@@ -410,42 +529,57 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     assert await writer.merge_entities(2, 3, project_id="project-1") is True
 
     validation_call = client.calls[0]
-    assert "MATCH (p:Entity {id: $primary_id})" in validation_call[1]
-    validation_params = json.loads(validation_call[2][0])
-    assert set(validation_params) == MERGE_VALIDATION_FIELDS
-    assert validation_params == {
-        "primary_id": 2,
-        "secondary_id": 3,
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
+    assert "FROM entities p" in validation_call[1]
+    assert validation_call[2] == (3, "project-1", 2, "project-1")
 
-    update_primary_call = client.calls[1]
-    update_primary_params = json.loads(update_primary_call[2][0])
-    assert set(update_primary_params) == MERGE_UPDATE_PRIMARY_FIELDS
+    update_primary_call = next(
+        call
+        for call in client.calls
+        if call[0] == "execute" and "UPDATE entities" in call[1]
+    )
+    assert update_primary_call[2] == (0.9, 200, 123456, 2, "project-1")
+
+    projection_update_call = next(
+        call for call in client.calls if "SET p.aliases = $aliases" in call[1]
+    )
+    update_primary_params = json.loads(projection_update_call[2][0])
+    assert set(update_primary_params) == {
+        "primary_id",
+        "project_id",
+        "aliases",
+        "confidence",
+        "last_mentioned",
+        "now",
+    }
     assert set(update_primary_params["aliases"]) == {
         "Ada",
         "Augusta",
         "Countess Lovelace",
     }
-    assert update_primary_params["conf"] == 0.9
-    assert update_primary_params["last"] == 200
+    assert update_primary_params["confidence"] == 0.9
+    assert update_primary_params["last_mentioned"] == 200
 
-    write_edges_call = next(
+    relationship_projection_call = next(
         call
         for call in client.calls
-        if "UNWIND $batch AS edge" in call[1]
+        if "UNWIND $batch AS rel" in call[1]
+        and "SET r.weight = rel.weight" in call[1]
     )
-    edge_params = json.loads(write_edges_call[2][0])
-    assert edge_params["primary_id"] == 2
-    assert set(edge_params["batch"][0]) == MERGE_EDGE_FIELDS
-    assert edge_params["batch"] == [
+    rel_params = json.loads(relationship_projection_call[2][0])
+    assert set(rel_params["batch"][0]) == MERGE_RELATIONSHIP_PROJECTION_FIELDS
+    assert rel_params["batch"] == [
         {
-            "target_id": 9,
+            "project_id": "project-1",
+            "entity_a_id": 2,
+            "entity_b_id": 9,
             "weight": 5,
-            "conf": 0.9,
-            "msg_ids": [{"message_id": 1}, {"message_id": 2}],
+            "confidence": 0.9,
+            "context": "works with",
             "last_seen": 200,
+            "message_ids": [
+                '{"message_id": 1, "session_id": "session-1", "user_name": "ada"}',
+                '{"message_id": 2, "session_id": "session-1", "user_name": "ada"}',
+            ],
         }
     ]
 
@@ -454,11 +588,36 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         "DELETE FROM entity_search WHERE entity_id = %s",
         (3,),
     ) in client.calls
-    assert (
-        "execute",
-        "UPDATE fact_search SET entity_id = %s WHERE entity_id = %s",
-        (2, 3),
-    ) in client.calls
+    assert any(
+        call[0] == "execute"
+        and "UPDATE fact_search" in call[1]
+        and call[2] == (2, 3)
+        for call in client.calls
+    )
+    assert any(
+        call[0] == "execute"
+        and "INSERT INTO relationships" in call[1]
+        and call[2][:5] == ("project-1:2:9", "ada", "project-1", 2, 9)
+        for call in client.calls
+    )
+    assert any(
+        call[0] == "execute"
+        and "UPDATE facts" in call[1]
+        and call[2] == (2, 3, "project-1")
+        for call in client.calls
+    )
+    assert any(
+        call[0] == "execute"
+        and "FROM relationships" in call[1]
+        and call[2] == ("project-1", 3, 3)
+        for call in client.calls
+    )
+    assert any(
+        call[0] == "execute"
+        and "DELETE FROM entities" in call[1]
+        and call[2] == (3, "project-1")
+        for call in client.calls
+    )
     assert client.connection_enters == 1
     assert client.connection_exits == 1
     assert client.transaction_enters == 1
@@ -506,8 +665,8 @@ async def test_graph_writer_merge_entities_returns_false_on_transaction_error():
     assert await writer.merge_entities(2, 3, project_id="project-1") is False
 
     assert len(client.calls) == 2
-    assert "MATCH (p:Entity {id: $primary_id})" in client.calls[0][1]
-    assert "SET p.aliases = $aliases" in client.calls[1][1]
+    assert "FROM entities p" in client.calls[0][1]
+    assert "UPDATE entities" in client.calls[1][1]
     assert client.connection_enters == 1
     assert client.connection_exits == 1
     assert client.transaction_enters == 1

@@ -1,10 +1,7 @@
-import json
-
 import pytest
 
-from common.scoping import IDENTITY_ENTITY_ID
-from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
 from knoggin_server.knowledge.db.readers.entity_reader import EntityReader
+from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -154,21 +151,74 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
     assert embedding == [0.1] * 1024
 
     # 2. Verify graph node
-    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.canonical_name", "name agtype")
-    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    node_query = real_postgres_client.build_cypher(
+        "MATCH (e:Entity {id: 2}) RETURN e.canonical_name",
+        "name agtype",
+    )
+    res = await real_postgres_client.execute_read(node_query, ("{}",))
     assert len(res) == 1
     assert "Ada Lovelace" in str(res[0]["name"])
 
     # 3. Verify graph relationships
     edge_query = real_postgres_client.build_cypher(
-        "MATCH (a)-[r:RELATED_TO]->(b) RETURN r.context, r.message_ids", 
-        "ctx agtype, msg_ids agtype"
+        "MATCH (a)-[r:RELATED_TO]->(b) RETURN r.context, r.message_ids",
+        "ctx agtype, msg_ids agtype",
     )
-    edges = await real_postgres_client.execute_read(edge_query, ('{}',))
+    edges = await real_postgres_client.execute_read(edge_query, ("{}",))
     assert len(edges) == 2
     edges_str = str(edges)
     assert "1000000005" in edges_str
     assert "123" in edges_str
+
+    rel_rows = await real_postgres_client.execute_read(
+        """
+        SELECT relationship_id, entity_a_id, entity_b_id, weight, confidence, context
+        FROM relationships
+        WHERE project_id = %s
+        ORDER BY entity_b_id
+        """,
+        ("project-1",),
+    )
+    assert rel_rows == [
+        {
+            "relationship_id": "project-1:2:3",
+            "entity_a_id": 2,
+            "entity_b_id": 3,
+            "weight": 1,
+            "confidence": 0.8,
+            "context": "Ada knows Grace",
+        },
+        {
+            "relationship_id": "project-1:2:4",
+            "entity_a_id": 2,
+            "entity_b_id": 4,
+            "weight": 1,
+            "confidence": 0.8,
+            "context": None,
+        },
+    ]
+
+    evidence_rows = await real_postgres_client.execute_read(
+        """
+        SELECT relationship_id, user_name, session_id, message_id
+        FROM relationship_evidence_refs
+        ORDER BY relationship_id
+        """,
+    )
+    assert evidence_rows == [
+        {
+            "relationship_id": "project-1:2:3",
+            "user_name": "ada",
+            "session_id": "session-1",
+            "message_id": 123,
+        },
+        {
+            "relationship_id": "project-1:2:4",
+            "user_name": "ada",
+            "session_id": "session-2",
+            "message_id": 1_000_000_005,
+        },
+    ]
 
 
 
@@ -200,8 +250,12 @@ async def test_entity_writer_update_entity_profile_updates_graph_and_search(
     assert embedding == [0.3] * 1024
 
     # Verify graph node
-    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.canonical_name, e.last_profiled_msg_id", "name agtype, msg_id agtype")
-    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    node_query = real_postgres_client.build_cypher(
+        "MATCH (e:Entity {id: 2}) "
+        "RETURN e.canonical_name, e.last_profiled_msg_id",
+        "name agtype, msg_id agtype",
+    )
+    res = await real_postgres_client.execute_read(node_query, ("{}",))
     assert "Ada Byron" in str(res[0]["name"])
     assert "77" in str(res[0]["msg_id"])
 
@@ -228,8 +282,11 @@ async def test_entity_writer_update_entity_canonical_name_updates_graph_and_sear
     entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
     assert entity["canonical_name"] == "Ada Byron"
 
-    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.canonical_name", "name agtype")
-    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    node_query = real_postgres_client.build_cypher(
+        "MATCH (e:Entity {id: 2}) RETURN e.canonical_name",
+        "name agtype",
+    )
+    res = await real_postgres_client.execute_read(node_query, ("{}",))
     assert "Ada Byron" in str(res[0]["name"])
 
 
@@ -255,8 +312,11 @@ async def test_entity_writer_update_entity_embedding_updates_graph_and_search(
     entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
     assert entity["embedding"] == [0.3] * 1024
 
-    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.last_updated", "now agtype")
-    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    node_query = real_postgres_client.build_cypher(
+        "MATCH (e:Entity {id: 2}) RETURN e.last_updated",
+        "now agtype",
+    )
+    res = await real_postgres_client.execute_read(node_query, ("{}",))
     assert "123456" in str(res[0]["now"])
 
 
@@ -273,8 +333,11 @@ async def test_entity_writer_update_entity_checkpoint_uses_execute_write_scope(
 
     await writer.update_entity_checkpoint(2, 77, project_id="project-1")
 
-    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN e.last_profiled_msg_id", "msg_id agtype")
-    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    node_query = real_postgres_client.build_cypher(
+        "MATCH (e:Entity {id: 2}) RETURN e.last_profiled_msg_id",
+        "msg_id agtype",
+    )
+    res = await real_postgres_client.execute_read(node_query, ("{}",))
     assert "77" in str(res[0]["msg_id"])
 
 
@@ -327,8 +390,11 @@ async def test_entity_writer_delete_entity_deletes_graph_and_search_row(
     assert entity is None
 
     # Graph node should be deleted
-    node_query = real_postgres_client.build_cypher("MATCH (e:Entity {id: 2}) RETURN count(e) as c", "c agtype")
-    res = await real_postgres_client.execute_read(node_query, ('{}',))
+    node_query = real_postgres_client.build_cypher(
+        "MATCH (e:Entity {id: 2}) RETURN count(e) as c",
+        "c agtype",
+    )
+    res = await real_postgres_client.execute_read(node_query, ("{}",))
     assert int(res[0]["c"]) == 0
 
 

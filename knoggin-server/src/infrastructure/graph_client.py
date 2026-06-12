@@ -6,6 +6,7 @@ from loguru import logger
 from common.schema.primitives import FactRecord
 from infrastructure.postgres_client import PostgresClient
 from knoggin_server.community.community_store import CommunityStore
+from knoggin_server.knowledge.db.projection_rebuilder import ProjectionRebuilder
 from knoggin_server.knowledge.db.readers.entity_reader import EntityReader
 from knoggin_server.knowledge.db.readers.fact_reader import FactReader
 from knoggin_server.knowledge.db.readers.graph_reader import GraphReader
@@ -33,6 +34,7 @@ class GraphClient:
         self._fact_reader = FactReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._tools = ToolQueries(self._postgres_client)
+        self._projection_rebuilder = ProjectionRebuilder(self._postgres_client)
         self._community = CommunityStore(self._postgres_client)
         logger.info("GraphClient initialized with internal Postgres/AGE backend")
 
@@ -117,8 +119,6 @@ class GraphClient:
             alias_updates, project_id=project_id
         )
 
-
-
     async def create_hierarchy_edge(
         self, parent_id: int, child_id: int, project_id: Optional[str] = None
     ) -> bool:
@@ -170,6 +170,16 @@ class GraphClient:
             entity_a_id, entity_b_id, project_id=project_id
         )
 
+    async def rebuild_project_projection(
+        self,
+        project_id: str,
+        user_name: Optional[str] = None,
+    ) -> Dict[str, int]:
+        return await self._projection_rebuilder.rebuild_project_projection(
+            project_id,
+            user_name=user_name,
+        )
+
     async def get_max_entity_id(self) -> int:
         return await self._entity_reader.get_max_entity_id()
 
@@ -216,7 +226,11 @@ class GraphClient:
         session_id: Optional[str] = None,
     ) -> List[Dict]:
         return await self._graph_reader.get_surrounding_messages(
-            message_id, forward, target_total, user_name=user_name, session_id=session_id
+            message_id,
+            forward,
+            target_total,
+            user_name=user_name,
+            session_id=session_id,
         )
 
     async def get_facts_for_entity(

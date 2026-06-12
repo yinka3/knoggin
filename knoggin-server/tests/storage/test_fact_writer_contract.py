@@ -87,7 +87,12 @@ async def test_fact_writer_create_facts_batch_requires_source_message_scope():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
-    client = RecordingPostgresClient(fetchone_results=[{"created_count": 1}])
+    client = RecordingPostgresClient(
+        fetchone_results=[
+            {"fact_id": "fact-1"},
+            {"projected_count": 1},
+        ]
+    )
     writer = FactWriter(client)
     fact = make_fact(source_msg_id=7)
 
@@ -100,10 +105,28 @@ async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
     )
 
     assert count == 1
-    assert len(client.calls) == 3
-    graph_call, msg_call, search_call = client.calls
-    
-    assert "CREATE (f:Fact" in graph_call[1]
+    assert len(client.calls) == 4
+    facts_call, graph_call, msg_call, search_call = client.calls
+
+    assert "INSERT INTO facts" in facts_call[1]
+    assert facts_call[2] == (
+        "fact-1",
+        2,
+        "ada",
+        "project-1",
+        "Ada writes algorithms",
+        "2026-01-01T00:00:00+00:00",
+        None,
+        0.8,
+        7,
+        "ada",
+        "session-1",
+        "user",
+        2,
+        "project-1",
+    )
+
+    assert "MERGE (f:Fact" in graph_call[1]
     graph_params = json.loads(graph_call[2][0])
     fact_payload = graph_params["batch"][0]
     assert set(graph_params) == CREATE_FACTS_GRAPH_FIELDS
@@ -127,7 +150,7 @@ async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
         "session_id": "session-1",
         "project_id": "project-1",
     }
-    
+
     assert "MATCH (m:Message" in msg_call[1]
     assert "MERGE (m:Message" not in msg_call[1]
     msg_params = json.loads(msg_call[2][0])
@@ -147,7 +170,12 @@ async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_fact_writer_create_facts_batch_without_embedding_skips_fact_search():
-    client = RecordingPostgresClient(fetchone_results=[{"created_count": 1}])
+    client = RecordingPostgresClient(
+        fetchone_results=[
+            {"fact_id": "fact-1"},
+            {"projected_count": 1},
+        ]
+    )
     writer = FactWriter(client)
 
     count = await writer.create_facts_batch(
@@ -158,14 +186,20 @@ async def test_fact_writer_create_facts_batch_without_embedding_skips_fact_searc
     )
 
     assert count == 1
-    assert len(client.calls) == 1
-    assert "CREATE (f:Fact" in client.calls[0][1]
+    assert len(client.calls) == 2
+    assert "INSERT INTO facts" in client.calls[0][1]
+    assert "MERGE (f:Fact" in client.calls[1][1]
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_fact_writer_create_facts_batch_prefers_explicit_source_scope():
-    client = RecordingPostgresClient(fetchone_results=[{"created_count": 1}])
+    client = RecordingPostgresClient(
+        fetchone_results=[
+            {"fact_id": "fact-1"},
+            {"projected_count": 1},
+        ]
+    )
     writer = FactWriter(client)
     fact = make_fact(
         source_msg_id=9,
@@ -181,7 +215,7 @@ async def test_fact_writer_create_facts_batch_prefers_explicit_source_scope():
         project_id="project-1",
     )
 
-    graph_params = json.loads(client.calls[0][2][0])
+    graph_params = json.loads(client.calls[1][2][0])
     fact_payload = graph_params["batch"][0]
     assert fact_payload["source_msg_id"] == 9
     assert fact_payload["source_user_name"] == "source-user"
@@ -211,7 +245,7 @@ async def test_fact_writer_create_facts_batch_requires_async_pool():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_fact_writer_create_facts_batch_zero_created_raises():
-    client = RecordingPostgresClient(fetchone_results=[{"created_count": 0}])
+    client = RecordingPostgresClient(fetchone_results=[None])
     writer = FactWriter(client)
 
     with pytest.raises(Exception, match="parent may not exist"):
@@ -223,14 +257,14 @@ async def test_fact_writer_create_facts_batch_zero_created_raises():
         )
 
     assert len(client.calls) == 1
-    assert "CREATE (f:Fact" in client.calls[0][1]
+    assert "INSERT INTO facts" in client.calls[0][1]
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_fact_writer_invalidate_fact_updates_search_when_graph_fact_exists():
+async def test_fact_writer_invalidate_fact_updates_search_when_fact_exists():
     invalid_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
-    client = RecordingPostgresClient(fetchone_results=[{"id": '"fact-1"'}])
+    client = RecordingPostgresClient(fetchone_results=[{"fact_id": "fact-1"}])
     writer = FactWriter(client)
 
     assert (
@@ -240,19 +274,18 @@ async def test_fact_writer_invalidate_fact_updates_search_when_graph_fact_exists
         is True
     )
 
-    assert len(client.calls) == 2
-    graph_call, search_call = client.calls
+    assert len(client.calls) == 3
+    facts_call, graph_call, search_call = client.calls
+    assert "UPDATE facts" in facts_call[1]
+    assert facts_call[2] == (invalid_at, "fact-1", "project-1")
     assert "SET f.invalid_at = $invalid_at" in graph_call[1]
     assert json.loads(graph_call[2][0]) == {
         "fact_id": "fact-1",
         "invalid_at": invalid_at.isoformat(),
         "project_id": "project-1",
     }
-    assert search_call == (
-        "execute",
-        "UPDATE fact_search SET invalid_at = %s WHERE fact_id = %s AND project_id = %s",
-        (invalid_at, "fact-1", "project-1"),
-    )
+    assert "UPDATE fact_search" in search_call[1]
+    assert search_call[2] == (invalid_at, "fact-1", "project-1")
 
 
 @pytest.mark.storage
@@ -303,18 +336,17 @@ async def test_fact_writer_delete_old_invalidated_facts_strips_ids_for_search_de
         == 2
     )
 
-    assert len(client.calls) == 2
-    graph_call, search_call = client.calls
+    assert len(client.calls) == 3
+    facts_call, graph_call, search_call = client.calls
+    assert "DELETE FROM facts" in facts_call[1]
+    assert facts_call[2] == (cutoff, "project-1")
     assert "DETACH DELETE f" in graph_call[1]
     assert json.loads(graph_call[2][0]) == {
-        "cutoff": cutoff.isoformat(),
+        "fact_ids": ["fact-1", "fact-2"],
         "project_id": "project-1",
     }
-    assert search_call == (
-        "execute",
-        "DELETE FROM fact_search WHERE fact_id = ANY(%s) AND project_id = %s",
-        (["fact-1", "fact-2"], "project-1"),
-    )
+    assert "DELETE FROM fact_search" in search_call[1]
+    assert search_call[2] == (["fact-1", "fact-2"], "project-1")
 
 
 @pytest.mark.storage
@@ -331,6 +363,7 @@ async def test_fact_writer_delete_old_invalidated_facts_empty_rows_skip_search_d
         == 0
     )
     assert len(client.calls) == 1
+    assert "DELETE FROM facts" in client.calls[0][1]
 
 
 @pytest.mark.storage

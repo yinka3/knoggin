@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 
 import pytest
@@ -70,8 +69,9 @@ async def test_fact_reader_search_relevant_facts_attaches_embeddings():
     vector_call, graph_call = client.calls
     assert "FROM fact_search" in vector_call[1]
     assert vector_call[2] == (2, [0.9, 0.8], 3)
-    assert "WHERE f.id IN $fact_ids" in graph_call[1]
-    assert json.loads(graph_call[2][0]) == {"fact_ids": ["fact-1"]}
+    assert "FROM facts" in graph_call[1]
+    assert "WHERE fact_id = ANY(%s)" in graph_call[1]
+    assert graph_call[2] == (["fact-1"],)
 
 
 @pytest.mark.storage
@@ -94,8 +94,9 @@ async def test_fact_reader_get_facts_for_entity_applies_active_only_filter():
     facts = await reader.get_facts_for_entity(2, active_only=True)
 
     assert [fact.id for fact in facts] == ["fact-1"]
-    assert "WHERE f.invalid_at IS NULL" in client.calls[0][1]
-    assert json.loads(client.calls[0][2][0]) == {"entity_id": 2}
+    assert "FROM facts" in client.calls[0][1]
+    assert "AND invalid_at IS NULL" in client.calls[0][1]
+    assert client.calls[0][2] == (2,)
 
 
 @pytest.mark.storage
@@ -107,7 +108,7 @@ async def test_fact_reader_get_facts_for_entity_can_include_inactive_facts():
     facts = await reader.get_facts_for_entity(2, active_only=False)
 
     assert [fact.id for fact in facts] == ["fact-1"]
-    assert "WHERE f.invalid_at IS NULL" not in client.calls[0][1]
+    assert "AND invalid_at IS NULL" not in client.calls[0][1]
 
 
 @pytest.mark.storage
@@ -132,8 +133,9 @@ async def test_fact_reader_get_facts_for_entities_groups_and_limits_per_entity()
         "fact-2-4",
     ]
     assert [fact.id for fact in grouped[3]] == ["fact-3-0"]
-    assert "AND f.invalid_at IS NULL" in client.calls[0][1]
-    assert json.loads(client.calls[0][2][0]) == {"entity_ids": [2, 3]}
+    assert "FROM facts" in client.calls[0][1]
+    assert "AND invalid_at IS NULL" in client.calls[0][1]
+    assert client.calls[0][2] == ([2, 3],)
 
 
 @pytest.mark.storage
@@ -159,12 +161,9 @@ async def test_fact_reader_get_facts_from_message_uses_user_session_scope():
     )
 
     assert [fact.id for fact in facts] == ["fact-1"]
-    assert "MATCH (f:Fact)-[:EXTRACTED_FROM]->(m:Message" in client.calls[0][1]
-    assert json.loads(client.calls[0][2][0]) == {
-        "msg_id": 7,
-        "user_name": "ada",
-        "session_id": "session-1",
-    }
+    assert "FROM facts" in client.calls[0][1]
+    assert "source_msg_id = %s" in client.calls[0][1]
+    assert client.calls[0][2] == (7, "ada", "session-1")
 
 
 @pytest.mark.storage
@@ -200,9 +199,11 @@ async def test_fact_reader_get_recent_facts_strips_quoted_age_strings():
             "entity_type": "person",
         }
     ]
-    params = json.loads(client.calls[0][2][0])
-    assert params["limit"] == 4
-    assert params["cutoff"] == "2026-01-05T12:00:00+00:00"
+    params = client.calls[0][2]
+    assert params == (
+        datetime(2026, 1, 5, 12, 0, tzinfo=timezone.utc),
+        4,
+    )
 
 
 @pytest.mark.storage

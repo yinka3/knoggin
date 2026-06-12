@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from common.scoping import IDENTITY_ENTITY_ID
@@ -86,8 +84,8 @@ async def test_entity_reader_get_entity_by_id_applies_visible_project_scope():
                     "aliases": ["Ada"],
                     "type": "person",
                     "topic": "Identity",
-                    "last_mentioned": "123.0",
-                    "last_updated": "456.0",
+                    "last_mentioned": 123000,
+                    "last_updated": 456000,
                     "last_profiled_msg_id": 77,
                 }
             ],
@@ -111,13 +109,11 @@ async def test_entity_reader_get_entity_by_id_applies_visible_project_scope():
         "last_profiled_msg_id": 77,
         "embedding": [0.1, 0.2, 0.3],
     }
-    params = json.loads(client.calls[0][2][0])
-    assert params == {
-        "entity_id": 2,
-        "filter_projects": True,
-        "visible_project_ids": ["project-1"],
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
+    sql, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM entities e" in sql
+    assert "LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id" in sql
+    assert "AND (e.project_id = ANY(%s) OR e.entity_id = %s)" in sql
+    assert params == (2, ["project-1"], IDENTITY_ENTITY_ID)
     assert client.calls[1] == (
         "execute_read",
         "SELECT embedding FROM entity_search WHERE entity_id = %s",
@@ -180,7 +176,9 @@ async def test_entity_reader_get_all_entities_for_hydration_converts_vectors():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_entity_reader_search_similar_entities_skips_without_embedding(monkeypatch):
+async def test_entity_reader_search_similar_entities_skips_without_embedding(
+    monkeypatch,
+):
     client = RecordingPostgresClient()
     reader = EntityReader(client)
 
@@ -195,7 +193,69 @@ async def test_entity_reader_search_similar_entities_skips_without_embedding(mon
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_entity_reader_get_entity_count_by_type_strips_quoted_age_strings():
+async def test_entity_reader_find_alias_collisions_uses_canonical_alias_tables():
+    client = RecordingPostgresClient(
+        execute_read_results=[[{"id_a": "2", "id_b": "3"}]]
+    )
+    reader = EntityReader(client)
+
+    assert await reader.find_alias_collisions() == [(2, 3)]
+
+    sql, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM entities" in sql
+    assert "FROM entity_aliases" in sql
+    assert params is None
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_reader_get_entities_by_names_uses_canonical_alias_tables():
+    client = RecordingPostgresClient(
+        execute_read_results=[
+            [
+                {
+                    "id": "2",
+                    "project_id": "project-1",
+                    "canonical_name": "Ada Lovelace",
+                    "aliases": ['"Ada"'],
+                    "type": "person",
+                    "facts": ["built notes"],
+                }
+            ]
+        ]
+    )
+    reader = EntityReader(client)
+
+    entities = await reader.get_entities_by_names(
+        ["Ada"],
+        visible_project_ids=["project-1"],
+    )
+
+    assert entities == [
+        {
+            "id": 2,
+            "project_id": "project-1",
+            "canonical_name": "Ada Lovelace",
+            "type": "person",
+            "aliases": ["Ada"],
+            "facts": ["built notes"],
+        }
+    ]
+    sql, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM entities e" in sql
+    assert "FROM entity_aliases ea" in sql
+    assert "AND (e.project_id = ANY(%s) OR e.entity_id = %s)" in sql
+    assert params == (
+        ["ada"],
+        ["ada"],
+        ["project-1"],
+        IDENTITY_ENTITY_ID,
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_reader_get_entity_count_by_type_uses_canonical_entities():
     client = RecordingPostgresClient(
         execute_read_results=[[{"type": '"person"', "count": "3"}]]
     )
@@ -204,6 +264,21 @@ async def test_entity_reader_get_entity_count_by_type_strips_quoted_age_strings(
     assert await reader.get_entity_count_by_type() == [
         {"type": "person", "count": 3}
     ]
+    assert "FROM entities" in client.calls[0][1]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_reader_get_entity_count_by_topic_uses_canonical_entities():
+    client = RecordingPostgresClient(
+        execute_read_results=[[{"topic": '"Identity"', "count": "2"}]]
+    )
+    reader = EntityReader(client)
+
+    assert await reader.get_entity_count_by_topic() == [
+        {"topic": "Identity", "count": 2}
+    ]
+    assert "FROM entities" in client.calls[0][1]
 
 
 @pytest.mark.storage
@@ -237,6 +312,10 @@ async def test_entity_reader_get_entity_relationships_hydrates_quoted_values():
             "confidence": 0.75,
         }
     ]
+    sql, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM relationships r" in sql
+    assert "LEFT JOIN relationship_evidence_refs ref" in sql
+    assert params == (2, 2, 2)
 
 
 @pytest.mark.storage

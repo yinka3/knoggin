@@ -6,12 +6,22 @@ from loguru import logger
 
 from common.schema.primitives import FactRecord
 from infrastructure.postgres_client import PostgresClient
+from knoggin_server.knowledge.db.writers.age_projection_writer import (
+    AgeProjectionWriter,
+)
 
 
 class FactWriter:
     def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
+        self.projection = AgeProjectionWriter(client, graph_name=graph_name)
+
+    @staticmethod
+    def _clean_string(value):
+        if isinstance(value, str):
+            return value.strip('"')
+        return value
 
     async def create_facts_batch(
         self,
@@ -27,7 +37,9 @@ class FactWriter:
         if not self.client.async_pool:
             raise RuntimeError("PostgresClient async_pool is not initialized")
         if not user_name or not project_id:
-            raise ValueError("create_facts_batch requires user_name and project_id scope")
+            raise ValueError(
+                "create_facts_batch requires user_name and project_id scope"
+            )
 
         fact_params = []
         for f in facts:
@@ -57,85 +69,110 @@ class FactWriter:
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # Write to AGE Graph
-                    cypher = """
-                    MATCH (e:Entity {id: $entity_id})
-                    WHERE e.project_id = $project_id
-                    UNWIND $batch AS item
-                    CREATE (f:Fact {
-                        id: item.id,
-                        source_entity_id: $entity_id,
-                        content: item.content,
-                        valid_at: item.valid_at,
-                        invalid_at: item.invalid_at,
-                        confidence: item.confidence,
-                        user_name: $user_name,
-                        project_id: $project_id,
-                        source_msg_id: item.source_msg_id,
-                        source_user_name: item.source_user_name,
-                        source_session_id: item.source_session_id,
-                        source: item.source
-                    })
-                    CREATE (e)-[:HAS_FACT]->(f)
-                    WITH f, item
-                    RETURN count(f)
-                    """
-
-                    await cur.execute(
-                        self.client.build_cypher(cypher, "created_count agtype"),
-                        (
-                            json.dumps(
-                                {
-                                    "entity_id": entity_id,
-                                    "batch": fact_params,
-                                    "user_name": user_name,
-                                    "session_id": session_id,
-                                    "project_id": project_id,
-                                }
+                    count = 0
+                    for item in fact_params:
+                        await cur.execute(
+                            """
+                            INSERT INTO facts (
+                                fact_id,
+                                entity_id,
+                                user_name,
+                                project_id,
+                                content,
+                                valid_at,
+                                invalid_at,
+                                confidence,
+                                source_msg_id,
+                                source_user_name,
+                                source_session_id,
+                                source
+                            )
+                            SELECT
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM entities
+                                WHERE entity_id = %s
+                                  AND project_id = %s
+                            )
+                            ON CONFLICT (fact_id) DO UPDATE SET
+                                entity_id = EXCLUDED.entity_id,
+                                user_name = EXCLUDED.user_name,
+                                project_id = EXCLUDED.project_id,
+                                content = EXCLUDED.content,
+                                valid_at = EXCLUDED.valid_at,
+                                invalid_at = EXCLUDED.invalid_at,
+                                confidence = EXCLUDED.confidence,
+                                source_msg_id = EXCLUDED.source_msg_id,
+                                source_user_name = EXCLUDED.source_user_name,
+                                source_session_id = EXCLUDED.source_session_id,
+                                source = EXCLUDED.source
+                            RETURNING fact_id
+                            """,
+                            (
+                                item["id"],
+                                entity_id,
+                                user_name,
+                                project_id,
+                                item["content"],
+                                item["valid_at"],
+                                item["invalid_at"],
+                                item["confidence"],
+                                item["source_msg_id"],
+                                item["source_user_name"],
+                                item["source_session_id"],
+                                item["source"],
+                                entity_id,
+                                project_id,
                             ),
-                        ),
-                    )
-                    record = await cur.fetchone()
-                    count = int(record["created_count"]) if record else 0
+                        )
+                        record = await cur.fetchone()
+                        if record:
+                            count += 1
 
                     if count == 0:
                         raise Exception(
-                            f"Failed to create facts for entity {entity_id} (parent may not exist)"
+                            "Failed to create facts for entity "
+                            f"{entity_id} (parent may not exist)"
                         )
 
-                    # Link only to persisted messages. Do not create placeholder
-                    # Message nodes from source_msg_id values.
-                    msg_params = [p for p in fact_params if p["source_msg_id"] is not None]
-                    if msg_params:
-                        cypher_m = """
-                        UNWIND $batch AS item
-                        MATCH (f:Fact {id: item.id})
-                        MATCH (m:Message {
-                            user_name: item.source_user_name,
-                            session_id: item.source_session_id,
-                            id: item.source_msg_id
-                        })
-                        MERGE (f)-[:EXTRACTED_FROM]->(m)
-                        RETURN count(f)
-                        """
-                        await cur.execute(
-                            self.client.build_cypher(cypher_m),
-                            (json.dumps({"batch": msg_params}),),
+                    projected_count = await self.projection.project_facts(
+                        cur,
+                        entity_id,
+                        fact_params,
+                        user_name,
+                        session_id,
+                        project_id,
+                    )
+                    if projected_count == 0:
+                        raise Exception(
+                            f"Failed to project facts for entity {entity_id}"
                         )
-
+                    await self.projection.project_fact_message_links(cur, fact_params)
 
                     # Write to Postgres fact_search table (Vectors)
                     for f in facts:
                         if f.embedding:
                             await cur.execute(
                                 """
-                                INSERT INTO fact_search (fact_id, entity_id, user_name, project_id, embedding, invalid_at)
+                                INSERT INTO fact_search (
+                                    fact_id,
+                                    entity_id,
+                                    user_name,
+                                    project_id,
+                                    embedding,
+                                    invalid_at
+                                )
                                 VALUES (%s, %s, %s, %s, %s::vector, %s)
                                 ON CONFLICT (fact_id) DO UPDATE SET
+                                    entity_id = EXCLUDED.entity_id,
                                     user_name = EXCLUDED.user_name,
                                     project_id = EXCLUDED.project_id,
                                     invalid_at = EXCLUDED.invalid_at,
-                                    embedding = COALESCE(EXCLUDED.embedding, fact_search.embedding)
+                                    embedding = COALESCE(
+                                        EXCLUDED.embedding,
+                                        fact_search.embedding
+                                    )
                                 """,
                                 (
                                     f.id,
@@ -145,7 +182,7 @@ class FactWriter:
                                     json.dumps(f.embedding),
                                     f.invalid_at,
                                 ),
-                            )
+                    )
 
         return count
 
@@ -157,31 +194,32 @@ class FactWriter:
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # Update Graph
-                    cypher = """
-                    MATCH (f:Fact {id: $fact_id})
-                    WHERE f.project_id = $project_id
-                    SET f.invalid_at = $invalid_at
-                    RETURN f.id
-                    """
                     await cur.execute(
-                        self.client.build_cypher(cypher, "id agtype"),
-                        (
-                            json.dumps(
-                                {
-                                    "fact_id": fact_id,
-                                    "invalid_at": invalid_at.isoformat(),
-                                    "project_id": project_id,
-                                }
-                            ),
-                        ),
+                        """
+                        UPDATE facts
+                        SET invalid_at = %s
+                        WHERE fact_id = %s
+                          AND project_id = %s
+                        RETURNING fact_id
+                        """,
+                        (invalid_at, fact_id, project_id),
                     )
                     record = await cur.fetchone()
 
-                    # Update Vector Table
                     if record:
+                        await self.projection.invalidate_fact(
+                            cur,
+                            fact_id,
+                            invalid_at.isoformat(),
+                            project_id,
+                        )
                         await cur.execute(
-                            "UPDATE fact_search SET invalid_at = %s WHERE fact_id = %s AND project_id = %s",
+                            """
+                            UPDATE fact_search
+                            SET invalid_at = %s
+                            WHERE fact_id = %s
+                              AND project_id = %s
+                            """,
                             (invalid_at, fact_id, project_id),
                         )
                         return True
@@ -195,36 +233,34 @@ class FactWriter:
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    # Delete from Graph
-                    cypher = """
-                    MATCH (f:Fact)
-                    WHERE f.invalid_at IS NOT NULL AND f.invalid_at < $cutoff
-                      AND f.project_id = $project_id
-                    WITH f, f.id as fact_id
-                    DETACH DELETE f
-                    RETURN fact_id
-                    """
-                    # We return the IDs to delete them from Postgres table easily
                     await cur.execute(
-                        self.client.build_cypher(cypher, "fact_id agtype"),
-                        (
-                            json.dumps(
-                                {"cutoff": cutoff.isoformat(), "project_id": project_id}
-                            ),
-                        ),
+                        """
+                        DELETE FROM facts
+                        WHERE invalid_at IS NOT NULL
+                          AND invalid_at < %s
+                          AND project_id = %s
+                        RETURNING fact_id
+                        """,
+                        (cutoff, project_id),
                     )
                     records = await cur.fetchall()
                     deleted_ids = [
-                        r["fact_id"].strip('"')
-                        if isinstance(r["fact_id"], str)
-                        else r["fact_id"]
+                        str(self._clean_string(r["fact_id"]))
                         for r in records
                     ]
 
-                    # Delete from Vector Table
                     if deleted_ids:
+                        await self.projection.delete_facts(
+                            cur,
+                            deleted_ids,
+                            project_id,
+                        )
                         await cur.execute(
-                            "DELETE FROM fact_search WHERE fact_id = ANY(%s) AND project_id = %s",
+                            """
+                            DELETE FROM fact_search
+                            WHERE fact_id = ANY(%s)
+                              AND project_id = %s
+                            """,
                             (deleted_ids, project_id),
                         )
                         logger.info(f"Deleted {len(deleted_ids)} old invalidated facts")

@@ -11,6 +11,22 @@ class GraphReader:
         self.client = client
         self.graph_name = graph_name
 
+    @staticmethod
+    def _clean_string(value):
+        if isinstance(value, str):
+            return value.strip('"')
+        return value
+
+    def _parse_message_row(self, row: Dict) -> Dict:
+        return {
+            "id": int(row["id"]),
+            "user_name": self._clean_string(row["user_name"]),
+            "session_id": self._clean_string(row["session_id"]),
+            "role": self._clean_string(row["role"]),
+            "content": self._clean_string(row["content"]),
+            "timestamp": row["timestamp"],
+        }
+
     def _parse_vector(self, val) -> List[float]:
         if val is None:
             return []
@@ -31,31 +47,27 @@ class GraphReader:
         self, message_id: int, user_name: str, session_id: str
     ) -> str:
         if not user_name or not session_id:
-            logger.warning("Refusing unsafe message text lookup without user/session scope")
+            logger.warning(
+                "Refusing unsafe message text lookup without user/session scope"
+            )
             return ""
 
-        cypher = """
-        MATCH (m:Message {user_name: $user_name, session_id: $session_id, id: $id})
-        RETURN m.content
+        query = """
+        SELECT content
+        FROM messages
+        WHERE user_name = %s
+          AND session_id = %s
+          AND message_id = %s
         """
-        query = self.client.build_cypher(cypher, "content agtype")
         try:
             res = await self.client.execute_read(
                 query,
-                (
-                    json.dumps(
-                        {
-                            "id": message_id,
-                            "user_name": user_name,
-                            "session_id": session_id,
-                        }
-                    ),
-                ),
+                (user_name, session_id, message_id),
             )
             if not res:
                 return ""
             content = res[0]["content"]
-            return content.strip('"') if isinstance(content, str) else content
+            return self._clean_string(content)
         except Exception as e:
             logger.error(f"Failed to get message text for {message_id}: {e}")
             return ""
@@ -74,39 +86,26 @@ class GraphReader:
 
         params = {"ids": ids, "user_name": user_name, "session_ids": session_ids}
 
-        cypher = """
-        MATCH (m:Message)
-        WHERE m.id IN $ids
-        AND m.user_name = $user_name
-        AND m.session_id IN $session_ids
-        RETURN m.id, m.user_name, m.session_id, m.role, m.content, m.timestamp
-        ORDER BY m.id ASC
+        query = """
+        SELECT
+            message_id AS id,
+            user_name,
+            session_id,
+            role,
+            content,
+            timestamp_ms AS timestamp
+        FROM messages
+        WHERE message_id = ANY(%s)
+          AND user_name = %s
+          AND session_id = ANY(%s)
+        ORDER BY message_id ASC
         """
-        query = self.client.build_cypher(
-            cypher,
-            "id agtype, user_name agtype, session_id agtype, role agtype, content agtype, timestamp agtype",
-        )
         try:
-            res = await self.client.execute_read(query, (json.dumps(params),))
-            return [
-                {
-                    "id": int(row["id"]),
-                    "user_name": row["user_name"].strip('"')
-                    if isinstance(row["user_name"], str)
-                    else row["user_name"],
-                    "session_id": row["session_id"].strip('"')
-                    if isinstance(row["session_id"], str)
-                    else row["session_id"],
-                    "role": row["role"].strip('"')
-                    if isinstance(row["role"], str)
-                    else row["role"],
-                    "content": row["content"].strip('"')
-                    if isinstance(row["content"], str)
-                    else row["content"],
-                    "timestamp": row["timestamp"],
-                }
-                for row in res
-            ]
+            res = await self.client.execute_read(
+                query,
+                (params["ids"], params["user_name"], params["session_ids"]),
+            )
+            return [self._parse_message_row(row) for row in res]
         except Exception as e:
             logger.error(f"Failed to fetch messages by ids: {e}")
             return []
@@ -119,7 +118,9 @@ class GraphReader:
         before_message_id: Optional[int] = None,
     ) -> List[Dict]:
         if not user_name or not project_id:
-            logger.warning("Refusing unsafe project message lookup without user/project scope")
+            logger.warning(
+                "Refusing unsafe project message lookup without user/project scope"
+            )
             return []
         if limit <= 0:
             return []
@@ -131,45 +132,34 @@ class GraphReader:
             "before_message_id": before_message_id,
         }
         before_clause = (
-            "AND m.id <= $before_message_id"
+            "AND message_id <= %s"
             if before_message_id is not None
             else ""
         )
-        cypher = f"""
-        MATCH (m:Message)
-        WHERE m.user_name = $user_name
-        AND m.project_id = $project_id
+        query = f"""
+        SELECT
+            message_id AS id,
+            user_name,
+            session_id,
+            role,
+            content,
+            timestamp_ms AS timestamp
+        FROM messages
+        WHERE user_name = %s
+        AND project_id = %s
         {before_clause}
-        RETURN m.id, m.user_name, m.session_id, m.role, m.content, m.timestamp
-        ORDER BY m.id DESC
-        LIMIT $limit
+        ORDER BY message_id DESC
+        LIMIT %s
         """
-        query = self.client.build_cypher(
-            cypher,
-            "id agtype, user_name agtype, session_id agtype, role agtype, content agtype, timestamp agtype",
+        query_params = (
+            (params["user_name"], params["project_id"], params["before_message_id"])
+            if before_message_id is not None
+            else (params["user_name"], params["project_id"])
         )
+        query_params = (*query_params, params["limit"])
         try:
-            rows = await self.client.execute_read(query, (json.dumps(params),))
-
-            def parse(row):
-                return {
-                    "id": int(row["id"]),
-                    "user_name": row["user_name"].strip('"')
-                    if isinstance(row["user_name"], str)
-                    else row["user_name"],
-                    "session_id": row["session_id"].strip('"')
-                    if isinstance(row["session_id"], str)
-                    else row["session_id"],
-                    "role": row["role"].strip('"')
-                    if isinstance(row["role"], str)
-                    else row["role"],
-                    "content": row["content"].strip('"')
-                    if isinstance(row["content"], str)
-                    else row["content"],
-                    "timestamp": row["timestamp"],
-                }
-
-            return [parse(row) for row in reversed(rows)]
+            rows = await self.client.execute_read(query, query_params)
+            return [self._parse_message_row(row) for row in reversed(rows)]
         except Exception as e:
             logger.error(f"Failed to fetch recent project messages: {e}")
             return []
@@ -190,12 +180,8 @@ class GraphReader:
 
         back_limit = max(0, target_total - forward - 1)
         session_ids = [session_id]
-        params_base = {"user_name": user_name, "session_id": session_id}
+        params_base = (user_name, session_id)
 
-        # In AGE, complex correlated CALL subqueries can be brittle.
-        # It's cleaner and safer to do the backwards/forwards search sequentially in python,
-        # or use simple independent Cypher fetches.
-        # We will fetch the target first.
         try:
             target_res = await self.get_messages_by_ids(
                 [message_id], user_name=user_name, session_ids=session_ids
@@ -205,82 +191,51 @@ class GraphReader:
             target = target_res[0]
             target_ts = target["timestamp"]
 
-            back_cypher = """
-            MATCH (prev:Message)
-            WHERE prev.timestamp <= $ts AND prev.id <> $id
-            AND prev.user_name = $user_name
-            AND prev.session_id = $session_id
-            RETURN prev.id, prev.user_name, prev.session_id, prev.role, prev.content, prev.timestamp
-            ORDER BY prev.timestamp DESC
-            LIMIT $limit
+            back_query = """
+            SELECT
+                message_id AS id,
+                user_name,
+                session_id,
+                role,
+                content,
+                timestamp_ms AS timestamp
+            FROM messages
+            WHERE timestamp_ms <= %s
+              AND message_id <> %s
+              AND user_name = %s
+              AND session_id = %s
+            ORDER BY timestamp_ms DESC
+            LIMIT %s
             """
 
-            fwd_cypher = """
-            MATCH (next:Message)
-            WHERE next.timestamp >= $ts AND next.id <> $id
-            AND next.user_name = $user_name
-            AND next.session_id = $session_id
-            RETURN next.id, next.user_name, next.session_id, next.role, next.content, next.timestamp
-            ORDER BY next.timestamp ASC
-            LIMIT $limit
+            fwd_query = """
+            SELECT
+                message_id AS id,
+                user_name,
+                session_id,
+                role,
+                content,
+                timestamp_ms AS timestamp
+            FROM messages
+            WHERE timestamp_ms >= %s
+              AND message_id <> %s
+              AND user_name = %s
+              AND session_id = %s
+            ORDER BY timestamp_ms ASC
+            LIMIT %s
             """
-
-            back_q = self.client.build_cypher(
-                back_cypher,
-                "id agtype, user_name agtype, session_id agtype, role agtype, content agtype, timestamp agtype",
-            )
-            fwd_q = self.client.build_cypher(
-                fwd_cypher,
-                "id agtype, user_name agtype, session_id agtype, role agtype, content agtype, timestamp agtype",
-            )
 
             back_data = await self.client.execute_read(
-                back_q,
-                (
-                    json.dumps(
-                        {
-                            "ts": target_ts,
-                            "id": message_id,
-                            "limit": back_limit,
-                            **params_base,
-                        }
-                    ),
-                ),
+                back_query,
+                (target_ts, message_id, *params_base, back_limit),
             )
             fwd_data = await self.client.execute_read(
-                fwd_q,
-                (
-                    json.dumps(
-                        {
-                            "ts": target_ts,
-                            "id": message_id,
-                            "limit": forward,
-                            **params_base,
-                        }
-                    ),
-                ),
+                fwd_query,
+                (target_ts, message_id, *params_base, forward),
             )
 
-            def parse(row):
-                return {
-                    "id": int(row["id"]),
-                    "user_name": row["user_name"].strip('"')
-                    if isinstance(row["user_name"], str)
-                    else row["user_name"],
-                    "session_id": row["session_id"].strip('"')
-                    if isinstance(row["session_id"], str)
-                    else row["session_id"],
-                    "role": row["role"].strip('"')
-                    if isinstance(row["role"], str)
-                    else row["role"],
-                    "content": row["content"].strip('"')
-                    if isinstance(row["content"], str)
-                    else row["content"],
-                    "timestamp": row["timestamp"],
-                }
-
-            prev_msgs = [parse(r) for r in reversed(back_data)]
-            next_msgs = [parse(r) for r in fwd_data]
+            prev_msgs = [self._parse_message_row(r) for r in reversed(back_data)]
+            next_msgs = [self._parse_message_row(r) for r in fwd_data]
 
             return prev_msgs + [target] + next_msgs
         except Exception as e:
@@ -288,7 +243,10 @@ class GraphReader:
             return []
 
     async def get_neighbor_ids(self, entity_id: int) -> set[int]:
-        cypher = "MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity) RETURN neighbor.id"
+        cypher = """
+        MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity)
+        RETURN neighbor.id
+        """
         query = self.client.build_cypher(cypher, "neighbor_id agtype")
         try:
             res = await self.client.execute_read(
@@ -300,23 +258,32 @@ class GraphReader:
             return set()
 
     async def get_parent_entities(self, entity_id: int) -> List[Dict]:
-        cypher = """
-        MATCH (child:Entity {id: $entity_id})-[:PART_OF]->(parent:Entity)
-        OPTIONAL MATCH (parent)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL
-        RETURN parent.id, parent.canonical_name, parent.type, collect(f.content) as facts
+        query = """
+        SELECT
+            parent.entity_id AS id,
+            parent.canonical_name,
+            parent.type,
+            COALESCE(
+                array_agg(f.content ORDER BY f.valid_at DESC)
+                    FILTER (WHERE f.content IS NOT NULL),
+                '{}'
+            ) AS facts
+        FROM hierarchy_edges edge
+        JOIN entities parent ON parent.entity_id = edge.parent_id
+        LEFT JOIN facts f
+          ON f.entity_id = parent.entity_id
+         AND f.invalid_at IS NULL
+        WHERE edge.child_id = %s
+        GROUP BY parent.entity_id, parent.canonical_name, parent.type
+        ORDER BY parent.canonical_name
         """
-        query = self.client.build_cypher(
-            cypher, "id agtype, canonical_name agtype, type agtype, facts agtype"
-        )
         try:
-            res = await self.client.execute_read(
-                query, (json.dumps({"entity_id": entity_id}),)
-            )
+            res = await self.client.execute_read(query, (entity_id,))
             return [
                 {
                     "id": int(r["id"]),
-                    "canonical_name": r["canonical_name"],
-                    "type": r["type"],
+                    "canonical_name": self._clean_string(r["canonical_name"]),
+                    "type": self._clean_string(r["type"]),
                     "facts": r["facts"] or [],
                 }
                 for r in res
@@ -343,23 +310,32 @@ class GraphReader:
             return []
 
     async def get_child_entities(self, entity_id: int) -> List[Dict]:
-        cypher = """
-        MATCH (child:Entity)-[:PART_OF]->(parent:Entity {id: $entity_id})
-        OPTIONAL MATCH (child)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL
-        RETURN child.id, child.canonical_name, child.type, collect(f.content) as facts
+        query = """
+        SELECT
+            child.entity_id AS id,
+            child.canonical_name,
+            child.type,
+            COALESCE(
+                array_agg(f.content ORDER BY f.valid_at DESC)
+                    FILTER (WHERE f.content IS NOT NULL),
+                '{}'
+            ) AS facts
+        FROM hierarchy_edges edge
+        JOIN entities child ON child.entity_id = edge.child_id
+        LEFT JOIN facts f
+          ON f.entity_id = child.entity_id
+         AND f.invalid_at IS NULL
+        WHERE edge.parent_id = %s
+        GROUP BY child.entity_id, child.canonical_name, child.type
+        ORDER BY child.canonical_name
         """
-        query = self.client.build_cypher(
-            cypher, "id agtype, canonical_name agtype, type agtype, facts agtype"
-        )
         try:
-            res = await self.client.execute_read(
-                query, (json.dumps({"entity_id": entity_id}),)
-            )
+            res = await self.client.execute_read(query, (entity_id,))
             return [
                 {
                     "id": int(r["id"]),
-                    "canonical_name": r["canonical_name"],
-                    "type": r["type"],
+                    "canonical_name": self._clean_string(r["canonical_name"]),
+                    "type": self._clean_string(r["type"]),
                     "facts": r["facts"] or [],
                 }
                 for r in res
@@ -369,7 +345,10 @@ class GraphReader:
             return []
 
     async def has_direct_edge(self, id_a: int, id_b: int) -> bool:
-        cypher = "MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b}) RETURN count(r) > 0 as connected"
+        cypher = """
+        MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b})
+        RETURN count(r) > 0 as connected
+        """
         query = self.client.build_cypher(cypher, "connected agtype")
         try:
             res = await self.client.execute_read(
@@ -381,16 +360,16 @@ class GraphReader:
             return False
 
     async def has_hierarchy_edge(self, id_a: int, id_b: int) -> bool:
-        cypher = """
-        MATCH (a:Entity {id: $id_a}), (b:Entity {id: $id_b})
-        WHERE (a)-[:PART_OF]->(b) OR (b)-[:PART_OF]->(a)
-        RETURN count(a) > 0 as exists
+        query = """
+        SELECT EXISTS (
+            SELECT 1
+            FROM hierarchy_edges
+            WHERE (parent_id = %s AND child_id = %s)
+               OR (parent_id = %s AND child_id = %s)
+        ) AS exists
         """
-        query = self.client.build_cypher(cypher, "exists agtype")
         try:
-            res = await self.client.execute_read(
-                query, (json.dumps({"id_a": id_a, "id_b": id_b}),)
-            )
+            res = await self.client.execute_read(query, (id_a, id_b, id_b, id_a))
             return bool(res[0]["exists"]) if res else False
         except Exception as e:
             logger.error(
@@ -402,34 +381,39 @@ class GraphReader:
         self, topic: str, parent_type: str, child_types: List[str], min_weight: int = 2
     ) -> List[Dict]:
 
-        # 1. Fetch graph candidates
-        cypher = """
-        MATCH (parent:Entity)-[:BELONGS_TO]->(t:Topic {name: $topic})
-        MATCH (child:Entity)-[:BELONGS_TO]->(t)
-        MATCH (parent)-[r:RELATED_TO]-(child)
-        WHERE parent.type = $parent_type
-        AND child.type IN $child_types
-        AND r.weight >= $min_weight
-        AND NOT (child)-[:PART_OF]->(parent)
-        RETURN parent.id, parent.canonical_name, child.id, child.canonical_name, r.weight
+        query = """
+        SELECT
+            parent.entity_id AS parent_id,
+            parent.canonical_name AS parent_name,
+            child.entity_id AS child_id,
+            child.canonical_name AS child_name,
+            rel.weight
+        FROM relationships rel
+        JOIN entities parent
+          ON parent.entity_id IN (rel.entity_a_id, rel.entity_b_id)
+        JOIN entities child
+          ON child.entity_id = CASE
+              WHEN parent.entity_id = rel.entity_a_id THEN rel.entity_b_id
+              ELSE rel.entity_a_id
+          END
+        WHERE parent.topic = %s
+          AND child.topic = %s
+          AND parent.type = %s
+          AND child.type = ANY(%s)
+          AND rel.weight >= %s
+          AND NOT EXISTS (
+              SELECT 1
+              FROM hierarchy_edges edge
+              WHERE edge.project_id = rel.project_id
+                AND edge.parent_id = parent.entity_id
+                AND edge.child_id = child.entity_id
+          )
+        ORDER BY rel.weight DESC, parent.canonical_name, child.canonical_name
         """
-        query = self.client.build_cypher(
-            cypher,
-            "parent_id agtype, parent_name agtype, child_id agtype, child_name agtype, weight agtype",
-        )
         try:
             graph_res = await self.client.execute_read(
                 query,
-                (
-                    json.dumps(
-                        {
-                            "topic": topic,
-                            "parent_type": parent_type,
-                            "child_types": child_types,
-                            "min_weight": min_weight,
-                        }
-                    ),
-                ),
+                (topic, topic, parent_type, child_types, min_weight),
             )
 
             if not graph_res:
@@ -441,7 +425,11 @@ class GraphReader:
                 | {int(r["child_id"]) for r in graph_res}
             )
             emb_res = await self.client.execute_read(
-                "SELECT entity_id, embedding FROM entity_search WHERE entity_id = ANY(%s)",
+                """
+                SELECT entity_id, embedding
+                FROM entity_search
+                WHERE entity_id = ANY(%s)
+                """,
                 (entity_ids,),
             )
             embs = {
@@ -452,10 +440,10 @@ class GraphReader:
             return [
                 {
                     "parent_id": int(r["parent_id"]),
-                    "parent_name": r["parent_name"],
+                    "parent_name": self._clean_string(r["parent_name"]),
                     "parent_embedding": embs.get(int(r["parent_id"]), []),
                     "child_id": int(r["child_id"]),
-                    "child_name": r["child_name"],
+                    "child_name": self._clean_string(r["child_name"]),
                     "child_embedding": embs.get(int(r["child_id"]), []),
                     "weight": r["weight"],
                 }
@@ -503,17 +491,18 @@ class GraphReader:
             return []
 
     async def get_graph_stats(self) -> Dict[str, int]:
-        cypher = """
-        MATCH (e:Entity) WITH count(e) as entities
-        MATCH (f:Fact) WHERE f.invalid_at IS NULL WITH entities, count(f) as facts
-        MATCH ()-[r:RELATED_TO]->() WITH entities, facts, count(r) as relationships
-        RETURN entities, facts, relationships
+        query = """
+        SELECT
+            (SELECT count(*) FROM entities) AS entities,
+            (
+                SELECT count(*)
+                FROM facts
+                WHERE invalid_at IS NULL
+            ) AS facts,
+            (SELECT count(*) FROM relationships) AS relationships
         """
-        query = self.client.build_cypher(
-            cypher, "entities agtype, facts agtype, relationships agtype"
-        )
         try:
-            res = await self.client.execute_read(query, ("{}",))
+            res = await self.client.execute_read(query)
             if not res:
                 return {"entities": 0, "facts": 0, "relationships": 0}
             return {
