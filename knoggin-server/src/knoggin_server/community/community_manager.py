@@ -56,8 +56,8 @@ class CommunityManager:
         self._active_discussion_id: Optional[str] = None
         self._discussion_task: Optional[asyncio.Task] = None
 
-    async def _get_agent_working_memory(self, agent_id: str) -> Dict[str, List[str]]:
-        """Fetch and safely parse an agent's working memory."""
+    async def _get_agent_directives(self, agent_id: str) -> str:
+        """Fetch and format an agent's directives."""
         memory_mgr = MemoryManager(
             redis=self.resources.redis,
             user_name=self.user_name,
@@ -66,12 +66,7 @@ class CommunityManager:
             topic_config=self.project_state.topic_config,
         )
 
-        result = await memory_mgr.list_working_memory()
-
-        # Format for community loop (List[str] of content)
-        return {
-            cat: [e.content for e in entries] for cat, entries in result.blocks.items()
-        }
+        return await memory_mgr.load_directive_string()
 
     async def _is_discussion_active(self) -> bool:
         return bool(await self.resources.redis.get(self._active_discussion_key()))
@@ -281,10 +276,7 @@ class CommunityManager:
         agent_state = AgentState()
         evidence = RetrievedEvidence()
 
-        working_memory = await self._get_agent_working_memory(agent.id)
-        agent_rules = working_memory["rules"] or None
-        agent_preferences = working_memory["preferences"] or None
-        agent_icks = working_memory["icks"] or None
+        agent_directives = await self._get_agent_directives(agent.id)
 
         comm_memory = MemoryManager(
             redis=self.resources.redis,
@@ -345,9 +337,7 @@ class CommunityManager:
                 model=agent.model,
                 agent_temperature=agent.temperature,
                 agent_instructions=agent.instructions,
-                agent_rules=agent_rules,
-                agent_preferences=agent_preferences,
-                agent_icks=agent_icks,
+                agent_directives=agent_directives,
                 enabled_tools=enabled_tools,
                 client_tools=client_tools,
             ):
@@ -411,10 +401,7 @@ class CommunityManager:
             logger.error("AAC: No seeding agent available")
             return None
 
-        working_memory = await self._get_agent_working_memory(seeding_agent.id)
-        rules_str = "\n".join(working_memory["rules"])
-        prefs_str = "\n".join(working_memory["preferences"])
-        icks_str = "\n".join(working_memory["icks"])
+        directives_str = await self._get_agent_directives(seeding_agent.id)
 
         comm_mem_key = RedisKeys.community_agent_memory(
             self.user_name, seeding_agent.id
@@ -436,9 +423,7 @@ class CommunityManager:
             persona=seeding_agent.persona,
             agent_name=seeding_agent.name,
             memory_context=agent_memory_context,
-            agent_rules=rules_str,
-            agent_preferences=prefs_str,
-            agent_icks=icks_str,
+            agent_directives=directives_str,
             instructions=seeding_agent.instructions,
         )
 

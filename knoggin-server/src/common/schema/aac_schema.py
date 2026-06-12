@@ -77,12 +77,20 @@ AAC_SPECIFIC_SCHEMAS = [
                         "type": "string",
                         "description": "The specialist's expertise and style.",
                     },
-                    "initial_rules": {"type": "array", "items": {"type": "string"}},
-                    "initial_preferences": {
+                    "initial_directives": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["require", "prefer", "avoid"],
+                                },
+                                "content": {"type": "string"},
+                            },
+                            "required": ["mode", "content"],
+                        },
                     },
-                    "initial_icks": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["name", "persona"],
             },

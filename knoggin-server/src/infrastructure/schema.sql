@@ -1,6 +1,114 @@
 
 CREATE SCHEMA IF NOT EXISTS public;
 
+-- Canonical knowledge storage.
+-- These tables are the long-term source of truth. AGE remains the graph
+-- traversal projection, while *_search tables below remain derived indexes.
+
+CREATE TABLE IF NOT EXISTS public.messages (
+    user_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    message_id BIGINT NOT NULL,
+    project_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp_ms BIGINT,
+    PRIMARY KEY (user_name, session_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS messages_project_idx
+ON public.messages(user_name, project_id, message_id);
+
+CREATE TABLE IF NOT EXISTS public.entities (
+    entity_id BIGINT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    canonical_name TEXT NOT NULL,
+    type TEXT,
+    topic TEXT NOT NULL DEFAULT 'General',
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    last_mentioned_ms BIGINT,
+    last_updated_ms BIGINT,
+    last_profiled_msg_id BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS entities_project_idx
+ON public.entities(user_name, project_id);
+
+CREATE INDEX IF NOT EXISTS entities_topic_idx
+ON public.entities(project_id, topic);
+
+CREATE TABLE IF NOT EXISTS public.entity_aliases (
+    entity_id BIGINT NOT NULL,
+    alias TEXT NOT NULL,
+    PRIMARY KEY (entity_id, alias)
+);
+
+CREATE INDEX IF NOT EXISTS entity_aliases_alias_idx
+ON public.entity_aliases(alias);
+
+CREATE TABLE IF NOT EXISTS public.facts (
+    fact_id TEXT PRIMARY KEY,
+    entity_id BIGINT NOT NULL,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    valid_at TIMESTAMPTZ,
+    invalid_at TIMESTAMPTZ,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    source_msg_id BIGINT,
+    source_user_name TEXT,
+    source_session_id TEXT,
+    source TEXT
+);
+
+CREATE INDEX IF NOT EXISTS facts_entity_active_idx
+ON public.facts(entity_id, invalid_at);
+
+CREATE INDEX IF NOT EXISTS facts_source_message_idx
+ON public.facts(source_user_name, source_session_id, source_msg_id);
+
+CREATE TABLE IF NOT EXISTS public.relationships (
+    relationship_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    entity_a_id BIGINT NOT NULL,
+    entity_b_id BIGINT NOT NULL,
+    weight INTEGER NOT NULL DEFAULT 1,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    context TEXT,
+    last_seen_ms BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS relationships_pair_idx
+ON public.relationships(project_id, entity_a_id, entity_b_id);
+
+CREATE TABLE IF NOT EXISTS public.relationship_evidence_refs (
+    relationship_id TEXT NOT NULL,
+    user_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    message_id BIGINT NOT NULL,
+    PRIMARY KEY (relationship_id, user_name, session_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS relationship_evidence_refs_message_idx
+ON public.relationship_evidence_refs(user_name, session_id, message_id);
+
+CREATE TABLE IF NOT EXISTS public.hierarchy_edges (
+    project_id TEXT NOT NULL,
+    parent_id BIGINT NOT NULL,
+    child_id BIGINT NOT NULL,
+    created_at_ms BIGINT,
+    PRIMARY KEY (project_id, parent_id, child_id)
+);
+
+CREATE INDEX IF NOT EXISTS hierarchy_edges_child_idx
+ON public.hierarchy_edges(project_id, child_id);
+
+CREATE INDEX IF NOT EXISTS hierarchy_edges_parent_idx
+ON public.hierarchy_edges(project_id, parent_id);
+
 -- 4. Entity and Message Vector/FTS search (Hybrid storage for the Graph)
 -- Since AGE nodes don't support pgvector indexes directly inside `agtype`,
 -- we store the heavy vectors and tsvectors in standard relational tables

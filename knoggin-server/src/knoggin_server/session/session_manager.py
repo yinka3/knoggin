@@ -30,12 +30,6 @@ class SessionManager:
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
-    def _serialize_topics_config(self, topics_config: dict) -> dict:
-        return {
-            name: cfg.model_dump() if hasattr(cfg, "model_dump") else cfg
-            for name, cfg in topics_config.items()
-        }
-
     async def list_sessions(self) -> Dict[str, dict]:
         try:
             raw = await self.resources.redis.hgetall(RedisKeys.sessions(self.user_name))
@@ -85,7 +79,6 @@ class SessionManager:
             now = get_now_iso()
             metadata = {
                 "created_at": now,
-                "topics_config": self._serialize_topics_config(topics_config),
                 "last_active": now,
                 "model": model,
                 "agent_id": agent_id,
@@ -164,7 +157,9 @@ class SessionManager:
                 if hasattr(context, "shutdown"):
                     await context.shutdown()
             finally:
-                DebugEventEmitter.get().unregister_session(context.project_id, session_id)
+                DebugEventEmitter.get().unregister_session(
+                    context.project_id, session_id
+                )
                 await self.project_manager.release_project(context.project_id)
         elif hasattr(context, "shutdown"):
             await context.shutdown()

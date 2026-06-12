@@ -46,9 +46,7 @@ class Orchestrator:
         simulated_date: Optional[str] = None,
         agent_temperature: Optional[float] = None,
         agent_instructions: Optional[str] = None,
-        agent_rules: Optional[List[str]] = None,
-        agent_preferences: Optional[List[str]] = None,
-        agent_icks: Optional[List[str]] = None,
+        agent_directives: Optional[str] = None,
         conversation_history: Optional[List[Dict]] = None,
         hot_topics: Optional[List[str]] = None,
         agent_persona_override: Optional[str] = None,
@@ -145,9 +143,7 @@ class Orchestrator:
                 agent_temperature=effective_temperature,
                 agent_instructions=agent_instructions
                 or (agent_cfg.instructions if agent_cfg else None),
-                agent_rules=agent_rules,
-                agent_preferences=agent_preferences,
-                agent_icks=agent_icks,
+                agent_directives=agent_directives,
                 client_tools=client_tools,
             ):
                 yield event

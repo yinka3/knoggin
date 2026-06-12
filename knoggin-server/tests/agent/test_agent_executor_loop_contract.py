@@ -18,9 +18,7 @@ class FakeMemoryManager:
         self.calls.append(list(hot_topics))
         return (
             "[Identity]\n- remembers stable profile preferences",
-            "memory rule",
-            "memory preference",
-            "memory ick",
+            "Required:\n- memory directive",
         )
 
 
@@ -77,9 +75,7 @@ class ScriptedExecutor(AgentExecutor):
         enabled_tools,
         memory_context,
         files_context,
-        rules,
-        prefs,
-        icks,
+        directives,
         temp,
         agent_instructions,
         last_result,
@@ -94,9 +90,7 @@ class ScriptedExecutor(AgentExecutor):
                 "enabled_tools": enabled_tools,
                 "memory_context": memory_context,
                 "files_context": files_context,
-                "rules": rules,
-                "prefs": prefs,
-                "icks": icks,
+                "directives": directives,
                 "temp": temp,
                 "agent_instructions": agent_instructions,
                 "last_result": last_result,
@@ -199,7 +193,7 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
             simulated_date="2026-02-03 04:05 UTC",
             agent_temperature=0.2,
             agent_instructions="Use citations",
-            agent_rules=["override rule"],
+            agent_directives="Required:\n- override directive",
         )
     ]
 
@@ -238,9 +232,7 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
         "[Identity]\n- remembers stable profile preferences"
     )
     assert first_call["files_context"] == "- profile-plan.md (2KB, 3 chunks)"
-    assert first_call["rules"] == "override rule"
-    assert first_call["prefs"] == "memory preference"
-    assert first_call["icks"] == "memory ick"
+    assert first_call["directives"] == "Required:\n- override directive"
     assert first_call["temp"] == 0.2
     assert first_call["agent_instructions"] == "Use citations"
     assert executor.step_calls[1]["last_result"] == [

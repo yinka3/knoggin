@@ -350,6 +350,7 @@ class FakeProjectManager:
     def __init__(self, project_state=None):
         self.project_state = project_state
         self.acquire_calls: list[tuple[str, str]] = []
+        self.acquire_topic_configs = []
         self.release_calls: list[str] = []
         self.add_session_calls: list[tuple[str, str]] = []
         self.remove_session_calls: list[tuple[str, str]] = []
@@ -358,6 +359,7 @@ class FakeProjectManager:
         self, project_id, session_id, topics_config=None
     ):
         self.acquire_calls.append((project_id, session_id))
+        self.acquire_topic_configs.append(topics_config)
         if self.project_state is not None:
             return self.project_state
         return object()

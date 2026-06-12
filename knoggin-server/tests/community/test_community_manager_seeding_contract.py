@@ -239,14 +239,17 @@ async def test_seed_discussion_parses_fenced_json_and_filters_unknown_agents(
     events = patch_events(monkeypatch)
     manager = CommunityManager(make_project_state(), "ada", resources)
 
-    async def get_working_memory(_agent_id):
-        return {
-            "rules": ["Stay grounded"],
-            "preferences": ["Prefer direct evidence"],
-            "icks": ["Vague claims"],
-        }
+    async def get_directives(_agent_id):
+        return (
+            "Required:\n"
+            "- Stay grounded\n\n"
+            "Preferred:\n"
+            "- Prefer direct evidence\n\n"
+            "Avoid:\n"
+            "- Vague claims"
+        )
 
-    manager._get_agent_working_memory = get_working_memory
+    manager._get_agent_directives = get_directives
 
     seed = await manager._seed_discussion()
 
@@ -274,14 +277,10 @@ async def test_seed_discussion_falls_back_to_seeding_agent_on_invalid_response(
     patch_events(monkeypatch)
     manager = CommunityManager(make_project_state(), "ada", resources)
 
-    async def get_working_memory(_agent_id):
-        return {
-            "rules": [],
-            "preferences": [],
-            "icks": [],
-        }
+    async def get_directives(_agent_id):
+        return ""
 
-    manager._get_agent_working_memory = get_working_memory
+    manager._get_agent_directives = get_directives
 
     seed = await manager._seed_discussion()
 

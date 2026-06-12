@@ -10,7 +10,11 @@ from common.utils.time_utils import get_now_iso
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.community.community_store import CommunityStore
-from knoggin_server.knowledge.services.memory_service import MemoryManager
+from knoggin_server.knowledge.services.memory_service import (
+    DIRECTIVE_MODES,
+    DIRECTIVES_CATEGORY,
+    MemoryManager,
+)
 
 MAX_SPAWNED_SPECIALISTS = 10
 
@@ -83,9 +87,7 @@ class CommunityTools(Tools):
         self,
         name: str,
         persona: str,
-        initial_rules: List[str] = None,
-        initial_preferences: List[str] = None,
-        initial_icks: List[str] = None,
+        initial_directives: List[Dict] = None,
     ) -> Dict:
         """Spawn a new specialist sub-agent."""
         spawned_count = await self._count_spawned_participants()
@@ -115,28 +117,27 @@ class CommunityTools(Tools):
         )
 
         now = get_now_iso()
-        seeded_counts = {"rules": 0, "preferences": 0, "icks": 0}
+        seeded_directives = 0
+        directives_key = RedisKeys.agent_working_memory(new_id, DIRECTIVES_CATEGORY)
+        for directive in initial_directives or []:
+            if not isinstance(directive, dict):
+                continue
+            mode = (directive.get("mode") or "").strip().lower()
+            content = (directive.get("content") or "").strip()
+            if mode not in DIRECTIVE_MODES or not content:
+                continue
 
-        initial_data = {
-            "rules": initial_rules or [],
-            "preferences": initial_preferences or [],
-            "icks": initial_icks or [],
-        }
-
-        for category, items in initial_data.items():
-            if items:
-                key = RedisKeys.agent_working_memory(new_id, category)
-                for content in items:
-                    mem_id = f"mem_{uuid.uuid4().hex[:8]}"
-                    payload = json.dumps(
-                        {
-                            "content": content,
-                            "created_at": now,
-                            "seeded_by": self.agent_id,
-                        }
-                    )
-                    await self.redis.hset(key, mem_id, payload)
-                    seeded_counts[category] += 1
+            directive_id = f"directive_{uuid.uuid4().hex[:8]}"
+            payload = json.dumps(
+                {
+                    "mode": mode,
+                    "content": content,
+                    "created_at": now,
+                    "seeded_by": self.agent_id,
+                }
+            )
+            await self.redis.hset(directives_key, directive_id, payload)
+            seeded_directives += 1
 
         await self.community_store.register_agent_spawn(self.agent_id, new_id, persona)
         self.current_participants.append(new_id)
@@ -151,14 +152,14 @@ class CommunityTools(Tools):
                 "agent_id": new_id,
                 "name": name,
                 "persona": persona,
-                "seeded_memory": seeded_counts,
+                "seeded_directives": seeded_directives,
             },
         )
 
         return {
             "id": new_id,
             "message": f"Spawned {name} and added to discussion pool.",
-            "seeded_memory": seeded_counts,
+            "seeded_directives": seeded_directives,
         }
 
     async def _count_spawned_participants(self) -> int:

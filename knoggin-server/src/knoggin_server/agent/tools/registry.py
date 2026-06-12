@@ -28,7 +28,7 @@ TOOL_DISPATCH = {
     "save_insight": ("save_insight", ["content"]),
     "spawn_specialist": (
         "spawn_specialist",
-        ["name", "persona", "initial_rules", "initial_preferences", "initial_icks"],
+        ["name", "persona", "initial_directives"],
     ),
 }
 

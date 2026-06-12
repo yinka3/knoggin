@@ -61,9 +61,7 @@ class AgentExecutor:
         simulated_date: Optional[str] = None,
         agent_temperature: float = 0.7,
         agent_instructions: Optional[str] = None,
-        agent_rules: Optional[List[str]] = None,
-        agent_preferences: Optional[List[str]] = None,
-        agent_icks: Optional[List[str]] = None,
+        agent_directives: Optional[str] = None,
         client_tools: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[Dict, None]:
         """Runs the reasoning loop and yields events."""
@@ -77,12 +75,10 @@ class AgentExecutor:
         if self.memory_mgr:
             (
                 memory_context,
-                rules_str,
-                prefs_str,
-                icks_str,
+                directives_str,
             ) = await self.memory_mgr.load_prompt_strings(self.ctx.hot_topics)
         else:
-            memory_context, rules_str, prefs_str, icks_str = "", "", "", ""
+            memory_context, directives_str = "", ""
 
         files_context = ""
         if self.tools.file_rag:
@@ -90,11 +86,9 @@ class AgentExecutor:
             if manifest:
                 files_context = format_files_context(manifest)
 
-        a_rules = "\n".join(agent_rules) if agent_rules is not None else rules_str
-        a_prefs = (
-            "\n".join(agent_preferences) if agent_preferences is not None else prefs_str
+        a_directives = (
+            agent_directives if agent_directives is not None else directives_str
         )
-        a_icks = "\n".join(agent_icks) if agent_icks is not None else icks_str
 
         last_result = None
 
@@ -152,9 +146,7 @@ class AgentExecutor:
                 enabled_tools,
                 memory_context,
                 files_context,
-                a_rules,
-                a_prefs,
-                a_icks,
+                a_directives,
                 agent_temperature,
                 agent_instructions or "",
                 last_result,
@@ -165,7 +157,8 @@ class AgentExecutor:
 
                 if event_type == "formatting_error":
                     logger.warning(
-                        f"AgentExecutor: Model emitted text without tool calls. Returning error to loop."
+                        "AgentExecutor: Model emitted text without tool calls. "
+                        "Returning error to loop."
                     )
                     current_results = [{"error": data}]
                     last_result = current_results
@@ -278,9 +271,7 @@ class AgentExecutor:
         enabled_tools: Optional[List[str]],
         memory_context: str,
         files_context: str,
-        rules: str,
-        prefs: str,
-        icks: str,
+        directives: str,
         temp: float,
         agent_instructions: str,
         last_result: Optional[List[Dict]],
@@ -295,9 +286,7 @@ class AgentExecutor:
             self.ctx.agent_name,
             memory_context=memory_context,
             files_context=files_context,
-            agent_rules=rules,
-            agent_preferences=prefs,
-            agent_icks=icks,
+            agent_directives=directives,
             instructions=agent_instructions,
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,

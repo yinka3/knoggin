@@ -44,49 +44,57 @@ class MemoryListResult:
 
 
 @dataclass
-class WorkingMemoryEntry:
-    """Single working memory entry."""
+class Directive:
+    """Agent behavioral guidance."""
 
-    id: str
+    mode: str
     content: str
+
+
+@dataclass
+class DirectiveEntry:
+    """Stored directive entry with internal bookkeeping."""
+
+    mode: str
+    content: str
+    directive_id: str = ""
     created_at: str = ""
 
 
 @dataclass
-class WorkingMemoryAddResult:
-    """Result from add_working_memory."""
+class DirectiveAddResult:
+    """Result from add_directive."""
 
     success: bool = True
-    memory_id: str = ""
+    directive_id: str = ""
+    mode: str = ""
     content: str = ""
-    category: str = ""
     error: Optional[str] = None
 
 
 @dataclass
-class WorkingMemoryRemoveResult:
-    """Result from remove_working_memory."""
+class DirectiveRemoveResult:
+    """Result from remove_directive."""
 
     success: bool = True
-    memory_id: str = ""
-    category: str = ""
+    directive_id: str = ""
     error: Optional[str] = None
 
 
 @dataclass
-class WorkingMemoryListResult:
-    """Result from list_working_memory."""
+class DirectiveListResult:
+    """Result from list_directives."""
 
-    blocks: Dict[str, List[WorkingMemoryEntry]] = field(default_factory=dict)
+    directives: List[DirectiveEntry] = field(default_factory=list)
 
 
 @dataclass
-class WorkingMemoryClearResult:
-    """Result from clear_working_memory."""
+class DirectiveClearResult:
+    """Result from clear_directives."""
 
     success: bool = True
     cleared: int = 0
-    category: str = ""
+    mode: str = ""
     error: Optional[str] = None
 
 
@@ -100,9 +108,7 @@ class PromptContext:
     """
 
     memory_ctx: str = ""
-    agent_rules: str = ""
-    agent_prefs: str = ""
-    agent_icks: str = ""
+    agent_directives: str = ""
     files_ctx: str = ""
     tool_schemas: List[Dict] = field(default_factory=list)
     model: str = ""

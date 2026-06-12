@@ -303,13 +303,16 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
     manager = CommunityManager(make_project_state(), "ada", resources)
     captured = {}
 
-    async def working_memory(agent_id):
+    async def directives(agent_id):
         assert agent_id == "agent-1"
-        return {
-            "rules": ["Stay grounded"],
-            "preferences": ["Prefer evidence"],
-            "icks": ["Vague claims"],
-        }
+        return (
+            "Required:\n"
+            "- Stay grounded\n\n"
+            "Preferred:\n"
+            "- Prefer evidence\n\n"
+            "Avoid:\n"
+            "- Vague claims"
+        )
 
     class FakeExecutor:
         def __init__(self, ctx, llm, tools, memory_mgr):
@@ -331,7 +334,7 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
         "knoggin_server.community.community_manager.AgentExecutor",
         FakeExecutor,
     )
-    manager._get_agent_working_memory = working_memory
+    manager._get_agent_directives = directives
     ctx = SimpleNamespace(
         session_id="aac-disc-1",
         project=make_project_state(),
@@ -371,9 +374,14 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
     assert execute_kwargs["model"] == "agent-model"
     assert execute_kwargs["agent_temperature"] == 0.2
     assert execute_kwargs["agent_instructions"] == "Use evidence."
-    assert execute_kwargs["agent_rules"] == ["Stay grounded"]
-    assert execute_kwargs["agent_preferences"] == ["Prefer evidence"]
-    assert execute_kwargs["agent_icks"] == ["Vague claims"]
+    assert execute_kwargs["agent_directives"] == (
+        "Required:\n"
+        "- Stay grounded\n\n"
+        "Preferred:\n"
+        "- Prefer evidence\n\n"
+        "Avoid:\n"
+        "- Vague claims"
+    )
     assert execute_kwargs["enabled_tools"] == ["search_entity"]
     assert execute_kwargs["client_tools"] == [
         schema

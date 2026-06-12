@@ -46,6 +46,7 @@ async def test_create_session_stores_metadata_and_active_context(
     assert ctx.session_id in active_sessions
     assert active_sessions[ctx.session_id] is ctx
     assert project_manager.acquire_calls == [("project-1", ctx.session_id)]
+    assert project_manager.acquire_topic_configs == [{"General": {"active": True}}]
 
     raw = await resources.redis.hget(RedisKeys.sessions("ada"), ctx.session_id)
     metadata = json.loads(raw)
@@ -53,7 +54,7 @@ async def test_create_session_stores_metadata_and_active_context(
     assert metadata["model"] == "test-model"
     assert metadata["agent_id"] == "agent-1"
     assert metadata["enabled_tools"] == ["search"]
-    assert metadata["topics_config"] == {"General": {"active": True}}
+    assert "topics_config" not in metadata
 
 
 @pytest.mark.runtime

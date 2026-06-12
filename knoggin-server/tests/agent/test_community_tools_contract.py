@@ -169,19 +169,20 @@ async def test_community_tools_spawn_specialist_creates_agent_and_seed_memory(
             result = await tool.spawn_specialist(
                 name="Evidence Steward",
                 persona="Tracks profile evidence and weak claims.",
-                initial_rules=["Never invent source messages."],
-                initial_preferences=["Prefer direct evidence."],
-                initial_icks=["Unscoped profile claims."],
+                initial_directives=[
+                    {
+                        "mode": "require",
+                        "content": "Never invent source messages.",
+                    },
+                    {"mode": "prefer", "content": "Prefer direct evidence."},
+                    {"mode": "avoid", "content": "Unscoped profile claims."},
+                ],
             )
     finally:
         await tool.close()
 
     assert result["id"].startswith("spawned_")
-    assert result["seeded_memory"] == {
-        "rules": 1,
-        "preferences": 1,
-        "icks": 1,
-    }
+    assert result["seeded_directives"] == 3
     assert participants == ["agent-1", result["id"]]
 
     raw_agent = await redis.hget(RedisKeys.agents("ada"), result["id"])
@@ -203,23 +204,32 @@ async def test_community_tools_spawn_specialist_creates_agent_and_seed_memory(
     ]
     assert events[0][2] == "agent_spawned"
     assert events[0][3]["agent_id"] == result["id"]
-    assert events[0][3]["seeded_memory"] == result["seeded_memory"]
+    assert events[0][3]["seeded_directives"] == result["seeded_directives"]
 
-    seeded = {}
-    for category in ("rules", "preferences", "icks"):
-        memory_key = RedisKeys.agent_working_memory(result["id"], category)
-        values = list((await redis.hgetall(memory_key)).values())
-        seeded[category] = [json.loads(value) for value in values]
+    memory_key = RedisKeys.agent_working_memory(result["id"], "directives")
+    seeded = [json.loads(value) for value in (await redis.hgetall(memory_key)).values()]
+    seeded.sort(key=lambda item: item["mode"])
 
-    assert seeded["rules"] == [
+    assert seeded == [
         {
+            "mode": "avoid",
+            "content": "Unscoped profile claims.",
+            "created_at": FROZEN_AT,
+            "seeded_by": "agent-1",
+        },
+        {
+            "mode": "prefer",
+            "content": "Prefer direct evidence.",
+            "created_at": FROZEN_AT,
+            "seeded_by": "agent-1",
+        },
+        {
+            "mode": "require",
             "content": "Never invent source messages.",
             "created_at": FROZEN_AT,
             "seeded_by": "agent-1",
-        }
+        },
     ]
-    assert seeded["preferences"][0]["content"] == "Prefer direct evidence."
-    assert seeded["icks"][0]["content"] == "Unscoped profile claims."
 
 
 @pytest.mark.no_network

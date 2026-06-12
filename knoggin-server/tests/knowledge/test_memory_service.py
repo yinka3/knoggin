@@ -5,7 +5,6 @@ import pytest
 from common.schema.settings import TopicSchema
 from common.utils.time_utils import frozen_time
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.services import memory_service as memory_service_module
 from knoggin_server.knowledge.services.memory_service import MemoryManager
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import FakeRedis
@@ -85,27 +84,21 @@ async def test_memory_manager_prompt_strings_include_only_requested_active_topic
         "{not-json",
     )
 
-    async def fake_load_formatted_memories(cls, agent_id, categories):
-        assert agent_id == "agent-1"
-        assert categories == ["rules", "preferences", "icks"]
-        return {
-            "rules": "- rule one",
-            "preferences": "- pref one",
-            "icks": "- ick one",
-        }
-
-    monkeypatch.setattr(
-        memory_service_module.AsyncRedisClient,
-        "load_formatted_memories",
-        classmethod(fake_load_formatted_memories),
-    )
+    await manager.add_directive("require", "Stay grounded")
+    await manager.add_directive("prefer", "Prefer direct evidence")
+    await manager.add_directive("avoid", "Avoid vague claims")
 
     prompt = await manager.load_prompt_strings(["job", "Identity", "unknown"])
 
     assert prompt.memory_ctx == f"[Work]\n  - ({work.memory_id}) Work note"
-    assert prompt.rules == "- rule one"
-    assert prompt.preferences == "- pref one"
-    assert prompt.icks == "- ick one"
+    assert prompt.directives == (
+        "Required:\n"
+        "- Stay grounded\n\n"
+        "Preferred:\n"
+        "- Prefer direct evidence\n\n"
+        "Avoid:\n"
+        "- Avoid vague claims"
+    )
     assert general.memory_id not in prompt.memory_ctx
     assert "General note" not in prompt.memory_ctx
     assert "inactive identity note" not in prompt.memory_ctx
@@ -193,33 +186,52 @@ async def test_memory_manager_rejects_empty_inactive_and_oversized_memory(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_memory_manager_working_memory_lifecycle(memory_manager):
+async def test_memory_manager_directive_lifecycle(memory_manager):
     manager, redis, events = memory_manager
 
-    added = await manager.add_working_memory("rules", "Be concise")
-    listed = await manager.list_working_memory("rules")
-    removed = await manager.remove_working_memory("rules", added.memory_id)
+    added = await manager.add_directive("require", "Be concise")
+    listed = await manager.list_directives("require")
+    removed = await manager.remove_directive(added.directive_id)
 
     assert added.success is True
-    assert listed.blocks["rules"][0].content == "Be concise"
+    assert added.mode == "require"
+    assert listed.directives[0].content == "Be concise"
+    assert listed.directives[0].mode == "require"
     assert removed.success is True
-    assert redis.hashes[RedisKeys.agent_working_memory("agent-1", "rules")] == {}
+    assert redis.hashes[RedisKeys.agent_working_memory("agent-1", "directives")] == {}
     assert [event[1] for event in events] == [
-        "working_memory_added",
-        "working_memory_removed",
+        "directive_added",
+        "directive_removed",
     ]
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_memory_manager_clear_working_memory_counts_removed_items(
+async def test_memory_manager_clear_directives_counts_removed_items(
     memory_manager,
 ):
     manager, _, _ = memory_manager
 
-    await manager.add_working_memory("preferences", "Prefer detail")
-    await manager.add_working_memory("preferences", "Prefer examples")
-    cleared = await manager.clear_working_memory("preferences")
+    await manager.add_directive("prefer", "Prefer detail")
+    await manager.add_directive("prefer", "Prefer examples")
+    await manager.add_directive("avoid", "Avoid vague claims")
+    cleared = await manager.clear_directives("prefer")
+    remaining = await manager.list_directives()
 
     assert cleared.success is True
     assert cleared.cleared == 2
+    assert [directive.mode for directive in remaining.directives] == ["avoid"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_memory_manager_rejects_invalid_directive_mode(memory_manager):
+    manager, _, _ = memory_manager
+
+    invalid = await manager.add_directive("rule", "Stay grounded")
+    empty = await manager.add_directive("prefer", "   ")
+
+    assert invalid.success is False
+    assert "Invalid directive mode" in invalid.error
+    assert empty.success is False
+    assert empty.error == "Empty directive content"

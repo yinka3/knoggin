@@ -1,11 +1,14 @@
 import os
+
 import pytest
+
 from infrastructure.postgres_client import PostgresClient
 
 DB_URL = os.environ.get(
     "KNOGGIN_TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db"
+    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
 )
+
 
 @pytest.fixture
 async def real_postgres_client():
@@ -17,12 +20,24 @@ async def real_postgres_client():
     finally:
         await client.close()
 
+
 @pytest.fixture(autouse=True)
 async def clean_db(real_postgres_client):
-    """Wipes the relational search tables and the AGE graph before every test."""
-    # Truncate relational vector tables
+    """Wipes relational tables and the AGE graph before every test."""
     await real_postgres_client.execute_write(
-        "TRUNCATE TABLE entity_search, message_search, fact_search;"
+        """
+        TRUNCATE TABLE
+            relationship_evidence_refs,
+            relationships,
+            hierarchy_edges,
+            facts,
+            entity_aliases,
+            entities,
+            messages,
+            entity_search,
+            message_search,
+            fact_search;
+        """
     )
     # Ensure the AGE graph exists before trying to wipe it
     graph_name = "knoggin_graph"
@@ -30,10 +45,17 @@ async def clean_db(real_postgres_client):
         "SELECT count(*) FROM ag_graph WHERE name = %s;",
         (graph_name,),
     )
-    if res[0]['count'] == 0:
-        await real_postgres_client.execute_write(f"SELECT create_graph('{graph_name}');")
-        
+    if res[0]["count"] == 0:
+        await real_postgres_client.execute_write(
+            f"SELECT create_graph('{graph_name}');"
+        )
+
     # Wipe the AGE graph nodes and relationships
+    wipe_graph_sql = (
+        f"SELECT * FROM cypher('{graph_name}', "
+        "$$ MATCH (n) DETACH DELETE n RETURN n $$"
+        ") AS (n agtype);"
+    )
     await real_postgres_client.execute_write(
-        f"SELECT * FROM cypher('{graph_name}', $$ MATCH (n) DETACH DELETE n RETURN n $$) AS (n agtype);"
+        wipe_graph_sql
     )

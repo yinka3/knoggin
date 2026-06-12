@@ -101,9 +101,7 @@ async def test_step_streams_tokens_thinking_and_parses_tool_calls(monkeypatch):
             enabled_tools=["search_messages"],
             memory_context="[Identity]\n- memory",
             files_context="- file.md",
-            rules="stay grounded",
-            prefs="prefer evidence",
-            icks="avoid vibes",
+            directives="Required:\n- stay grounded",
             temp=0.2,
             agent_instructions="Use citations",
             last_result=None,
@@ -145,9 +143,7 @@ async def test_step_streams_tokens_thinking_and_parses_tool_calls(monkeypatch):
     _, prompt_kwargs = prompt_calls[0]
     assert prompt_kwargs["memory_context"] == "[Identity]\n- memory"
     assert prompt_kwargs["files_context"] == "- file.md"
-    assert prompt_kwargs["agent_rules"] == "stay grounded"
-    assert prompt_kwargs["agent_preferences"] == "prefer evidence"
-    assert prompt_kwargs["agent_icks"] == "avoid vibes"
+    assert prompt_kwargs["agent_directives"] == "Required:\n- stay grounded"
     assert prompt_kwargs["instructions"] == "Use citations"
     assert prompt_kwargs["current_mode"] == "Architect"
     assert prompt_kwargs["active_topics"] == ["Identity", "Testing"]
@@ -175,19 +171,17 @@ async def test_step_marks_invalid_arguments_for_later_tool_error():
     events = [
         event
         async for event in executor._step(
-            "now",
-            "model",
-            "medium",
-            "Librarian",
-            None,
-            "",
-            "",
-            "",
-            "",
-            "",
-            0.7,
-            "",
-            None,
+            date="now",
+            model="model",
+            reasoning="medium",
+            current_mode="Librarian",
+            enabled_tools=None,
+            memory_context="",
+            files_context="",
+            directives="",
+            temp=0.7,
+            agent_instructions="",
+            last_result=None,
         )
     ]
 
@@ -209,19 +203,17 @@ async def test_step_done_without_tool_calls_yields_formatting_error():
     events = [
         event
         async for event in executor._step(
-            "now",
-            "model",
-            "high",
-            "Architect",
-            None,
-            "",
-            "",
-            "",
-            "",
-            "",
-            0.7,
-            "",
-            None,
+            date="now",
+            model="model",
+            reasoning="high",
+            current_mode="Architect",
+            enabled_tools=None,
+            memory_context="",
+            files_context="",
+            directives="",
+            temp=0.7,
+            agent_instructions="",
+            last_result=None,
         )
     ]
 
@@ -237,37 +229,33 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
     chunk_events = [
         event
         async for event in make_executor(chunk_error)._step(
-            "now",
-            "model",
-            "high",
-            "Architect",
-            None,
-            "",
-            "",
-            "",
-            "",
-            "",
-            0.7,
-            "",
-            None,
+            date="now",
+            model="model",
+            reasoning="high",
+            current_mode="Architect",
+            enabled_tools=None,
+            memory_context="",
+            files_context="",
+            directives="",
+            temp=0.7,
+            agent_instructions="",
+            last_result=None,
         )
     ]
     exception_events = [
         event
         async for event in make_executor(exception_error)._step(
-            "now",
-            "model",
-            "high",
-            "Architect",
-            None,
-            "",
-            "",
-            "",
-            "",
-            "",
-            0.7,
-            "",
-            None,
+            date="now",
+            model="model",
+            reasoning="high",
+            current_mode="Architect",
+            enabled_tools=None,
+            memory_context="",
+            files_context="",
+            directives="",
+            temp=0.7,
+            agent_instructions="",
+            last_result=None,
         )
     ]
 

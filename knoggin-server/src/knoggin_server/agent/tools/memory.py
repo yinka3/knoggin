@@ -45,9 +45,7 @@ class MemoryTools:
         self,
         name: str,
         persona: str,
-        initial_rules: List[str] = None,
-        initial_preferences: List[str] = None,
-        initial_icks: List[str] = None,
+        initial_directives: List[Dict] = None,
     ) -> Dict:
         return {"error": "spawn_specialist is only available in community discussions."}
 

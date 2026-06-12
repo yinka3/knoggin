@@ -87,9 +87,15 @@ def test_agent_prompt_renders_files_without_memory_section():
 def test_agent_prompt_renders_agent_and_community_contexts():
     prompt = get_agent_prompt(
         user_name="Ada",
-        agent_rules="Stay grounded.\nCite evidence.",
-        agent_preferences="Prefer concise answers.",
-        agent_icks="Do not overstate weak evidence.",
+        agent_directives=(
+            "Required:\n"
+            "- Stay grounded.\n"
+            "- Cite evidence.\n\n"
+            "Preferred:\n"
+            "- Prefer concise answers.\n\n"
+            "Avoid:\n"
+            "- Do not overstate weak evidence."
+        ),
         instructions="Use the available evidence before answering.",
         is_community=True,
         participants=["planner", "critic"],
@@ -97,15 +103,10 @@ def test_agent_prompt_renders_agent_and_community_contexts():
     )
 
     assert "<agent_instructions>" in prompt
-    assert "<agent_rules>\nStay grounded.\nCite evidence.</agent_rules>" in prompt
-    assert (
-        "<agent_preferences>\nPrefer concise answers.</agent_preferences>"
-        in prompt
-    )
-    assert (
-        "<agent_icks>\nDo not overstate weak evidence.</agent_icks>"
-        in prompt
-    )
+    assert "<agent_directives>" in prompt
+    assert "Required:\n- Stay grounded.\n- Cite evidence." in prompt
+    assert "Preferred:\n- Prefer concise answers." in prompt
+    assert "Avoid:\n- Do not overstate weak evidence." in prompt
     assert "<community_context>" in prompt
     assert "Current participants: planner, critic" in prompt
     assert "<instructions>\nUse the available evidence before answering." in prompt

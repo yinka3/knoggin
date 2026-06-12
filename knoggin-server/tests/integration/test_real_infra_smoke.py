@@ -9,20 +9,34 @@ from infrastructure.postgres_client import PostgresClient
 
 DB_URL = os.environ.get(
     "KNOGGIN_TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db"
+    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
 )
-REDIS_URL = os.environ.get(
-    "KNOGGIN_TEST_REDIS_URL",
-    "redis://localhost:6379/1"
-)
+REDIS_URL = os.environ.get("KNOGGIN_TEST_REDIS_URL", "redis://localhost:6379/1")
 
 EXPECTED_TABLES = {
+    "messages",
+    "entities",
+    "entity_aliases",
+    "facts",
+    "relationships",
+    "relationship_evidence_refs",
+    "hierarchy_edges",
     "entity_search",
     "message_search",
     "fact_search",
 }
 
 EXPECTED_INDEXES = {
+    "messages_project_idx",
+    "entities_project_idx",
+    "entities_topic_idx",
+    "entity_aliases_alias_idx",
+    "facts_entity_active_idx",
+    "facts_source_message_idx",
+    "relationships_pair_idx",
+    "relationship_evidence_refs_message_idx",
+    "hierarchy_edges_child_idx",
+    "hierarchy_edges_parent_idx",
     "entity_search_embedding_idx",
     "message_search_fts_idx",
     "fact_search_embedding_idx",
@@ -30,6 +44,7 @@ EXPECTED_INDEXES = {
     "message_search_session_idx",
     "fact_search_project_idx",
 }
+
 
 def _execute_direct_read(query, params=None, load_age=True):
     with psycopg.connect(
@@ -94,6 +109,13 @@ async def test_real_postgres_schema_tables_and_indexes_are_present():
         SELECT table_name, to_regclass('public.' || table_name) AS regclass
         FROM (
             VALUES
+                ('messages'),
+                ('entities'),
+                ('entity_aliases'),
+                ('facts'),
+                ('relationships'),
+                ('relationship_evidence_refs'),
+                ('hierarchy_edges'),
                 ('entity_search'),
                 ('message_search'),
                 ('fact_search')
