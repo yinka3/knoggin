@@ -322,7 +322,7 @@ async def test_fact_writer_invalidate_fact_requires_project_scope():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_fact_writer_delete_old_invalidated_facts_strips_ids_for_search_delete():
+async def test_fact_writer_delete_old_invalidated_facts_relies_on_search_cascade():
     cutoff = datetime(2026, 1, 3, tzinfo=timezone.utc)
     client = RecordingPostgresClient(
         fetchall_results=[[{"fact_id": '"fact-1"'}, {"fact_id": "fact-2"}]]
@@ -336,8 +336,8 @@ async def test_fact_writer_delete_old_invalidated_facts_strips_ids_for_search_de
         == 2
     )
 
-    assert len(client.calls) == 3
-    facts_call, graph_call, search_call = client.calls
+    assert len(client.calls) == 2
+    facts_call, graph_call = client.calls
     assert "DELETE FROM facts" in facts_call[1]
     assert facts_call[2] == (cutoff, "project-1")
     assert "DETACH DELETE f" in graph_call[1]
@@ -345,8 +345,7 @@ async def test_fact_writer_delete_old_invalidated_facts_strips_ids_for_search_de
         "fact_ids": ["fact-1", "fact-2"],
         "project_id": "project-1",
     }
-    assert "DELETE FROM fact_search" in search_call[1]
-    assert search_call[2] == (["fact-1", "fact-2"], "project-1")
+    assert not any("DELETE FROM fact_search" in call[1] for call in client.calls)
 
 
 @pytest.mark.storage

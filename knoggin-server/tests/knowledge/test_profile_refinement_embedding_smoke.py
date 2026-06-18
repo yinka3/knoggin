@@ -89,6 +89,7 @@ async def test_real_embedding_profile_refinement_updates_profile_vector_from_fac
         profile_vector = await job._update_entity_embedding(
             42,
             "Knoggin profile refinement",
+            "concept",
             active_facts,
         )
         profile_query_vector = await service.encode_single(

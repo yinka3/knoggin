@@ -79,6 +79,33 @@ class AgeProjectionWriter:
             (json.dumps({"batch": entities}),),
         )
 
+    async def project_identity(self, cur, identity: Dict) -> None:
+        """Project the canonical identity node with exact reserved properties."""
+        cypher = """
+        MERGE (e:Entity {id: $id})
+        SET e.user_name = $user_name,
+            e.session_id = null,
+            e.project_id = $project_id,
+            e.canonical_name = $canonical_name,
+            e.aliases = $aliases,
+            e.type = $type,
+            e.confidence = $confidence,
+            e.last_updated = $now,
+            e.last_mentioned = $now,
+            e.last_profiled_msg_id = null
+        WITH e
+        OPTIONAL MATCH (e)-[old:BELONGS_TO]->(:Topic)
+        DELETE old
+        WITH e
+        MERGE (t:Topic {name: $topic})
+        MERGE (e)-[:BELONGS_TO]->(t)
+        RETURN e.id
+        """
+        await cur.execute(
+            self._build_cypher(cypher),
+            (json.dumps(identity),),
+        )
+
     async def clear_project_projection(self, cur, project_id: str) -> None:
         """Clear project-scoped AGE projection before rebuilding it from SQL."""
         cypher = """
@@ -115,19 +142,30 @@ class AgeProjectionWriter:
         )
 
     async def project_entity_topics(self, cur, topics: List[Dict]) -> None:
-        if not topics:
+        canonical_topics = {}
+        for topic in topics:
+            if topic.get("topic"):
+                canonical_topics[int(topic["id"])] = {
+                    "id": int(topic["id"]),
+                    "topic": topic["topic"],
+                }
+
+        if not canonical_topics:
             return
 
         cypher = """
         UNWIND $batch AS data
         MATCH (e:Entity {id: data.id})
+        OPTIONAL MATCH (e)-[old:BELONGS_TO]->(:Topic)
+        DELETE old
+        WITH e, data
         MERGE (t:Topic {name: data.topic})
         MERGE (e)-[:BELONGS_TO]->(t)
         RETURN count(e)
         """
         await cur.execute(
             self._build_cypher(cypher),
-            (json.dumps({"batch": topics}),),
+            (json.dumps({"batch": list(canonical_topics.values())}),),
         )
 
     async def project_relationships(self, cur, relationships: List[Dict]) -> None:
@@ -235,7 +273,7 @@ class AgeProjectionWriter:
             ),
         )
 
-    async def transfer_merged_entity_dependencies(
+    async def transfer_merged_entity_facts(
         self,
         cur,
         primary_id: int,
@@ -251,25 +289,6 @@ class AgeProjectionWriter:
         """
         await cur.execute(
             self._build_cypher(cypher_transfer_facts),
-            (
-                json.dumps(
-                    {
-                        "primary_id": primary_id,
-                        "secondary_id": secondary_id,
-                    }
-                ),
-            ),
-        )
-
-        cypher_transfer_topics = """
-        MATCH (s:Entity {id: $secondary_id})-[r:BELONGS_TO]->(t:Topic)
-        MATCH (p:Entity {id: $primary_id})
-        MERGE (p)-[:BELONGS_TO]->(t)
-        DELETE r
-        RETURN count(t)
-        """
-        await cur.execute(
-            self._build_cypher(cypher_transfer_topics),
             (
                 json.dumps(
                     {
@@ -370,22 +389,43 @@ class AgeProjectionWriter:
         entity_id: int,
         project_id: str,
     ) -> None:
-        cypher = """
-        MATCH (e:Entity {id: $entity_id})
-        WHERE e.project_id = $project_id
-        DETACH DELETE e
-        RETURN count(e)
+        await self.delete_entities_projection(cur, [entity_id], project_id)
+
+    async def delete_entities_projection(
+        self,
+        cur,
+        entity_ids: List[int],
+        project_id: str,
+    ) -> None:
+        if not entity_ids:
+            return
+
+        params = {
+            "entity_ids": entity_ids,
+            "project_id": project_id,
+        }
+        fact_cypher = """
+        MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
+        WHERE e.id IN $entity_ids
+          AND e.project_id = $project_id
+        DETACH DELETE f
+        RETURN count(DISTINCT f)
         """
         await cur.execute(
-            self._build_cypher(cypher),
-            (
-                json.dumps(
-                    {
-                        "entity_id": entity_id,
-                        "project_id": project_id,
-                    }
-                ),
-            ),
+            self._build_cypher(fact_cypher),
+            (json.dumps(params),),
+        )
+
+        entity_cypher = """
+        MATCH (e:Entity)
+        WHERE e.id IN $entity_ids
+          AND e.project_id = $project_id
+        DETACH DELETE e
+        RETURN count(DISTINCT e)
+        """
+        await cur.execute(
+            self._build_cypher(entity_cypher),
+            (json.dumps(params),),
         )
 
     async def project_facts(

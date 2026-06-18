@@ -43,14 +43,22 @@ class FakeSchedulerJob:
 
 
 class CleanupGraph:
-    def __init__(self, orphan_ids=None):
+    def __init__(
+        self,
+        orphan_ids=None,
+        null_deleted_ids=None,
+        bulk_deleted_ids=None,
+    ):
         self.orphan_ids = orphan_ids or []
+        self.null_deleted_ids = null_deleted_ids or []
+        self.bulk_deleted_ids = bulk_deleted_ids
         self.cleanup_calls = []
         self.orphan_calls = []
         self.bulk_delete_calls = []
 
     async def cleanup_null_entities(self, project_id=None):
         self.cleanup_calls.append(project_id)
+        return list(self.null_deleted_ids)
 
     async def get_orphan_entities(
         self, user_id, orphan_cutoff, junk_cutoff, project_id=None
@@ -60,7 +68,13 @@ class CleanupGraph:
 
     async def bulk_delete_entities(self, entity_ids, project_id=None):
         self.bulk_delete_calls.append((list(entity_ids), project_id))
-        return len(entity_ids)
+        if self.bulk_deleted_ids is None:
+            return list(entity_ids)
+        return [
+            entity_id
+            for entity_id in entity_ids
+            if entity_id in self.bulk_deleted_ids
+        ]
 
 
 class CleanupEntities:
@@ -229,6 +243,25 @@ async def test_entity_cleanup_user_missing_still_updates_last_run():
         assert graph.cleanup_calls == ["project-1"]
         assert graph.orphan_calls == []
         assert await redis.get(last_run_key) == str(get_now_unix())
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_entity_cleanup_evicts_only_ids_confirmed_deleted():
+    redis = FakeRedis()
+    graph = CleanupGraph(
+        orphan_ids=[2, 3, 4],
+        null_deleted_ids=[5],
+        bulk_deleted_ids=[2, 4],
+    )
+    entities = CleanupEntities(user_id=1)
+    job = EntityCleanupJob("ada", graph, entities, redis)
+
+    result = await job.execute(job_context())
+
+    assert result.summary == "Cleaned 3 entities"
+    assert graph.bulk_delete_calls == [([2, 3, 4], "project-1")]
+    assert entities.removed == [5, 2, 4]
 
 
 @pytest.mark.runtime

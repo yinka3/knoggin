@@ -5,22 +5,12 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.utils.events import DebugEventEmitter
-from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
 from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
 from knoggin_server.knowledge.services.file_rag import FileRAGService
 from knoggin_server.project.state import ProjectState
 from knoggin_server.session.context import Context
-
-LUA_SYNC_COUNTER_SCRIPT = """
-local current = tonumber(redis.call('GET', KEYS[1])) or 0
-local proposed = tonumber(ARGV[1])
-if proposed > current then
-    redis.call('SET', KEYS[1], ARGV[1])
-end
-"""
-
 
 class SessionAssembler:
     """
@@ -62,8 +52,6 @@ class SessionAssembler:
         Does NOT start background loops.
         """
         session_id = session_id or str(uuid.uuid4())
-
-        await self._sync_entity_counters()
 
         # Instantiate Context shell first
         ctx = Context(
@@ -127,12 +115,6 @@ class SessionAssembler:
             ctx.consumer.start()
 
         logger.info(f"System launched successfully for session {ctx.session_id}")
-
-    async def _sync_entity_counters(self):
-        max_id = (await self.resources.graph_client.get_max_entity_id()) or 0
-        await self.resources.redis.eval(
-            LUA_SYNC_COUNTER_SCRIPT, 1, RedisKeys.global_next_ent_id(), max_id
-        )
 
     def _init_batch_consumer(
         self,

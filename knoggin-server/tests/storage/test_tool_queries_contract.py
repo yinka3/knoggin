@@ -56,6 +56,34 @@ async def test_search_messages_fts_adds_user_session_scope_when_provided():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_search_messages_fts_prefers_project_scope_when_provided():
+    client = FakeToolClient(
+        rows=[{"message_id": "4", "score": "0.5", "session_id": "s1"}]
+    )
+    queries = ToolQueries(client)
+
+    result = await queries.search_messages_fts(
+        "alpha beta",
+        limit=7,
+        user_name="ada",
+        session_ids=["s1"],
+        project_ids=["project-1", "archive-1"],
+    )
+
+    assert result == [(4, 0.5, "s1")]
+    sql, params = client.read_calls[0]
+    assert "AND user_name = %s AND project_id = ANY(%s)" in sql
+    assert params == (
+        "alpha | beta",
+        "alpha | beta",
+        "ada",
+        ["project-1", "archive-1"],
+        7,
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_search_messages_fts_ignores_empty_queries():
     client = FakeToolClient()
     queries = ToolQueries(client)

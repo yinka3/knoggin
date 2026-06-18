@@ -25,6 +25,9 @@ from knoggin_server.agent.prompts import (
     enrich_facts_with_sources,
     get_merge_judgment_prompt,
 )
+from knoggin_server.knowledge.services.entity_embedding import (
+    build_entity_embedding_text,
+)
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
 
@@ -182,6 +185,48 @@ class MergeDetectionJob(BaseJob):
 
         return judgment.confidence, judgment.new_canonical_name
 
+    @staticmethod
+    def _clean_topic(value) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip().strip('"')
+        return cleaned or None
+
+    @staticmethod
+    def _as_int(value) -> int:
+        if value is None or value == "":
+            return 0
+        return int(value)
+
+    @staticmethod
+    def _as_float(value) -> float:
+        if value is None or value == "":
+            return 0.0
+        return float(value)
+
+    @classmethod
+    def _topic_strength_score(cls, prefix: str, strength: Dict) -> Tuple:
+        return (
+            cls._as_int(strength.get(f"{prefix}_fact_count")),
+            cls._as_int(strength.get(f"{prefix}_relationship_count")),
+            cls._as_int(strength.get(f"{prefix}_last")),
+            cls._as_float(strength.get(f"{prefix}_conf")),
+        )
+
+    @classmethod
+    def _select_merge_topic(cls, strength: Dict) -> Optional[str]:
+        if not strength:
+            return None
+
+        primary_topic = cls._clean_topic(strength.get("p_topic")) or "General"
+        secondary_topic = cls._clean_topic(strength.get("s_topic")) or primary_topic
+        primary_score = cls._topic_strength_score("p", strength)
+        secondary_score = cls._topic_strength_score("s", strength)
+
+        if secondary_score > primary_score:
+            return secondary_topic
+        return primary_topic
+
     async def _execute_merge_db_only(
         self,
         primary_id: int,
@@ -201,8 +246,17 @@ class MergeDetectionJob(BaseJob):
 
         for attempt in range(1, max_retries + 1):
             try:
+                topic_strength = await self.graph_client.get_merge_topic_strength(
+                    primary_id,
+                    secondary_id,
+                    project_id,
+                )
+                final_topic = self._select_merge_topic(topic_strength)
                 success = await self.graph_client.merge_entities(
-                    primary_id, secondary_id, project_id=project_id
+                    primary_id,
+                    secondary_id,
+                    project_id=project_id,
+                    final_topic=final_topic,
                 )
 
                 if success:
@@ -310,7 +364,19 @@ class MergeDetectionJob(BaseJob):
             suggested_name = merge_info.get("suggested_name")
 
             try:
-                self._sync_resolver(p_id, s_id)
+                refreshed_primary = await self.graph_client.get_entity_by_id(
+                    p_id,
+                    visible_project_ids=getattr(
+                        self.entities,
+                        "readable_project_ids",
+                        None,
+                    ),
+                )
+                profile_updates = {}
+                if refreshed_primary and refreshed_primary.get("topic"):
+                    profile_updates["topic"] = refreshed_primary["topic"]
+
+                self._sync_resolver(p_id, s_id, profile_updates)
 
                 if suggested_name and suggested_name != p_name:
                     logger.info(
@@ -322,12 +388,17 @@ class MergeDetectionJob(BaseJob):
                     p_name = suggested_name
 
                 all_facts = await self.graph_client.get_facts_for_entity(p_id, True)
-                if all_facts:
-                    resolution_text = f"{p_name}. " + " ".join(
-                        [f.content for f in all_facts]
-                    )
-                else:
-                    resolution_text = f"{p_name} (merged with {s_name})"
+                primary_profile = await self.entities.get_profile(p_id)
+                primary_type = (
+                    primary_profile.get("type", "unknown")
+                    if primary_profile
+                    else "unknown"
+                )
+                resolution_text = build_entity_embedding_text(
+                    p_name,
+                    primary_type,
+                    all_facts or [],
+                )
 
                 new_embedding = await self.entities.compute_embedding(
                     p_id, resolution_text
@@ -357,9 +428,18 @@ class MergeDetectionJob(BaseJob):
                 verbose_only=True,
             )
 
-    def _sync_resolver(self, primary_id: int, secondary_id: int):
+    def _sync_resolver(
+        self,
+        primary_id: int,
+        secondary_id: int,
+        primary_profile_updates: dict = None,
+    ):
         """Update EntityManager after merge."""
-        self.entities.merge_into(primary_id, secondary_id)
+        self.entities.merge_into(
+            primary_id,
+            secondary_id,
+            primary_profile_updates=primary_profile_updates,
+        )
 
     async def _judgement(self, candidates: List, ctx: JobContext) -> Tuple[List, List]:
         auto_merge = []
@@ -642,6 +722,7 @@ class MergeDetectionJob(BaseJob):
 
             for parent_type, child_types in type_rules.items():
                 candidates = await self.graph_client.get_hierarchy_candidates(
+                    project_id,
                     topic,
                     parent_type,
                     child_types,

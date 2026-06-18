@@ -124,7 +124,14 @@ async def test_real_embedding_retrieval_ranks_memory_rag_messages_over_unrelated
         ]
 
         class FakeGraphClient:
-            async def search_messages_fts(self, query, limit, user_name, session_ids):
+            async def search_messages_fts(
+                self,
+                query,
+                limit,
+                user_name,
+                session_ids=None,
+                project_ids=None,
+            ):
                 return [
                     (3, 1.0, "session-1"),
                     (1, 0.9, "session-1"),

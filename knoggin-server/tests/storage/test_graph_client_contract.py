@@ -35,13 +35,16 @@ def graph_client(monkeypatch):
 
     def component_factory(name):
         class Component(RecordingComponent):
-            def __init__(self, client):
+            def __init__(self, client, *args):
                 super().__init__(client)
                 components[name] = self
 
         return Component
 
     monkeypatch.setattr(graph_client_module, "PostgresClient", RecordingPostgresClient)
+    monkeypatch.setattr(
+        graph_client_module, "IdAllocator", component_factory("id_allocator")
+    )
     monkeypatch.setattr(
         graph_client_module, "EntityWriter", component_factory("entity_writer")
     )
@@ -67,10 +70,18 @@ def graph_client(monkeypatch):
         component_factory("projection_rebuilder"),
     )
     monkeypatch.setattr(
+        graph_client_module,
+        "SearchIndexRebuilder",
+        component_factory("search_index_rebuilder"),
+    )
+    monkeypatch.setattr(
         graph_client_module, "CommunityStore", component_factory("community")
     )
 
-    client = graph_client_module.GraphClient("postgresql://example")
+    client = graph_client_module.GraphClient(
+        "postgresql://example",
+        embedding_service=object(),
+    )
     return client, components
 
 
@@ -98,10 +109,17 @@ def test_graph_client_community_property(graph_client):
 @pytest.mark.parametrize(
     "method_name, component_name, args, kwargs",
     [
+        ("allocate_entity_id", "id_allocator", (), {}),
+        ("allocate_message_id", "id_allocator", (), {}),
         # --- Graph Writer (6) ---
         ("save_message_logs", "graph_writer", ([{"id": 1}],), {}),
         ("create_hierarchy_edge", "graph_writer", (1, 2), {"project_id": "test"}),
-        ("merge_entities", "graph_writer", (1, 2), {"project_id": "test"}),
+        (
+            "merge_entities",
+            "graph_writer",
+            (1, 2),
+            {"project_id": "test", "final_topic": "Projects"},
+        ),
         (
             "create_preference",
             "graph_writer",
@@ -116,8 +134,20 @@ def test_graph_client_community_property(graph_client):
             ("project-1",),
             {"user_name": "ada"},
         ),
+        (
+            "rebuild_project_search_indexes",
+            "search_index_rebuilder",
+            ("project-1", "ada", ["project-1", "archive-1"]),
+            {},
+        ),
         # --- Entity Writer (9) ---
         ("write_batch", "entity_writer", ([{"id": 1}], [{"rel": 2}]), {}),
+        (
+            "ensure_identity_entity",
+            "entity_writer",
+            ("ada", ["A. Lovelace"]),
+            {},
+        ),
         (
             "update_entity_profile",
             "entity_writer",
@@ -200,7 +230,7 @@ def test_graph_client_community_property(graph_client):
             {"user_name": "ada", "session_id": "session-1"},
         ),
         ("get_recent_facts", "fact_reader", (7, 20), {}),
-        # --- Graph Reader (13) ---
+        # --- Graph Reader (14) ---
         ("get_message_text", "graph_reader", (1, "ada", "session-1"), {}),
         (
             "get_messages_by_ids",
@@ -227,7 +257,13 @@ def test_graph_client_community_property(graph_client):
         (
             "get_hierarchy_candidates",
             "graph_reader",
-            ("topic", "parent", ["child"], 2),
+            ("project-1", "topic", "parent", ["child"], 2),
+            {},
+        ),
+        (
+            "get_merge_topic_strength",
+            "graph_reader",
+            (1, 2, "project-1"),
             {},
         ),
         ("has_direct_edge", "graph_reader", (1, 2), {}),
@@ -242,7 +278,16 @@ def test_graph_client_community_property(graph_client):
             (["hot"], 5, False, ["test"]),
             {},
         ),
-        ("search_messages_fts", "tools", ("query", 50, "ada", ["session-1"]), {}),
+        (
+            "search_messages_fts",
+            "tools",
+            ("query", 50),
+            {
+                "user_name": "ada",
+                "session_ids": ["session-1"],
+                "project_ids": None,
+            },
+        ),
         ("search_entity", "tools", ("query", ["topic"], 5, 5, 5, ["test"]), {}),
         ("get_related_entities", "tools", (["name"], ["topic"], 50, ["test"]), {}),
         ("get_recent_activity", "tools", ("name", ["topic"], 24, ["test"]), {}),

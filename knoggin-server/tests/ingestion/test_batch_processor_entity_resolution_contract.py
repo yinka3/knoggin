@@ -171,7 +171,6 @@ async def seed_entity(
         entity_type,
         topic,
         session_id="seed-session",
-        source_context=f"Seeded profile for {canonical_name}.",
     )
 
 
@@ -505,6 +504,34 @@ async def test_resolve_mentions_reuses_exact_known_alias_candidate():
     assert result.new_ids == set()
     assert result.alias_ids == set()
     assert result.entity_msg_map == {102: [1]}
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_resolve_mentions_does_not_reuse_entity_from_readable_project():
+    processor, entities, _, _ = make_harness()
+    await entities.register_entity(
+        102,
+        "Robert Chen",
+        ["Robert Chen", "Bob"],
+        "person",
+        "Identity",
+        session_id="archived-session",
+        project_id="archived-project",
+    )
+
+    result = await processor._resolve_mentions(
+        [(1, "Bob", "person", "Identity")],
+        MESSAGES,
+        "active-session",
+    )
+
+    assert result.entity_ids == [1001]
+    assert result.new_ids == {1001}
+    assert result.alias_ids == set()
+    assert result.alias_updates == {}
+    assert entities.entity_profiles[102]["project_id"] == "archived-project"
+    assert entities.entity_profiles[1001]["project_id"] == "project-1"
 
 
 @pytest.mark.ingestion

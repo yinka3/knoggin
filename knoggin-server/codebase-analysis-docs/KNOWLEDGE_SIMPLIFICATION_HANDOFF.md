@@ -88,6 +88,7 @@ Session metadata no longer stores `topics_config`.
 Current behavior:
 
 - `SessionManager.create_session(...)` can still accept `topics_config`.
+- Session creation requires the ID of an existing persisted project.
 - That value is passed to `ProjectManager.acquire_project_for_session(...)`.
 - `ProjectManager` uses it only to seed the project topic config if the project
   does not already have one.
@@ -213,11 +214,85 @@ Important note:
 - `IDENTITY_ENTITY_ID` is used in `AgeProjectionWriter` only for relationship
   paths that can involve the special user/self entity. It is not used for
   hierarchy, messages, normal entities, facts, or topics.
+- Identity initialization now happens in
+  `ProjectManager.acquire_project_for_session(...)` before project runtime boot.
+  `EntityWriter.ensure_identity_entity(...)` reserves entity ID `1`, persists
+  the configured user under the reserved `__identity__` scope in SQL and AGE, and
+  treats any non-identity occupant of ID `1` as a broken development database
+  invariant. No legacy identity lookup or migration path is maintained.
+- PostgreSQL owns canonical entity and message ID generation through
+  `entity_id_seq` and `message_id_seq`. Entity ID `1` remains reserved for the
+  identity, so normal entity allocation begins at `2`.
+- Redis owns only session-local conversation turn ordering. It no longer owns
+  canonical entity/message counters and requires no startup synchronization.
+
+### Project Lifecycle Status And Retained Deletion
+
+Persisted project metadata now carries an explicit lifecycle status:
+
+- `active`
+- `archived`
+- `deleted`
+
+New projects start active. Archived projects retain their metadata, durable
+session membership, topic configuration, canonical PostgreSQL knowledge, search
+rows, and AGE projection. They cannot create or resume sessions. Archiving is
+rejected while live runtime sessions still hold the project, and reactivation
+restores session eligibility.
+
+`allowed_projects` may explicitly include an archived project, which lets an
+active project expose retained archive knowledge to agent retrieval without
+making the archived project writable again. Merely archiving a project does not
+make its knowledge globally readable. Entity resolution may inspect entities in
+the readable scope, but ingestion only reuses entities owned by the active
+project or the reserved identity. A matching entity owned by another readable
+project causes a new entity to be created in the active project instead.
+Project create/update rejects unknown allowed-project IDs, removes duplicates
+and self-references, and scope changes are rejected while runtime sessions are
+active so a live `ProjectState` cannot retain a stale read scope.
+
+`delete_project(...)` is intentionally a soft delete. It marks retained project
+metadata as `deleted`, records `deleted_at`, and preserves session membership,
+topic configuration, canonical PostgreSQL knowledge, search rows, AGE
+projection, and message history. Deleted projects cannot create or resume
+sessions, cannot be archived or reactivated, and are excluded from
+`allowed_projects` read scopes. Deletion is rejected while runtime sessions are
+active. Active projects that were already reading the deleted project have that
+scope and its cached entities removed immediately.
+
+There is currently no permanent project purge operation. A future explicit
+purge design can use the retained deleted metadata to identify and remove the
+full aggregate deliberately.
+
+Lifecycle enforcement exists at both session acquisition and direct project
+runtime boot. Missing, archived, and deleted projects cannot bootstrap a
+`ProjectState`, even if lower-level manager methods are called directly.
+Cross-project readable targets must carry a recognized `active` or `archived`
+status; missing, malformed, and deleted metadata is excluded.
+
+### Development Database Reset
+
+This work changes the fresh PostgreSQL schema by adding canonical ID sequences,
+foreign keys, cascade rules, and integrity checks. There is no migration or
+legacy compatibility path because the system is pre-release. Existing
+development database volumes must be recreated before using this code; running
+the new `schema.sql` against an old populated volume is not the supported setup.
 
 ### 5. Message Writes and Reads Moved to Canonical SQL
 
 `GraphWriter.save_message_logs(...)` now writes canonical `messages` first, then
 projects AGE `Message` nodes for compatibility.
+
+User and assistant messages both receive canonical IDs from `message_id_seq`.
+The previous assistant `turn_id + 1_000_000_000` namespace has been removed.
+Canonical message retries are idempotent only when the stored payload matches;
+an ID reused with different content or scope fails instead of overwriting data.
+Assistant persistence is awaited by `Context.add_assistant_turn(...)`. After the
+bounded retries are exhausted, the staged Redis conversation row, sorted-set
+entry, message-to-turn mapping, and cached content are deleted, and the final
+exception is re-raised for higher-layer user feedback. PostgreSQL and AGE writes
+share a transaction, while consumed sequence and turn numbers are intentionally
+not recycled.
 
 `GraphReader` message reads now use SQL:
 
@@ -240,6 +315,25 @@ Important files:
 - `tests/storage/test_graph_writer_contract.py`
 - `tests/storage/test_graph_reader_contract.py`
 
+### Entity Deletion Is A Cascading Hard Delete
+
+Entities are active graph interpretations rather than permanent audit records.
+Deleting one removes its canonical aliases, facts, relationships, relationship
+evidence, hierarchy edges, and search rows through PostgreSQL foreign keys with
+`ON DELETE CASCADE`. The matching AGE entity and fact projections are removed
+in the same database transaction.
+
+Deletion entry points return the exact entity IDs removed. The cleanup job uses
+those IDs for `EntityManager` cache eviction, and orphan eligibility is computed
+from canonical SQL rather than AGE. Future mentions may create a new entity with
+a new ID; there is no archive or tombstone model.
+
+Merge remains transfer-first: canonical dependencies and `fact_search`
+ownership move to the primary entity, the writer verifies that no facts,
+relationships, or hierarchy edges remain on the secondary, and only then
+deletes the secondary. Existing development databases must be recreated so the
+fresh `schema.sql` constraint set is applied.
+
 ### 6. Entity Writes and Metadata Reads Moved to Canonical SQL
 
 `EntityWriter.write_batch(...)` now writes:
@@ -248,6 +342,11 @@ Important files:
 - `entity_aliases`,
 - `entity_search`,
 - then projects AGE entity/topic nodes.
+
+Topic projection replaces every existing AGE `BELONGS_TO` edge for the entity
+before creating the edge for its canonical PostgreSQL topic. PostgreSQL
+therefore remains the single-topic source of truth even when an existing entity
+is reclassified.
 
 Entity metadata reads now use SQL for:
 
@@ -344,11 +443,27 @@ Hierarchy reads now use SQL:
 - `has_hierarchy_edge`
 - `get_hierarchy_candidates`
 
+Hierarchy is treated as a project-scoped, multi-parent directed acyclic graph:
+
+- An entity may have more than one parent.
+- Self-edges and edges that would create a cycle are rejected.
+- Hierarchy creation and merge take a transaction-scoped project advisory lock
+  so overlapping jobs cannot race their cycle checks.
+- Candidate rows include `parent_type` and `child_type` for the hierarchy job.
+- Candidate selection and embedding hydration require the same `project_id`.
+- Entity merge rewrites every parent and child edge from the secondary entity to
+  the primary; it no longer selects a single parent with `LIMIT 1`.
+- A merge is rejected when the primary and secondary are already connected by
+  an ancestor path because contracting those nodes would create a cycle.
+
 Reasoning:
 
 - Parent/child facts are durable relationship state.
 - Merge cleanup needs SQL-owned hierarchy state.
 - AGE can still project `PART_OF` for traversal.
+- Preserving all canonical edges matches the schema's multi-parent model.
+- Keeping cycle checks in the SQL transaction prevents canonical and projected
+  hierarchy state from diverging.
 
 Important files:
 
@@ -357,14 +472,17 @@ Important files:
 
 ### 10. Entity Merge Reworked Around Canonical SQL
 
-`GraphWriter.merge_entities(...)` was the largest cleanup.
+Entity merge was the largest cleanup. Topic choice is policy owned by
+`MergeDetectionJob`; `GraphWriter.merge_entities(...)` persists the supplied
+final topic while it performs the canonical SQL/AGE merge.
 
 Current merge flow:
 
 1. Validate primary and secondary entities from SQL.
 2. Combine aliases.
 3. Pick strongest confidence and newest mention timestamp.
-4. Update primary canonical entity row.
+4. Update primary canonical entity row with the final topic supplied by the
+   merge job, falling back to the primary topic when none is supplied.
 5. Move secondary aliases to primary.
 6. Move secondary facts to primary.
 7. Merge secondary relationships into primary relationships.
@@ -373,27 +491,35 @@ Current merge flow:
 10. Rewrite hierarchy edges away from the secondary entity.
 11. Read canonical relationship/hierarchy rows for projection.
 12. Update AGE primary entity projection.
-13. Transfer projected fact/topic dependencies.
-14. Replace affected AGE relationship projection from SQL state.
-15. Replace affected AGE hierarchy projection from SQL state.
-16. Delete secondary AGE entity projection.
-17. Delete secondary SQL entity/aliases/search rows.
-18. Update `fact_search` entity ids.
+13. Update `fact_search` ownership and verify no transferable secondary-owned
+    dependencies remain.
+14. Transfer projected fact dependencies.
+15. Replace the primary AGE topic with the supplied final SQL topic.
+16. Replace affected AGE relationship projection from SQL state.
+17. Replace affected AGE hierarchy projection from SQL state.
+18. Delete secondary AGE entity projection.
+19. Delete secondary SQL entity; cascades remove residual aliases/search rows.
 
 Reasoning:
 
 - The old merge asked AGE to validate entities and calculate merged relationship
   shape, then patched SQL afterward.
-- That still made AGE act like truth.
+- Cross-topic merges choose one canonical SQL topic in the merge job by active
+  facts, relationship count, recency, confidence, then primary-topic tie-break.
+- The merged entity never accumulates both entities' projected topic edges.
 - The new merge makes SQL decide the final state and uses AGE only as projected
   traversal state.
 
-Important file:
+Important files:
 
+- `src/knoggin_server/knowledge/jobs/merge_job.py`
+- `src/knoggin_server/knowledge/db/readers/graph_reader.py`
 - `src/knoggin_server/knowledge/db/writers/graph_writer.py`
 
 Important tests:
 
+- `tests/knowledge/test_merge_detection_job_contract.py`
+- `tests/storage/test_graph_reader_contract.py`
 - `tests/storage/test_graph_writer_contract.py`
 
 ### 11. Projection Rebuilder Added
@@ -563,7 +689,32 @@ Reasoning:
 - Now that `ProjectionRebuilder` exists, decoupling is possible later, but it was
   not done yet.
 
-### 7. Documentation Is Now Stale
+### 7. Derived Search Repair Is Implemented
+
+`SearchIndexRebuilder` now reconstructs `message_search`, `entity_search`, and
+`fact_search` from canonical PostgreSQL rows for one project.
+
+Current behavior:
+
+- All embeddings are generated before existing search rows are modified.
+- Replacement occurs in one PostgreSQL transaction.
+- The global identity search row is refreshed from active and archived project
+  facts; deleted projects are excluded.
+- Project maintenance rejects repair while any project runtime has active
+  sessions and blocks new session acquisition for the duration of repair.
+- Entity registration, profile refinement, merge finalization, and repair share
+  one deterministic entity embedding-text recipe.
+- `message_search` is project-scoped and its message id cascades from
+  `messages`.
+
+AGE projection repair remains separate because it does not require model
+inference and has different failure and performance behavior.
+
+Fresh development databases are required after these schema changes. Existing
+development database volumes should be discarded and recreated; no migration
+or compatibility path was added.
+
+### 8. Documentation Is Now Stale
 
 `codebase-analysis-docs/CODEBASE_KNOWLEDGE.md` still contains old statements like
 AGE owning graph data and memory categories being `rules`, `preferences`, and

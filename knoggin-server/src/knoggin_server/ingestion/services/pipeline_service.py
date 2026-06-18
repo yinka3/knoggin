@@ -26,6 +26,7 @@ from common.schema.contracts import (
 )
 from common.schema.primitives import ConnectionRecord
 from common.schema.settings import EntityResolutionSettings
+from common.scoping import IDENTITY_SCOPE
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
 from common.utils.time_utils import get_now_unix
@@ -493,15 +494,20 @@ class BatchProcessor:
                     if boosted >= self.resolution_threshold:
                         profile = await self.entities.get_profile(top_id)
                         message_text = msg_text_map.get(msg_id, "")
-                        if profile and self._should_accept_candidate(
-                            name,
-                            typ,
-                            topic,
-                            message_text,
-                            profile,
-                            base_score,
-                            boosted,
-                            top_id,
+                        if (
+                            profile
+                            and profile.get("project_id")
+                            in {self.project_id, IDENTITY_SCOPE}
+                            and self._should_accept_candidate(
+                                name,
+                                typ,
+                                topic,
+                                message_text,
+                                profile,
+                                base_score,
+                                boosted,
+                                top_id,
+                            )
                         ):
                             ent_id = top_id
                             batch_matched_ids.add(ent_id)
@@ -526,7 +532,6 @@ class BatchProcessor:
                     else:
                         try:
                             ent_id = await self.get_next_ent_id()
-                            source_context = msg_text_map.get(msg_id)
 
                             await self.entities.register_entity(
                                 ent_id,
@@ -534,8 +539,7 @@ class BatchProcessor:
                                 [name.strip()],
                                 typ,
                                 topic,
-                                session_id,
-                                source_context,
+                                session_id=session_id,
                             )
                             new_ids.add(ent_id)
                             created_in_batch[canonical_lower] = ent_id

@@ -326,3 +326,93 @@ async def test_entity_reader_get_orphan_entities_refuses_missing_project_scope()
 
     assert await reader.get_orphan_entities(project_id=None) == []
     assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_reader_get_orphan_entities_uses_canonical_sql():
+    client = RecordingPostgresClient(
+        execute_read_results=[[{"id": 2}, {"id": 7}]]
+    )
+    reader = EntityReader(client)
+
+    result = await reader.get_orphan_entities(
+        protected_id=IDENTITY_ENTITY_ID,
+        orphan_cutoff_ms=100,
+        stale_junk_cutoff_ms=50,
+        project_id="project-1",
+    )
+
+    assert result == [2, 7]
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM entities e" in query
+    assert "FROM facts f" in query
+    assert query.count("FROM relationships r") == 3
+    assert "build_cypher" not in query
+    assert params == (
+        IDENTITY_ENTITY_ID,
+        "project-1",
+        100,
+        50,
+        IDENTITY_ENTITY_ID,
+        IDENTITY_ENTITY_ID,
+        IDENTITY_ENTITY_ID,
+        IDENTITY_ENTITY_ID,
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+async def test_entity_reader_orphan_rules_use_canonical_dependencies(
+    real_postgres_client,
+):
+    await real_postgres_client.execute_write(
+        """
+        INSERT INTO entities (
+            entity_id, user_name, project_id, canonical_name,
+            type, topic, last_mentioned_ms
+        )
+        VALUES
+            (1, 'ada', '__identity__', 'ada', 'person', 'Identity', 1000),
+            (2, 'ada', 'project-1', 'orphan', 'concept', 'General', 10),
+            (3, 'ada', 'project-1', 'active fact', 'concept', 'General', 10),
+            (4, 'ada', 'project-1', 'connected a', 'concept', 'General', 10),
+            (5, 'ada', 'project-1', 'connected b', 'concept', 'General', 10),
+            (6, 'ada', 'project-1', 'identity stale', 'concept', 'General', 10),
+            (7, 'ada', 'project-1', 'identity recent', 'concept', 'General', 75),
+            (8, 'ada', 'project-1', 'orphan recent', 'concept', 'General', 150),
+            (9, 'ada', 'project-2', 'other project', 'concept', 'General', 10),
+            (10, 'ada', 'project-1', 'invalid fact', 'concept', 'General', 10)
+        """
+    )
+    await real_postgres_client.execute_write(
+        """
+        INSERT INTO facts (
+            fact_id, entity_id, user_name, project_id, content, invalid_at
+        )
+        VALUES
+            ('active-fact', 3, 'ada', 'project-1', 'active', NULL),
+            ('invalid-fact', 10, 'ada', 'project-1', 'old', NOW())
+        """
+    )
+    await real_postgres_client.execute_write(
+        """
+        INSERT INTO relationships (
+            relationship_id, user_name, project_id, entity_a_id, entity_b_id
+        )
+        VALUES
+            ('project-1:4:5', 'ada', 'project-1', 4, 5),
+            ('project-1:1:6', 'ada', 'project-1', 1, 6),
+            ('project-1:1:7', 'ada', 'project-1', 1, 7)
+        """
+    )
+    reader = EntityReader(real_postgres_client)
+
+    orphan_ids = await reader.get_orphan_entities(
+        protected_id=IDENTITY_ENTITY_ID,
+        orphan_cutoff_ms=100,
+        stale_junk_cutoff_ms=50,
+        project_id="project-1",
+    )
+
+    assert orphan_ids == [2, 6, 10]

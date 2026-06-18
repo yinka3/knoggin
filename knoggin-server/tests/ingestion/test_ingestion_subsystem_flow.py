@@ -233,7 +233,6 @@ async def seed_entity(
         entity_type,
         topic,
         session_id="seed-session",
-        source_context=f"Seeded profile for {canonical_name}.",
     )
 
 

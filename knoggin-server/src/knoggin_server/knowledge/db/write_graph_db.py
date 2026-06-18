@@ -100,6 +100,9 @@ async def build_graph_mutation_plan(
     entity_writes = []
 
     async def build_entity_write(entity_id: int) -> Optional[EntityWrite]:
+        if entity_id == IDENTITY_ENTITY_ID:
+            return None
+
         profile = entities.entity_profiles.get(entity_id)
         if not profile:
             return None
@@ -107,6 +110,7 @@ async def build_graph_mutation_plan(
         embedding = await entities.get_embedding_for_id(entity_id)
         return EntityWrite(
             id=entity_id,
+            is_new=entity_id in new_entity_ids,
             canonical_name=profile["canonical_name"],
             type=profile.get("type", ""),
             confidence=1.0,

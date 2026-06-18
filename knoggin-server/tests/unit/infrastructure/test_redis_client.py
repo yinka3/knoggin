@@ -79,3 +79,23 @@ async def test_update_message_mapping(mock_redis):
     
     assert mock_pipeline.hset.call_count == 2
     assert mock_pipeline.execute.call_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_delete_message_turn_removes_all_assistant_redis_state(mock_redis):
+    _, mock_pipeline = mock_redis
+
+    await AsyncRedisClient.delete_message_turn(
+        user_name="ada",
+        session_id="sess-1",
+        msg_id=101,
+        turn_id=42,
+    )
+
+    assert mock_pipeline.hdel.call_count == 3
+    mock_pipeline.zrem.assert_called_once_with(
+        RedisKeys.recent_conversation("ada", "sess-1"),
+        "42",
+    )
+    assert mock_pipeline.execute.call_count == 1

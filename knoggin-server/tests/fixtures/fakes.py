@@ -32,6 +32,10 @@ class FakePipelineWriter:
         self.commands.append(("zremrangebyrank", key, start, end))
         return self
 
+    def zrem(self, key, *members):
+        self.commands.append(("zrem", key, members))
+        return self
+
     def expire(self, key, ttl):
         self.commands.append(("expire", key, ttl))
         return self
@@ -57,6 +61,9 @@ class FakePipelineWriter:
             elif name == "zremrangebyrank":
                 _, key, start, end = command
                 results.append(await self.redis.zremrangebyrank(key, start, end))
+            elif name == "zrem":
+                _, key, members = command
+                results.append(await self.redis.zrem(key, *members))
             elif name == "expire":
                 _, key, ttl = command
                 results.append(await self.redis.expire(key, ttl))
@@ -243,14 +250,60 @@ class FakeRedis:
             self.zsets[key].pop(member, None)
         return len(removed)
 
+    async def zrem(self, key, *members):
+        removed = 0
+        for member in members:
+            removed += int(
+                self.zsets.get(key, {}).pop(str(member), None) is not None
+            )
+        return removed
+
 
 class FakeGraphClient:
     def __init__(self):
         self.saved_message_logs = []
         self.recent_project_messages = []
+        self.identity_calls = []
+        self.next_entity_id = 2
+        self.next_message_id = 1
+        self.search_rebuild_calls = []
+
+    async def allocate_entity_id(self):
+        entity_id = self.next_entity_id
+        self.next_entity_id += 1
+        return entity_id
+
+    async def allocate_message_id(self):
+        message_id = self.next_message_id
+        self.next_message_id += 1
+        return message_id
+
+    async def rebuild_project_search_indexes(
+        self,
+        project_id,
+        user_name,
+        identity_project_ids,
+    ):
+        call = {
+            "project_id": project_id,
+            "user_name": user_name,
+            "identity_project_ids": list(identity_project_ids),
+        }
+        self.search_rebuild_calls.append(call)
+        return {"messages": 0, "entities": 0, "facts": 0, "identity": 1}
 
     async def get_max_entity_id(self):
         return 0
+
+    async def ensure_identity_entity(self, user_name, aliases=None):
+        self.identity_calls.append((user_name, list(aliases or [])))
+        return {
+            "id": 1,
+            "user_name": user_name,
+            "canonical_name": user_name,
+            "aliases": list(aliases or []),
+            "project_id": "__identity__",
+        }
 
     async def save_message_logs(self, messages):
         self.saved_message_logs.append(messages)
@@ -336,7 +389,7 @@ class FakeFileRAG:
 
 
 class FakeContext:
-    def __init__(self, session_id="session-1", project_id="global"):
+    def __init__(self, session_id="session-1", project_id="project-1"):
         self.session_id = session_id
         self.project_id = project_id
         self.shutdown_count = 0

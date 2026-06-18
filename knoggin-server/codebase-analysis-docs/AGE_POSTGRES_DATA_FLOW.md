@@ -1,9 +1,9 @@
 # AGE + Postgres Data Flow
 
-This system uses Apache AGE for the durable knowledge graph and regular Postgres
-tables as search sidecars. AGE owns the domain relationships. Postgres helper
-tables make text and vector lookup fast, then readers hydrate details back from
-the graph when needed.
+This system uses canonical PostgreSQL tables for durable knowledge and Apache
+AGE as the graph traversal projection. Regular PostgreSQL helper tables make
+text and vector lookup fast, then readers hydrate details from canonical rows
+or projected AGE paths as appropriate.
 
 ## Scope Rule
 
@@ -24,8 +24,9 @@ the graph when needed.
   jobs can read across multiple sessions.
 - `Entity` nodes represent remembered things: people, projects, tools, concepts,
   files, or other named objects. They are project-scoped.
-- `Topic` nodes group entities. `Entity-[:BELONGS_TO]->Topic` is descriptive
-  metadata, not message provenance.
+- `Topic` nodes project each entity's single canonical PostgreSQL topic.
+  `Entity-[:BELONGS_TO]->Topic` is descriptive metadata, not message
+  provenance.
 - `Fact` nodes are atomic claims about an entity. Facts are project-scoped, but
   their evidence should point back to a real source message session.
 - Relationship edges such as `RELATED_TO`, `PART_OF`, `BELONGS_TO`, `HAS_FACT`,
@@ -40,8 +41,8 @@ the graph when needed.
 - `fact_search` mirrors fact id, entity id, user, project, embedding, and
   invalidation state for fact retrieval.
 
-These tables are not separate sources of truth. They are indexes over AGE-owned
-knowledge and must stay synchronized with graph writes.
+These tables are not separate sources of truth. They are indexes over canonical
+PostgreSQL knowledge and must stay synchronized with graph writes.
 
 ## Write Flow
 

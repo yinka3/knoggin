@@ -78,7 +78,6 @@ class ResourceManager:
                     raise ConfigurationError(
                         "DATABASE_URL environment variable is not set"
                     )
-                instance.graph_client = GraphClient(dsn=dsn)
                 instance.redis = await AsyncRedisClient.get_instance()
 
                 config = ConfigManager.get().config
@@ -107,6 +106,10 @@ class ResourceManager:
                     embedding_model=embedding_model,
                     reranker_model=reranker_model,
                     device=device,
+                )
+                instance.graph_client = GraphClient(
+                    dsn=dsn,
+                    embedding_service=instance.embedding,
                 )
 
                 async def load_spacy():

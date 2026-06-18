@@ -166,6 +166,24 @@ async def boot_project(monkeypatch):
     config_manager = FanoutConfigManager()
     resources = FakeResources()
     manager = ProjectManager(resources=resources, user_name="ada")
+    await resources.redis.hset(
+        RedisKeys.projects("ada"),
+        "project-1",
+        json.dumps(
+            {
+                "id": "project-1",
+                "name": "Research",
+                "description": None,
+                "access_mode": "open",
+                "allowed_projects": [],
+                "status": "active",
+                "archived_at": None,
+                "deleted_at": None,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+    )
 
     monkeypatch.setattr(
         "knoggin_server.project.project_manager.ConfigManager.get",

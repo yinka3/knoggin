@@ -11,8 +11,17 @@ async def test_search_messages_uses_fts_candidates_and_reranks_without_vectors()
         def __init__(self):
             self.fts_calls = []
 
-        async def search_messages_fts(self, query, limit, user_name, session_ids):
-            self.fts_calls.append((query, limit, user_name, session_ids))
+        async def search_messages_fts(
+            self,
+            query,
+            limit,
+            user_name,
+            session_ids=None,
+            project_ids=None,
+        ):
+            self.fts_calls.append(
+                (query, limit, user_name, session_ids, project_ids)
+            )
             return [
                 (1, 0.5, "session-1"),
                 (2, 1.0, "session-1"),
@@ -56,7 +65,9 @@ async def test_search_messages_uses_fts_candidates_and_reranks_without_vectors()
 
     results = await tool._search_messages("query", 2)
 
-    assert graph_client.fts_calls == [("query", 10, "ada", ["session-1"])]
+    assert graph_client.fts_calls == [
+        ("query", 10, "ada", ["session-1"], None)
+    ]
     assert results == [
         ("msg_2", 0.9, "session-1"),
         ("msg_1", 0.1, "session-1"),
@@ -66,7 +77,14 @@ async def test_search_messages_uses_fts_candidates_and_reranks_without_vectors()
 @pytest.mark.no_network
 async def test_search_messages_empty_fts_skips_rerank():
     class FakeGraphClient:
-        async def search_messages_fts(self, query, limit, user_name, session_ids):
+        async def search_messages_fts(
+            self,
+            query,
+            limit,
+            user_name,
+            session_ids=None,
+            project_ids=None,
+        ):
             return []
 
     class FakeEmbeddingService:
@@ -87,7 +105,14 @@ async def test_search_messages_empty_fts_skips_rerank():
 @pytest.mark.no_network
 async def test_search_messages_rerank_failure_falls_back_to_normalized_fts_scores():
     class FakeGraphClient:
-        async def search_messages_fts(self, query, limit, user_name, session_ids):
+        async def search_messages_fts(
+            self,
+            query,
+            limit,
+            user_name,
+            session_ids=None,
+            project_ids=None,
+        ):
             return [
                 (1, 5.0, "session-1"),
                 (2, 10.0, "session-1"),
@@ -131,13 +156,22 @@ async def test_search_messages_rerank_failure_falls_back_to_normalized_fts_score
 
 
 @pytest.mark.no_network
-async def test_search_messages_visible_sessions_expand_from_readable_projects():
+async def test_search_messages_uses_readable_project_scope_directly():
     class FakeGraphClient:
         def __init__(self):
             self.calls = []
 
-        async def search_messages_fts(self, query, limit, user_name, session_ids):
-            self.calls.append((query, limit, user_name, session_ids))
+        async def search_messages_fts(
+            self,
+            query,
+            limit,
+            user_name,
+            session_ids=None,
+            project_ids=None,
+        ):
+            self.calls.append(
+                (query, limit, user_name, session_ids, project_ids)
+            )
             return []
 
     graph_client = FakeGraphClient()
@@ -157,9 +191,10 @@ async def test_search_messages_visible_sessions_expand_from_readable_projects():
 
     assert await tool._search_messages("query", 5) == []
 
-    _, _, user_name, session_ids = graph_client.calls[0]
+    _, _, user_name, session_ids, project_ids = graph_client.calls[0]
     assert user_name == "ada"
-    assert set(session_ids) == {"session-1", "session-2", "session-3", "session-4"}
+    assert session_ids is None
+    assert project_ids == ["project-1", "project-2"]
 
 
 @pytest.mark.no_network

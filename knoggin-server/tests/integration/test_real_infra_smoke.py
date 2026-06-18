@@ -26,6 +26,11 @@ EXPECTED_TABLES = {
     "fact_search",
 }
 
+EXPECTED_SEQUENCES = {
+    "entity_id_seq",
+    "message_id_seq",
+}
+
 EXPECTED_INDEXES = {
     "messages_project_idx",
     "entities_project_idx",
@@ -34,14 +39,19 @@ EXPECTED_INDEXES = {
     "facts_entity_active_idx",
     "facts_source_message_idx",
     "relationships_pair_idx",
+    "relationships_entity_a_idx",
+    "relationships_entity_b_idx",
     "relationship_evidence_refs_message_idx",
     "hierarchy_edges_child_idx",
     "hierarchy_edges_parent_idx",
+    "hierarchy_edges_parent_entity_idx",
+    "hierarchy_edges_child_entity_idx",
     "entity_search_embedding_idx",
     "message_search_fts_idx",
     "fact_search_embedding_idx",
     "entity_search_project_idx",
     "message_search_session_idx",
+    "message_search_project_idx",
     "fact_search_project_idx",
 }
 
@@ -131,6 +141,19 @@ async def test_real_postgres_schema_tables_and_indexes_are_present():
         f"schema.sql manually. Missing: {sorted(missing_tables)}"
     )
 
+    sequence_rows = _execute_direct_read(
+        """
+        SELECT sequence_name
+        FROM information_schema.sequences
+        WHERE sequence_schema = 'public'
+          AND sequence_name = ANY(%s)
+        """,
+        (list(EXPECTED_SEQUENCES),),
+        load_age=False,
+    )
+    present_sequences = {row["sequence_name"] for row in sequence_rows}
+    assert not EXPECTED_SEQUENCES - present_sequences
+
     index_rows = _execute_direct_read(
         """
         SELECT indexname
@@ -147,6 +170,200 @@ async def test_real_postgres_schema_tables_and_indexes_are_present():
         "Missing expected schema indexes. If tables exist but indexes are missing, "
         f"re-apply schema.sql. Missing: {sorted(missing_indexes)}"
     )
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.slow
+async def test_entity_dependencies_use_cascade_foreign_keys_and_checks():
+    rows = _execute_direct_read(
+        """
+        SELECT conname, confdeltype
+        FROM pg_constraint
+        WHERE connamespace = 'public'::regnamespace
+          AND conname = ANY(%s)
+        """,
+        (
+            [
+                "entity_aliases_entity_id_fkey",
+                "facts_entity_id_fkey",
+                "relationships_entity_a_id_fkey",
+                "relationships_entity_b_id_fkey",
+                "relationship_evidence_refs_relationship_id_fkey",
+                "hierarchy_edges_parent_id_fkey",
+                "hierarchy_edges_child_id_fkey",
+                "entity_search_entity_id_fkey",
+                "message_search_message_id_fkey",
+                "fact_search_fact_id_fkey",
+                "relationships_distinct_entities",
+                "hierarchy_edges_distinct_entities",
+            ],
+        ),
+        load_age=False,
+    )
+    constraints = {row["conname"]: row["confdeltype"] for row in rows}
+    cascade_names = {
+        "entity_aliases_entity_id_fkey",
+        "facts_entity_id_fkey",
+        "relationships_entity_a_id_fkey",
+        "relationships_entity_b_id_fkey",
+        "relationship_evidence_refs_relationship_id_fkey",
+        "hierarchy_edges_parent_id_fkey",
+        "hierarchy_edges_child_id_fkey",
+        "entity_search_entity_id_fkey",
+        "message_search_message_id_fkey",
+        "fact_search_fact_id_fkey",
+    }
+    assert cascade_names <= constraints.keys()
+    assert all(constraints[name] == "c" for name in cascade_names)
+    assert "relationships_distinct_entities" in constraints
+    assert "hierarchy_edges_distinct_entities" in constraints
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.slow
+async def test_message_search_is_project_scoped_and_keyed_by_message():
+    rows = _execute_direct_read(
+        """
+        SELECT
+            column_name,
+            is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'message_search'
+          AND column_name = 'project_id'
+        """,
+        load_age=False,
+    )
+    assert rows == [{"column_name": "project_id", "is_nullable": "NO"}]
+
+    primary_key_rows = _execute_direct_read(
+        """
+        SELECT a.attname AS column_name
+        FROM pg_constraint c
+        JOIN pg_attribute a
+          ON a.attrelid = c.conrelid
+         AND a.attnum = ANY(c.conkey)
+        WHERE c.conrelid = 'public.message_search'::regclass
+          AND c.contype = 'p'
+        """,
+        load_age=False,
+    )
+    assert primary_key_rows == [{"column_name": "message_id"}]
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.slow
+async def test_direct_entity_delete_cascades_all_sql_dependencies():
+    conn = psycopg.connect(DB_URL, row_factory=dict_row)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entities (
+                    entity_id, user_name, project_id, canonical_name, type, topic
+                )
+                VALUES
+                    (-910001, 'cascade-test', 'cascade-project', 'Parent', 'concept', 'General'),
+                    (-910002, 'cascade-test', 'cascade-project', 'Target', 'concept', 'General')
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO entity_aliases (entity_id, alias)
+                VALUES (-910002, 'Target Alias')
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO entity_search (
+                    entity_id, canonical_name, user_name, project_id
+                )
+                VALUES (-910002, 'Target', 'cascade-test', 'cascade-project')
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO facts (
+                    fact_id, entity_id, user_name, project_id, content
+                )
+                VALUES (
+                    'cascade-fact', -910002, 'cascade-test',
+                    'cascade-project', 'temporary fact'
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO fact_search (
+                    fact_id, entity_id, user_name, project_id
+                )
+                VALUES (
+                    'cascade-fact', -910002, 'cascade-test', 'cascade-project'
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO relationships (
+                    relationship_id, user_name, project_id,
+                    entity_a_id, entity_b_id
+                )
+                VALUES (
+                    'cascade-relationship', 'cascade-test', 'cascade-project',
+                    -910001, -910002
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO relationship_evidence_refs (
+                    relationship_id, user_name, session_id, message_id
+                )
+                VALUES (
+                    'cascade-relationship', 'cascade-test', 'cascade-session', 1
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO hierarchy_edges (
+                    project_id, parent_id, child_id, created_at_ms
+                )
+                VALUES ('cascade-project', -910001, -910002, 1)
+                """
+            )
+
+            cur.execute("DELETE FROM entities WHERE entity_id = -910002")
+
+            for table, predicate in (
+                ("entities", "entity_id = -910002"),
+                ("entity_aliases", "entity_id = -910002"),
+                ("entity_search", "entity_id = -910002"),
+                ("facts", "entity_id = -910002"),
+                ("fact_search", "fact_id = 'cascade-fact'"),
+                ("relationships", "relationship_id = 'cascade-relationship'"),
+                (
+                    "relationship_evidence_refs",
+                    "relationship_id = 'cascade-relationship'",
+                ),
+                ("hierarchy_edges", "child_id = -910002"),
+            ):
+                cur.execute(f"SELECT count(*) AS count FROM {table} WHERE {predicate}")
+                assert cur.fetchone()["count"] == 0
+
+            cur.execute(
+                "SELECT count(*) AS count FROM entities WHERE entity_id = -910001"
+            )
+            assert cur.fetchone()["count"] == 1
+    finally:
+        conn.rollback()
+        conn.close()
 
 
 @pytest.mark.integration

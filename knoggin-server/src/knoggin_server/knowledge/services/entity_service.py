@@ -16,6 +16,9 @@ from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
 from infrastructure.graph_client import GraphClient
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
+from knoggin_server.knowledge.services.entity_embedding import (
+    build_entity_embedding_text,
+)
 
 
 class EntityManager:
@@ -328,21 +331,13 @@ class EntityManager:
         topic: str,
         session_id: str = None,
         project_id: str = None,
-        source_context: str = None,
     ) -> List[float]:
         """
         Register new entity: update all indexes and return embedding.
         """
 
         project_id = project_id or self.project_id
-        text_to_embed = None
-        if source_context:
-            text_to_embed = (
-                f"{canonical_name} ({entity_type}). Context: {source_context}"
-            )
-        else:
-            text_to_embed = f"{canonical_name} ({entity_type})"
-
+        text_to_embed = build_entity_embedding_text(canonical_name, entity_type)
         embedding = await self.embedding_service.encode_single(text_to_embed)
 
         with self._lock:
@@ -398,7 +393,12 @@ class EntityManager:
 
         return embedding
 
-    def merge_into(self, primary_id: int, secondary_id: int):
+    def merge_into(
+        self,
+        primary_id: int,
+        secondary_id: int,
+        primary_profile_updates: dict = None,
+    ):
         """Transfer secondary aliases to primary and remove secondary indexes."""
         with self._lock:
             secondary_aliases = list(self._id_to_names.get(secondary_id, set()))
@@ -410,6 +410,9 @@ class EntityManager:
             if primary_id not in self._id_to_names:
                 self._id_to_names[primary_id] = set()
             self._id_to_names[primary_id].update(secondary_names)
+
+            if primary_profile_updates and primary_id in self.entity_profiles:
+                self.entity_profiles[primary_id].update(primary_profile_updates)
 
             if secondary_id in self.entity_profiles:
                 del self.entity_profiles[secondary_id]

@@ -377,26 +377,150 @@ class GraphReader:
             )
             return False
 
+    async def get_merge_topic_strength(
+        self,
+        primary_id: int,
+        secondary_id: int,
+        project_id: str,
+    ) -> Dict:
+        if not project_id:
+            raise ValueError("get_merge_topic_strength requires project_id scope")
+
+        query = """
+        SELECT
+            p.topic AS p_topic,
+            p.confidence AS p_conf,
+            p.last_mentioned_ms AS p_last,
+            s.topic AS s_topic,
+            s.confidence AS s_conf,
+            s.last_mentioned_ms AS s_last,
+            (
+                SELECT count(*)
+                FROM facts
+                WHERE project_id = %s
+                  AND entity_id = %s
+                  AND invalid_at IS NULL
+            ) AS p_fact_count,
+            (
+                SELECT count(*)
+                FROM facts
+                WHERE project_id = %s
+                  AND entity_id = %s
+                  AND invalid_at IS NULL
+            ) AS s_fact_count,
+            (
+                SELECT count(*)
+                FROM relationships
+                WHERE project_id = %s
+                  AND (
+                      entity_a_id = %s
+                      OR entity_b_id = %s
+                  )
+                  AND NOT (
+                      (
+                          entity_a_id = %s
+                          AND entity_b_id = %s
+                      )
+                      OR (
+                          entity_a_id = %s
+                          AND entity_b_id = %s
+                      )
+                  )
+            ) AS p_relationship_count,
+            (
+                SELECT count(*)
+                FROM relationships
+                WHERE project_id = %s
+                  AND (
+                      entity_a_id = %s
+                      OR entity_b_id = %s
+                  )
+                  AND NOT (
+                      (
+                          entity_a_id = %s
+                          AND entity_b_id = %s
+                      )
+                      OR (
+                          entity_a_id = %s
+                          AND entity_b_id = %s
+                      )
+                  )
+            ) AS s_relationship_count
+        FROM entities p
+        JOIN entities s
+          ON s.entity_id = %s
+         AND s.project_id = %s
+        WHERE p.entity_id = %s
+          AND p.project_id = %s
+        """
+        try:
+            res = await self.client.execute_read(
+                query,
+                (
+                    project_id,
+                    primary_id,
+                    project_id,
+                    secondary_id,
+                    project_id,
+                    primary_id,
+                    primary_id,
+                    primary_id,
+                    secondary_id,
+                    secondary_id,
+                    primary_id,
+                    project_id,
+                    secondary_id,
+                    secondary_id,
+                    primary_id,
+                    secondary_id,
+                    secondary_id,
+                    primary_id,
+                    secondary_id,
+                    project_id,
+                    primary_id,
+                    project_id,
+                ),
+            )
+            return dict(res[0]) if res else {}
+        except Exception as e:
+            logger.error(
+                "Failed to get merge topic strength for "
+                f"{primary_id}<-{secondary_id}: {e}"
+            )
+            raise
+
     async def get_hierarchy_candidates(
-        self, topic: str, parent_type: str, child_types: List[str], min_weight: int = 2
+        self,
+        project_id: str,
+        topic: str,
+        parent_type: str,
+        child_types: List[str],
+        min_weight: int = 2,
     ) -> List[Dict]:
+        if not project_id:
+            raise ValueError("get_hierarchy_candidates requires project_id scope")
 
         query = """
         SELECT
             parent.entity_id AS parent_id,
             parent.canonical_name AS parent_name,
+            parent.type AS parent_type,
             child.entity_id AS child_id,
             child.canonical_name AS child_name,
+            child.type AS child_type,
             rel.weight
         FROM relationships rel
         JOIN entities parent
           ON parent.entity_id IN (rel.entity_a_id, rel.entity_b_id)
+         AND parent.project_id = rel.project_id
         JOIN entities child
           ON child.entity_id = CASE
               WHEN parent.entity_id = rel.entity_a_id THEN rel.entity_b_id
               ELSE rel.entity_a_id
-          END
-        WHERE parent.topic = %s
+           END
+         AND child.project_id = rel.project_id
+        WHERE rel.project_id = %s
+          AND parent.topic = %s
           AND child.topic = %s
           AND parent.type = %s
           AND child.type = ANY(%s)
@@ -413,7 +537,14 @@ class GraphReader:
         try:
             graph_res = await self.client.execute_read(
                 query,
-                (topic, topic, parent_type, child_types, min_weight),
+                (
+                    project_id,
+                    topic,
+                    topic,
+                    parent_type,
+                    child_types,
+                    min_weight,
+                ),
             )
 
             if not graph_res:
@@ -429,8 +560,9 @@ class GraphReader:
                 SELECT entity_id, embedding
                 FROM entity_search
                 WHERE entity_id = ANY(%s)
+                  AND project_id = %s
                 """,
-                (entity_ids,),
+                (entity_ids, project_id),
             )
             embs = {
                 r["entity_id"]: self._parse_vector(r["embedding"])
@@ -441,9 +573,11 @@ class GraphReader:
                 {
                     "parent_id": int(r["parent_id"]),
                     "parent_name": self._clean_string(r["parent_name"]),
+                    "parent_type": self._clean_string(r["parent_type"]),
                     "parent_embedding": embs.get(int(r["parent_id"]), []),
                     "child_id": int(r["child_id"]),
                     "child_name": self._clean_string(r["child_name"]),
+                    "child_type": self._clean_string(r["child_type"]),
                     "child_embedding": embs.get(int(r["child_id"]), []),
                     "weight": r["weight"],
                 }

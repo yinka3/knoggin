@@ -150,6 +150,7 @@ class ToolQueries:
         limit: int = 50,
         user_name: Optional[str] = None,
         session_ids: Optional[List[str]] = None,
+        project_ids: Optional[List[str]] = None,
     ) -> List[Tuple[int, float, str]]:
         sanitized = self._sanitize_fts_query(query)
         if not sanitized:
@@ -157,7 +158,10 @@ class ToolQueries:
 
         scope_sql = ""
         params = [sanitized, sanitized]
-        if user_name and session_ids:
+        if user_name and project_ids:
+            scope_sql = "AND user_name = %s AND project_id = ANY(%s)"
+            params.extend([user_name, project_ids])
+        elif user_name and session_ids:
             scope_sql = "AND user_name = %s AND session_id = ANY(%s)"
             params.extend([user_name, session_ids])
 

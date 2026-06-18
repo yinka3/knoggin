@@ -112,12 +112,6 @@ class Context:
 
         return ctx
 
-    async def get_next_msg_id(self) -> int:
-        return await self.redis_client.incr(RedisKeys.global_next_msg_id())
-
-    async def get_next_ent_id(self) -> int:
-        return await self.redis_client.incr(RedisKeys.global_next_ent_id())
-
     async def get_next_turn_id(self) -> int:
         return await self.redis_client.incr(
             RedisKeys.global_next_turn_id(self.user_name, self.session_id)
@@ -140,7 +134,7 @@ class Context:
             msg.id = int(existing_id)
             return msg
 
-        new_id = await self.get_next_msg_id()
+        new_id = await self.graph_client.allocate_message_id()
         was_set = await self.redis_client.set(dedup_key, str(new_id), ex=300, nx=True)
 
         if not was_set:
@@ -150,11 +144,23 @@ class Context:
 
         msg.id = new_id
 
-        await self._persist_user_turn(msg)
-        await self._enqueue_user_message(msg)
+        try:
+            await self._persist_user_turn(msg)
+            await self._enqueue_user_message(msg)
+        except Exception:
+            try:
+                await self.redis_client.delete(dedup_key)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "Failed to release message dedup claim after add failure: "
+                    f"{cleanup_exc}"
+                )
+            raise
+
         await self.project.record_session_activity()
         self.consumer.signal()
         await self.refresh_session_ttls()
+
         return msg
 
     async def _add_to_conversation_log(
@@ -243,6 +249,7 @@ class Context:
         if metadata is None:
             metadata = {}
 
+        message_id = await self.graph_client.allocate_message_id()
         turn_id = await self._add_to_conversation_log(
             role="assistant",
             content=content,
@@ -251,10 +258,37 @@ class Context:
             user_msg_id=user_msg_id,
         )
 
-        self.task_group.create_task(
-            self._persist_assistant_message_log(turn_id, content, timestamp),
-            name=f"persist_assistant_message_log_{turn_id}",
-        )
+        try:
+            await AsyncRedisClient.update_message_mapping(
+                user_name=self.user_name,
+                session_id=self.session_id,
+                msg_id=message_id,
+                turn_id=turn_id,
+                content=content,
+                timestamp=timestamp.isoformat(),
+                role="assistant",
+            )
+            await self._persist_assistant_message_log(
+                message_id,
+                turn_id,
+                content,
+                timestamp,
+            )
+        except Exception:
+            try:
+                await AsyncRedisClient.delete_message_turn(
+                    user_name=self.user_name,
+                    session_id=self.session_id,
+                    msg_id=message_id,
+                    turn_id=turn_id,
+                )
+            except Exception as cleanup_exc:
+                logger.error(
+                    "Failed to remove assistant message after persistence "
+                    f"failure for message {message_id} (turn {turn_id}): "
+                    f"{cleanup_exc}"
+                )
+            raise
 
     async def _maybe_extract_llm(self, content: str, user_msg_id: int) -> bool:
         """
@@ -382,18 +416,20 @@ class Context:
             return False
 
     async def _persist_assistant_message_log(
-        self, turn_id: int, content: str, timestamp: datetime
+        self,
+        message_id: int,
+        turn_id: int,
+        content: str,
+        timestamp: datetime,
     ):
-        """Background task: write assistant message log with retry."""
+        """Write an assistant message log, raising after bounded retries."""
         max_retries = 3
 
         for attempt in range(max_retries):
             try:
-                graph_id = turn_id + 1_000_000_000
-
                 agent_msg_batch = [
                     {
-                        "id": graph_id,
+                        "id": message_id,
                         "content": content,
                         "role": "assistant",
                         "user_name": self.user_name,
@@ -409,13 +445,18 @@ class Context:
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.warning(
-                        f"Assistant message log failed (attempt {attempt + 1}/{max_retries}) for turn {turn_id}: {e}"
+                        "Assistant message log failed "
+                        f"(attempt {attempt + 1}/{max_retries}) for message "
+                        f"{message_id} (turn {turn_id}): {e}"
                     )
                     await asyncio.sleep(0.5 * (attempt + 1))
                 else:
                     logger.error(
-                        f"Failed to persist assistant message log for turn {turn_id} after {max_retries} attempts: {e}"
+                        "Failed to persist assistant message log for message "
+                        f"{message_id} (turn {turn_id}) after {max_retries} "
+                        f"attempts: {e}"
                     )
+                    raise
 
     async def get_conversation_context(
         self, num_turns: int, up_to_msg_id: Optional[int] = None

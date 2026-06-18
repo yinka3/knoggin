@@ -169,15 +169,10 @@ async def test_register_entity_updates_profile_aliases_and_embedding(
         "tool",
         "General",
         session_id="session-1",
-        source_context="Used for workspace notes.",
     )
 
-    assert vector == embedding.vector_for(
-        "Notion (tool). Context: Used for workspace notes."
-    )
-    assert embedding.single_calls == [
-        "Notion (tool). Context: Used for workspace notes."
-    ]
+    assert vector == embedding.vector_for("Notion (tool)")
+    assert embedding.single_calls == ["Notion (tool)"]
     profile = await entities.get_profile(404)
     assert profile == {
         "canonical_name": "Notion",

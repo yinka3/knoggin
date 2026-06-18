@@ -67,7 +67,11 @@ class EntityCleanupJob(BaseJob):
             user=ctx.user_name, job=self.name, project=ctx.project_id
         ):
             project_id = ctx.project_id
-            await self.graph_client.cleanup_null_entities(project_id=project_id)
+            null_deleted_ids = await self.graph_client.cleanup_null_entities(
+                project_id=project_id
+            )
+            if null_deleted_ids:
+                self.entities.remove_entities(null_deleted_ids)
 
             now_ms = get_now_ms()
             orphan_cutoff = now_ms - self.orphan_cutoff_ms
@@ -101,6 +105,11 @@ class EntityCleanupJob(BaseJob):
                     RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id),
                     get_now_unix(),
                 )
+                if null_deleted_ids:
+                    return JobResult(
+                        success=True,
+                        summary=f"Cleaned {len(null_deleted_ids)} entities",
+                    )
                 return JobResult(success=True, summary="No orphans found")
 
             logger.info(
@@ -111,14 +120,17 @@ class EntityCleanupJob(BaseJob):
                 logger.debug(f"Cleaning entity ID: {eid}")
 
             batch_size = 100
-            deleted_count = 0
+            deleted_ids = list(null_deleted_ids)
             for i in range(0, len(orphan_ids), batch_size):
                 batch = orphan_ids[i : i + batch_size]
-                deleted_count += await self.graph_client.bulk_delete_entities(
+                batch_deleted_ids = await self.graph_client.bulk_delete_entities(
                     batch, project_id=project_id
                 )
-                self.entities.remove_entities(batch)
+                deleted_ids.extend(batch_deleted_ids)
+                self.entities.remove_entities(batch_deleted_ids)
                 await asyncio.sleep(0.1)  # Yield to other tasks
+
+            deleted_count = len(deleted_ids)
 
             await self.redis.set(
                 RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id),

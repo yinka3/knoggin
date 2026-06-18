@@ -8,7 +8,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.schema.contracts import EntityProfilesResult
 from common.schema.primitives import FactRecord
-from common.scoping import GLOBAL_PROJECT_SCOPE
+from common.scoping import IDENTITY_SCOPE
 from common.utils.core_utils import format_vp04_input
 from common.utils.data_utils import (
     process_extracted_facts,
@@ -24,6 +24,9 @@ from knoggin_server.agent.prompts import (
     get_profile_extraction_prompt,
 )
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
+from knoggin_server.knowledge.services.entity_embedding import (
+    build_entity_embedding_text,
+)
 from knoggin_server.knowledge.services.entity_service import EntityManager
 from knoggin_server.knowledge.services.fact_resolution import FactResolutionUtils
 
@@ -529,7 +532,7 @@ class ProfileRefinementJob(BaseJob):
             self.contradiction_batch_size,
             self.contradiction_prompt,
             user_name=ctx.user_name,
-            project_id=GLOBAL_PROJECT_SCOPE,
+            project_id=IDENTITY_SCOPE,
             source_session_by_msg_id=source_session_by_msg_id,
         )
         if fact_summary.failed_invalidations:
@@ -540,7 +543,10 @@ class ProfileRefinementJob(BaseJob):
             )
 
         embedding = await self._update_entity_embedding(
-            user_id, ctx.user_name, fact_summary.active_facts
+            user_id,
+            ctx.user_name,
+            "person",
+            fact_summary.active_facts,
         )
 
         await self.graph_client.update_entity_profile(
@@ -548,7 +554,7 @@ class ProfileRefinementJob(BaseJob):
             canonical_name=ctx.user_name,
             embedding=embedding,
             last_msg_id=current_msg_id,
-            project_id=GLOBAL_PROJECT_SCOPE,
+            project_id=IDENTITY_SCOPE,
         )
 
         logger.info(f"Refined user profile for {ctx.user_name}")
@@ -681,7 +687,10 @@ class ProfileRefinementJob(BaseJob):
                     )
 
                 embedding = await self._update_entity_embedding(
-                    orig["ent_id"], orig["entity_name"], fact_summary.active_facts
+                    orig["ent_id"],
+                    orig["entity_name"],
+                    orig["entity_type"],
+                    fact_summary.active_facts,
                 )
 
                 updates.append(
@@ -827,6 +836,7 @@ class ProfileRefinementJob(BaseJob):
         self,
         entity_id: int,
         canonical_name: str,
+        entity_type: str,
         active_facts: Optional[List[FactRecord]] = None,
     ) -> List[float]:
         """Recompute entity embedding from current active facts."""
@@ -838,10 +848,11 @@ class ProfileRefinementJob(BaseJob):
                 )
                 active_facts = []
 
-        resolution_text = f"{canonical_name}. " + " ".join(
-            [f.content for f in active_facts]
+        resolution_text = build_entity_embedding_text(
+            canonical_name,
+            entity_type,
+            active_facts,
         )
-
         new_emb = await self.entities.compute_embedding(entity_id, resolution_text)
 
         return new_emb

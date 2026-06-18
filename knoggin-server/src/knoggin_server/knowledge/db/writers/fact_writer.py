@@ -255,14 +255,6 @@ class FactWriter:
                             deleted_ids,
                             project_id,
                         )
-                        await cur.execute(
-                            """
-                            DELETE FROM fact_search
-                            WHERE fact_id = ANY(%s)
-                              AND project_id = %s
-                            """,
-                            (deleted_ids, project_id),
-                        )
                         logger.info(f"Deleted {len(deleted_ids)} old invalidated facts")
 
         return len(deleted_ids) if records else 0

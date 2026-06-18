@@ -45,12 +45,17 @@ class SessionManager:
 
     async def create_session(
         self,
+        project_id: str,
         topics_config: Optional[dict] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
-        project_id: Optional[str] = None,
     ) -> Context:
+        if not project_id or not project_id.strip():
+            raise ValueError(
+                "create_session requires a project_id from an existing project"
+            )
+
         session_id = str(uuid.uuid4())
 
         if topics_config is None:
@@ -58,9 +63,8 @@ class SessionManager:
             topics_config = config.default_topics
 
         async with self._lock:
-            actual_project_id = project_id or "global"
             project_state = await self.project_manager.acquire_project_for_session(
-                actual_project_id, session_id, topics_config=topics_config
+                project_id, session_id, topics_config=topics_config
             )
 
             try:
@@ -72,8 +76,8 @@ class SessionManager:
                     project_state=project_state,
                 )
             except Exception:
-                await self.project_manager.remove_session(actual_project_id, session_id)
-                await self.project_manager.release_project(actual_project_id)
+                await self.project_manager.remove_session(project_id, session_id)
+                await self.project_manager.release_project(project_id)
                 raise
 
             now = get_now_iso()
@@ -83,7 +87,7 @@ class SessionManager:
                 "model": model,
                 "agent_id": agent_id,
                 "enabled_tools": enabled_tools,
-                "project_id": actual_project_id,
+                "project_id": project_id,
             }
 
             await self.resources.redis.hset(
@@ -116,9 +120,14 @@ class SessionManager:
             if not metadata:
                 return None
 
-            actual_project_id = metadata.get("project_id") or "global"
+            project_id = metadata.get("project_id")
+            if not isinstance(project_id, str) or not project_id.strip():
+                raise ValueError(
+                    f"Session '{session_id}' has no valid project_id and cannot resume"
+                )
+
             project_state = await self.project_manager.acquire_project_for_session(
-                actual_project_id, session_id
+                project_id, session_id
             )
 
             try:
@@ -130,7 +139,7 @@ class SessionManager:
                     project_state=project_state,
                 )
             except Exception:
-                await self.project_manager.release_project(actual_project_id)
+                await self.project_manager.release_project(project_id)
                 raise
 
             self.active_sessions[session_id] = context
@@ -222,7 +231,7 @@ class SessionManager:
         if raw_metadata:
             metadata = safe_json_loads(raw_metadata, {})
             if metadata:
-                project_id = metadata.get("project_id") or "global"
+                project_id = metadata.get("project_id")
 
         if not project_id and session_id in self.active_sessions:
             project_id = self.active_sessions[session_id].project_id

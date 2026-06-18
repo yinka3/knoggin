@@ -244,7 +244,7 @@ erDiagram
     Entity ||--o{ Fact : HAS_FACT
     Fact }o--o| Message : EXTRACTED_FROM
     Entity }o--o{ Entity : RELATED_TO
-    Entity }o--o{ Topic : BELONGS_TO
+    Entity }o--|| Topic : BELONGS_TO
     Entity }o--o{ Entity : PART_OF
     AAC_Discussion ||--o{ AAC_Message : HAS_MESSAGE
     AAC_Agent ||--o{ AAC_Agent : SPAWNED
@@ -252,10 +252,10 @@ erDiagram
 
 Storage is hybrid:
 
-- Apache AGE graph stores nodes and edges: `Entity`, `Message`, `Fact`, `Topic`, `Preference`, `AAC_Discussion`, `AAC_Message`, `AAC_Agent`, `RELATED_TO`, `HAS_FACT`, `EXTRACTED_FROM`, `BELONGS_TO`, `PART_OF`, `SPAWNED`.
+- PostgreSQL stores canonical knowledge; Apache AGE projects nodes and edges for traversal: `Entity`, `Message`, `Fact`, `Topic`, `Preference`, `AAC_Discussion`, `AAC_Message`, `AAC_Agent`, `RELATED_TO`, `HAS_FACT`, `EXTRACTED_FROM`, `BELONGS_TO`, `PART_OF`, `SPAWNED`. Each entity projects one canonical topic.
 - Postgres relational helper tables store vectors and FTS:
   - `entity_search(entity_id, canonical_name, user_name, project_id, embedding vector(1024))`
-  - `message_search(message_id, user_name, session_id, content_tsvector)`
+  - `message_search(message_id, user_name, session_id, project_id, content_tsvector)`
   - `fact_search(fact_id, entity_id, user_name, project_id, embedding vector(1024), invalid_at)`
 - Schema and indexes are in `src/infrastructure/schema.sql`.
 - `PostgresClient.build_cypher` wraps AGE Cypher in SQL in `src/infrastructure/postgres_client.py`.
@@ -349,10 +349,11 @@ Purpose: group sessions and graph visibility under a project scope.
 Technical flow:
 
 - `ProjectManager.create_project` stores project metadata in `RedisKeys.projects(user)`.
-- `ProjectManager.acquire_project_for_session` calls `get_or_start_project` and records durable session membership in `RedisKeys.project_sessions(user, project_id)`.
-- `get_or_start_project` bootstraps `ProjectState`, `TopicConfig`, `EntityManager`, `TextProcessor`, project-level `BatchProcessor`, user identity entity, `Scheduler`, and all background jobs.
+- `ProjectManager.acquire_project_for_session` requires an existing persisted project, calls `get_or_start_project`, and records durable session membership in `RedisKeys.project_sessions(user, project_id)`.
+- `acquire_project_for_session` first persists and validates the global user identity at reserved entity ID `1`, then calls `get_or_start_project`. PostgreSQL sequences allocate canonical entity and message IDs; Redis only allocates session-local conversation turn IDs.
+- `get_or_start_project` independently requires persisted active project metadata, then bootstraps `ProjectState`, `TopicConfig`, `EntityManager`, `TextProcessor`, project-level `BatchProcessor`, `Scheduler`, and all background jobs.
 - `ProjectManager.release_project` decrements `ProjectState.active_runtime_sessions_count` and shuts down project state when count reaches zero.
-- `ProjectManager.get_readable_project_ids` combines own project, allowed projects, and global readable scopes via `build_readable_project_ids`.
+- `ProjectManager.get_readable_project_ids` combines the current project, allowed projects, and the reserved identity scope via `build_readable_project_ids`.
 
 Business value: project scopes let the user separate memory by work area while still sharing identity/global context.
 
@@ -360,7 +361,7 @@ Tests:
 
 - `tests/runtime/test_project_membership.py` verifies durable project membership.
 - `tests/runtime/test_project_membership.py` also includes a fake-backed `get_or_start_project` contract for cached project state reuse, scheduler project scope, and background job registration names.
-- `tests/integration/test_fake_engine_flow.py` verifies project delete returns sessions for cleanup.
+- `tests/integration/test_fake_engine_flow.py` verifies soft project deletion retains session membership and explicit session cleanup remains a separate operation.
 
 ### 4.4 Session Lifecycle
 
@@ -381,15 +382,27 @@ Tests:
 - `tests/integration/test_fake_engine_flow.py` covers create-add-history-close flow.
 - `tests/runtime/test_session_assembler.py` covers `SessionAssembler.assemble` and `launch` wiring without launching heavy model/database infrastructure.
 
+Project lifecycle:
+
+- Project metadata carries `status` (`active`, `archived`, or `deleted`) plus lifecycle timestamps.
+- Archived projects preserve session membership and canonical knowledge but reject session creation/resume.
+- An active project's explicit `allowed_projects` list may include archived projects for read-only agent retrieval.
+- Ingestion does not reuse entities owned by another readable project; cross-project visibility cannot mutate archived entities through entity resolution.
+- Reactivation makes an archived project writable through sessions again.
+- `delete_project` is a soft delete: metadata, sessions, configuration, messages, SQL/search knowledge, and AGE projection are retained.
+- Deleted projects reject sessions and lifecycle restoration and are excluded from cross-project readable scopes.
+- `delete_project` returns retained project metadata with `status="deleted"` and `deleted_at`; it does not return orphaned session IDs.
+- Permanent project purge is intentionally not implemented yet.
+
 ### 4.5 Context And Message Ingestion
 
 Purpose: accept raw messages and schedule background knowledge extraction.
 
 Technical flow:
 
-- `Context.add` deduplicates by SHA-256 of session/content/timestamp, assigns a global message id, stores a Redis conversation turn, updates message-to-turn mapping, increments heartbeat counter, pushes a JSON item into `RedisKeys.buffer(user, session)`, records project activity, signals consumer, and refreshes TTLs.
-- `Context.add_assistant_turn` logs assistant turns and schedules `_persist_assistant_embedding` in a `BackgroundTaskGroup`.
-- `_persist_assistant_embedding` writes assistant messages to graph using synthetic graph ids offset by `1_000_000_000`.
+- `Context.add` deduplicates by SHA-256 of session/content/timestamp, allocates a canonical message ID from PostgreSQL, stores a Redis conversation turn, updates message-to-turn mapping, increments heartbeat counters, pushes a JSON item into `RedisKeys.buffer(user, session)`, records project activity, signals the consumer, and refreshes TTLs.
+- `Context.add_assistant_turn` allocates a canonical PostgreSQL message ID, stages the assistant turn and message-to-turn mapping in Redis, then awaits canonical persistence.
+- `_persist_assistant_message_log` retries the transactional SQL/AGE write with the same canonical ID and payload. If all retries fail, `add_assistant_turn` removes the Redis conversation row, timeline entry, mapping, and cached message content before re-raising the persistence error to its caller. There is no synthetic offset namespace.
 - `Context._maybe_extract_llm` can extract assistant-response facts, resolve subjects to known entities, and write facts.
 
 Business value: user and assistant messages become both raw recall and structured memory.
@@ -398,6 +411,7 @@ Edge cases:
 
 - Dedup TTL is 300 seconds, so identical messages outside that window can be ingested again.
 - `Context.add` fails fast if project, scheduler, or consumer are not initialized.
+- Failed assistant persistence consumes its allocated message and turn numbers, but leaves no message data behind. IDs are never decremented or reused.
 - Session-scoped Redis keys are refreshed to a 72-hour TTL in `Context.refresh_session_ttls`.
 
 ### 4.6 Batch Consumer
@@ -501,7 +515,7 @@ Technical flow:
 - `EntityManager.detect_merge_entity_candidates` uses vector search, fuzzy matching, generic-token filtering, direct-edge/hierarchy-edge rejection, shared-neighbor caution, and facts.
 - `MergeDetectionJob._get_merge_judgment` sends enriched facts to the LLM using `MergeJudgment`.
 - High-confidence merges can execute automatically; lower-confidence proposals are stored for human-in-the-loop review in Redis.
-- `GraphWriter.merge_entities` transfers aliases, relationships, facts, topics, and hierarchy edges before deleting the secondary entity and updating helper tables.
+- `MergeDetectionJob` chooses one final topic for approved merges using canonical SQL evidence; `GraphWriter.merge_entities` transfers aliases, relationships, facts, and hierarchy edges, persists that one topic, then deletes the secondary entity and updates helper tables.
 
 Business value: keeps the knowledge graph coherent as the user refers to the same concept in different ways.
 
@@ -520,7 +534,7 @@ Technical flow:
   - `graph_write`: retry persisted `BatchResult` with no new LLM calls.
   - `message_log`: retry message log then graph write.
   - `processing`: reprocess messages with stored context.
-- `EntityCleanupJob` removes null entities and stale orphan entities while protecting entities pending merge.
+- `EntityCleanupJob` selects stale orphan entities from canonical SQL, protects entities pending merge, and evicts only IDs confirmed deleted from the runtime resolver cache.
 - `FactArchivalJob` deletes invalidated facts after retention and is triggered by `profile_complete` or fallback interval.
 
 Business value: reduces manual repair and keeps memory useful over time.
@@ -639,7 +653,8 @@ GLOSSARY_DELTA: Profile refinement, topic evolution, dead letter queue, HITL mer
 ### Scope And Identity
 
 - `project_id` is required for most graph writes. Writers intentionally reject missing scope.
-- The identity root is `IDENTITY_ENTITY_ID` from `src/common/scoping.py`. Relationship writes allow edges to identity across project scope, and merge/delete logic protects identity.
+- The identity root is `IDENTITY_ENTITY_ID` from `src/common/scoping.py`. It is persisted under `IDENTITY_SCOPE`, must resolve to the configured user before project boot, and is protected from merge/delete paths. Relationship writes allow edges to identity across project scope.
+- Entity deletion is a hard aggregate delete. PostgreSQL cascades aliases, facts, relationships/evidence, hierarchy edges, and search rows; AGE removes the matching entity/fact projection in the same transaction.
 - Project-level jobs receive a `JobContext.scope_id` whose value is the project id because `ProjectManager.get_or_start_project` constructs `Scheduler(user, project_id, ..., project_id=project_id)`. `JobContext.session_id` is only a compatibility alias; prefer `scope_id` in new job code and tests.
 
 ### Redis Is The Runtime Bus
@@ -690,7 +705,7 @@ Graph nodes/edges and helper tables are maintained together:
 - `EntityWriter.write_batch`: AGE `Entity` plus `entity_search`.
 - `GraphWriter.save_message_logs`: AGE `Message` plus `message_search`.
 - `FactWriter.create_facts_batch`: AGE `Fact` plus `fact_search`.
-- `GraphWriter.merge_entities`: AGE relationship/fact/topic/hierarchy migration plus `entity_search`/`fact_search` updates.
+- `GraphWriter.merge_entities`: AGE relationship/fact/hierarchy migration, single-topic replacement, and search helper updates.
 
 If you add a new persisted graph concept, decide whether it also needs vector or FTS helper rows.
 
@@ -793,7 +808,8 @@ resources = await ResourceManager.initialize()
 project_manager = ProjectManager(resources, user_name="ada")
 sessions = {}
 session_manager = SessionManager(resources, "ada", sessions, project_manager)
-ctx = await session_manager.create_session(project_id="global")
+project = await project_manager.create_project("Research")
+ctx = await session_manager.create_session(project_id=project["id"])
 ```
 
 Add a user message:

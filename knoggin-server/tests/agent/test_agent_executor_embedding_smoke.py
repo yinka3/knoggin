@@ -145,8 +145,23 @@ class FakeGraphClient:
         self.messages = dict(messages)
         self.fts_calls = []
 
-    async def search_messages_fts(self, query, limit, user_name, session_ids):
-        self.fts_calls.append((query, limit, user_name, list(session_ids)))
+    async def search_messages_fts(
+        self,
+        query,
+        limit,
+        user_name,
+        session_ids=None,
+        project_ids=None,
+    ):
+        self.fts_calls.append(
+            (
+                query,
+                limit,
+                user_name,
+                list(session_ids or []),
+                list(project_ids or []),
+            )
+        )
         return [
             (6, 1.0, "session-agent"),
             (7, 0.95, "session-agent"),
@@ -329,6 +344,7 @@ async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
             10,
             "ada",
             ["session-agent"],
+            [],
         )
     ]
     assert memory.calls == [["Testing"]]

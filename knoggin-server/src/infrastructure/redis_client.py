@@ -164,6 +164,35 @@ class AsyncRedisClient:
         await pipe.execute()
 
     @classmethod
+    async def delete_message_turn(
+        cls,
+        user_name: str,
+        session_id: str,
+        msg_id: int,
+        turn_id: int,
+    ) -> None:
+        """Remove all staged Redis state for a failed canonical message."""
+        redis = await cls.get_instance()
+        pipe = redis.pipeline()
+        pipe.hdel(
+            RedisKeys.conversation(user_name, session_id),
+            str(turn_id),
+        )
+        pipe.zrem(
+            RedisKeys.recent_conversation(user_name, session_id),
+            str(turn_id),
+        )
+        pipe.hdel(
+            RedisKeys.msg_to_turn_lookup(user_name, session_id),
+            str(msg_id),
+        )
+        pipe.hdel(
+            RedisKeys.message_content(user_name, session_id),
+            f"msg_{msg_id}",
+        )
+        await pipe.execute()
+
+    @classmethod
     async def refresh_session_ttls(cls, user_name: str, session_id: str, ttl: int):
         """Refreshes TTLs for all session-scoped keys in a single pipeline."""
         redis = await cls.get_instance()
@@ -360,14 +389,6 @@ class RedisKeys:
     @staticmethod
     def heartbeat_counter(user: str, session: str) -> str:
         return f"heartbeat_counter:{user}:{session}"
-
-    @staticmethod
-    def global_next_msg_id() -> str:
-        return "global:next_msg_id"
-
-    @staticmethod
-    def global_next_ent_id() -> str:
-        return "global:next_ent_id"
 
     @staticmethod
     def sessions(user: str) -> str:

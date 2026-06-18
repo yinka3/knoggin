@@ -41,10 +41,10 @@ class RecordingSessionManager:
     async def create_session(
         self,
         *,
+        project_id,
         model=None,
         agent_id=None,
         enabled_tools=None,
-        project_id=None,
     ):
         self.create_calls.append(
             {

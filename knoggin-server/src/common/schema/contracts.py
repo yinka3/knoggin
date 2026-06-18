@@ -324,6 +324,7 @@ class EntityWrite(BaseModel):
     """Typed entity payload intended for graph persistence."""
 
     id: int
+    is_new: bool
     canonical_name: str
     type: str
     confidence: float = 1.0

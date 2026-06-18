@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from common.scoping import IDENTITY_ENTITY_ID
+from common.scoping import IDENTITY_ENTITY_ID, IDENTITY_SCOPE
 from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
 from knoggin_server.knowledge.db.writers.age_projection_writer import (
@@ -38,7 +38,9 @@ class EntityWriter:
             if message_id.startswith("msg_"):
                 return int(message_id.split("_", 1)[1])
             if message_id.startswith("turn_"):
-                return int(message_id.split("_", 1)[1]) + 1_000_000_000
+                raise ValueError(
+                    "Conversation turn IDs are not canonical message IDs"
+                )
         return int(message_id)
 
     @classmethod
@@ -66,6 +68,148 @@ class EntityWriter:
     def _relationship_id(project_id: str, entity_a_id: int, entity_b_id: int) -> str:
         return f"{project_id}:{entity_a_id}:{entity_b_id}"
 
+    @staticmethod
+    def _normalized_identity_value(value: object) -> str:
+        return str(value or "").strip().strip('"').casefold()
+
+    async def ensure_identity_entity(
+        self, user_name: str, aliases: Optional[List[str]] = None
+    ) -> Dict:
+        """Persist and validate the identity-scoped entity reserved at ID 1."""
+        user_name = str(user_name or "").strip()
+        if not user_name:
+            raise ValueError("Identity requires a non-empty configured user name")
+        if not self.client.async_pool:
+            raise RuntimeError("PostgresClient async_pool is not initialized")
+
+        canonical_key = self._normalized_identity_value(user_name)
+        clean_aliases = []
+        seen_aliases = {canonical_key}
+        for alias in aliases or []:
+            clean_alias = str(alias or "").strip()
+            alias_key = self._normalized_identity_value(clean_alias)
+            if clean_alias and alias_key not in seen_aliases:
+                clean_aliases.append(clean_alias)
+                seen_aliases.add(alias_key)
+
+        now_ms = self._current_time_ms()
+        identity = {
+            "id": IDENTITY_ENTITY_ID,
+            "user_name": user_name,
+            "session_id": None,
+            "project_id": IDENTITY_SCOPE,
+            "canonical_name": user_name,
+            "aliases": clean_aliases,
+            "type": "person",
+            "topic": "Identity",
+            "confidence": 1.0,
+            "now": now_ms,
+        }
+
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (IDENTITY_ENTITY_ID,),
+                    )
+                    await cur.execute(
+                        """
+                        SELECT entity_id, user_name, project_id, canonical_name
+                        FROM entities
+                        WHERE entity_id = %s
+                        FOR UPDATE
+                        """,
+                        (IDENTITY_ENTITY_ID,),
+                    )
+                    existing = await cur.fetchone()
+                    if existing and (
+                        existing["project_id"] != IDENTITY_SCOPE
+                        or self._normalized_identity_value(existing["user_name"])
+                        != canonical_key
+                        or self._normalized_identity_value(
+                            existing["canonical_name"]
+                        )
+                        != canonical_key
+                    ):
+                        raise RuntimeError(
+                            "Entity ID 1 is occupied by a non-identity entity; "
+                            "reset the development database before startup"
+                        )
+
+                    await cur.execute(
+                        """
+                        INSERT INTO entities (
+                            entity_id,
+                            user_name,
+                            project_id,
+                            session_id,
+                            canonical_name,
+                            type,
+                            topic,
+                            confidence,
+                            last_mentioned_ms,
+                            last_updated_ms,
+                            last_profiled_msg_id
+                        )
+                        VALUES (%s, %s, %s, NULL, %s, %s, %s, %s, %s, %s, NULL)
+                        ON CONFLICT (entity_id) DO UPDATE SET
+                            user_name = EXCLUDED.user_name,
+                            project_id = EXCLUDED.project_id,
+                            session_id = NULL,
+                            canonical_name = EXCLUDED.canonical_name,
+                            type = EXCLUDED.type,
+                            topic = EXCLUDED.topic,
+                            confidence = EXCLUDED.confidence,
+                            last_updated_ms = EXCLUDED.last_updated_ms
+                        """,
+                        (
+                            IDENTITY_ENTITY_ID,
+                            user_name,
+                            IDENTITY_SCOPE,
+                            user_name,
+                            "person",
+                            "Identity",
+                            1.0,
+                            now_ms,
+                            now_ms,
+                        ),
+                    )
+                    await cur.execute(
+                        "DELETE FROM entity_aliases WHERE entity_id = %s",
+                        (IDENTITY_ENTITY_ID,),
+                    )
+                    for alias in clean_aliases:
+                        await cur.execute(
+                            """
+                            INSERT INTO entity_aliases (entity_id, alias)
+                            VALUES (%s, %s)
+                            ON CONFLICT (entity_id, alias) DO NOTHING
+                            """,
+                            (IDENTITY_ENTITY_ID, alias),
+                        )
+                    await cur.execute(
+                        """
+                        INSERT INTO entity_search (
+                            entity_id, canonical_name, user_name, project_id, embedding
+                        )
+                        VALUES (%s, %s, %s, %s, NULL)
+                        ON CONFLICT (entity_id) DO UPDATE SET
+                            canonical_name = EXCLUDED.canonical_name,
+                            user_name = EXCLUDED.user_name,
+                            project_id = EXCLUDED.project_id
+                        """,
+                        (
+                            IDENTITY_ENTITY_ID,
+                            user_name,
+                            user_name,
+                            IDENTITY_SCOPE,
+                        ),
+                    )
+                    await self.projection.project_identity(cur, identity)
+
+        return identity
+
     async def write_batch(self, entities: List[Dict], relationships: List[Dict]):
         # We need a transaction for both Graph and Hybrid tables
         if not self.client.async_pool:
@@ -85,56 +229,100 @@ class EntityWriter:
                                 ["user_name", "session_id", "project_id"],
                                 f"Entity {e.get('id')}",
                             )
+                            if "is_new" not in e:
+                                raise ValueError(
+                                    f"Entity {e.get('id')} missing is_new write intent"
+                                )
+                            if e.get("id") == IDENTITY_ENTITY_ID:
+                                raise ValueError(
+                                    "Identity entity writes must use "
+                                    "ensure_identity_entity"
+                                )
+
                             e_clean = e.copy()
+                            is_new = bool(e_clean.pop("is_new"))
                             e_clean["aliases"] = e.get("aliases") or []
                             e_clean["now"] = now_ms
                             entity_params.append(e_clean)
 
-                            await cur.execute(
-                                """
-                                INSERT INTO entities (
-                                    entity_id,
-                                    user_name,
-                                    project_id,
-                                    session_id,
-                                    canonical_name,
-                                    type,
-                                    topic,
-                                    confidence,
-                                    last_mentioned_ms,
-                                    last_updated_ms,
-                                    last_profiled_msg_id
-                                )
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                ON CONFLICT (entity_id) DO UPDATE SET
-                                    user_name = EXCLUDED.user_name,
-                                    project_id = EXCLUDED.project_id,
-                                    session_id = EXCLUDED.session_id,
-                                    canonical_name = EXCLUDED.canonical_name,
-                                    type = COALESCE(entities.type, EXCLUDED.type),
-                                    topic = EXCLUDED.topic,
-                                    confidence = EXCLUDED.confidence,
-                                    last_mentioned_ms = EXCLUDED.last_mentioned_ms,
-                                    last_updated_ms = EXCLUDED.last_updated_ms,
-                                    last_profiled_msg_id = COALESCE(
-                                        entities.last_profiled_msg_id,
-                                        EXCLUDED.last_profiled_msg_id
+                            if is_new:
+                                await cur.execute(
+                                    """
+                                    INSERT INTO entities (
+                                        entity_id,
+                                        user_name,
+                                        project_id,
+                                        session_id,
+                                        canonical_name,
+                                        type,
+                                        topic,
+                                        confidence,
+                                        last_mentioned_ms,
+                                        last_updated_ms,
+                                        last_profiled_msg_id
                                     )
-                                """,
-                                (
-                                    e_clean["id"],
-                                    e_clean["user_name"],
-                                    e_clean["project_id"],
-                                    e_clean["session_id"],
-                                    e_clean["canonical_name"],
-                                    e_clean.get("type"),
-                                    e_clean.get("topic", "General"),
-                                    e_clean.get("confidence", 1.0),
-                                    now_ms,
-                                    now_ms,
-                                    e_clean.get("last_profiled_msg_id"),
-                                ),
-                            )
+                                    VALUES (
+                                        %s, %s, %s, %s, %s, %s,
+                                        %s, %s, %s, %s, %s
+                                    )
+                                    """,
+                                    (
+                                        e_clean["id"],
+                                        e_clean["user_name"],
+                                        e_clean["project_id"],
+                                        e_clean["session_id"],
+                                        e_clean["canonical_name"],
+                                        e_clean.get("type"),
+                                        e_clean.get("topic", "General"),
+                                        e_clean.get("confidence", 1.0),
+                                        now_ms,
+                                        now_ms,
+                                        e_clean.get("last_profiled_msg_id"),
+                                    ),
+                                )
+                            else:
+                                await cur.execute(
+                                    """
+                                    UPDATE entities
+                                    SET session_id = %s,
+                                        canonical_name = %s,
+                                        type = COALESCE(type, %s),
+                                        topic = %s,
+                                        confidence = %s,
+                                        last_mentioned_ms = %s,
+                                        last_updated_ms = %s,
+                                        last_profiled_msg_id = COALESCE(
+                                            last_profiled_msg_id,
+                                            %s
+                                        )
+                                    WHERE entity_id = %s
+                                      AND (
+                                          project_id = %s
+                                          OR entity_id = %s
+                                      )
+                                    RETURNING entity_id
+                                    """,
+                                    (
+                                        e_clean["session_id"],
+                                        e_clean["canonical_name"],
+                                        e_clean.get("type"),
+                                        e_clean.get("topic", "General"),
+                                        e_clean.get("confidence", 1.0),
+                                        now_ms,
+                                        now_ms,
+                                        e_clean.get("last_profiled_msg_id"),
+                                        e_clean["id"],
+                                        e_clean["project_id"],
+                                        IDENTITY_ENTITY_ID,
+                                    ),
+                                )
+
+                                persisted = await cur.fetchone()
+                                if not persisted:
+                                    raise RuntimeError(
+                                        f"Existing entity {e_clean['id']} was not "
+                                        f"found in project {e_clean['project_id']}"
+                                    )
 
                             for alias in e_clean["aliases"]:
                                 if not alias:
@@ -153,41 +341,59 @@ class EntityWriter:
                         # Handle topics in AGE without FOREACH
                         topic_params = [
                             {"id": e["id"], "topic": e["topic"]}
-                            for e in entities
+                            for e in entity_params
                             if e.get("topic")
                         ]
                         await self.projection.project_entity_topics(cur, topic_params)
 
                         # 2. Write Hybrid Search Data (Vectors)
-                        for e in entities:
+                        for original, e in zip(entities, entity_params):
                             if "embedding" in e and e["embedding"]:
-                                await cur.execute(
-                                    """
-                                    INSERT INTO entity_search (
-                                        entity_id,
-                                        canonical_name,
-                                        user_name,
-                                        project_id,
-                                        embedding
-                                    )
-                                    VALUES (%s, %s, %s, %s, %s::vector)
-                                    ON CONFLICT (entity_id) DO UPDATE SET
-                                        canonical_name = EXCLUDED.canonical_name,
-                                        user_name = EXCLUDED.user_name,
-                                        project_id = EXCLUDED.project_id,
-                                        embedding = COALESCE(
-                                            EXCLUDED.embedding,
-                                            entity_search.embedding
+                                if original["is_new"]:
+                                    await cur.execute(
+                                        """
+                                        INSERT INTO entity_search (
+                                            entity_id,
+                                            canonical_name,
+                                            user_name,
+                                            project_id,
+                                            embedding
                                         )
-                                    """,
-                                    (
-                                        e["id"],
-                                        e["canonical_name"],
-                                        e["user_name"],
-                                        e["project_id"],
-                                        json.dumps(e["embedding"]),
-                                    ),
-                                )
+                                        VALUES (%s, %s, %s, %s, %s::vector)
+                                        """,
+                                        (
+                                            e["id"],
+                                            e["canonical_name"],
+                                            e["user_name"],
+                                            e["project_id"],
+                                            json.dumps(e["embedding"]),
+                                        ),
+                                    )
+                                else:
+                                    await cur.execute(
+                                        """
+                                        INSERT INTO entity_search (
+                                            entity_id,
+                                            canonical_name,
+                                            user_name,
+                                            project_id,
+                                            embedding
+                                        )
+                                        VALUES (%s, %s, %s, %s, %s::vector)
+                                        ON CONFLICT (entity_id) DO UPDATE SET
+                                            canonical_name = EXCLUDED.canonical_name,
+                                            user_name = EXCLUDED.user_name,
+                                            project_id = EXCLUDED.project_id,
+                                            embedding = EXCLUDED.embedding
+                                        """,
+                                        (
+                                            e["id"],
+                                            e["canonical_name"],
+                                            e["user_name"],
+                                            e["project_id"],
+                                            json.dumps(e["embedding"]),
+                                        ),
+                                    )
 
                     # 3. Write Relationships to Graph
                     if relationships:
@@ -637,8 +843,67 @@ class EntityWriter:
                         ),
                     )
 
-    async def cleanup_null_entities(self, project_id: Optional[str] = None) -> int:
+    async def _delete_entity_aggregate(
+        self,
+        entity_ids: List[int],
+        project_id: str,
+    ) -> List[int]:
+        unique_ids = sorted(
+            {
+                int(entity_id)
+                for entity_id in entity_ids
+                if int(entity_id) != IDENTITY_ENTITY_ID
+            }
+        )
+        if not unique_ids:
+            return []
+
+        if not self.client.async_pool:
+            raise RuntimeError("PostgresClient async_pool is not initialized")
+
+        async with self.client.async_pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    return await self._delete_entity_aggregate_with_cursor(
+                        cur,
+                        unique_ids,
+                        project_id,
+                    )
+
+    async def _delete_entity_aggregate_with_cursor(
+        self,
+        cur,
+        entity_ids: List[int],
+        project_id: str,
+    ) -> List[int]:
+        if not entity_ids:
+            return []
+
+        await cur.execute(
+            """
+            DELETE FROM entities
+            WHERE entity_id = ANY(%s)
+              AND project_id = %s
+              AND entity_id <> %s
+            RETURNING entity_id
+            """,
+            (entity_ids, project_id, IDENTITY_ENTITY_ID),
+        )
+        deleted_ids = sorted(int(row["entity_id"]) for row in await cur.fetchall())
+        await self.projection.delete_entities_projection(
+            cur,
+            deleted_ids,
+            project_id,
+        )
+        return deleted_ids
+
+    async def cleanup_null_entities(
+        self, project_id: Optional[str] = None
+    ) -> List[int]:
         project_id = self._require_project_id(project_id, "cleanup_null_entities")
+        if not self.client.async_pool:
+            raise RuntimeError("PostgresClient async_pool is not initialized")
+
         async with self.client.async_pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
@@ -653,41 +918,11 @@ class EntityWriter:
                     )
                     rows = await cur.fetchall()
                     entity_ids = [row["entity_id"] for row in rows]
-
-                    cypher = """
-                    MATCH (e:Entity)
-                    WHERE e.type IS NULL AND e.project_id = $project_id
-                    DETACH DELETE e
-                    RETURN count(e)
-                    """
-                    await cur.execute(
-                        self.client.build_cypher(cypher, "deleted agtype"),
-                        (json.dumps({"project_id": project_id}),),
+                    return await self._delete_entity_aggregate_with_cursor(
+                        cur,
+                        entity_ids,
+                        project_id,
                     )
-
-                    if entity_ids:
-                        await cur.execute(
-                            "DELETE FROM entity_aliases WHERE entity_id = ANY(%s)",
-                            (entity_ids,),
-                        )
-                        await cur.execute(
-                            """
-                            DELETE FROM entity_search
-                            WHERE entity_id = ANY(%s)
-                              AND project_id = %s
-                            """,
-                            (entity_ids, project_id),
-                        )
-                        await cur.execute(
-                            """
-                            DELETE FROM entities
-                            WHERE entity_id = ANY(%s)
-                              AND project_id = %s
-                            """,
-                            (entity_ids, project_id),
-                        )
-
-        return len(entity_ids)
 
     async def delete_entity(
         self,
@@ -695,132 +930,17 @@ class EntityWriter:
         project_id: Optional[str] = None,
     ) -> bool:
         project_id = self._require_project_id(project_id, "delete_entity")
-        async with self.client.async_pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        DELETE FROM entity_aliases
-                        WHERE entity_id = %s
-                          AND EXISTS (
-                              SELECT 1
-                              FROM entities
-                              WHERE entities.entity_id = entity_aliases.entity_id
-                                AND project_id = %s
-                                AND entities.entity_id <> %s
-                          )
-                        """,
-                        (entity_id, project_id, IDENTITY_ENTITY_ID),
-                    )
-                    await cur.execute(
-                        """
-                        DELETE FROM entities
-                        WHERE entity_id = %s
-                          AND project_id = %s
-                          AND entity_id <> %s
-                        """,
-                        (entity_id, project_id, IDENTITY_ENTITY_ID),
-                    )
+        if entity_id == IDENTITY_ENTITY_ID:
+            logger.warning("Identity entity deletion rejected")
+            return False
 
-                    # Delete from Graph
-                    cypher = """
-                    MATCH (e:Entity {id: $id})
-                    WHERE e.project_id = $project_id AND e.id <> $identity_entity_id
-                    OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
-                    DETACH DELETE e, f
-                    RETURN count(e)
-                    """
-                    await cur.execute(
-                        self.client.build_cypher(cypher),
-                        (
-                            json.dumps(
-                                {
-                                    "id": entity_id,
-                                    "project_id": project_id,
-                                    "identity_entity_id": IDENTITY_ENTITY_ID,
-                                }
-                            ),
-                        ),
-                    )
-
-                    # Delete from Vector Table
-                    await cur.execute(
-                        """
-                        DELETE FROM entity_search
-                        WHERE entity_id = %s
-                          AND project_id = %s
-                        """,
-                        (entity_id, project_id),
-                    )
-        return True
+        deleted_ids = await self._delete_entity_aggregate([entity_id], project_id)
+        return entity_id in deleted_ids
 
     async def bulk_delete_entities(
         self, entity_ids: List[int], project_id: Optional[str] = None
-    ) -> int:
+    ) -> List[int]:
         if not entity_ids:
-            return 0
+            return []
         project_id = self._require_project_id(project_id, "bulk_delete_entities")
-
-        async with self.client.async_pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        DELETE FROM entity_aliases
-                        WHERE entity_id = ANY(%s)
-                          AND EXISTS (
-                              SELECT 1
-                              FROM entities
-                              WHERE entities.entity_id = entity_aliases.entity_id
-                                AND project_id = %s
-                                AND entities.entity_id <> %s
-                          )
-                        """,
-                        (entity_ids, project_id, IDENTITY_ENTITY_ID),
-                    )
-                    await cur.execute(
-                        """
-                        DELETE FROM entities
-                        WHERE entity_id = ANY(%s)
-                          AND project_id = %s
-                          AND entity_id <> %s
-                        """,
-                        (entity_ids, project_id, IDENTITY_ENTITY_ID),
-                    )
-
-                    # Delete from Graph
-                    cypher = """
-                    MATCH (e:Entity)
-                    WHERE e.id IN $ids
-                      AND e.project_id = $project_id
-                      AND e.id <> $identity_entity_id
-                    OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
-                    DETACH DELETE e, f
-                    RETURN count(DISTINCT e)
-                    """
-                    await cur.execute(
-                        self.client.build_cypher(cypher, "deleted agtype"),
-                        (
-                            json.dumps(
-                                {
-                                    "ids": entity_ids,
-                                    "project_id": project_id,
-                                    "identity_entity_id": IDENTITY_ENTITY_ID,
-                                }
-                            ),
-                        ),
-                    )
-                    res = await cur.fetchall()
-                    deleted = int(res[0]["deleted"]) if res else 0
-
-                    # Delete from Vector Table
-                    await cur.execute(
-                        """
-                        DELETE FROM entity_search
-                        WHERE entity_id = ANY(%s)
-                          AND project_id = %s
-                        """,
-                        (entity_ids, project_id),
-                    )
-
-        return deleted
+        return await self._delete_entity_aggregate(entity_ids, project_id)

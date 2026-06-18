@@ -153,7 +153,7 @@ async def test_search_messages_drops_results_without_hit_context():
 
 
 @pytest.mark.no_network
-async def test_hydrate_evidence_uses_explicit_scope_and_legacy_default_scope():
+async def test_hydrate_evidence_uses_explicit_and_default_scope():
     redis = FakeRedis()
     await redis.hset(
         RedisKeys.message_content("grace", "session-9"),
@@ -172,16 +172,6 @@ async def test_hydrate_evidence_uses_explicit_scope_and_legacy_default_scope():
             {
                 "content": "legacy default message",
                 "timestamp": "2026-01-01T10:01:00+00:00",
-            }
-        ),
-    )
-    await redis.hset(
-        RedisKeys.conversation("ada", "session-1"),
-        "turn_2",
-        json.dumps(
-            {
-                "content": "turn evidence",
-                "timestamp": "2026-01-01T10:02:00+00:00",
             }
         ),
     )
@@ -210,13 +200,6 @@ async def test_hydrate_evidence_uses_explicit_scope_and_legacy_default_scope():
             "session_id": "session-1",
             "message": "legacy default message",
             "timestamp": "2026-01-01T10:01:00+00:00",
-        },
-        {
-            "id": "turn_2",
-            "user_name": "ada",
-            "session_id": "session-1",
-            "message": "turn evidence",
-            "timestamp": "2026-01-01T10:02:00+00:00",
         },
     ]
 

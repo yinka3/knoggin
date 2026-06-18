@@ -1,7 +1,13 @@
+import json
+from datetime import datetime, timezone
+
 import pytest
 
+from common.schema.primitives import FactRecord
+from common.scoping import IDENTITY_ENTITY_ID, IDENTITY_SCOPE
 from knoggin_server.knowledge.db.readers.entity_reader import EntityReader
 from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
+from knoggin_server.knowledge.db.writers.fact_writer import FactWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -37,6 +43,7 @@ RELATIONSHIP_GRAPH_FIELDS = {
 def make_entity(**overrides):
     entity = {
         "id": 2,
+        "is_new": True,
         "canonical_name": "Ada Lovelace",
         "aliases": ["Ada"],
         "type": "person",
@@ -110,6 +117,134 @@ async def test_entity_writer_write_batch_rejects_unscoped_relationship():
 
 
 @pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_write_batch_requires_explicit_write_intent():
+    client = RecordingPostgresClient()
+    writer = EntityWriter(client)
+    entity = make_entity()
+    entity.pop("is_new")
+
+    with pytest.raises(ValueError, match="missing is_new write intent"):
+        await writer.write_batch([entity], [])
+
+    assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_new_entity_uses_strict_insert():
+    client = RecordingPostgresClient()
+    writer = EntityWriter(client)
+
+    await writer.write_batch([make_entity(aliases=[], embedding=None)], [])
+
+    canonical_sql = client.calls[0][1]
+    assert "INSERT INTO entities" in canonical_sql
+    assert "ON CONFLICT (entity_id)" not in canonical_sql
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_existing_entity_must_exist_in_scope():
+    client = RecordingPostgresClient(fetchone_results=[None])
+    writer = EntityWriter(client)
+
+    with pytest.raises(RuntimeError, match="Existing entity 2 was not found"):
+        await writer.write_batch(
+            [make_entity(is_new=False, aliases=[], embedding=None)],
+            [],
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_existing_entity_replaces_age_topic():
+    client = RecordingPostgresClient(
+        fetchone_results=[{"entity_id": 2}],
+    )
+    writer = EntityWriter(client)
+
+    await writer.write_batch(
+        [
+            make_entity(
+                is_new=False,
+                aliases=[],
+                embedding=None,
+                topic="Projects",
+            )
+        ],
+        [],
+    )
+
+    topic_call = next(
+        call
+        for call in client.calls
+        if "MERGE (e)-[:BELONGS_TO]->(t)" in call[1]
+    )
+    assert "OPTIONAL MATCH (e)-[old:BELONGS_TO]->(:Topic)" in topic_call[1]
+    assert "DELETE old" in topic_call[1]
+    assert json.loads(topic_call[2][0])["batch"] == [
+        {"id": 2, "topic": "Projects"}
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_ensures_reserved_identity_in_sql_and_age(monkeypatch):
+    client = RecordingPostgresClient(fetchone_results=[None])
+    writer = EntityWriter(client)
+    monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
+
+    identity = await writer.ensure_identity_entity(
+        "Ada Lovelace",
+        ["Ada", " ada ", "Ada Lovelace", ""],
+    )
+
+    assert identity == {
+        "id": IDENTITY_ENTITY_ID,
+        "user_name": "Ada Lovelace",
+        "session_id": None,
+        "project_id": IDENTITY_SCOPE,
+        "canonical_name": "Ada Lovelace",
+        "aliases": ["Ada"],
+        "type": "person",
+        "topic": "Identity",
+        "confidence": 1.0,
+        "now": 123456,
+    }
+    sql = "\n".join(call[1] for call in client.calls)
+    assert "pg_advisory_xact_lock" in sql
+    assert "INSERT INTO entities" in sql
+    assert "DELETE FROM entity_aliases" in sql
+    assert "INSERT INTO entity_aliases" in sql
+    assert "INSERT INTO entity_search" in sql
+    assert "MERGE (e:Entity {id: $id})" in sql
+    assert client.transaction_enters == 1
+    assert client.transaction_exits == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_rejects_non_identity_occupant_at_reserved_id():
+    client = RecordingPostgresClient(
+        fetchone_results=[
+            {
+                "entity_id": IDENTITY_ENTITY_ID,
+                "user_name": "grace",
+                "project_id": "project-1",
+                "canonical_name": "Grace Hopper",
+            }
+        ]
+    )
+    writer = EntityWriter(client)
+
+    with pytest.raises(RuntimeError, match="ID 1 is occupied"):
+        await writer.ensure_identity_entity("Ada Lovelace")
+
+    assert not any("INSERT INTO entities" in call[1] for call in client.calls)
+
+
+@pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
@@ -133,7 +268,7 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
                 evidence_ref={
                     "user_name": "ada",
                     "session_id": "session-2",
-                    "message_id": "turn_5",
+                    "message_id": "msg_125",
                 },
                 message_id="ignored",
                 context=None,
@@ -167,7 +302,7 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
     edges = await real_postgres_client.execute_read(edge_query, ("{}",))
     assert len(edges) == 2
     edges_str = str(edges)
-    assert "1000000005" in edges_str
+    assert "125" in edges_str
     assert "123" in edges_str
 
     rel_rows = await real_postgres_client.execute_read(
@@ -378,24 +513,55 @@ async def test_entity_writer_delete_entity_deletes_graph_and_search_row(
     real_postgres_client
 ):
     writer = EntityWriter(real_postgres_client)
+    fact_writer = FactWriter(real_postgres_client)
     reader = EntityReader(real_postgres_client)
 
     # Seed
     await writer.write_batch([make_entity()], [])
+    await fact_writer.create_facts_batch(
+        2,
+        [
+            FactRecord(
+                id="delete-fact",
+                content="Temporary fact",
+                source_entity_id=2,
+                valid_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                embedding=[0.1] * 1024,
+            )
+        ],
+        user_name="ada",
+        session_id="session-1",
+        project_id="project-1",
+    )
 
     assert await writer.delete_entity(2, project_id="project-1") is True
 
-    # Search table should be empty
     entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
     assert entity is None
+    sql_counts = await real_postgres_client.execute_read(
+        """
+        SELECT
+            (SELECT count(*) FROM facts WHERE fact_id = 'delete-fact') AS facts,
+            (
+                SELECT count(*)
+                FROM fact_search
+                WHERE fact_id = 'delete-fact'
+            ) AS fact_search
+        """
+    )
+    assert sql_counts == [{"facts": 0, "fact_search": 0}]
 
-    # Graph node should be deleted
     node_query = real_postgres_client.build_cypher(
-        "MATCH (e:Entity {id: 2}) RETURN count(e) as c",
-        "c agtype",
+        """
+        OPTIONAL MATCH (e:Entity {id: 2})
+        OPTIONAL MATCH (f:Fact {id: 'delete-fact'})
+        RETURN count(e), count(f)
+        """,
+        "entity_count agtype, fact_count agtype",
     )
     res = await real_postgres_client.execute_read(node_query, ("{}",))
-    assert int(res[0]["c"]) == 0
+    assert int(res[0]["entity_count"]) == 0
+    assert int(res[0]["fact_count"]) == 0
 
 
 @pytest.mark.storage
@@ -404,7 +570,98 @@ async def test_entity_writer_bulk_delete_entities_empty_list_skips_db():
     client = RecordingPostgresClient()
     writer = EntityWriter(client)
 
-    assert await writer.bulk_delete_entities([], project_id="project-1") == 0
+    assert await writer.bulk_delete_entities([], project_id="project-1") == []
+    assert client.calls == []
+    assert client.connection_enters == 0
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_bulk_delete_returns_exact_scoped_ids():
+    client = RecordingPostgresClient(
+        fetchall_results=[[{"entity_id": 2}, {"entity_id": 4}]]
+    )
+    writer = EntityWriter(client)
+
+    deleted_ids = await writer.bulk_delete_entities(
+        [4, 2, 4, IDENTITY_ENTITY_ID, 99],
+        project_id="project-1",
+    )
+
+    assert deleted_ids == [2, 4]
+    delete_call = next(
+        call
+        for call in client.calls
+        if call[0] == "execute" and "DELETE FROM entities" in call[1]
+    )
+    assert delete_call[2] == ([2, 4, 99], "project-1", IDENTITY_ENTITY_ID)
+    projection_call = next(
+        call for call in client.calls if "e.id IN $entity_ids" in call[1]
+    )
+    assert json.loads(projection_call[2][0]) == {
+        "entity_ids": [2, 4],
+        "project_id": "project-1",
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_null_cleanup_uses_aggregate_deletion():
+    client = RecordingPostgresClient(
+        fetchall_results=[
+            [{"entity_id": 4}, {"entity_id": 2}],
+            [{"entity_id": 2}, {"entity_id": 4}],
+        ]
+    )
+    writer = EntityWriter(client)
+
+    deleted_ids = await writer.cleanup_null_entities(project_id="project-1")
+
+    assert deleted_ids == [2, 4]
+    assert any(
+        call[0] == "execute"
+        and "WHERE type IS NULL" in call[1]
+        and call[2] == ("project-1",)
+        for call in client.calls
+    )
+    assert any(
+        call[0] == "execute"
+        and "DELETE FROM entities" in call[1]
+        and call[2] == ([4, 2], "project-1", IDENTITY_ENTITY_ID)
+        for call in client.calls
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_delete_returns_false_when_scope_does_not_match():
+    client = RecordingPostgresClient(fetchall_results=[[]])
+    writer = EntityWriter(client)
+
+    assert await writer.delete_entity(2, project_id="wrong-project") is False
+    assert not any("MATCH (e:Entity)" in call[1] for call in client.calls)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_rejects_identity_deletion_without_db_access():
+    client = RecordingPostgresClient()
+    writer = EntityWriter(client)
+
+    assert (
+        await writer.delete_entity(
+            IDENTITY_ENTITY_ID,
+            project_id=IDENTITY_SCOPE,
+        )
+        is False
+    )
+    assert (
+        await writer.bulk_delete_entities(
+            [IDENTITY_ENTITY_ID],
+            project_id=IDENTITY_SCOPE,
+        )
+        == []
+    )
     assert client.calls == []
     assert client.connection_enters == 0
 
@@ -416,7 +673,6 @@ async def test_entity_writer_bulk_delete_entities_empty_list_skips_db():
     [
         (7, 7),
         ("msg_123", 123),
-        ("turn_5", 1_000_000_005),
     ],
 )
 def test_entity_writer_build_evidence_ref_normalizes_message_ids(
@@ -440,7 +696,7 @@ def test_entity_writer_build_evidence_ref_prefers_explicit_scoped_ref():
             evidence_ref={
                 "user_name": "ada",
                 "session_id": "session-2",
-                "message_id": "turn_9",
+                "message_id": "msg_9",
             },
             user_name="ignored",
             session_id="ignored",
@@ -449,7 +705,7 @@ def test_entity_writer_build_evidence_ref_prefers_explicit_scoped_ref():
     ) == {
         "user_name": "ada",
         "session_id": "session-2",
-        "message_id": 1_000_000_009,
+        "message_id": 9,
     }
 
 

@@ -101,16 +101,35 @@ class FakeMergeGraph:
         self.updated_embeddings = []
         self.updated_names = []
         self.messages_by_ids_calls = []
+        self.topic_strength = {}
+        self.topic_strength_reads = []
 
-    async def merge_entities(self, primary_id, secondary_id, project_id=None):
+    async def merge_entities(
+        self,
+        primary_id,
+        secondary_id,
+        project_id=None,
+        final_topic=None,
+    ):
         self.merges.append(
+            {
+                "primary_id": primary_id,
+                "secondary_id": secondary_id,
+                "project_id": project_id,
+                "final_topic": final_topic,
+            }
+        )
+        return self.merge_results.get((primary_id, secondary_id), True)
+
+    async def get_merge_topic_strength(self, primary_id, secondary_id, project_id):
+        self.topic_strength_reads.append(
             {
                 "primary_id": primary_id,
                 "secondary_id": secondary_id,
                 "project_id": project_id,
             }
         )
-        return self.merge_results.get((primary_id, secondary_id), True)
+        return dict(self.topic_strength.get((primary_id, secondary_id), {}))
 
     async def invalidate_fact(self, fact_id, invalid_at, project_id=None):
         self.invalidations.append(

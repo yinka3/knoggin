@@ -295,8 +295,10 @@ async def test_graph_reader_hierarchy_candidates_attach_embeddings():
                 {
                     "parent_id": "2",
                     "parent_name": "Area",
+                    "parent_type": "area",
                     "child_id": "3",
                     "child_name": "Task",
+                    "child_type": "task",
                     "weight": "4",
                 }
             ],
@@ -309,6 +311,7 @@ async def test_graph_reader_hierarchy_candidates_attach_embeddings():
     reader = GraphReader(client)
 
     candidates = await reader.get_hierarchy_candidates(
+        "project-1",
         "Work",
         "area",
         ["task"],
@@ -319,17 +322,28 @@ async def test_graph_reader_hierarchy_candidates_attach_embeddings():
         {
             "parent_id": 2,
             "parent_name": "Area",
+            "parent_type": "area",
             "parent_embedding": [0.1, 0.2],
             "child_id": 3,
             "child_name": "Task",
+            "child_type": "task",
             "child_embedding": [0.3, 0.4],
             "weight": "4",
         }
     ]
     assert "FROM relationships rel" in client.calls[0][1]
     assert "FROM hierarchy_edges edge" in client.calls[0][1]
-    assert client.calls[0][2] == ("Work", "Work", "area", ["task"], 2)
+    assert "rel.project_id = %s" in client.calls[0][1]
+    assert client.calls[0][2] == (
+        "project-1",
+        "Work",
+        "Work",
+        "area",
+        ["task"],
+        2,
+    )
     assert set(client.calls[1][2][0]) == {2, 3}
+    assert client.calls[1][2][1] == "project-1"
 
 
 @pytest.mark.storage
@@ -338,8 +352,90 @@ async def test_graph_reader_hierarchy_candidates_skip_embedding_query_when_empty
     client = RecordingPostgresClient(execute_read_results=[[]])
     reader = GraphReader(client)
 
-    assert await reader.get_hierarchy_candidates("Work", "area", ["task"]) == []
+    assert (
+        await reader.get_hierarchy_candidates(
+            "project-1", "Work", "area", ["task"]
+        )
+        == []
+    )
     assert len(client.calls) == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_hierarchy_candidates_require_project_scope():
+    client = RecordingPostgresClient()
+    reader = GraphReader(client)
+
+    with pytest.raises(ValueError, match="requires project_id scope"):
+        await reader.get_hierarchy_candidates("", "Work", "area", ["task"])
+
+    assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_get_merge_topic_strength_reads_canonical_sql():
+    row = {
+        "p_topic": "People",
+        "p_conf": "0.8",
+        "p_last": "100",
+        "s_topic": "Projects",
+        "s_conf": "0.9",
+        "s_last": "200",
+        "p_fact_count": "1",
+        "s_fact_count": "2",
+        "p_relationship_count": "3",
+        "s_relationship_count": "4",
+    }
+    client = RecordingPostgresClient(execute_read_results=[[row]])
+    reader = GraphReader(client)
+
+    strength = await reader.get_merge_topic_strength(2, 3, "project-1")
+
+    assert strength == row
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM entities p" in query
+    assert "JOIN entities s" in query
+    assert "invalid_at IS NULL" in query
+    assert "FROM relationships" in query
+    assert "AND NOT" in query
+    assert params == (
+        "project-1",
+        2,
+        "project-1",
+        3,
+        "project-1",
+        2,
+        2,
+        2,
+        3,
+        3,
+        2,
+        "project-1",
+        3,
+        3,
+        2,
+        3,
+        3,
+        2,
+        3,
+        "project-1",
+        2,
+        "project-1",
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_get_merge_topic_strength_requires_project_scope():
+    client = RecordingPostgresClient()
+    reader = GraphReader(client)
+
+    with pytest.raises(ValueError, match="requires project_id scope"):
+        await reader.get_merge_topic_strength(2, 3, "")
+
+    assert client.calls == []
 
 
 @pytest.mark.storage

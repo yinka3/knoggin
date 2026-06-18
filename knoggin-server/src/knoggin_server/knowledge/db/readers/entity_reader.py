@@ -520,37 +520,76 @@ class EntityReader:
             logger.warning("Refusing unsafe orphan lookup without project scope")
             return []
 
-        cypher = """
-        MATCH (e:Entity)
-        WHERE e.id <> $protected_id
-        AND e.project_id = $project_id
-        AND NOT EXISTS {
-            MATCH (e)-[:HAS_FACT]->(f_active:Fact)
-            WHERE f_active.invalid_at IS NULL
-        }
-        OPTIONAL MATCH (e)-[r:RELATED_TO]-(neighbor)
-        WITH e, collect(neighbor.id) as neighbors
-        WHERE (size(neighbors) = 0 AND e.last_mentioned < $orphan_cutoff)
-           OR (
-                size(neighbors) = 1
-                AND neighbors[0] = $protected_id
-                AND e.last_mentioned < $stale_cutoff
-           )
-        RETURN e.id
+        query = """
+        SELECT e.entity_id AS id
+        FROM entities e
+        WHERE e.entity_id <> %s
+          AND e.project_id = %s
+          AND NOT EXISTS (
+              SELECT 1
+              FROM facts f
+              WHERE f.entity_id = e.entity_id
+                AND f.project_id = e.project_id
+                AND f.invalid_at IS NULL
+          )
+          AND (
+              (
+                  e.last_mentioned_ms < %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM relationships r
+                      WHERE r.project_id = e.project_id
+                        AND (
+                            r.entity_a_id = e.entity_id
+                            OR r.entity_b_id = e.entity_id
+                        )
+                  )
+              )
+              OR
+              (
+                  e.last_mentioned_ms < %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM relationships r
+                      WHERE r.project_id = e.project_id
+                        AND (
+                            (
+                                r.entity_a_id = e.entity_id
+                                AND r.entity_b_id = %s
+                            )
+                            OR (
+                                r.entity_b_id = e.entity_id
+                                AND r.entity_a_id = %s
+                            )
+                        )
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM relationships r
+                      WHERE r.project_id = e.project_id
+                        AND (
+                            r.entity_a_id = e.entity_id
+                            OR r.entity_b_id = e.entity_id
+                        )
+                        AND r.entity_a_id <> %s
+                        AND r.entity_b_id <> %s
+                  )
+              )
+          )
+        ORDER BY e.entity_id
         """
-        query = self.client.build_cypher(cypher, "id agtype")
         try:
             res = await self.client.execute_read(
                 query,
                 (
-                    json.dumps(
-                        {
-                            "protected_id": protected_id,
-                            "orphan_cutoff": orphan_cutoff_ms,
-                            "stale_cutoff": stale_junk_cutoff_ms,
-                            "project_id": project_id,
-                        }
-                    ),
+                    protected_id,
+                    project_id,
+                    orphan_cutoff_ms,
+                    stale_junk_cutoff_ms,
+                    protected_id,
+                    protected_id,
+                    protected_id,
+                    protected_id,
                 ),
             )
             return [int(r["id"]) for r in res]

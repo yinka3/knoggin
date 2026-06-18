@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.settings import DeveloperSettings, RootConfig
-from infrastructure.redis_client import RedisKeys
 from knoggin_server.project.state import ProjectState
 from knoggin_server.session.boot import SessionAssembler
 from tests.fixtures.factories import make_topic_config
@@ -175,9 +174,8 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.model == "model-a"
     assert ctx.active_topics == ["General", "Identity"]
 
-    assert harness.resources.graph_client.max_entity_id_calls == 1
-    assert len(harness.resources.redis.evals) == 1
-    assert harness.resources.redis.evals[0][1] == (RedisKeys.global_next_ent_id(), 41)
+    assert harness.resources.graph_client.max_entity_id_calls == 0
+    assert harness.resources.redis.evals == []
 
     assert RecordingBatchProcessor.instances == [harness.batch_processor]
     processor = harness.batch_processor

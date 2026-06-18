@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from common.scoping import IDENTITY_ENTITY_ID
+from common.scoping import IDENTITY_ENTITY_ID, IDENTITY_SCOPE
 from knoggin_server.knowledge.db.projection_rebuilder import ProjectionRebuilder
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -70,7 +70,7 @@ async def test_projection_rebuilder_replays_canonical_rows_into_age_projection()
                     "id": IDENTITY_ENTITY_ID,
                     "user_name": "ada",
                     "session_id": "session-1",
-                    "project_id": "global",
+                    "project_id": IDENTITY_SCOPE,
                     "canonical_name": "ada",
                     "type": "person",
                     "topic": "Identity",
@@ -177,6 +177,14 @@ async def test_projection_rebuilder_replays_canonical_rows_into_age_projection()
     assert entity_batch[0]["last_updated"] == 222
     assert entity_batch[0]["last_mentioned"] == 111
     assert entity_batch[0]["last_profiled_msg_id"] == 7
+
+    topic_projection = next(
+        call
+        for call in client.calls
+        if "MERGE (e)-[:BELONGS_TO]->(t)" in call[1]
+    )
+    assert "OPTIONAL MATCH (e)-[old:BELONGS_TO]->(:Topic)" in topic_projection[1]
+    assert "DELETE old" in topic_projection[1]
 
     relationship_projection = next(
         call

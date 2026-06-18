@@ -15,7 +15,7 @@ def make_topic_config():
     )
 
 
-def make_project_state(project_id="global", redis=None, scheduler=None):
+def make_project_state(project_id="project-1", redis=None, scheduler=None):
     redis = redis or FakeRedis()
     scheduler = scheduler or FakeScheduler()
     return ProjectState(

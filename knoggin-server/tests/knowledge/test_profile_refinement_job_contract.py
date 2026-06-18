@@ -6,7 +6,7 @@ import pytest
 from common.schema.contracts import EntityProfilesResult, FactResolutionSummary
 from common.schema.primitives import Fact, FactRecord, ProfileUpdate
 from common.schema.settings import DeveloperSettings, RootConfig
-from common.scoping import GLOBAL_PROJECT_SCOPE
+from common.scoping import IDENTITY_SCOPE
 from common.utils.time_utils import frozen_time
 from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
@@ -575,7 +575,7 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
     ]
     assert await redis.smembers(RedisKeys.dirty_entities("ada", "project-1")) == {"2"}
     assert entities.embedding_calls == [
-        (2, "Widget. Widget now requires direct source evidence")
+        (2, "Widget (concept). Widget now requires direct source evidence")
     ]
     assert graph.update_checkpoint_calls == []
 
@@ -836,13 +836,13 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     assert args[8:12] == (0.25, 0.9, 2, "judge contradictions")
     assert kwargs == {
         "user_name": "ada",
-        "project_id": GLOBAL_PROJECT_SCOPE,
+        "project_id": IDENTITY_SCOPE,
         "source_session_by_msg_id": {7: "session-7"},
     }
 
     assert await redis.smembers(RedisKeys.dirty_entities("ada", "project-1")) == {"1"}
     assert entities.embedding_calls == [
-        (1, "ada. Ada requires direct evidence for profile updates")
+        (1, "ada (person). Ada requires direct evidence for profile updates")
     ]
     assert graph.update_profile_calls == [
         {
@@ -850,7 +850,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
             "canonical_name": "ada",
             "embedding": [1.0, 0.5],
             "last_msg_id": 12,
-            "project_id": GLOBAL_PROJECT_SCOPE,
+            "project_id": IDENTITY_SCOPE,
         }
     ]
     assert [args[2] for args, _ in events] == [
