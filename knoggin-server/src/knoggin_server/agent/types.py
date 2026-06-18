@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union
 
+from common.schema.agent_stream import StreamUsage
 from common.schema.memory import PromptContext
 
 
@@ -56,11 +57,12 @@ class AgentState:
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     last_error: Optional[str] = None
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
-    usage: Dict[str, int] = field(
+    usage: StreamUsage = field(
         default_factory=lambda: {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "approximate": False,
         }
     )
 
@@ -109,7 +111,7 @@ class RetrievedEvidence:
 
 @dataclass
 class AgentContext:
-    """Core container aggregating configuration, state, and evidence for an agent execution."""
+    """Configuration, state, and evidence for one agent execution."""
 
     config: AgentRunConfig
     state: AgentState

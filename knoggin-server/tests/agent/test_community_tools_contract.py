@@ -57,7 +57,7 @@ def make_base_tools(redis):
     )
 
 
-def make_tool(*, redis=None, participants=None):
+def make_tool(*, redis=None, participants=None, discussion_id="disc-1"):
     redis = redis or FakeRedis()
     store = RecordingCommunityStore()
     participants = participants if participants is not None else ["agent-1"]
@@ -65,7 +65,7 @@ def make_tool(*, redis=None, participants=None):
         user_name="ada",
         base_tools=make_base_tools(redis),
         community_store=store,
-        discussion_id="disc-1",
+        discussion_id=discussion_id,
         agent_id="agent-1",
         memory_mgr=object(),
         participants=participants,
@@ -156,6 +156,29 @@ async def test_community_tools_save_memory_refuses_when_memory_is_full():
 
 
 @pytest.mark.no_network
+async def test_community_memory_persists_across_discussions_for_same_agent():
+    redis = FakeRedis()
+    first, _, _, _ = make_tool(redis=redis, discussion_id="disc-1")
+    second, _, _, _ = make_tool(redis=redis, discussion_id="disc-2")
+
+    try:
+        first_result = await first.save_memory("first discussion")
+        second_result = await second.save_memory("second discussion")
+    finally:
+        await first.close()
+        await second.close()
+
+    key = RedisKeys.community_agent_memory("ada", "agent-1")
+    entries = {
+        memory_id: json.loads(payload)
+        for memory_id, payload in (await redis.hgetall(key)).items()
+    }
+
+    assert entries[first_result["memory_id"]]["discussion_id"] == "disc-1"
+    assert entries[second_result["memory_id"]]["discussion_id"] == "disc-2"
+
+
+@pytest.mark.no_network
 async def test_community_tools_spawn_specialist_creates_agent_and_seed_memory(
     monkeypatch,
 ):
@@ -206,7 +229,7 @@ async def test_community_tools_spawn_specialist_creates_agent_and_seed_memory(
     assert events[0][3]["agent_id"] == result["id"]
     assert events[0][3]["seeded_directives"] == result["seeded_directives"]
 
-    memory_key = RedisKeys.agent_working_memory(result["id"], "directives")
+    memory_key = RedisKeys.agent_directives("ada", result["id"])
     seeded = [json.loads(value) for value in (await redis.hgetall(memory_key)).values()]
     seeded.sort(key=lambda item: item["mode"])
 

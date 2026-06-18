@@ -72,9 +72,9 @@ class CommunityManager:
         return bool(await self.resources.redis.get(self._active_discussion_key()))
 
     def _active_discussion_key(self) -> str:
-        return (
-            f"{RedisKeys.community_discussion_active()}:"
-            f"{self.user_name}:{self.project_state.project_id}"
+        return RedisKeys.community_discussion_active(
+            self.user_name,
+            self.project_state.project_id,
         )
 
     async def _agent_exists(self, agent_id: str) -> bool:
@@ -142,7 +142,7 @@ class CommunityManager:
         await self.resources.redis.set(
             self._active_discussion_key(), discussion_id
         )
-        await self.resources.graph_client.community.create_discussion(
+        await self.resources.graph.community.create_discussion(
             discussion_id, topic, valid_agent_ids
         )
 
@@ -164,7 +164,7 @@ class CommunityManager:
                 )
                 self._active_discussion_id = None
                 try:
-                    await self.resources.graph_client.community.close_discussion(
+                    await self.resources.graph.community.close_discussion(
                         discussion_id
                     )
                 except Exception as e:
@@ -243,7 +243,7 @@ class CommunityManager:
                 }
             )
 
-            await self.resources.graph_client.community.add_message(
+            await self.resources.graph.community.add_message(
                 discussion_id, agent_id, message, "assistant"
             )
 
@@ -292,14 +292,14 @@ class CommunityManager:
             topic_config=ctx.project.topic_config,
             search_cfg={},
             file_rag=ctx.file_rag,
-            graph_client=self.resources.graph_client,
+            graph_client=self.resources.graph,
             redis=self.resources.redis,
         )
 
         comm_tools = CommunityTools(
             self.user_name,
             base_tools,
-            self.resources.graph_client.community,
+            self.resources.graph.community,
             discussion_id,
             agent.id,
             comm_memory,
@@ -485,7 +485,7 @@ class CommunityManager:
             },
         )
 
-        response = await self.resources.llm_service.call_llm(
+        response = await self.resources.llm_service.generate_text(
             system_prompt,
             user_prompt,
             model=seeding_agent.model,
@@ -559,17 +559,17 @@ class CommunityManager:
         lines = []
 
         try:
-            stats = await self.resources.graph_client.get_graph_stats()
-            notable = await self.resources.graph_client.get_notable_entities(8)
+            stats = await self.resources.graph.get_graph_stats()
+            notable = await self.resources.graph.get_notable_entities(8)
             recent_entities = (
-                await self.resources.graph_client.get_recently_active_entities(7, 5)
+                await self.resources.graph.get_recently_active_entities(7, 5)
             )
-            recent_facts = await self.resources.graph_client.get_recent_facts(7, 10)
+            recent_facts = await self.resources.graph.get_recent_facts(7, 10)
             past_discussions = (
-                await self.resources.graph_client.community.get_recent_discussions(5)
+                await self.resources.graph.community.get_recent_discussions(5)
             )
             insights = (
-                await self.resources.graph_client.community.get_discussion_insights(5)
+                await self.resources.graph.community.get_discussion_insights(5)
             )
         except Exception as e:
             logger.warning(f"Failed to gather seeding context: {e}")

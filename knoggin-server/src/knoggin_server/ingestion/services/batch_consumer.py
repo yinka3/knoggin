@@ -8,7 +8,7 @@ from common.schema.contracts import BatchResult
 from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
 from common.utils.json_utils import safe_json_loads
-from infrastructure.graph_client import GraphClient
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
 
@@ -18,7 +18,7 @@ class BatchConsumer:
         self,
         user_name: str,
         session_id: str,
-        graph_client: GraphClient,
+        graph_client: GraphInterface,
         processor: BatchProcessor,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],

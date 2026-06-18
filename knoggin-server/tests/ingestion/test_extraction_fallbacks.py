@@ -9,7 +9,7 @@ class FakeLLM:
     def __init__(self, response):
         self.response = response
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         return self.response
 
 

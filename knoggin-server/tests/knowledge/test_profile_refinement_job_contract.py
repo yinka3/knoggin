@@ -1,11 +1,9 @@
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
 
 from common.schema.contracts import EntityProfilesResult, FactResolutionSummary
 from common.schema.primitives import Fact, FactRecord, ProfileUpdate
-from common.schema.settings import DeveloperSettings, RootConfig
 from common.scoping import IDENTITY_SCOPE
 from common.utils.time_utils import frozen_time
 from infrastructure.job.base import JobContext
@@ -135,7 +133,7 @@ class FakeLLM:
         self.result = result or EntityProfilesResult()
         self.calls = []
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
         return self.result
 
@@ -166,15 +164,6 @@ def make_job(
         contradiction_sim_high=0.9,
         contradiction_batch_size=2,
         contradiction_prompt="judge contradictions",
-    )
-
-
-def patch_profile_config(monkeypatch, *, merger_enabled=False):
-    root = RootConfig(developer_settings=DeveloperSettings())
-    root.developer_settings.jobs.merger.enabled = merger_enabled
-    monkeypatch.setattr(
-        "knoggin_server.knowledge.jobs.profile_job.ConfigManager.get",
-        staticmethod(lambda: SimpleNamespace(config=root)),
     )
 
 
@@ -293,7 +282,6 @@ def test_source_session_by_msg_id_maps_only_user_messages_with_session_id():
 async def test_execute_filters_dirty_ids_force_limit_clears_processed_and_merges(
     monkeypatch,
 ):
-    patch_profile_config(monkeypatch, merger_enabled=True)
     patch_profile_events(monkeypatch)
     redis = FakeRedis()
     dirty_key = RedisKeys.dirty_entities("ada", "project-1")
@@ -352,7 +340,6 @@ async def test_execute_filters_dirty_ids_force_limit_clears_processed_and_merges
 async def test_execute_empty_conversation_returns_failure_without_profile_complete(
     monkeypatch,
 ):
-    patch_profile_config(monkeypatch)
     redis = FakeRedis()
     dirty_key = RedisKeys.dirty_entities("ada", "project-1")
     await redis.sadd(dirty_key, "2")

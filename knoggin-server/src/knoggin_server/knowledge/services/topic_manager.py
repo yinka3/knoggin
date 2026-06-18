@@ -12,7 +12,7 @@ async def generate_topics(
 ) -> dict:
 
     system = get_topic_seed_prompt(user_name)
-    result: TopicConfigResult = await llm_service.call_llm(
+    result: TopicConfigResult = await llm_service.generate_structured(
         response_model=TopicConfigResult, system=system, user=text
     )
 

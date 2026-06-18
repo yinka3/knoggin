@@ -1,7 +1,9 @@
+import os
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from common.exceptions import ConfigurationError
 from knoggin_server.agent.prompts import (
     get_connection_reasoning_prompt,
     get_contradiction_judgment_prompt,
@@ -9,6 +11,50 @@ from knoggin_server.agent.prompts import (
     get_profile_extraction_prompt,
     ner_reasoning_prompt,
 )
+
+
+class RedisConnectionSettings(BaseModel):
+    """Startup-only Redis connection and pool settings."""
+
+    model_config = ConfigDict(frozen=True)
+
+    url: str = "redis://localhost:6379/0"
+    max_connections: int = Field(10, ge=1)
+    health_check_interval: int = Field(30, ge=0)
+    connect_timeout: float = Field(2.0, gt=0)
+    startup_attempts: int = Field(3, ge=1)
+    startup_backoff_seconds: float = Field(0.25, ge=0)
+
+    @classmethod
+    def from_env(cls) -> "RedisConnectionSettings":
+        values = {
+            "url": os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            "max_connections": os.getenv("REDIS_MAX_CONNECTIONS", "10"),
+            "health_check_interval": os.getenv(
+                "REDIS_HEALTH_CHECK_INTERVAL",
+                "30",
+            ),
+            "connect_timeout": os.getenv("REDIS_CONNECT_TIMEOUT", "2.0"),
+            "startup_attempts": os.getenv("REDIS_STARTUP_ATTEMPTS", "3"),
+            "startup_backoff_seconds": os.getenv(
+                "REDIS_STARTUP_BACKOFF_SECONDS",
+                "0.25",
+            ),
+        }
+        try:
+            return cls.model_validate(values)
+        except ValidationError as exc:
+            errors = [
+                {
+                    "field": ".".join(str(part) for part in error["loc"]),
+                    "message": error["msg"],
+                }
+                for error in exc.errors(include_url=False)
+            ]
+            raise ConfigurationError(
+                "Invalid Redis connection settings",
+                details={"errors": errors},
+            ) from exc
 
 
 class TopicSchema(BaseModel):
@@ -83,7 +129,6 @@ class ProfileSettings(BaseModel):
 
 
 class MergerSettings(BaseModel):
-    enabled: bool = Field(True)
     auto_threshold: float = Field(0.93, ge=0.5, le=1.0)
     hitl_threshold: float = Field(0.65, ge=0.4, le=1.0)
     cosine_threshold: float = Field(0.65, ge=0.1, le=1.0)

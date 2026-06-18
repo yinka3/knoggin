@@ -43,92 +43,115 @@ class ScriptedLLM:
     def count_tokens(self, text):
         return len(text.split())
 
-    async def call_llm(self, **_kwargs):
+    async def generate_text(self, **_kwargs):
         raise AssertionError("embedding smoke should not call generation LLM")
 
-    async def call_llm_with_tools_streaming(self, **kwargs):
+    async def stream_with_tools(self, **kwargs):
         self.stream_calls.append(kwargs)
         turn = len(self.stream_calls)
 
         if turn == 1:
             yield {
-                "type": "thinking",
-                "content": "Search for agent/tool evidence first.",
+                "event": "thinking",
+                "data": {"content": "Search for agent/tool evidence first."},
             }
             yield {
-                "type": "tool_calls",
-                "calls": [
-                    {
-                        "id": "call-search-agent",
-                        "name": "search_messages",
-                        "arguments": json.dumps(
-                            {
-                                "query": (
-                                    "AgentExecutor tool behavior prompt context "
-                                    "active topics fake LLM real embedding retrieval"
-                                ),
-                                "limit": 5,
-                            }
-                        ),
-                    }
-                ],
+                "event": "tool_calls",
+                "data": {
+                    "content": "Search for agent/tool evidence first.",
+                    "calls": [
+                        {
+                            "id": "call-search-agent",
+                            "name": "search_messages",
+                            "arguments": json.dumps(
+                                {
+                                    "query": (
+                                        "AgentExecutor tool behavior prompt "
+                                        "context active topics fake LLM real "
+                                        "embedding retrieval"
+                                    ),
+                                    "limit": 5,
+                                }
+                            ),
+                        }
+                    ],
+                },
             }
             yield {
-                "type": "done",
-                "usage": {
-                    "prompt_tokens": 100,
-                    "completion_tokens": 10,
-                    "total_tokens": 110,
+                "event": "step_completed",
+                "data": {
+                    "content": "Search for agent/tool evidence first.",
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 10,
+                        "total_tokens": 110,
+                        "approximate": False,
+                    },
                 },
             }
             return
 
         if turn == 2:
             yield {
-                "type": "tool_calls",
-                "calls": [
-                    {
-                        "id": "call-draft-answer",
-                        "name": "submit_answer",
-                        "arguments": json.dumps(
-                            {"content": "draft based on retrieved evidence"}
-                        ),
-                    }
-                ],
+                "event": "tool_calls",
+                "data": {
+                    "content": "",
+                    "calls": [
+                        {
+                            "id": "call-draft-answer",
+                            "name": "submit_answer",
+                            "arguments": json.dumps(
+                                {"content": "draft based on retrieved evidence"}
+                            ),
+                        }
+                    ],
+                },
             }
             yield {
-                "type": "done",
-                "usage": {
-                    "prompt_tokens": 80,
-                    "completion_tokens": 8,
-                    "total_tokens": 88,
+                "event": "step_completed",
+                "data": {
+                    "content": "",
+                    "usage": {
+                        "prompt_tokens": 80,
+                        "completion_tokens": 8,
+                        "total_tokens": 88,
+                        "approximate": False,
+                    },
                 },
             }
             return
 
         yield {
-            "type": "tool_calls",
-            "calls": [
-                {
-                    "id": "call-final-answer",
-                    "name": "submit_answer",
-                    "arguments": json.dumps(
-                        {
-                            "content": (
-                                "Agent/tool smoke final answer from retrieved "
-                                "executor, tool behavior, and prompt context evidence."
-                            )
-                        }
-                    ),
-                }
-            ],
+            "event": "tool_calls",
+            "data": {
+                "content": "",
+                "calls": [
+                    {
+                        "id": "call-final-answer",
+                        "name": "submit_answer",
+                        "arguments": json.dumps(
+                            {
+                                "content": (
+                                    "Agent/tool smoke final answer from retrieved "
+                                    "executor, tool behavior, and prompt context "
+                                    "evidence."
+                                )
+                            }
+                        ),
+                    }
+                ],
+            },
         }
         yield {
-            "type": "done",
-            "usage": {
-                "prompt_tokens": 70,
-                "completion_tokens": 7,
-                "total_tokens": 77,
+            "event": "step_completed",
+            "data": {
+                "content": "",
+                "usage": {
+                    "prompt_tokens": 70,
+                    "completion_tokens": 7,
+                    "total_tokens": 77,
+                    "approximate": False,
+                },
             },
         }
 
@@ -330,9 +353,7 @@ async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
 
         events = [
             event
-            async for event in executor.execute(
-                simulated_date="2026-04-05 10:30 UTC"
-            )
+            async for event in executor.execute(simulated_date="2026-04-05 10:30 UTC")
         ]
     except Exception as exc:
         pytest.skip(f"Local agent embedding smoke could not run: {exc}")
@@ -371,6 +392,7 @@ async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
     second_turn_user_message = llm.stream_calls[1]["user"]
     assert "AgentExecutor chunk 8 smoke testing" in second_turn_user_message
     assert "`search_messages`: Found" in second_turn_user_message
-    assert "Active topics you can categorize memories under: Testing" in (
-        llm.stream_calls[0]["system"]
+    assert (
+        "Active topics you can categorize memories under: Testing"
+        in (llm.stream_calls[0]["system"])
     )

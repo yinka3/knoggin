@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from common.exceptions import LLMProviderError
 from common.schema.contracts import BulkRelevanceResult, RelevanceResult
 from common.schema.primitives import FactRecord
 from knoggin_server.ingestion.services.pipeline_service import (
@@ -109,10 +110,10 @@ class FakeLLM:
         self.raise_error = raise_error
         self.calls = []
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
         if self.raise_error:
-            raise RuntimeError("fake llm failure")
+            raise LLMProviderError("fake llm failure")
         if self.empty_response:
             return BulkRelevanceResult(judgments=[])
         if isinstance(self.relevance, list):

@@ -12,7 +12,6 @@ from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.community.community_store import CommunityStore
 from knoggin_server.knowledge.services.memory_service import (
     DIRECTIVE_MODES,
-    DIRECTIVES_CATEGORY,
     MemoryManager,
 )
 
@@ -64,8 +63,8 @@ class CommunityTools(Tools):
 
     async def save_memory(self, content: str, topic: str = "General") -> Dict:
         """
-        Saves a short-term working memory specifically for this active agent instance.
-        Capped at 10 memories per sub-agent to force summarization over accumulation.
+        Saves persistent AAC memory for this user and agent across discussions.
+        The ten-entry lifetime cap forces summarization over accumulation.
         """
         key = RedisKeys.community_agent_memory(self.user_name, self.agent_id)
         count = await self.redis.hlen(key)
@@ -118,7 +117,7 @@ class CommunityTools(Tools):
 
         now = get_now_iso()
         seeded_directives = 0
-        directives_key = RedisKeys.agent_working_memory(new_id, DIRECTIVES_CATEGORY)
+        directives_key = RedisKeys.agent_directives(self.user_name, new_id)
         for directive in initial_directives or []:
             if not isinstance(directive, dict):
                 continue

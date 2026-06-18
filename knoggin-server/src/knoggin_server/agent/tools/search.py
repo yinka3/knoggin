@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
-    from infrastructure.graph_client import GraphClient
+    from infrastructure.graph_interface import GraphInterface
     from knoggin_server.knowledge.services.embedding_service import EmbeddingService
     from knoggin_server.knowledge.services.entity_service import EntityManager
     from knoggin_server.knowledge.services.file_rag import FileRAGService
@@ -28,7 +28,7 @@ except ImportError:
 
 class SearchTools:
     redis: aioredis.Redis
-    graph_client: GraphClient
+    graph_client: GraphInterface
     embedding_service: EmbeddingService
     search_cfg: Dict
     file_rag: Optional[FileRAGService]
@@ -41,7 +41,8 @@ class SearchTools:
     async def search_messages(self, query: str, limit: int = None) -> List[Dict]:
         """
         Search the user's actual messages by keyword or phrase.
-        Use when you need their exact words, a direct quote, or when entity-based tools found nothing relevant.
+        Use when you need their exact words, a direct quote, or when entity-based
+        tools found nothing relevant.
         This is raw recall, not summarized knowledge.
 
         Args:
@@ -121,15 +122,16 @@ class SearchTools:
     async def search_entity(self, query: str, limit: int = None) -> List[Dict]:
         """
         Find a person, place, or thing by name.
-        Returns their full profile (type, summary, aliases, topic) and their 5 strongest connections.
-        Connections only include canonical name and aliases — use this tool again on a connection's name if you need their full profile.
+        Returns their full profile and their five strongest connections.
+        Connections include canonical name and aliases; search a connection's name
+        to retrieve its full profile.
 
         Args:
             query: Name or partial name to search
             limit: Max results to return (default 5)
 
         Returns:
-            List of matching entities with id, name, summary snippet, type, and top connections.
+            Matching entities with ID, name, summary, type, and top connections.
         """
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
         results = await self.graph_client.search_entity(
@@ -181,7 +183,10 @@ class SearchTools:
                 available = [f["original_name"] for f in files]
                 return [
                     {
-                        "error": f"File '{file_name}' not found. Available: {', '.join(available)}"
+                        "error": (
+                            f"File '{file_name}' not found. Available: "
+                            f"{', '.join(available)}"
+                        )
                     }
                 ]
 
@@ -227,10 +232,13 @@ class SearchTools:
         brave_key = self.search_cfg.get("brave_api_key", "")
         if not brave_key:
             return [
-                {
-                    "title": "Not Available",
-                    "url": "",
-                    "snippet": "News search requires a Brave Search API key. Configure one in Settings → Web Search.",
+                    {
+                        "title": "Not Available",
+                        "url": "",
+                        "snippet": (
+                            "News search requires a Brave Search API key. "
+                            "Configure one in Settings → Web Search."
+                        ),
                 }
             ]
         return await self._news_brave(query, limit, brave_key, freshness or "pw")
@@ -397,9 +405,8 @@ class SearchTools:
         grouped = {}
         for item in normalized:
             bucket = "message" if item["key"].startswith("msg_") else "conversation"
-            grouped.setdefault((item["user_name"], item["session_id"], bucket), []).append(
-                item
-            )
+            group_key = (item["user_name"], item["session_id"], bucket)
+            grouped.setdefault(group_key, []).append(item)
 
         try:
             for (user_name, session_id, bucket), items in grouped.items():
@@ -451,7 +458,9 @@ class SearchTools:
             )
             for message in fallback_msgs:
                 ts_iso = ""
-                if "timestamp" in message and isinstance(message["timestamp"], (int, float)):
+                if "timestamp" in message and isinstance(
+                    message["timestamp"], (int, float)
+                ):
                     ts_iso = datetime.fromtimestamp(
                         message["timestamp"] / 1000.0, timezone.utc
                     ).isoformat()
@@ -495,26 +504,22 @@ class SearchTools:
         session_id: Optional[str] = None,
     ) -> List[Dict]:
         """
-        Given a specific message or turn ID, retrieve the surrounding conversational
+        Given a specific message ID, retrieve the surrounding conversational
         context (previous and succeeding turns) to provide continuity in search results.
         """
         target_session_id = session_id or self.session_id
         sorted_key = RedisKeys.recent_conversation(self.user_name, target_session_id)
         conv_key = RedisKeys.conversation(self.user_name, target_session_id)
-        lookup_key = RedisKeys.msg_to_turn_lookup(self.user_name, target_session_id)
 
-        target_turn_id = msg_id
-        is_msg_id = msg_id.startswith("msg_")
-        if is_msg_id:
-            raw_id = msg_id.split("_", 1)[1]
-            target_turn_id = await self.redis.hget(lookup_key, raw_id)
+        is_prefixed_msg_id = msg_id.startswith("msg_")
+        target_message_id = (
+            msg_id.split("_", 1)[1] if is_prefixed_msg_id else msg_id
+        )
 
-        rank = None
-        if target_turn_id:
-            rank = await self.redis.zrank(sorted_key, target_turn_id)
+        rank = await self.redis.zrank(sorted_key, target_message_id)
 
         if rank is None:
-            if is_msg_id:
+            if is_prefixed_msg_id:
                 try:
                     numerical_msg_id = int(msg_id.split("_")[1])
                     fallback_msgs = await self.graph_client.get_surrounding_messages(
@@ -553,20 +558,24 @@ class SearchTools:
         start = max(0, rank - back_fetch)
         end = rank + forward + 1
 
-        turn_ids = await self.redis.zrange(sorted_key, start, end)
-        if not turn_ids:
+        message_ids = await self.redis.zrange(sorted_key, start, end)
+        if not message_ids:
             return []
 
         pipe = self.redis.pipeline()
-        for _id in turn_ids:
+        for _id in message_ids:
             pipe.hget(conv_key, _id)
         results = await pipe.execute()
 
-        raw_map = {tid: res for tid, res in zip(turn_ids, results) if res}
+        raw_map = {
+            message_id: result
+            for message_id, result in zip(message_ids, results)
+            if result
+        }
 
-        if target_turn_id not in turn_ids:
+        if target_message_id not in message_ids:
             return []
-        target_index = turn_ids.index(target_turn_id)
+        target_index = message_ids.index(target_message_id)
 
         pre_context = []
         post_context = []
@@ -575,11 +584,11 @@ class SearchTools:
         max_back = target_total - forward
 
         for i in range(target_index - 1, -1, -1):
-            tid = turn_ids[i]
-            if tid not in raw_map:
+            message_id = message_ids[i]
+            if message_id not in raw_map:
                 continue
 
-            data = safe_json_loads(raw_map[tid])
+            data = safe_json_loads(raw_map[message_id])
             if not data or not isinstance(data, dict):
                 continue
 
@@ -591,7 +600,7 @@ class SearchTools:
                     "role": role,
                     "timestamp": data.get("timestamp", ""),
                     "content": content,
-                    "id": tid,
+                    "id": f"msg_{message_id}",
                 }
             )
 
@@ -601,13 +610,13 @@ class SearchTools:
 
         pre_context.reverse()
 
-        tgt_data = safe_json_loads(raw_map[target_turn_id])
+        tgt_data = safe_json_loads(raw_map[target_message_id])
         if tgt_data and isinstance(tgt_data, dict):
             target_msg = {
                 "role": tgt_data.get("role", "unknown"),
                 "timestamp": tgt_data.get("timestamp", ""),
                 "content": tgt_data.get("content", ""),
-                "id": target_turn_id,
+                "id": f"msg_{target_message_id}",
                 "is_hit": True,
             }
         else:
@@ -615,18 +624,18 @@ class SearchTools:
                 "role": "unknown",
                 "timestamp": "",
                 "content": "",
-                "id": target_turn_id,
+                "id": f"msg_{target_message_id}",
                 "is_hit": True,
             }
 
         for i in range(
-            target_index + 1, min(len(turn_ids), target_index + forward + 1)
+            target_index + 1, min(len(message_ids), target_index + forward + 1)
         ):
-            tid = turn_ids[i]
-            if tid not in raw_map:
+            message_id = message_ids[i]
+            if message_id not in raw_map:
                 continue
 
-            data = safe_json_loads(raw_map[tid])
+            data = safe_json_loads(raw_map[message_id])
             if not data or not isinstance(data, dict):
                 continue
             post_context.append(
@@ -634,7 +643,7 @@ class SearchTools:
                     "role": data.get("role", "unknown"),
                     "timestamp": data.get("timestamp", ""),
                     "content": data.get("content", ""),
-                    "id": tid,
+                    "id": f"msg_{message_id}",
                 }
             )
 
@@ -847,7 +856,10 @@ class SearchTools:
                     {
                         "title": "Error",
                         "url": "",
-                        "snippet": f"Brave News API error ({response.status_code}). Check your API key in Settings.",
+                        "snippet": (
+                            f"Brave News API error ({response.status_code}). "
+                            "Check your API key in Settings."
+                        ),
                     }
                 ]
 

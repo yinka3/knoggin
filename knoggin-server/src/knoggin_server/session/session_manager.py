@@ -194,27 +194,31 @@ class SessionManager:
         sorted_key = RedisKeys.recent_conversation(self.user_name, session_id)
         conv_key = RedisKeys.conversation(self.user_name, session_id)
 
-        turn_ids = await self.resources.redis.zrange(sorted_key, 0, limit - 1)
-        if not turn_ids:
+        message_ids = await self.resources.redis.zrange(sorted_key, 0, limit - 1)
+        if not message_ids:
             return []
 
-        turn_data = await self.resources.redis.hmget(conv_key, *turn_ids)
+        message_data = await self.resources.redis.hmget(conv_key, *message_ids)
 
         turns = []
-        for raw in turn_data:
+        for message_id, raw in zip(message_ids, message_data):
             if not raw:
                 continue
             parsed = safe_json_loads(raw)
             if not parsed or not isinstance(parsed, dict):
-                logger.warning("Skipping corrupted turn in readonly history")
+                logger.warning("Skipping corrupted message in readonly history")
                 continue
-            turns.append(
-                {
-                    "role": parsed["role"],
-                    "content": parsed["content"],
-                    "timestamp": parsed["timestamp"],
-                }
-            )
+            try:
+                turns.append(
+                    {
+                        "message_id": int(message_id),
+                        "role": parsed["role"],
+                        "content": parsed["content"],
+                        "timestamp": parsed["timestamp"],
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Skipping malformed message in readonly history")
 
         return turns
 
@@ -236,17 +240,19 @@ class SessionManager:
         if not project_id and session_id in self.active_sessions:
             project_id = self.active_sessions[session_id].project_id
 
-        direct_keys = RedisKeys.get_session_scoped_keys(user, session_id)
-
-        memory_pattern = f"memory:{user}:{session_id}:*"
-        cursor = 0
+        direct_keys = RedisKeys.session_keys(user, session_id)
         deleted = 0
-        while True:
-            cursor, keys = await redis.scan(cursor, match=memory_pattern, count=100)
-            if keys:
-                deleted += int(await redis.delete(*keys))  # type: ignore
-            if cursor == 0:
-                break
+        for pattern in (
+            RedisKeys.session_memory_pattern(user, session_id),
+            RedisKeys.message_dedup_pattern(user, session_id),
+        ):
+            cursor = 0
+            while True:
+                cursor, keys = await redis.scan(cursor, match=pattern, count=100)
+                if keys:
+                    deleted += int(await redis.delete(*keys))  # type: ignore
+                if cursor == 0:
+                    break
 
         if session_id in self.active_sessions:
             ctx = self.active_sessions[session_id]

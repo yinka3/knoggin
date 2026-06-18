@@ -1,12 +1,14 @@
 import asyncio
+import json
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Set
 
+import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.time_utils import get_now, get_now_iso, parse_iso_time
-from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from infrastructure.redis_client import RedisKeys
 
 
 @dataclass
@@ -230,10 +232,18 @@ class CommunityEventEmitter(BaseEventEmitter):
 
     def __init__(self):
         super().__init__(history_maxlen=20)
+        self._redis: Optional[aioredis.Redis] = None
 
     @classmethod
     def get(cls) -> "CommunityEventEmitter":
         return _COMMUNITY_EMITTER
+
+    def bind_redis(self, redis: aioredis.Redis) -> None:
+        self._redis = redis
+
+    def unbind_redis(self, redis: aioredis.Redis) -> None:
+        if self._redis is redis:
+            self._redis = None
 
     async def emit(
         self, user_name: str, component: str, event: str, data: Dict[str, Any] = None
@@ -248,10 +258,14 @@ class CommunityEventEmitter(BaseEventEmitter):
 
         await self._emit_to_subs(user_name, evt)
 
-        try:
-            await AsyncRedisClient.publish(RedisKeys.community_pubsub_channel(), evt)
-        except Exception as e:
-            logger.error(f"Failed to publish community event to Redis: {e}")
+        if self._redis is not None:
+            try:
+                await self._redis.publish(
+                    RedisKeys.community_pubsub_channel(),
+                    json.dumps(evt),
+                )
+            except Exception as e:
+                logger.error(f"Failed to publish community event to Redis: {e}")
 
         self._emit_count += 1
         if self._emit_count % 100 == 0:
@@ -315,7 +329,8 @@ def emit_sync(
         if not loop:
             coro.close()
             logger.warning(
-                f"Dropped sync event {component}.{event}: no running event loop is registered"
+                f"Dropped sync event {component}.{event}: "
+                "no running event loop is registered"
             )
             return
         future = asyncio.run_coroutine_threadsafe(coro, loop)

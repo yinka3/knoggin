@@ -5,7 +5,7 @@ import pytest
 
 from common.schema.primitives import Message
 from common.utils.events import DebugEventEmitter
-from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from infrastructure.redis_client import RedisKeys
 from knoggin_server.project.project_manager import ProjectManager
 from knoggin_server.session.context import Context
 from knoggin_server.session.session_manager import SessionManager
@@ -31,7 +31,6 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         active_sessions=active_sessions,
         project_manager=project_manager,
     )
-    monkeypatch.setattr(AsyncRedisClient, "_instance", resources.redis)
     monkeypatch.setattr(
         Context,
         "current_config",
@@ -96,6 +95,7 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     assert msg.id == 1
     assert history == [
         {
+            "message_id": 1,
             "role": "user",
             "content": "hello from integration",
             "timestamp": timestamp.isoformat(),

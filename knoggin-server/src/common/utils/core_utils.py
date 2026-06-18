@@ -187,75 +187,74 @@ async def fetch_conversation_turns(
     specific formatting needs.
 
     Returns list of dicts with keys:
-        turn_id, role, content, timestamp, user_msg_id, metadata
+        message_id, role, content, timestamp, user_msg_id, metadata
     """
     sorted_key = RedisKeys.recent_conversation(user_name, session_id)
     conv_key = RedisKeys.conversation(user_name, session_id)
 
     if up_to_msg_id:
-        turn_key = await redis_client.hget(
-            RedisKeys.msg_to_turn_lookup(user_name, session_id),
-            str(up_to_msg_id),
-        )
-        if turn_key:
-            turn_score = await redis_client.zscore(sorted_key, turn_key)
-            turn_ids = await redis_client.zrange(
+        message_key = str(up_to_msg_id)
+        message_rank = await redis_client.zrank(sorted_key, message_key)
+        if message_rank is not None:
+            message_ids = await redis_client.zrange(
                 sorted_key,
-                f"({turn_score}",
-                "-inf",
-                desc=True,
-                byscore=True,
-                offset=0,
-                num=num_turns,
+                max(0, message_rank - num_turns),
+                message_rank - 1,
             )
-            turn_ids = list(reversed(turn_ids))
         else:
-            # DLQ Retry Guard: If up_to_msg_id isn't in DB, check if it's an old message by comparing to the latest.
-            latest_turn_ids = await redis_client.zrange(sorted_key, 0, 0, desc=True)
+            # If the ID is absent, detect an old DLQ retry from the latest message.
+            latest_message_ids = await redis_client.zrange(
+                sorted_key, 0, 0, desc=True
+            )
             is_dlq_retry = False
             latest_msg_id = None
 
-            if latest_turn_ids:
-                latest_turn_data = await redis_client.hget(conv_key, latest_turn_ids[0])
-                if latest_turn_data:
+            if latest_message_ids:
+                latest_message_data = await redis_client.hget(
+                    conv_key, latest_message_ids[0]
+                )
+                if latest_message_data:
                     try:
-                        parsed = safe_json_loads(latest_turn_data)
+                        parsed = safe_json_loads(latest_message_data)
                         if parsed:
                             latest_msg_id = parsed.get("user_msg_id")
                             if latest_msg_id is not None and int(latest_msg_id) >= int(
                                 up_to_msg_id
                             ):
                                 is_dlq_retry = True
-                    except (ValueError, TypeError, Exception) as e:
+                    except Exception as e:
                         logger.warning(
-                            f"Failed to unpack latest turn for DLQ guard: {e}"
+                            f"Failed to unpack latest message for DLQ guard: {e}"
                         )
 
             if is_dlq_retry:
                 logger.warning(
-                    f"DLQ Guard: Msg {up_to_msg_id} missing from cache, but DB is already at msg {latest_msg_id}. "
+                    f"DLQ Guard: Msg {up_to_msg_id} missing from cache, but DB "
+                    f"is already at msg {latest_msg_id}. "
                     "Returning empty context to prevent leaking future messages."
                 )
                 return []
 
-            # If not a DLQ retry, it's a truly new message. Safe to grab the current state as context.
-            turn_ids = await redis_client.zrange(
+            # A truly new message can use the current conversation as context.
+            message_ids = await redis_client.zrange(
                 sorted_key, 0, num_turns - 1, desc=True
             )
-            turn_ids = list(turn_ids)
-            turn_ids.reverse()
+            message_ids = list(message_ids)
+            message_ids.reverse()
     else:
-        turn_ids = await redis_client.zrange(sorted_key, 0, num_turns - 1, desc=True)
-        turn_ids = list(turn_ids)
-        turn_ids.reverse()
+        message_ids = await redis_client.zrange(
+            sorted_key, 0, num_turns - 1, desc=True
+        )
+        message_ids = list(message_ids)
+        message_ids.reverse()
 
-    if not turn_ids:
+    if not message_ids:
         return []
 
-    turn_data = await redis_client.hmget(conv_key, *turn_ids)
+    message_data = await redis_client.hmget(conv_key, *message_ids)
 
     results = []
-    for turn_id, data in zip(turn_ids, turn_data):
+    for message_id, data in zip(message_ids, message_data):
         if not data:
             continue
         try:
@@ -264,7 +263,7 @@ async def fetch_conversation_turns(
                 continue
             results.append(
                 {
-                    "turn_id": turn_id,
+                    "message_id": message_id,
                     "role": parsed["role"],
                     "content": parsed["content"],
                     "timestamp": parsed["timestamp"],
@@ -273,7 +272,7 @@ async def fetch_conversation_turns(
                 }
             )
         except Exception as e:
-            logger.warning(f"Failed to parse turn data for {turn_id}: {e}")
+            logger.warning(f"Failed to parse conversation message {message_id}: {e}")
             continue
 
     return results
@@ -343,7 +342,8 @@ def format_vp01_input(
 
     lines.append("\n## Discovery (Task 2: find missed entities)")
     lines.append(
-        "Scan messages above for proper nouns not listed in Known Entities or GLiNER extractions."
+        "Scan messages above for proper nouns not listed in Known Entities or "
+        "GLiNER extractions."
     )
     lines.append("Include the MSG id where you found each entity.")
     lines.append("Only return msg_id values from the Valid msg_id list above.")
@@ -393,11 +393,14 @@ def format_vp02_input(
 
     lines.append("\n## Output Constraints")
     lines.append("Use only Valid canonical entity names for entity_a and entity_b.")
-    lines.append("Use only Valid canonical entity names for user_connections.entity_name.")
+    lines.append(
+        "Use only Valid canonical entity names for user_connections.entity_name."
+    )
     lines.append("Use only Valid msg_id values from the Messages section.")
     if user_name:
         lines.append(
-            f'Do not put "{user_name}" in entity_a or entity_b; use user_connections instead.'
+            f'Do not put "{user_name}" in entity_a or entity_b; use '
+            "user_connections instead."
         )
     lines.append("Do not use Session Context as evidence for a connection.")
 
@@ -462,7 +465,8 @@ def format_vp04_input(entities: List[Dict], conversation_text: str) -> str:
     lines.append("## Output Constraints")
     lines.append("Use only Valid canonical_name values.")
     lines.append(
-        "Use source_msg_id only when the fact is grounded in a [MSG_<id>] or [MSG <id>] line above."
+        "Use source_msg_id only when the fact is grounded in a [MSG_<id>] or "
+        "[MSG <id>] line above."
     )
     lines.append("Use exact existing fact text for supersedes or invalidates.")
 

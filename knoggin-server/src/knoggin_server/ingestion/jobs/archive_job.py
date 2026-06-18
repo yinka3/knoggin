@@ -3,9 +3,10 @@ from datetime import timedelta
 import redis.asyncio as aioredis
 from loguru import logger
 
+from common.schema.settings import ArchivalSettings
 from common.utils.events import emit
-from common.utils.time_utils import get_now, get_now_unix
-from infrastructure.graph_client import GraphClient
+from common.utils.time_utils import get_now
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 
@@ -16,10 +17,17 @@ class FactArchivalJob(BaseJob):
     With Fact nodes, we simply delete facts past retention period.
     """
 
+    _CONSUME_PROFILE_TRIGGER_SCRIPT = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('del', KEYS[1])
+    end
+    return 0
+    """
+
     def __init__(
         self,
         user_name: str,
-        graph_client: GraphClient,
+        graph_client: GraphInterface,
         redis_client: aioredis.Redis,
         retention_days: int = 14,
         fallback_interval_hours: float = 24,
@@ -34,36 +42,17 @@ class FactArchivalJob(BaseJob):
     def name(self) -> str:
         return "fact_archival"
 
+    @property
+    def cadence_seconds(self) -> float:
+        return self._fallback_interval_seconds
+
     async def should_run(self, ctx: JobContext) -> bool:
-        profile_done = (
+        return (
             await self.redis.get(
                 RedisKeys.project_profile_complete(ctx.user_name, ctx.project_id)
             )
             is not None
         )
-
-        if profile_done:
-            await self.redis.delete(
-                RedisKeys.project_profile_complete(ctx.user_name, ctx.project_id)
-            )
-            return True
-
-        last_run_ts = await self.redis.get(
-            RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id)
-        )
-        if not last_run_ts:
-            await self.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
-                get_now_unix(),
-            )
-            return False
-
-        try:
-            elapsed = get_now_unix() - float(last_run_ts)
-        except ValueError:
-            return False
-
-        return elapsed >= self._fallback_interval_seconds
 
     async def execute(self, ctx: JobContext) -> JobResult:
         with logger.contextualize(
@@ -71,6 +60,11 @@ class FactArchivalJob(BaseJob):
         ):
             project_id = ctx.project_id
             cutoff = get_now() - timedelta(days=self.retention_days)
+            profile_complete_key = RedisKeys.project_profile_complete(
+                ctx.user_name,
+                ctx.project_id,
+            )
+            profile_trigger = await self.redis.get(profile_complete_key)
 
             deleted_count = await self.graph_client.delete_old_invalidated_facts(
                 cutoff, project_id=project_id
@@ -89,24 +83,22 @@ class FactArchivalJob(BaseJob):
                     },
                 )
 
-            await self.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
-                get_now_unix(),
-            )
+            if profile_trigger is not None:
+                await self.redis.eval(
+                    self._CONSUME_PROFILE_TRIGGER_SCRIPT,
+                    1,
+                    profile_complete_key,
+                    profile_trigger,
+                )
 
             return JobResult(success=True, summary=summary)
 
-    def update_settings(
-        self, retention_days: int = None, fallback_interval_hours: float = None
-    ):
-        if retention_days is not None:
-            self.retention_days = retention_days
-        if fallback_interval_hours is not None:
-            self._fallback_interval_seconds = fallback_interval_hours * 3600
-        if retention_days is not None or fallback_interval_hours is not None:
-            logger.info(
-                f"FactArchivalJob updated: retention_days={self.retention_days}, fallback_hours={self._fallback_interval_seconds / 3600}"
-            )
-
-    async def on_shutdown(self, ctx: JobContext) -> None:
-        pass
+    def update_settings(self, settings: ArchivalSettings) -> None:
+        self.enabled = settings.enabled
+        self.retention_days = settings.retention_days
+        self._fallback_interval_seconds = settings.fallback_interval_hours * 3600
+        logger.info(
+            "FactArchivalJob settings updated: "
+            f"enabled={self.enabled}, retention_days={self.retention_days}, "
+            f"fallback_hours={settings.fallback_interval_hours}"
+        )

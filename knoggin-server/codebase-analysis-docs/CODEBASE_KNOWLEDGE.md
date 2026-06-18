@@ -186,7 +186,7 @@ sequenceDiagram
     participant Jobs as Scheduler Jobs
 
     Caller->>Context: add(Message)
-    Context->>Redis: log conversation turn + message mapping
+    Context->>Redis: cache canonical message + timeline position
     Context->>Redis: rpush buffer:user:session
     Context->>Consumer: signal()
     Consumer->>Redis: lrange buffer batch
@@ -276,7 +276,15 @@ Logging and observability:
 - `loguru` is used throughout.
 - `DebugEventEmitter` streams session-scoped events, with project-id fanout to active sessions in `src/common/utils/events.py`.
 - `CommunityEventEmitter` also publishes community events over Redis pubsub in `src/common/utils/events.py`.
-- `LLMService` records approximate token/cost stats into `RedisKeys.global_stats()` when pricing is known in `src/infrastructure/llm_client.py`.
+- `LLMService` exposes separate text, structured, and tool-streaming paths.
+  Text transport retries are owned by the service; structured validation retries
+  are owned by Instructor. Tool streaming uses one discriminated `StreamEvent`
+  envelope, preserves provider tool-call IDs, and marks token usage as exact or
+  estimated. Client hot reload swaps generations so in-flight requests finish on
+  their original client before retirement. Full prompt/response tracing is
+  disabled by default, enabled with `KNOGGIN_LLM_TRACE=true`, bounded per entry,
+  and written through a rotating file handler. The service does not fetch
+  pricing or persist usage.
 
 Configuration:
 
@@ -314,7 +322,7 @@ Purpose: create one shared runtime with all heavy dependencies initialized once.
 
 Technical flow:
 
-- `ResourceManager.initialize` in `src/infrastructure/resources.py` selects CPU/CUDA/MPS using `KNOGGIN_GPU`, creates a `ThreadPoolExecutor`, requires `DATABASE_URL`, constructs `GraphClient`, gets Redis via `AsyncRedisClient.get_instance`, reads LLM config from `ConfigManager`, creates `LLMService`, creates `EmbeddingService`, loads tiktoken, embeddings, spaCy `en_core_web_md`, and GLiNER, then connects the graph client.
+- `ResourceManager.initialize` in `src/infrastructure/resources.py` selects CPU/CUDA/MPS using `KNOGGIN_GPU`, creates a `ThreadPoolExecutor`, requires `DATABASE_URL`, validates Redis settings, owns an `AsyncRedisClient` instance and its stable raw client, creates `GraphInterface`, reads LLM config from `ConfigManager`, creates `LLMService` and `EmbeddingService`, loads the ML resources, then connects the graph interface.
 - `ResourceManager.shutdown` closes Redis, Postgres pools, embedding models, LLM HTTP clients, and executor resources.
 
 Business value: this hides heavyweight ML and storage setup from feature code and allows session/project managers to share resources.
@@ -350,7 +358,7 @@ Technical flow:
 
 - `ProjectManager.create_project` stores project metadata in `RedisKeys.projects(user)`.
 - `ProjectManager.acquire_project_for_session` requires an existing persisted project, calls `get_or_start_project`, and records durable session membership in `RedisKeys.project_sessions(user, project_id)`.
-- `acquire_project_for_session` first persists and validates the global user identity at reserved entity ID `1`, then calls `get_or_start_project`. PostgreSQL sequences allocate canonical entity and message IDs; Redis only allocates session-local conversation turn IDs.
+- `acquire_project_for_session` first persists and validates the global user identity at reserved entity ID `1`, then calls `get_or_start_project`. PostgreSQL sequences allocate canonical entity and message IDs; Redis does not allocate separate conversation IDs.
 - `get_or_start_project` independently requires persisted active project metadata, then bootstraps `ProjectState`, `TopicConfig`, `EntityManager`, `TextProcessor`, project-level `BatchProcessor`, `Scheduler`, and all background jobs.
 - `ProjectManager.release_project` decrements `ProjectState.active_runtime_sessions_count` and shuts down project state when count reaches zero.
 - `ProjectManager.get_readable_project_ids` combines the current project, allowed projects, and the reserved identity scope via `build_readable_project_ids`.
@@ -400,9 +408,9 @@ Purpose: accept raw messages and schedule background knowledge extraction.
 
 Technical flow:
 
-- `Context.add` deduplicates by SHA-256 of session/content/timestamp, allocates a canonical message ID from PostgreSQL, stores a Redis conversation turn, updates message-to-turn mapping, increments heartbeat counters, pushes a JSON item into `RedisKeys.buffer(user, session)`, records project activity, signals the consumer, and refreshes TTLs.
-- `Context.add_assistant_turn` allocates a canonical PostgreSQL message ID, stages the assistant turn and message-to-turn mapping in Redis, then awaits canonical persistence.
-- `_persist_assistant_message_log` retries the transactional SQL/AGE write with the same canonical ID and payload. If all retries fail, `add_assistant_turn` removes the Redis conversation row, timeline entry, mapping, and cached message content before re-raising the persistence error to its caller. There is no synthetic offset namespace.
+- `Context.add` deduplicates by SHA-256 of user/session/content/timestamp, allocates a canonical message ID from PostgreSQL, atomically caches the message and timeline position under that ID, increments heartbeat counters, pushes a JSON item into `RedisKeys.buffer(user, session)`, records project activity, signals the consumer, and refreshes TTLs.
+- `Context.add_assistant_turn` allocates a canonical PostgreSQL message ID, atomically caches the assistant message under that ID, then awaits canonical persistence.
+- `_persist_assistant_message_log` retries the transactional SQL/AGE write with the same canonical ID and payload. If all retries fail, `add_assistant_turn` removes the Redis conversation row, timeline entry, and cached message content before re-raising the persistence error.
 - `Context._maybe_extract_llm` can extract assistant-response facts, resolve subjects to known entities, and write facts.
 
 Business value: user and assistant messages become both raw recall and structured memory.
@@ -411,7 +419,7 @@ Edge cases:
 
 - Dedup TTL is 300 seconds, so identical messages outside that window can be ingested again.
 - `Context.add` fails fast if project, scheduler, or consumer are not initialized.
-- Failed assistant persistence consumes its allocated message and turn numbers, but leaves no message data behind. IDs are never decremented or reused.
+- Failed assistant persistence consumes its allocated canonical message ID but leaves no message data behind. IDs are never decremented or reused.
 - Session-scoped Redis keys are refreshed to a 72-hour TTL in `Context.refresh_session_ttls`.
 
 ### 4.6 Batch Consumer
@@ -574,9 +582,9 @@ Purpose: provide explicit memory slots beyond extracted graph facts.
 
 Technical flow:
 
-- `MemoryManager.save_memory` writes topic-scoped session memory under `RedisKeys.agent_memory(user, session, topic)`.
+- `MemoryManager.save_memory` writes topic-scoped session memory under `RedisKeys.session_memory(user, session, topic)`.
 - It rejects empty, oversized, inactive-topic, or full-block writes.
-- `add_working_memory`, `remove_working_memory`, `list_working_memory`, and `clear_working_memory` manage agent categories `rules`, `preferences`, and `icks`.
+- Directive operations manage user-scoped agent guidance in `require`, `prefer`, and `avoid` modes.
 - `load_prompt_strings` formats session memory plus working memory for prompt injection.
 
 Business value: the user or agent can preserve concise instructions and preferences that should directly affect future responses.
@@ -655,7 +663,8 @@ GLOSSARY_DELTA: Profile refinement, topic evolution, dead letter queue, HITL mer
 - `project_id` is required for most graph writes. Writers intentionally reject missing scope.
 - The identity root is `IDENTITY_ENTITY_ID` from `src/common/scoping.py`. It is persisted under `IDENTITY_SCOPE`, must resolve to the configured user before project boot, and is protected from merge/delete paths. Relationship writes allow edges to identity across project scope.
 - Entity deletion is a hard aggregate delete. PostgreSQL cascades aliases, facts, relationships/evidence, hierarchy edges, and search rows; AGE removes the matching entity/fact projection in the same transaction.
-- Project-level jobs receive a `JobContext.scope_id` whose value is the project id because `ProjectManager.get_or_start_project` constructs `Scheduler(user, project_id, ..., project_id=project_id)`. `JobContext.session_id` is only a compatibility alias; prefer `scope_id` in new job code and tests.
+- Project-level jobs receive an explicit `JobContext.project_id`; scheduler job
+  context has no session or generic scope aliases.
 
 ### Redis Is The Runtime Bus
 
@@ -670,7 +679,7 @@ Redis is not only cache. It stores:
 - heartbeat counters,
 - dirty entity sets,
 - merge queues/proposals/intents,
-- job last-run and pending flags,
+- job last-run markers and execution leases,
 - agent configs/defaults,
 - session and working memory,
 - community active-discussion flags.
@@ -840,13 +849,15 @@ Defined in `RedisKeys` in `src/infrastructure/redis_client.py`.
 
 - Projects: `projects:{user}`, `project_sessions:{user}:{project_id}`
 - Sessions: `sessions:{user}`, `session_config:{user}`
-- Conversation: `conversation:{user}:{session}`, `recent_conversation:{user}:{session}`, `lookup:msg_to_turn:{user}:{session}`, `message_content:{user}:{session}`
+- Conversation: `conversation:{user}:{session}`, `recent_conversation:{user}:{session}`, `message_content:{user}:{session}`, `msg_dedup:{user}:{session}:{digest}`
 - Ingestion: `buffer:{user}:{session}`, `checkpoint_count:{user}:{session}`, `last_processed_msg:{user}:{session}`, `heartbeat_counter:{user}:{session}`
-- Jobs: `last_run:{job}:{user}:{session}`, `pending:{user}:{session}:{job}`
+- Jobs: `last_run:{job}:{user}:{project_id}` (scheduler-owned cadence anchor,
+  advanced after successful interval-job execution),
+  `job_lease:{user}:{project_id}:{job}`
 - Knowledge queues: `dirty_entities:{user}:{project_id}`, `merge_queue:{user}:{project_id}`, `merge_proposals:{user}:{project_id}`, `dlq:{user}:{project_id}`
-- Memory: `memory:{user}:{session}:{topic}`, `agent_memory:{agent_id}:{category}`
+- Memory: `memory:{user}:{session}:{topic}`, `agent_directives:{user}:{agent_id}`
 - Agents: `agents:{user}`, `agents:default:{user}`
-- Community: `community:discussion:active`, `community:events`, `community:{user}:agent_memory:{agent_id}`
+- Community: `community:discussion:active:{user}:{project}`, `community:events`, `community:{user}:agent_memory:{agent_id}`
 
 ### Domain Glossary
 
@@ -878,7 +889,7 @@ These are referenced by in-scope files but their internals were not inspected.
 - Apache AGE extension: loaded by `PostgresClient` in `src/infrastructure/postgres_client.py`.
 - `pgvector`: vector column/index usage in `src/infrastructure/schema.sql` and SQL queries.
 - `openai.AsyncOpenAI` and `instructor`: LLM calls in `src/infrastructure/llm_client.py`.
-- `httpx`: LLM pricing and web/search clients in `src/infrastructure/llm_client.py` and tools.
+- `httpx`: web/search clients and other external HTTP integrations.
 - `tiktoken`: token counting in `src/infrastructure/llm_client.py`.
 - `sentence_transformers.SentenceTransformer` and `CrossEncoder`: embeddings/reranking in `src/knoggin_server/knowledge/services/embedding_service.py`.
 - `torch`: device selection and model memory cleanup in `src/infrastructure/resources.py` and `src/knoggin_server/knowledge/services/embedding_service.py`.

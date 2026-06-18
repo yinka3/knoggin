@@ -125,7 +125,7 @@ flowchart TD
     MSG["Context.add(user message)"] --> DUP{"Same session + content + timestamp<br/>seen in dedup window?"}
     DUP -->|Yes| EXISTING["Return existing message ID"]
     DUP -->|No| ASSIGN["Allocate global message ID"]
-    ASSIGN --> REDIS["Persist conversation turn and message mapping in Redis"]
+    ASSIGN --> REDIS["Cache canonical message and timeline position in Redis"]
     REDIS --> BUFFER["Append scoped message to Redis ingestion buffer"]
     BUFFER --> SIGNAL["Record project activity, signal consumer, refresh TTLs"]
 
@@ -315,14 +315,22 @@ Tool destinations:
 
 ## 8. Background Job Decisions
 
-Each active project has one scheduler. Every 30 seconds it asks enabled jobs
-whether they should run, while preventing overlapping runs of the same job.
+Each active project has one scheduler. It checks jobs once at startup and every
+30 seconds afterward. Enabled jobs run when either their domain trigger passes
+or their declared scheduler cadence is due. The scheduler owns cadence
+timestamps and advances them only after successful results; job `should_run`
+checks do not mutate cadence state. Local task tracking and a token-owned Redis
+lease prevent overlapping runs in the same process or across server workers.
+
+Archival retains its profile-complete domain trigger in addition to its fallback
+cadence. It consumes the profile marker with a compare-and-delete only after a
+successful archival pass, so failed work and newer markers remain retryable.
 
 ```mermaid
 flowchart TD
     TICK["Project scheduler tick"] --> RUNNING{"Same job already running?"}
     RUNNING -->|Yes| SKIP["Skip this tick"]
-    RUNNING -->|No| ENABLED{"Job enabled?"}
+    RUNNING -->|No| ENABLED{"Optional job enabled?"}
     ENABLED -->|No| SKIP
     ENABLED -->|Yes| KIND{"Which job?"}
 

@@ -14,7 +14,7 @@ from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import is_substring_match
 from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
-from infrastructure.graph_client import GraphClient
+from infrastructure.graph_interface import GraphInterface
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 from knoggin_server.knowledge.services.entity_embedding import (
     build_entity_embedding_text,
@@ -24,7 +24,7 @@ from knoggin_server.knowledge.services.entity_embedding import (
 class EntityManager:
     def __init__(
         self,
-        graph_client: "GraphClient",
+        graph_client: "GraphInterface",
         embedding_service: EmbeddingService,
         project_id: Optional[str] = None,
         readable_project_ids: Optional[List[str]] = None,

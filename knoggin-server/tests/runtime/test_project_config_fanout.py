@@ -7,6 +7,7 @@ import pytest
 from common.schema.settings import (
     ArchivalSettings,
     CleanerSettings,
+    CommunitySettings,
     DeveloperSettings,
     DLQSettings,
     EntityResolutionSettings,
@@ -18,6 +19,7 @@ from common.schema.settings import (
     TopicSchema,
 )
 from common.utils.core_utils import safe_update
+from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.project.project_manager import ProjectManager
 from tests.fixtures.fakes import FakeResources
@@ -157,6 +159,24 @@ class FanoutBatchProcessor:
         self.refresh_count += 1
 
 
+@pytest.mark.runtime
+@pytest.mark.no_network
+def test_legacy_merger_enabled_setting_is_ignored_and_not_serialized():
+    config = RootConfig(
+        developer_settings={
+            "jobs": {
+                "merger": {
+                    "enabled": False,
+                    "auto_threshold": 0.95,
+                }
+            }
+        }
+    )
+
+    assert config.developer_settings.jobs.merger.auto_threshold == 0.95
+    assert "enabled" not in config.model_dump()["developer_settings"]["jobs"]["merger"]
+
+
 async def boot_project(monkeypatch):
     FanoutScheduler.instances = []
     FanoutEntityManager.instances = []
@@ -230,7 +250,7 @@ async def test_project_config_subscriptions_are_registered_and_initialized(
 
     assert config_manager.active_paths() == CONFIG_PATHS
     assert len(project_state.config_unsubscribers) == len(CONFIG_PATHS)
-    assert len(scheduler._jobs) == 6
+    assert len(scheduler._jobs) == 7
 
     assert len(project_state.entities.updated_settings) == 1
     assert isinstance(
@@ -248,6 +268,15 @@ async def test_project_config_subscriptions_are_registered_and_initialized(
     assert scheduler._jobs["entity_cleanup"].run_interval_seconds == 24 * 3600
     assert scheduler._jobs["fact_archival"].retention_days == 14
     assert scheduler._jobs["topic_config"].interval_msgs == 40
+    assert scheduler._jobs["entity_cleanup"].enabled is True
+    assert scheduler._jobs["fact_archival"].enabled is True
+    assert scheduler._jobs["topic_config"].enabled is True
+    assert scheduler._jobs["profile_refinement"].enabled is True
+    assert scheduler._jobs["merge_detection"].enabled is True
+    assert scheduler._jobs["dlq_auto_replay"].enabled is True
+    assert "enabled" not in ProfileSettings.model_fields
+    assert "enabled" not in MergerSettings.model_fields
+    assert "enabled" not in DLQSettings.model_fields
 
 
 @pytest.mark.runtime
@@ -282,15 +311,18 @@ async def test_project_config_updates_fan_out_to_runtime_services(monkeypatch):
     )
     dlq_update = DLQSettings(interval_seconds=17, batch_size=4, max_attempts=5)
     cleaner_update = CleanerSettings(
+        enabled=False,
         interval_hours=2,
         orphan_age_hours=3,
         stale_junk_days=4,
     )
     archival_update = ArchivalSettings(
+        enabled=False,
         retention_days=21,
         fallback_interval_hours=2.5,
     )
     topic_job_update = TopicConfigSettings(
+        enabled=False,
         interval_msgs=25,
         conversation_window=35,
     )
@@ -329,17 +361,61 @@ async def test_project_config_updates_fan_out_to_runtime_services(monkeypatch):
     assert cleaner_job.run_interval_seconds == 2 * 3600
     assert cleaner_job.orphan_cutoff_ms == 3 * 3600 * 1000
     assert cleaner_job.stale_cutoff_ms == 4 * 24 * 3600 * 1000
+    assert cleaner_job.enabled is False
 
     archival_job = scheduler._jobs["fact_archival"]
     assert archival_job.retention_days == 21
     assert archival_job._fallback_interval_seconds == 2.5 * 3600
+    assert archival_job.enabled is False
 
     topic_job = scheduler._jobs["topic_config"]
     assert topic_job.interval_msgs == 25
     assert topic_job.conversation_window == 35
+    assert topic_job.enabled is False
+
+    config_manager.emit(
+        "developer_settings.jobs.cleaner",
+        CleanerSettings(enabled=True),
+    )
+    config_manager.emit(
+        "developer_settings.jobs.archival",
+        ArchivalSettings(enabled=True),
+    )
+    config_manager.emit(
+        "developer_settings.jobs.topic_config",
+        TopicConfigSettings(enabled=True),
+    )
+    assert cleaner_job.enabled is True
+    assert archival_job.enabled is True
+    assert topic_job.enabled is True
 
     assert len(project_state.entities.updated_settings) == 2
     assert len(processor.updated_settings) == 4
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_aac_can_be_enabled_and_disabled_after_project_boot(monkeypatch):
+    project_state, config_manager = await boot_project(monkeypatch)
+    job = project_state.scheduler._jobs["aac_discussion"]
+    ctx = JobContext(user_name="ada", project_id="project-1")
+
+    assert await job.should_run(ctx) is False
+    assert job.cadence_seconds is None
+
+    config_manager.config.developer_settings.community = CommunitySettings(
+        enabled=True,
+        interval_minutes=30,
+    )
+    assert await job.should_run(ctx) is False
+    assert job.cadence_seconds == 30 * 60
+
+    config_manager.config.developer_settings.community = CommunitySettings(
+        enabled=False,
+        interval_minutes=30,
+    )
+    assert await job.should_run(ctx) is False
+    assert job.cadence_seconds is None
 
 
 @pytest.mark.runtime

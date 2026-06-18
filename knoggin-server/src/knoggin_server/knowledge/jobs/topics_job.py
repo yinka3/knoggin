@@ -8,8 +8,9 @@ from loguru import logger
 
 from common.conf.topics_config import TopicConfig
 from common.schema.contracts import TopicConfigResult
+from common.schema.settings import TopicConfigSettings
 from common.utils.events import emit
-from infrastructure.graph_client import GraphClient
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
@@ -29,7 +30,7 @@ class TopicConfigJob(BaseJob):
         topic_config: TopicConfig,
         update_callback: Callable[[dict], Awaitable[None]],
         redis_client: aioredis.Redis,
-        graph_client: GraphClient,
+        graph_client: GraphInterface,
         interval_msgs: int = 40,
         conversation_window: int = 50,
     ):
@@ -44,6 +45,16 @@ class TopicConfigJob(BaseJob):
     @property
     def name(self) -> str:
         return "topic_config"
+
+    def update_settings(self, settings: TopicConfigSettings) -> None:
+        self.enabled = settings.enabled
+        self.interval_msgs = settings.interval_msgs
+        self.conversation_window = settings.conversation_window
+        logger.info(
+            "TopicConfigJob settings updated: "
+            f"enabled={self.enabled}, interval_msgs={self.interval_msgs}, "
+            f"conversation_window={self.conversation_window}"
+        )
 
     @staticmethod
     def _topic_to_dict(topic_cfg) -> dict:
@@ -114,7 +125,7 @@ class TopicConfigJob(BaseJob):
             verbose_only=True,
         )
 
-        result: TopicConfigResult = await self.llm.call_llm(
+        result: TopicConfigResult = await self.llm.generate_structured(
             response_model=TopicConfigResult,
             system=system,
             user=user_content,

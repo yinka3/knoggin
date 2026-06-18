@@ -16,7 +16,7 @@ from common.schema.contracts import (
     UserRelationshipWrite,
 )
 from common.scoping import IDENTITY_ENTITY_ID
-from infrastructure.graph_client import GraphClient
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
@@ -50,7 +50,7 @@ def _normalize_embedding(value) -> Optional[list[float]]:
 
 async def build_graph_mutation_plan(
     batch: BatchResult,
-    graph_client: GraphClient,
+    graph_client: GraphInterface,
     entities: EntityManager,
     session_id: str,
     project_id: str,
@@ -299,7 +299,7 @@ def _attach_graph_work_summary(
 
 async def execute_graph_mutation_plan(
     plan: GraphMutationPlan,
-    graph_client: GraphClient,
+    graph_client: GraphInterface,
     redis_client: aioredis.Redis = None,
 ) -> GraphWriteSummary:
     """Execute a typed graph mutation plan using existing graph-client APIs."""
@@ -346,7 +346,7 @@ async def execute_graph_mutation_plan(
 
 async def write_batch_to_graph(
     batch: BatchResult,
-    graph_client: GraphClient,
+    graph_client: GraphInterface,
     entities: EntityManager,
     session_id: str,
     project_id: str,
@@ -394,7 +394,7 @@ async def write_batch_to_graph(
 
 async def write_batch_callback(
     batch: BatchResult,
-    graph_client: GraphClient,
+    graph_client: GraphInterface,
     entities: EntityManager,
     session_id: str,
     project_id: str,

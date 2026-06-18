@@ -6,12 +6,15 @@ from typing import Any, Optional
 import redis.asyncio as aioredis
 import spacy
 import torch
+from dotenv import load_dotenv
 from gliner import GLiNER
 from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
-from infrastructure.graph_client import GraphClient
+from common.schema.settings import RedisConnectionSettings
+from common.utils.events import CommunityEventEmitter
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import AsyncRedisClient
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
@@ -37,8 +40,9 @@ class ResourceManager:
 
     def __init__(self):
 
-        self.graph_client: Optional[GraphClient] = None
+        self.graph: Optional[GraphInterface] = None
         self.embedding: Optional[EmbeddingService] = None
+        self.redis_manager: Optional[AsyncRedisClient] = None
         self.redis: Optional[aioredis.Redis] = None
         self.llm_service: Optional[LLMService] = None
         self.executor: Optional[ThreadPoolExecutor] = None
@@ -50,6 +54,7 @@ class ResourceManager:
     @classmethod
     async def initialize(cls, num_workers: int = 4) -> "ResourceManager":
         """Initialize all resources concurrently."""
+        load_dotenv()
         async with cls._get_lock():
             if cls._instance is not None:
                 return cls._instance
@@ -78,18 +83,25 @@ class ResourceManager:
                     raise ConfigurationError(
                         "DATABASE_URL environment variable is not set"
                     )
-                instance.redis = await AsyncRedisClient.get_instance()
+                redis_settings = RedisConnectionSettings.from_env()
+                instance.redis_manager = AsyncRedisClient(redis_settings)
+                instance.redis = await instance.redis_manager.connect()
+                CommunityEventEmitter.get().bind_redis(instance.redis)
 
                 config = ConfigManager.get().config
                 llm_config = config.llm
+                trace_logger = (
+                    get_trace_logger()
+                    if os.getenv("KNOGGIN_LLM_TRACE", "false").lower() == "true"
+                    else None
+                )
                 instance.llm_service = LLMService(
                     api_key=llm_config.api_key,
                     agent_model=llm_config.agent_model,
                     extraction_model=llm_config.extraction_model,
                     merge_model=llm_config.merge_model,
                     base_url=llm_config.base_url,
-                    trace_logger=get_trace_logger(),
-                    redis_client=instance.redis,
+                    trace_logger=trace_logger,
                 )
                 instance.config_unsubscribers.append(
                     ConfigManager.get().subscribe(
@@ -107,7 +119,7 @@ class ResourceManager:
                     reranker_model=reranker_model,
                     device=device,
                 )
-                instance.graph_client = GraphClient(
+                instance.graph = GraphInterface(
                     dsn=dsn,
                     embedding_service=instance.embedding,
                 )
@@ -146,10 +158,10 @@ class ResourceManager:
                         details={"original_error": str(e)},
                     )
 
-                await instance.graph_client.connect()
+                await instance.graph.connect()
 
                 instance.active_entities = EntityManager(
-                    graph_client=instance.graph_client,
+                    graph_client=instance.graph,
                     embedding_service=instance.embedding,
                 )
                 cls._instance = instance
@@ -174,11 +186,16 @@ class ResourceManager:
         if self.executor:
             self.executor.shutdown(wait=wait)
 
-        await AsyncRedisClient.close_redis()
+        if self.redis is not None:
+            CommunityEventEmitter.get().unbind_redis(self.redis)
+        if self.redis_manager is not None:
+            await self.redis_manager.close()
+            self.redis_manager = None
+        self.redis = None
 
-        if self.graph_client:
-            await self.graph_client.close()
-            self.graph_client = None
+        if self.graph:
+            await self.graph.close()
+            self.graph = None
         if self.embedding:
             self.embedding.cleanup()
         if self.llm_service:
@@ -186,8 +203,7 @@ class ResourceManager:
 
         self.gliner = None
         self.spacy = None
-        self.redis = None
-        self.graph_client = None
+        self.graph = None
 
     async def shutdown(self):
         """Release all managed resources."""

@@ -1,5 +1,8 @@
+import json
+
 import pytest
 
+from common.exceptions import LLMProviderError
 from knoggin_server.agent.executor import AgentExecutor
 from knoggin_server.agent.types import (
     AgentContext,
@@ -46,10 +49,10 @@ class FakeLLM:
             return self.token_counts.pop(0)
         return len(text.split())
 
-    async def call_llm(self, **kwargs):
+    async def generate_text(self, **kwargs):
         self.call_llm_calls.append(kwargs)
         if self.raises:
-            raise RuntimeError("summary failed")
+            raise LLMProviderError("summary failed")
         return self.summary
 
 
@@ -99,13 +102,19 @@ class ScriptedExecutor(AgentExecutor):
         )
         events = self.step_events.pop(0)
         for event in events:
-            yield event
+            if isinstance(event, tuple):
+                for nested_event in event:
+                    yield nested_event
+            else:
+                yield event
 
     async def _execute_tools(self, tool_calls, results_out):
         self.tool_batches.append(tool_calls)
         for call in tool_calls:
             result = self.tool_results.pop(0)
             results_out.append({"tool": call.name, "result": result})
+            self.ctx.state.consecutive_errors = 0
+            self.ctx.state.last_error = None
             yield {
                 "event": "tool_end",
                 "data": {"tool": call.name, "result": "scripted"},
@@ -132,7 +141,45 @@ def make_ctx(*, config=None, evidence=None):
 
 
 def done_with(*tool_calls):
-    return {"event": "done", "data": list(tool_calls)}
+    content = next(
+        (call.thinking for call in tool_calls if call.thinking),
+        "",
+    )
+    return (
+        {
+            "event": "tool_calls",
+            "data": {
+                "content": content,
+                "calls": [
+                    {
+                        "name": call.name,
+                        "arguments": json.dumps(call.args),
+                        **({"id": call.call_id} if call.call_id else {}),
+                    }
+                    for call in tool_calls
+                ],
+            },
+        },
+        {
+            "event": "step_completed",
+            "data": {
+                "content": content,
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "approximate": False,
+                },
+            },
+        },
+    )
+
+
+def step_error(message, *, kind="provider"):
+    return {
+        "event": "step_error",
+        "data": {"kind": kind, "message": message},
+    }
 
 
 @pytest.mark.no_network
@@ -210,6 +257,7 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,
+                    "approximate": False,
                 },
                 "sources": None,
             },
@@ -309,6 +357,7 @@ async def test_execute_clarification_and_replanning_short_circuit_paths():
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,
+                    "approximate": False,
                 },
             },
         }
@@ -376,6 +425,106 @@ async def test_execute_consecutive_empty_results_force_replanning():
 
 
 @pytest.mark.no_network
+async def test_execute_hides_transient_step_errors_and_resets_after_tool_success():
+    executor = ScriptedExecutor(
+        make_ctx(),
+        FakeLLM(),
+        FakeTools(),
+        memory_mgr=None,
+        step_events=[
+            [step_error("temporary provider failure")],
+            [done_with(ToolCall(name="search_messages", args={"query": "profile"}))],
+            [
+                done_with(
+                    ToolCall(name="submit_answer", args={"content": "draft answer"})
+                )
+            ],
+            [
+                done_with(
+                    ToolCall(name="submit_answer", args={"content": "final answer"})
+                )
+            ],
+        ],
+        tool_results=[{"data": [{"id": "msg-1"}]}],
+    )
+
+    events = [event async for event in executor.execute()]
+
+    assert [event["event"] for event in events] == ["tool_end", "response"]
+    assert events[-1]["data"]["content"] == "final answer"
+    assert executor.ctx.state.consecutive_errors == 0
+    assert len(executor.step_calls) == 4
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("kind", ["provider", "formatting"])
+async def test_execute_emits_one_terminal_error_after_consecutive_step_failures(kind):
+    config = AgentRunConfig(max_attempts=5, max_consecutive_errors=2)
+    executor = ScriptedExecutor(
+        make_ctx(config=config),
+        FakeLLM(),
+        FakeTools(),
+        memory_mgr=None,
+        step_events=[
+            [step_error("first failure", kind=kind)],
+            [step_error("second failure", kind=kind)],
+        ],
+    )
+
+    events = [event async for event in executor.execute()]
+
+    assert events == [
+        {
+            "event": "error",
+            "data": {
+                "message": (
+                    "Agent stopped after 2 consecutive errors: second failure"
+                )
+            },
+        }
+    ]
+    assert len(executor.step_calls) == 2
+
+
+@pytest.mark.no_network
+async def test_execute_preserves_approximate_usage_in_final_response():
+    tool_events = done_with(
+        ToolCall(name="submit_answer", args={"content": "final answer"})
+    )
+    tool_events[1]["data"]["usage"] = {
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "total_tokens": 14,
+        "approximate": True,
+    }
+    executor = ScriptedExecutor(
+        make_ctx(),
+        FakeLLM(),
+        FakeTools(),
+        memory_mgr=None,
+        step_events=[[tool_events]],
+    )
+
+    events = [event async for event in executor.execute()]
+
+    assert events == [
+        {
+            "event": "response",
+            "data": {
+                "content": "final answer",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "total_tokens": 14,
+                    "approximate": True,
+                },
+                "sources": None,
+            },
+        }
+    ]
+
+
+@pytest.mark.no_network
 async def test_fallback_without_evidence_asks_for_rephrase():
     executor = AgentExecutor(
         make_ctx(),
@@ -394,6 +543,7 @@ async def test_fallback_without_evidence_asks_for_rephrase():
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
+                "approximate": False,
             },
             "fallback": True,
         },
@@ -439,6 +589,7 @@ async def test_fallback_with_evidence_generates_summary_and_preserves_sources():
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
+                "approximate": False,
             },
             "sources": [{"url": "https://example.test/source"}],
             "fallback": True,

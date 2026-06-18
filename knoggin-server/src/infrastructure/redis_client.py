@@ -1,250 +1,133 @@
 import asyncio
-import json
-import os
-from typing import Any, Dict, List, Optional
+from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import redis.asyncio as aioredis
-from dotenv import load_dotenv
 from loguru import logger
 
 from common.exceptions import DependencyError
-from common.utils.json_utils import safe_json_loads
-from common.utils.time_utils import parse_iso_time
+from common.schema.settings import RedisConnectionSettings
 
-load_dotenv()
 
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-REDIS_PORT = os.environ.get("REDIS_PORT", "6379")
+def _endpoint_label(url: str) -> str:
+    """Return a credential-free endpoint for logs and errors."""
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or "unknown"
+        port = parsed.port or (6380 if parsed.scheme == "redis" else 6379)
+        path = parsed.path or "/0"
+        return urlunsplit((parsed.scheme, f"{host}:{port}", path, "", ""))
+    except ValueError:
+        return "configured Redis endpoint"
+
+
+def _safe_error_type(exc: BaseException) -> str:
+    """Avoid copying a credential-bearing URL from an exception into logs."""
+    return type(exc).__name__
 
 
 class AsyncRedisClient:
-    """Singleton async Redis client with health checks and auto-reconnection."""
+    """Resource-owned async Redis connection lifecycle."""
 
-    _instance = None
-    _lock = None
+    def __init__(self, settings: RedisConnectionSettings):
+        self.settings = settings
+        self._client: Optional[aioredis.Redis] = None
+        self._lock = asyncio.Lock()
 
-    @classmethod
-    def _get_lock(cls) -> asyncio.Lock:
-        if cls._lock is None:
-            cls._lock = asyncio.Lock()
-        return cls._lock
+    @property
+    def client(self) -> aioredis.Redis:
+        if self._client is None:
+            raise RuntimeError("Redis client is not connected")
+        return self._client
 
-    @classmethod
-    async def get_instance(cls) -> aioredis.Redis:
-        """Async-safe singleton accessor with health check."""
-        async with cls._get_lock():
-            is_healthy = False
-            if cls._instance is not None:
-                try:
-                    await asyncio.wait_for(cls._instance.ping(), timeout=2.0)
-                    is_healthy = True
-                except (aioredis.ConnectionError, asyncio.TimeoutError):
-                    logger.warning("Redis connection lost, attempting to reconnect...")
-                    await cls._close_unlocked()
+    def _build_client(self) -> aioredis.Redis:
+        return aioredis.Redis.from_url(
+            self.settings.url,
+            decode_responses=True,
+            max_connections=self.settings.max_connections,
+            health_check_interval=self.settings.health_check_interval,
+            socket_connect_timeout=self.settings.connect_timeout,
+        )
 
-            if not is_healthy:
-                try:
-                    pool = aioredis.ConnectionPool.from_url(
-                        url=f"redis://{REDIS_HOST}:{REDIS_PORT}",
-                        decode_responses=True,
-                        max_connections=10,
-                        retry_on_timeout=True,
-                        health_check_interval=30,
-                    )
-                    cls._instance = aioredis.Redis(connection_pool=pool)
-                    await cls._instance.ping()
-                    logger.info(f"Redis connected: {REDIS_HOST}:{REDIS_PORT}")
-                except Exception as e:
-                    cls._instance = None
-                    raise DependencyError(
-                        f"Failed to connect to Redis at {REDIS_HOST}:{REDIS_PORT}",
-                        details={
-                            "error": str(e),
-                            "host": REDIS_HOST,
-                            "port": REDIS_PORT,
-                        },
-                    )
+    async def _close_client(self, client: aioredis.Redis) -> bool:
+        try:
+            await client.aclose(close_connection_pool=True)
+            return True
+        except Exception as exc:
+            logger.warning(
+                f"Failed to close Redis connection pool: {_safe_error_type(exc)}"
+            )
+            return False
 
-            return cls._instance
+    async def connect(self) -> aioredis.Redis:
+        """Connect once and return the stable raw redis-py client."""
+        async with self._lock:
+            if self._client is not None:
+                return self._client
 
-    @classmethod
-    async def _close_unlocked(cls):
-        """Internal teardown without acquiring the lock."""
-        if cls._instance is not None:
-            await cls._instance.close()
-            cls._instance = None
-            logger.info("Redis connection closed")
-
-    @classmethod
-    async def close_redis(cls):
-        """Close the Redis connection pool."""
-        async with cls._get_lock():
-            await cls._close_unlocked()
-
-    @classmethod
-    async def publish(cls, channel: str, message: Any):
-        """Publish a message to a channel."""
-        redis = await cls.get_instance()
-        data = json.dumps(message) if not isinstance(message, str) else message
-        await redis.publish(channel, data)
-
-    @classmethod
-    async def subscribe(cls, channel: str):
-        """Get a pubsub instance and subscribe to a channel."""
-        redis = await cls.get_instance()
-        ps = redis.pubsub()
-        await ps.subscribe(channel)
-        return ps
-
-    @classmethod
-    async def log_conversation_turn(
-        cls,
-        user_name: str,
-        session_id: str,
-        turn_id: int,
-        payload: dict,
-        max_history: int = 100,
-    ):
-        """
-        Atomically logs a turn to history and prunes old entries.
-        Updates both the data (Hash) and the timeline (Sorted Set).
-        """
-        redis = await cls.get_instance()
-        conv_key = RedisKeys.conversation(user_name, session_id)
-        recent_key = RedisKeys.recent_conversation(user_name, session_id)
-        turn_key = str(turn_id)
-
-        pipe = redis.pipeline()
-        pipe.hset(conv_key, turn_key, json.dumps(payload))
-
-        timestamp = payload.get("timestamp")
-        score = turn_id
-        if timestamp:
             try:
-                if isinstance(timestamp, str):
-                    score = parse_iso_time(timestamp).timestamp()
-            except Exception:
-                pass
-        pipe.zadd(recent_key, {turn_key: score})
+                candidate = self._build_client()
+            except Exception as exc:
+                endpoint = _endpoint_label(self.settings.url)
+                raise DependencyError(
+                    f"Failed to configure Redis at {endpoint}",
+                    details={
+                        "error_type": _safe_error_type(exc),
+                        "endpoint": endpoint,
+                        "attempts": 0,
+                    },
+                ) from exc
 
-        # Keep history within limits
-        pipe.zremrangebyrank(recent_key, 0, -(max_history + 1))
+            last_error: Optional[Exception] = None
+            try:
+                for attempt in range(1, self.settings.startup_attempts + 1):
+                    try:
+                        await asyncio.wait_for(
+                            candidate.ping(),
+                            timeout=self.settings.connect_timeout,
+                        )
+                        self._client = candidate
+                        logger.info(
+                            f"Redis connected: {_endpoint_label(self.settings.url)}"
+                        )
+                        return candidate
+                    except Exception as exc:
+                        last_error = exc
+                        if attempt < self.settings.startup_attempts:
+                            delay = self.settings.startup_backoff_seconds * (
+                                2 ** (attempt - 1)
+                            )
+                            logger.warning(
+                                f"Redis startup check {attempt}/"
+                                f"{self.settings.startup_attempts} failed: "
+                                f"{_safe_error_type(exc)}. "
+                                f"Retrying in {delay}s..."
+                            )
+                            await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                await self._close_client(candidate)
+                raise
 
-        await pipe.execute()
+            await self._close_client(candidate)
+            endpoint = _endpoint_label(self.settings.url)
+            raise DependencyError(
+                f"Failed to connect to Redis at {endpoint}",
+                details={
+                    "error_type": _safe_error_type(last_error),
+                    "endpoint": endpoint,
+                    "attempts": self.settings.startup_attempts,
+                },
+            ) from last_error
 
-    @classmethod
-    async def update_message_mapping(
-        cls,
-        user_name: str,
-        session_id: str,
-        msg_id: int,
-        turn_id: Optional[int],
-        content: Optional[str] = None,
-        timestamp: Optional[str] = None,
-        role: str = "user",
-    ):
-        """Maps a message ID to a turn ID and optionally stores content."""
-        redis = await cls.get_instance()
-        lookup_key = RedisKeys.msg_to_turn_lookup(user_name, session_id)
-        content_key = RedisKeys.message_content(user_name, session_id)
-
-        pipe = redis.pipeline()
-        if turn_id is not None:
-            pipe.hset(lookup_key, str(msg_id), str(turn_id))
-        if content is not None:
-            payload = {
-                "id": msg_id,
-                "message": content,
-                "content": content,
-                "timestamp": timestamp or "",
-                "role": role,
-            }
-            pipe.hset(content_key, f"msg_{msg_id}", json.dumps(payload))
-
-        await pipe.execute()
-
-    @classmethod
-    async def delete_message_turn(
-        cls,
-        user_name: str,
-        session_id: str,
-        msg_id: int,
-        turn_id: int,
-    ) -> None:
-        """Remove all staged Redis state for a failed canonical message."""
-        redis = await cls.get_instance()
-        pipe = redis.pipeline()
-        pipe.hdel(
-            RedisKeys.conversation(user_name, session_id),
-            str(turn_id),
-        )
-        pipe.zrem(
-            RedisKeys.recent_conversation(user_name, session_id),
-            str(turn_id),
-        )
-        pipe.hdel(
-            RedisKeys.msg_to_turn_lookup(user_name, session_id),
-            str(msg_id),
-        )
-        pipe.hdel(
-            RedisKeys.message_content(user_name, session_id),
-            f"msg_{msg_id}",
-        )
-        await pipe.execute()
-
-    @classmethod
-    async def refresh_session_ttls(cls, user_name: str, session_id: str, ttl: int):
-        """Refreshes TTLs for all session-scoped keys in a single pipeline."""
-        redis = await cls.get_instance()
-        keys = RedisKeys.get_session_scoped_keys(user_name, session_id)
-
-        pipe = redis.pipeline()
-        for key in keys:
-            pipe.expire(key, ttl)
-        await pipe.execute()
-
-    @classmethod
-    async def load_formatted_memories(
-        cls, agent_id: str, categories: List[str]
-    ) -> Dict[str, str]:
-        """
-        Loads multiple memory categories and formats them as markdown lists.
-        Returns {category: "\n- content1\n- content2"}.
-        """
-        redis = await cls.get_instance()
-        pipe = redis.pipeline()
-        for cat in categories:
-            pipe.hgetall(RedisKeys.agent_working_memory(agent_id, cat))
-
-        raw_results = await pipe.execute()
-        formatted = {}
-
-        for i, raw in enumerate(raw_results):
-            cat = categories[i]
-            if not raw:
-                formatted[cat] = ""
-                continue
-
-            lines = []
-            # Sort by timestamp if available in payload
-            parsed = []
-            for v in raw.values():
-                try:
-                    data = safe_json_loads(v)
-                    if data:
-                        parsed.append(data)
-                except Exception:
-                    continue
-
-            # Sort by created_at
-            parsed.sort(key=lambda x: x.get("created_at", ""))
-
-            for item in parsed:
-                lines.append(f"- {item['content']}")
-
-            formatted[cat] = "\n".join(lines)
-
-        return formatted
+    async def close(self) -> None:
+        """Detach the client and close its complete connection pool."""
+        async with self._lock:
+            client = self._client
+            self._client = None
+            if client is not None:
+                closed = await self._close_client(client)
+                if closed:
+                    logger.info("Redis connection closed")
 
 
 class RedisKeys:
@@ -309,24 +192,25 @@ class RedisKeys:
         return f"project_topic_config:{user}"
 
     @staticmethod
-    def get_session_scoped_keys(user: str, session: str) -> list[str]:
+    def session_keys(user: str, session: str) -> list[str]:
         """Returns all Redis keys that are scoped to a specific session."""
         return [
-            RedisKeys.global_next_turn_id(user, session),
             RedisKeys.buffer(user, session),
             RedisKeys.checkpoint(user, session),
             RedisKeys.message_content(user, session),
             RedisKeys.last_processed(user, session),
             RedisKeys.conversation(user, session),
             RedisKeys.recent_conversation(user, session),
-            RedisKeys.msg_to_turn_lookup(user, session),
-            RedisKeys.last_activity(user, session),
             RedisKeys.heartbeat_counter(user, session),
         ]
 
     @staticmethod
-    def global_next_turn_id(user: str, session: str) -> str:
-        return f"global:next_turn_id:{user}:{session}"
+    def message_dedup(user: str, session: str, digest: str) -> str:
+        return f"msg_dedup:{user}:{session}:{digest}"
+
+    @staticmethod
+    def message_dedup_pattern(user: str, session: str) -> str:
+        return f"msg_dedup:{user}:{session}:*"
 
     @staticmethod
     def buffer(user: str, session: str) -> str:
@@ -353,18 +237,6 @@ class RedisKeys:
         return f"recent_conversation:{user}:{session}"
 
     @staticmethod
-    def msg_to_turn_lookup(user: str, session: str) -> str:
-        return f"lookup:msg_to_turn:{user}:{session}"
-
-    @staticmethod
-    def last_activity(user: str, session: str) -> str:
-        return f"last_activity:{user}:{session}"
-
-    @staticmethod
-    def merge_undo(session: str, primary_id: int, secondary_id: int) -> str:
-        return f"merge_undo:{session}:{primary_id}:{secondary_id}"
-
-    @staticmethod
     def merge_intent(
         user: str, project_id: str, primary_id: int, secondary_id: int
     ) -> str:
@@ -379,12 +251,16 @@ class RedisKeys:
         return f"last_run:{job_name}:{user}:{project_id}"
 
     @staticmethod
-    def job_pending(user: str, project_id: str, job_name: str) -> str:
-        return f"pending:{user}:{project_id}:{job_name}"
+    def job_lease(user: str, project_id: str, job_name: str) -> str:
+        return f"job_lease:{user}:{project_id}:{job_name}"
 
     @staticmethod
-    def agent_memory(user: str, session: str, topic: str) -> str:
+    def session_memory(user: str, session: str, topic: str) -> str:
         return f"memory:{user}:{session}:{topic}"
+
+    @staticmethod
+    def session_memory_pattern(user: str, session: str) -> str:
+        return f"memory:{user}:{session}:*"
 
     @staticmethod
     def heartbeat_counter(user: str, session: str) -> str:
@@ -403,32 +279,12 @@ class RedisKeys:
         return f"agents:{user}"
 
     @staticmethod
-    def agent_working_memory(agent_id: str, category: str) -> str:
-        return f"agent_memory:{agent_id}:{category}"
+    def agent_directives(user: str, agent_id: str) -> str:
+        return f"agent_directives:{user}:{agent_id}"
 
     @staticmethod
-    def global_stats() -> str:
-        return "global:stats"
-
-    @staticmethod
-    def community_config() -> str:
-        return "community:config"
-
-    @staticmethod
-    def community_discussion_active() -> str:
-        return "community:discussion:active"
-
-    @staticmethod
-    def community_discussion_history() -> str:
-        return "community:discussion:history"
-
-    @staticmethod
-    def community_discussion_messages(discussion_id: str) -> str:
-        return f"community:discussion:{discussion_id}:messages"
-
-    @staticmethod
-    def community_agent_hierarchy() -> str:
-        return "community:agent_hierarchy"
+    def community_discussion_active(user: str, project_id: str) -> str:
+        return f"community:discussion:active:{user}:{project_id}"
 
     @staticmethod
     def community_agent_memory(user_name: str, agent_id: str) -> str:

@@ -1,4 +1,5 @@
 import logging
+from logging.handlers import RotatingFileHandler
 
 
 def get_trace_logger():
@@ -8,7 +9,13 @@ def get_trace_logger():
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
 
-        handler = logging.FileHandler("llm_trace.log", mode="a")
+        handler = RotatingFileHandler(
+            "llm_trace.log",
+            mode="a",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=2,
+            encoding="utf-8",
+        )
 
         formatter = logging.Formatter(
             "\n"

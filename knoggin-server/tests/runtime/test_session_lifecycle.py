@@ -227,7 +227,10 @@ async def test_delete_session_data_cleans_keys_membership_and_filerag(
     await resources.redis.sadd(
         RedisKeys.project_sessions("ada", "project-1"), "session-1"
     )
-    await resources.redis.set("memory:ada:session-1:notes", "remember me")
+    memory_key = RedisKeys.session_memory("ada", "session-1", "notes")
+    dedup_key = RedisKeys.message_dedup("ada", "session-1", "digest")
+    await resources.redis.set(memory_key, "remember me")
+    await resources.redis.set(dedup_key, "42")
     await resources.redis.rpush(RedisKeys.buffer("ada", "session-1"), "pending")
 
     deleted = await manager.delete_session_data("session-1")
@@ -236,3 +239,5 @@ async def test_delete_session_data_cleans_keys_membership_and_filerag(
     assert ctx.file_rag.cleanup_count == 1
     assert project_manager.remove_session_calls == [("project-1", "session-1")]
     assert await resources.redis.hget(RedisKeys.sessions("ada"), "session-1") is None
+    assert await resources.redis.get(memory_key) is None
+    assert await resources.redis.get(dedup_key) is None

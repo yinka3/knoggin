@@ -1,6 +1,6 @@
 import pytest
 
-from infrastructure import graph_client as graph_client_module
+from infrastructure import graph_interface as graph_client_module
 
 
 class RecordingComponent:
@@ -78,7 +78,7 @@ def graph_client(monkeypatch):
         graph_client_module, "CommunityStore", component_factory("community")
     )
 
-    client = graph_client_module.GraphClient(
+    client = graph_client_module.GraphInterface(
         "postgresql://example",
         embedding_service=object(),
     )

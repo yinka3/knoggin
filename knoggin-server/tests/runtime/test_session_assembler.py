@@ -98,7 +98,7 @@ def assembler_harness(monkeypatch):
 
     config_manager = RecordingConfigManager()
     emitter = RecordingEmitter()
-    resources = FakeResources(graph_client=RecordingGraphClient())
+    resources = FakeResources(graph=RecordingGraphClient())
     entities = object()
     pipeline = FakePipeline()
 
@@ -174,7 +174,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.model == "model-a"
     assert ctx.active_topics == ["General", "Identity"]
 
-    assert harness.resources.graph_client.max_entity_id_calls == 0
+    assert harness.resources.graph.max_entity_id_calls == 0
     assert harness.resources.redis.evals == []
 
     assert RecordingBatchProcessor.instances == [harness.batch_processor]
@@ -190,7 +190,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
 
     consumer = RecordingBatchConsumer.instances[0]
     assert ctx.consumer is consumer
-    assert consumer.kwargs["graph_client"] is harness.resources.graph_client
+    assert consumer.kwargs["graph_client"] is harness.resources.graph
     assert consumer.kwargs["redis"] is harness.resources.redis
     assert consumer.kwargs["processor"] is processor
     assert consumer.get_session_context == ctx.get_conversation_context

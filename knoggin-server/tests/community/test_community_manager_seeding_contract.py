@@ -78,7 +78,7 @@ class RecordingLLM:
         self.response = response
         self.calls = []
 
-    async def call_llm(self, system, user, model, temperature):
+    async def generate_text(self, system, user, model, temperature):
         self.calls.append(
             {
                 "system": system,
@@ -100,7 +100,7 @@ def root_config(**community_overrides):
 def make_resources(*, redis=None, llm_response="{}"):
     return SimpleNamespace(
         redis=redis or FakeRedis(),
-        graph_client=RecordingGraphClient(),
+        graph=RecordingGraphClient(),
         llm_service=RecordingLLM(llm_response),
     )
 
@@ -206,7 +206,7 @@ async def test_build_seeding_context_includes_graph_and_community_sections():
 @pytest.mark.no_network
 async def test_build_seeding_context_falls_back_when_graph_collection_fails():
     resources = make_resources()
-    resources.graph_client.raise_context = True
+    resources.graph.raise_context = True
     manager = CommunityManager(make_project_state(), "ada", resources)
 
     assert (

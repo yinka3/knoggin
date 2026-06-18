@@ -11,6 +11,7 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.schema.agent_contracts import AgentConfig
+from common.schema.agent_stream import PublicAgentStreamEvent
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.executor import AgentExecutor
@@ -52,7 +53,7 @@ class Orchestrator:
         agent_persona_override: Optional[str] = None,
         agent_name_override: Optional[str] = None,
         client_tools: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[Dict, None]:
+    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
         """
         Main entry point for agent execution. Uses modular helpers for initialization.
         """

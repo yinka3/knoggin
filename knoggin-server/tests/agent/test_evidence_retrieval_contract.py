@@ -18,27 +18,25 @@ def make_search_tool(redis=None, graph_client=None):
 
 
 @pytest.mark.no_network
-async def test_surrounding_context_uses_msg_lookup_and_skips_malformed_turns():
+async def test_surrounding_context_uses_message_ids_and_skips_malformed_entries():
     redis = FakeRedis()
     tool = make_search_tool(redis=redis)
 
-    lookup_key = RedisKeys.msg_to_turn_lookup("ada", "session-1")
     recent_key = RedisKeys.recent_conversation("ada", "session-1")
     conv_key = RedisKeys.conversation("ada", "session-1")
 
-    await redis.hset(lookup_key, "7", "turn_2")
     await redis.zadd(
         recent_key,
         {
-            "turn_1": 1,
-            "turn_2": 2,
-            "turn_bad": 3,
-            "turn_3": 4,
+            "6": 1,
+            "7": 2,
+            "8": 3,
+            "9": 4,
         },
     )
     await redis.hset(
         conv_key,
-        "turn_1",
+        "6",
         json.dumps(
             {
                 "role": "assistant",
@@ -49,7 +47,7 @@ async def test_surrounding_context_uses_msg_lookup_and_skips_malformed_turns():
     )
     await redis.hset(
         conv_key,
-        "turn_2",
+        "7",
         json.dumps(
             {
                 "role": "user",
@@ -58,10 +56,10 @@ async def test_surrounding_context_uses_msg_lookup_and_skips_malformed_turns():
             }
         ),
     )
-    await redis.hset(conv_key, "turn_bad", "{not-json")
+    await redis.hset(conv_key, "8", "{not-json")
     await redis.hset(
         conv_key,
-        "turn_3",
+        "9",
         json.dumps(
             {
                 "role": "assistant",
@@ -80,20 +78,20 @@ async def test_surrounding_context_uses_msg_lookup_and_skips_malformed_turns():
             "role": "assistant",
             "timestamp": "2026-01-01T10:00:00+00:00",
             "content": "before",
-            "id": "turn_1",
+            "id": "msg_6",
         },
         {
             "role": "user",
             "timestamp": "2026-01-01T10:01:00+00:00",
             "content": "hit",
-            "id": "turn_2",
+            "id": "msg_7",
             "is_hit": True,
         },
         {
             "role": "assistant",
             "timestamp": "2026-01-01T10:02:00+00:00",
             "content": "after",
-            "id": "turn_3",
+            "id": "msg_9",
         },
     ]
 

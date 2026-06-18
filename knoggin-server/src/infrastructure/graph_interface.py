@@ -19,7 +19,7 @@ from knoggin_server.knowledge.db.writers.graph_writer import GraphWriter
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 
-class GraphClient:
+class GraphInterface:
     """
     Facade over the Postgres/AGE persistence layer.
 

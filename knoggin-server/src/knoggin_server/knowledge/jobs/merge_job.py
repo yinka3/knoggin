@@ -8,6 +8,7 @@ from loguru import logger
 from common.conf.topics_config import TopicConfig
 from common.schema.contracts import MergeJudgment
 from common.schema.primitives import FactRecord
+from common.schema.settings import MergerSettings
 from common.utils.core_utils import format_vp05_input
 from common.utils.data_utils import (
     cosine_similarity,
@@ -17,7 +18,7 @@ from common.utils.data_utils import (
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now, get_now_iso
-from infrastructure.graph_client import GraphClient
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
@@ -40,7 +41,7 @@ class MergeDetectionJob(BaseJob):
         self,
         user_name: str,
         entities: EntityManager,
-        graph_client: GraphClient,
+        graph_client: GraphInterface,
         llm_client: LLMService,
         topic_config: TopicConfig,
         redis_client: aioredis.Redis,
@@ -165,7 +166,7 @@ class MergeDetectionJob(BaseJob):
             verbose_only=True,
         )
 
-        judgment: MergeJudgment = await self.llm.call_llm(
+        judgment: MergeJudgment = await self.llm.generate_structured(
             response_model=MergeJudgment,
             system=system,
             user=user_content,
@@ -787,33 +788,11 @@ class MergeDetectionJob(BaseJob):
 
         return stored
 
-    def update_settings(
-        self,
-        auto_threshold: float = None,
-        hitl_threshold: float = None,
-        cosine_threshold: float = None,
-    ):
-        updates = []
-
-        if auto_threshold is not None:
-            self.auto_threshold = auto_threshold
-            updates.append(f"auto={auto_threshold}")
-        if hitl_threshold is not None:
-            self.hitl_threshold = hitl_threshold
-            updates.append(f"hitl={hitl_threshold}")
-        if cosine_threshold is not None:
-            self.cosine_threshold = cosine_threshold
-            updates.append(f"cosine={cosine_threshold}")
-
-        if updates:
-            logger.info(f"MergeDetectionJob updated: {', '.join(updates)}")
-
-    async def on_shutdown(self, ctx: JobContext) -> None:
-        """Set pending flag so next session picks up merge work."""
-        await self.redis.set(
-            RedisKeys.job_pending(ctx.user_name, ctx.project_id, self.name), "true"
-        )
-        logger.debug("Merge detection pending flag set")
+    def update_settings(self, settings: MergerSettings) -> None:
+        self.auto_threshold = settings.auto_threshold
+        self.hitl_threshold = settings.hitl_threshold
+        self.cosine_threshold = settings.cosine_threshold
+        logger.info("MergeDetectionJob settings updated")
 
     async def _judge_with_sem(
         self, candidate: dict, event_scope_id: str, sem: asyncio.Semaphore

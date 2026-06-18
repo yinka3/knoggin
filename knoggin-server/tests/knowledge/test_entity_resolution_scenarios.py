@@ -144,7 +144,7 @@ class FakeLLM:
         self.relevance = relevance
         self.calls = []
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
         if isinstance(self.relevance, list):
             return BulkRelevanceResult(

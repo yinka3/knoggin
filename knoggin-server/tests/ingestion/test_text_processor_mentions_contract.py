@@ -1,6 +1,7 @@
 import pytest
 
 from common.conf.topics_config import TopicConfig
+from common.exceptions import LLMProviderError
 from common.schema.contracts import ExtractionTrace, NERResult
 from common.schema.primitives import EntityRecord
 from common.schema.settings import TopicSchema
@@ -67,10 +68,10 @@ class FakeLLM:
         self.raise_error = raise_error
         self.calls = []
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
         if self.raise_error:
-            raise RuntimeError("fake ner failure")
+            raise LLMProviderError("fake ner failure")
         return self.response
 
 

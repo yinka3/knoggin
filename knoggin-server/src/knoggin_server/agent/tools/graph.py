@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from infrastructure.graph_client import GraphClient
+    from infrastructure.graph_interface import GraphInterface
     from knoggin_server.knowledge.services.embedding_service import EmbeddingService
     from knoggin_server.knowledge.services.entity_service import EntityManager
 
@@ -12,7 +12,7 @@ from common.utils.data_utils import cosine_similarity
 
 class GraphTools:
     # Attributes provided by the composed Tools class
-    graph_client: GraphClient
+    graph_client: GraphInterface
     entities: EntityManager
     embedding_service: EmbeddingService
     active_topics: Optional[List[str]]

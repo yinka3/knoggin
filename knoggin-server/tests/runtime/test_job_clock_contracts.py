@@ -1,4 +1,3 @@
-import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -37,6 +36,10 @@ class ProcessorWithGraphClient:
 
 class FakeSchedulerJob:
     name = "clocked_job"
+    enabled = True
+
+    async def should_run(self, ctx):
+        return True
 
     async def execute(self, ctx):
         return JobResult(success=True, summary="done")
@@ -112,7 +115,7 @@ class ProfileEntities:
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_scheduler_uses_frozen_wall_clock_for_activity_idle_and_last_run():
+async def test_scheduler_uses_frozen_wall_clock_for_activity_and_idle():
     redis = FakeRedis()
     scheduler = Scheduler("ada", "project-1", redis)
     job = FakeSchedulerJob()
@@ -127,38 +130,17 @@ async def test_scheduler_uses_frozen_wall_clock_for_activity_idle_and_last_run()
         assert await scheduler._get_idle_seconds() == 45.0
 
         await scheduler._execute_job(job, ctx)
-        assert scheduler._last_runs[job.name] == get_now()
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_scheduler_pending_checks_use_project_id():
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
-    job = FakeSchedulerJob()
-    scheduler.register(job)
-    captured_contexts = []
-
-    async def fake_execute_job(job_arg, ctx_arg):
-        captured_contexts.append(ctx_arg)
-
-    scheduler._execute_job = fake_execute_job
-    await redis.set(RedisKeys.job_pending("ada", "project-1", job.name), "1")
-    await redis.set(RedisKeys.job_pending("ada", "session-1", job.name), "1")
-
-    await scheduler._run_pending_checks()
-    await asyncio.sleep(0)
-
-    assert await redis.get(RedisKeys.job_pending("ada", "project-1", job.name)) is None
-    assert await redis.get(RedisKeys.job_pending("ada", "session-1", job.name)) == "1"
-    assert captured_contexts[0].project_id == "project-1"
+        assert (
+            await redis.get(RedisKeys.job_lease("ada", "project-1", job.name))
+            is None
+        )
     assert not hasattr(scheduler, "session_id")
-    assert not hasattr(captured_contexts[0], "session_id")
-    assert not hasattr(captured_contexts[0], "scope_id")
+    assert not hasattr(ctx, "session_id")
+    assert not hasattr(ctx, "scope_id")
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_dlq_job_should_run_and_empty_execute_use_frozen_unix_time():
+async def test_dlq_job_exposes_cadence_and_leaves_clock_to_scheduler():
     redis = FakeRedis()
     job = DLQReplayJob(
         entities=object(),
@@ -168,32 +150,21 @@ async def test_dlq_job_should_run_and_empty_execute_use_frozen_unix_time():
         interval=60,
     )
     ctx = job_context()
-    last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
+    assert job.cadence_seconds == 60
+    assert await job.should_run(ctx) is False
 
-    with frozen_time(FROZEN_AT) as clock:
-        assert await job.should_run(ctx) is False
-        assert await redis.get(last_run_key) == str(get_now_unix())
+    result = await job.execute(ctx)
 
-        clock.advance(seconds=59)
-        assert await job.should_run(ctx) is False
-
-        clock.advance(seconds=1)
-        assert await job.should_run(ctx) is True
-
-        await redis.set(last_run_key, "not-a-number")
-        assert await job.should_run(ctx) is False
-        assert await redis.get(last_run_key) == str(get_now_unix())
-
-        clock.advance(seconds=10)
-        result = await job.execute(ctx)
-        assert result.success is True
-        assert result.summary == "DLQ empty"
-        assert await redis.get(last_run_key) == str(get_now_unix())
+    assert result.success is True
+    assert result.summary == "DLQ empty"
+    assert await redis.get(
+        RedisKeys.job_last_run(job.name, "ada", "project-1")
+    ) is None
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_entity_cleanup_uses_frozen_cutoffs_and_updates_last_run():
+async def test_entity_cleanup_uses_frozen_cutoffs_without_owning_cadence():
     redis = FakeRedis()
     graph = CleanupGraph()
     entities = CleanupEntities(user_id=1)
@@ -207,11 +178,9 @@ async def test_entity_cleanup_uses_frozen_cutoffs_and_updates_last_run():
         stale_junk_days=3,
     )
     ctx = job_context()
-    last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
-
     with frozen_time(FROZEN_AT):
         assert await job.should_run(ctx) is False
-        assert await redis.get(last_run_key) == str(get_now_unix())
+        assert job.cadence_seconds == 3600
 
         result = await job.execute(ctx)
 
@@ -223,26 +192,28 @@ async def test_entity_cleanup_uses_frozen_cutoffs_and_updates_last_run():
         assert graph.orphan_calls == [
             (1, expected_orphan_cutoff, expected_junk_cutoff, "project-1")
         ]
-        assert await redis.get(last_run_key) == str(get_now_unix())
+        assert await redis.get(
+            RedisKeys.job_last_run(job.name, "ada", "project-1")
+        ) is None
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_entity_cleanup_user_missing_still_updates_last_run():
+async def test_entity_cleanup_user_missing_returns_success_without_clock_write():
     redis = FakeRedis()
     graph = CleanupGraph()
     entities = CleanupEntities(user_id=None)
     job = EntityCleanupJob("ada", graph, entities, redis)
     ctx = job_context()
-    last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
-
     with frozen_time(FROZEN_AT):
         result = await job.execute(ctx)
 
         assert result.summary == "User entity not initialized"
         assert graph.cleanup_calls == ["project-1"]
         assert graph.orphan_calls == []
-        assert await redis.get(last_run_key) == str(get_now_unix())
+        assert await redis.get(
+            RedisKeys.job_last_run(job.name, "ada", "project-1")
+        ) is None
 
 
 @pytest.mark.runtime
@@ -266,7 +237,7 @@ async def test_entity_cleanup_evicts_only_ids_confirmed_deleted():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_fact_archival_uses_frozen_interval_marker_and_cutoff():
+async def test_fact_archival_exposes_fallback_cadence_and_consumes_marker_on_success():
     redis = FakeRedis()
     graph = ArchivalGraph(deleted_count=2)
     job = FactArchivalJob(
@@ -277,34 +248,51 @@ async def test_fact_archival_uses_frozen_interval_marker_and_cutoff():
         fallback_interval_hours=1,
     )
     ctx = job_context()
-    last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
     profile_complete_key = RedisKeys.project_profile_complete("ada", "project-1")
 
-    with frozen_time(FROZEN_AT) as clock:
+    with frozen_time(FROZEN_AT):
         assert await job.should_run(ctx) is False
-        assert await redis.get(last_run_key) == str(get_now_unix())
-
-        clock.advance(minutes=59)
-        assert await job.should_run(ctx) is False
-
-        clock.advance(minutes=1)
-        assert await job.should_run(ctx) is True
+        assert job.cadence_seconds == 3600
 
         await redis.set(profile_complete_key, str(get_now_unix()))
         assert await job.should_run(ctx) is True
-        assert await redis.get(profile_complete_key) is None
+        assert await redis.get(profile_complete_key) is not None
 
         result = await job.execute(ctx)
 
         assert result.summary == "Archived 2 invalidated facts"
         expected_cutoff = get_now() - timedelta(days=14)
         assert graph.calls == [(expected_cutoff, "project-1")]
-        assert await redis.get(last_run_key) == str(get_now_unix())
+        assert await redis.get(profile_complete_key) is None
+        assert await redis.get(
+            RedisKeys.job_last_run(job.name, "ada", "project-1")
+        ) is None
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_aac_job_uses_frozen_interval_and_last_run(monkeypatch):
+async def test_fact_archival_preserves_profile_marker_when_execution_fails():
+    redis = FakeRedis()
+    graph = ArchivalGraph()
+    job = FactArchivalJob("ada", graph, redis)
+    ctx = job_context()
+    profile_complete_key = RedisKeys.project_profile_complete("ada", "project-1")
+    await redis.set(profile_complete_key, "profile-run-1")
+
+    async def fail_archival(cutoff, project_id=None):
+        raise RuntimeError("database unavailable")
+
+    graph.delete_old_invalidated_facts = fail_archival
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await job.execute(ctx)
+
+    assert await redis.get(profile_complete_key) == "profile-run-1"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_aac_job_exposes_live_cadence_and_leaves_clock_to_scheduler(monkeypatch):
     class FakeCommunityManager:
         def __init__(self, project_state, user_name, resources):
             self.project_state = project_state
@@ -336,43 +324,32 @@ async def test_aac_job_uses_frozen_interval_and_last_run(monkeypatch):
 
     resources = FakeResources()
     resources.triggered_discussions = 0
-    resources.graph_client.community = FakeCommunityGraph()
+    resources.graph.community = FakeCommunityGraph()
     project_state = SimpleNamespace(project_id="project-1")
     job = AACJob(project_state, resources)
     ctx = job_context()
-    last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
-
-    with frozen_time(FROZEN_AT) as clock:
+    with frozen_time(FROZEN_AT):
         patch_config(enabled=False)
         assert await job.should_run(ctx) is False
+        assert job.cadence_seconds is None
 
         patch_config(enabled=True, interval_minutes=30)
-        assert await job.should_run(ctx) is True
-
-        await resources.redis.set(last_run_key, get_now_unix())
-        clock.advance(minutes=29)
         assert await job.should_run(ctx) is False
-
-        clock.advance(minutes=1)
-        assert await job.should_run(ctx) is True
+        assert job.cadence_seconds == 30 * 60
+        assert job.run_immediately_on_first_check is True
 
         result = await job.execute(ctx)
         assert result.success is True
         assert resources.triggered_discussions == 1
-        assert await resources.redis.get(last_run_key) == str(get_now_unix())
+        assert await resources.redis.get(
+            RedisKeys.job_last_run(job.name, "ada", "project-1")
+        ) is None
 
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_profile_refinement_targeted_recency_and_markers_use_frozen_unix(
     monkeypatch,
 ):
-    root = RootConfig(developer_settings=DeveloperSettings())
-    root.developer_settings.jobs.merger.enabled = False
-    monkeypatch.setattr(
-        "knoggin_server.knowledge.jobs.profile_job.ConfigManager.get",
-        staticmethod(lambda: SimpleNamespace(config=root)),
-    )
-
     redis = FakeRedis()
     job = ProfileRefinementJob(
         llm=object(),
@@ -432,5 +409,8 @@ async def test_profile_refinement_targeted_recency_and_markers_use_frozen_unix(
         assert await redis.get(recent_key) == str(get_now_unix() - 30)
         assert await redis.get(old_key) == str(get_now_unix())
         assert await redis.get(profile_complete_key) == str(get_now_unix())
+        assert await redis.smembers(
+            RedisKeys.merge_queue("ada", "project-1")
+        ) == {"3"}
         assert (old_key, 3600) in redis.expirations
         assert (profile_complete_key, 300) in redis.expirations

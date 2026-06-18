@@ -3,9 +3,10 @@ import asyncio
 import redis.asyncio as aioredis
 from loguru import logger
 
+from common.schema.settings import CleanerSettings
 from common.utils.events import emit
-from common.utils.time_utils import get_now_ms, get_now_unix
-from infrastructure.graph_client import GraphClient
+from common.utils.time_utils import get_now_ms
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.services.entity_service import EntityManager
@@ -23,7 +24,7 @@ class EntityCleanupJob(BaseJob):
     def __init__(
         self,
         user_name: str,
-        graph_client: GraphClient,
+        graph_client: GraphInterface,
         entities: EntityManager,
         redis_client: aioredis.Redis,
         interval_hours: int = 24,
@@ -45,22 +46,12 @@ class EntityCleanupJob(BaseJob):
     def name(self) -> str:
         return "entity_cleanup"
 
+    @property
+    def cadence_seconds(self) -> float:
+        return self.run_interval_seconds
+
     async def should_run(self, ctx: JobContext) -> bool:
-        """Run if we haven't run in X hours."""
-        last_run_key = RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id)
-        last_run_ts = await self.redis.get(last_run_key)
-
-        if not last_run_ts:
-            await self.redis.set(last_run_key, get_now_unix())
-            return False
-
-        try:
-            elapsed = get_now_unix() - float(last_run_ts)
-        except ValueError:
-            await self.redis.set(last_run_key, get_now_unix())
-            return False
-
-        return elapsed >= self.run_interval_seconds
+        return False
 
     async def execute(self, ctx: JobContext) -> JobResult:
         with logger.contextualize(
@@ -79,10 +70,6 @@ class EntityCleanupJob(BaseJob):
 
             user_id = await self.entities.get_id(self.user_name)
             if user_id is None:
-                await self.redis.set(
-                    RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id),
-                    get_now_unix(),
-                )
                 return JobResult(success=True, summary="User entity not initialized")
 
             orphan_ids = await self.graph_client.get_orphan_entities(
@@ -96,15 +83,12 @@ class EntityCleanupJob(BaseJob):
                 protected = set(orphan_ids) & pending_ids
                 if protected:
                     logger.info(
-                        f"Cleanup: Skipping {len(protected)} orphans pending merge evaluation"
+                        "Cleanup: Skipping "
+                        f"{len(protected)} orphans pending merge evaluation"
                     )
                     orphan_ids = [eid for eid in orphan_ids if eid not in pending_ids]
 
             if not orphan_ids:
-                await self.redis.set(
-                    RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id),
-                    get_now_unix(),
-                )
                 if null_deleted_ids:
                     return JobResult(
                         success=True,
@@ -113,7 +97,8 @@ class EntityCleanupJob(BaseJob):
                 return JobResult(success=True, summary="No orphans found")
 
             logger.info(
-                f"Cleanup trigger: Found {len(orphan_ids)} entities (Orphans >24h or Junk >30d)"
+                f"Cleanup trigger: Found {len(orphan_ids)} entities "
+                "(Orphans >24h or Junk >30d)"
             )
             for eid in orphan_ids:
                 # We don't fetch names to avoid slow DB calls, but we log the IDs
@@ -132,11 +117,6 @@ class EntityCleanupJob(BaseJob):
 
             deleted_count = len(deleted_ids)
 
-            await self.redis.set(
-                RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id),
-                get_now_unix(),
-            )
-
             await emit(
                 ctx.project_id,
                 "job",
@@ -145,32 +125,14 @@ class EntityCleanupJob(BaseJob):
             )
             return JobResult(success=True, summary=f"Cleaned {deleted_count} entities")
 
-    def update_settings(
-        self,
-        interval_hours: int = None,
-        orphan_age_hours: int = None,
-        stale_junk_days: int = None,
-    ):
-        """
-        Override BaseJob to convert hours/days into milliseconds.
-        """
-        updates = []
-
-        if interval_hours is not None:
-            self.run_interval_seconds = interval_hours * 3600
-            updates.append(f"interval={interval_hours}h")
-
-        if orphan_age_hours is not None:
-            self.orphan_cutoff_ms = orphan_age_hours * 3600 * 1000
-            updates.append(f"orphan_age={orphan_age_hours}h")
-
-        if stale_junk_days is not None:
-            self.stale_cutoff_ms = stale_junk_days * 24 * 3600 * 1000
-            updates.append(f"stale_age={stale_junk_days}d")
-
-        if updates:
-            logger.info(f"Cleaner Job reconfigured: {', '.join(updates)}")
-
-    async def on_shutdown(self, ctx: JobContext) -> None:
-        # No state to flush
-        pass
+    def update_settings(self, settings: CleanerSettings) -> None:
+        self.enabled = settings.enabled
+        self.run_interval_seconds = settings.interval_hours * 3600
+        self.orphan_cutoff_ms = settings.orphan_age_hours * 3600 * 1000
+        self.stale_cutoff_ms = settings.stale_junk_days * 24 * 3600 * 1000
+        logger.info(
+            "EntityCleanupJob settings updated: "
+            f"enabled={self.enabled}, interval={settings.interval_hours}h, "
+            f"orphan_age={settings.orphan_age_hours}h, "
+            f"stale_age={settings.stale_junk_days}d"
+        )

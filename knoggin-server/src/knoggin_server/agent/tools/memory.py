@@ -5,14 +5,14 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
-    from infrastructure.graph_client import GraphClient
+    from infrastructure.graph_interface import GraphInterface
     from knoggin_server.knowledge.services.entity_service import EntityManager
     from knoggin_server.knowledge.services.memory_service import MemoryManager
 
 
 class MemoryTools:
     redis: aioredis.Redis
-    graph_client: GraphClient
+    graph_client: GraphInterface
     entities: EntityManager
     memory: Optional[MemoryManager]
 

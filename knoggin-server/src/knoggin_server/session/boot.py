@@ -132,7 +132,7 @@ class SessionAssembler:
         return BatchConsumer(
             user_name=self.user_name,
             session_id=session_id,
-            graph_client=self.resources.graph_client,
+            graph_client=self.resources.graph,
             redis=self.resources.redis,
             processor=processor,
             get_session_context=get_session_context,

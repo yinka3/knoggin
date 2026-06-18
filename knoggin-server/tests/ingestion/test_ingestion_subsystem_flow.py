@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from common.exceptions import LLMProviderError
 from common.schema.contracts import (
     BulkRelevanceResult,
     ConnectionsResult,
@@ -148,11 +149,11 @@ class RoutedLLM:
         self.raise_for = set(raise_for or [])
         self.calls = []
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
         response_model = kwargs["response_model"]
         if response_model in self.raise_for:
-            raise RuntimeError(f"fake {response_model.__name__} failure")
+            raise LLMProviderError(f"fake {response_model.__name__} failure")
         if response_model is NERResult:
             return self.ner_result
         if response_model is ConnectionsResult:

@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.exceptions import LLMProviderError
 from knoggin_server.agent.executor import AgentExecutor
 from knoggin_server.agent.types import (
     AgentContext,
@@ -20,7 +21,7 @@ class StreamingLLM:
         self.raises = raises
         self.calls = []
 
-    async def call_llm_with_tools_streaming(self, **kwargs):
+    async def stream_with_tools(self, **kwargs):
         self.calls.append(kwargs)
         if self.raises:
             raise self.raises
@@ -46,31 +47,38 @@ def make_executor(llm):
 
 
 @pytest.mark.no_network
-async def test_step_streams_tokens_thinking_and_parses_tool_calls(monkeypatch):
+async def test_step_forwards_standard_stream_events(monkeypatch):
     chunks = [
-        {"type": "token", "content": "I should search first. "},
-        {"type": "thinking", "content": "Need direct evidence"},
+        {"event": "token", "data": {"content": "I should search first. "}},
+        {"event": "thinking", "data": {"content": "Need direct evidence"}},
         {
-            "type": "tool_calls",
-            "calls": [
-                {
-                    "name": "search_messages",
-                    "arguments": '{"query": "profile behavior", "limit": 3}',
-                    "id": "call-1",
-                },
-                {
-                    "name": "get_recent_activity",
-                    "arguments": '{"entity_name": "Knoggin", "hours": "24",}',
-                    "id": "call-2",
-                },
-            ],
+            "event": "tool_calls",
+            "data": {
+                "content": "Authoritative tool reasoning.",
+                "calls": [
+                    {
+                        "name": "search_messages",
+                        "arguments": '{"query": "profile behavior", "limit": 3}',
+                        "id": "call-1",
+                    },
+                    {
+                        "name": "get_recent_activity",
+                        "arguments": '{"entity_name": "Knoggin", "hours": "24",}',
+                        "id": "call-2",
+                    },
+                ],
+            },
         },
         {
-            "type": "done",
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
+            "event": "step_completed",
+            "data": {
+                "content": "Authoritative tool reasoning.",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                    "approximate": False,
+                },
             },
         },
     ]
@@ -117,18 +125,18 @@ async def test_step_streams_tokens_thinking_and_parses_tool_calls(monkeypatch):
         "event": "thinking",
         "data": {"content": "Need direct evidence"},
     }
-    assert events[2]["event"] == "done"
-    calls = events[2]["data"]
+    assert events[2] == chunks[2]
+    assert events[3] == chunks[3]
+
+    calls = executor._parse_tool_calls(
+        events[2]["data"]["calls"],
+        events[2]["data"]["content"],
+    )
     assert [call.name for call in calls] == ["search_messages", "get_recent_activity"]
     assert calls[0].args == {"query": "profile behavior", "limit": 3}
-    assert calls[0].thinking == "I should search first."
+    assert calls[0].thinking == "Authoritative tool reasoning."
     assert calls[0].call_id == "call-1"
     assert calls[1].args == {"entity_name": "Knoggin", "hours": "24"}
-    assert executor.ctx.state.usage == {
-        "prompt_tokens": 10,
-        "completion_tokens": 5,
-        "total_tokens": 15,
-    }
 
     llm_call = llm.calls[0]
     assert llm_call["system"] == "SYSTEM PROMPT"
@@ -151,51 +159,39 @@ async def test_step_streams_tokens_thinking_and_parses_tool_calls(monkeypatch):
 
 @pytest.mark.no_network
 async def test_step_marks_invalid_arguments_for_later_tool_error():
-    llm = StreamingLLM(
+    executor = make_executor(StreamingLLM())
+    tool_call = executor._parse_tool_calls(
         [
             {
-                "type": "tool_calls",
-                "calls": [
-                    {
-                        "name": "search_messages",
-                        "arguments": "{not json",
-                        "id": "call-bad",
-                    }
-                ],
-            },
-            {"type": "done"},
-        ]
-    )
-    executor = make_executor(llm)
+                "name": "search_messages",
+                "arguments": "{not json",
+                "id": "call-bad",
+            }
+        ],
+        "",
+    )[0]
 
-    events = [
-        event
-        async for event in executor._step(
-            date="now",
-            model="model",
-            reasoning="medium",
-            current_mode="Librarian",
-            enabled_tools=None,
-            memory_context="",
-            files_context="",
-            directives="",
-            temp=0.7,
-            agent_instructions="",
-            last_result=None,
-        )
-    ]
-
-    tool_call = events[-1]["data"][0]
     assert tool_call.args["_parse_error"] is True
     assert tool_call.args["_raw"] == "{not json"
 
 
 @pytest.mark.no_network
-async def test_step_done_without_tool_calls_yields_formatting_error():
+async def test_step_completed_without_tool_calls_yields_formatting_step_error():
     llm = StreamingLLM(
         [
-            {"type": "token", "content": "raw answer"},
-            {"type": "done"},
+            {"event": "token", "data": {"content": "raw answer"}},
+            {
+                "event": "step_completed",
+                "data": {
+                    "content": "raw answer",
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 2,
+                        "total_tokens": 6,
+                        "approximate": True,
+                    },
+                },
+            },
         ]
     )
     executor = make_executor(llm)
@@ -217,14 +213,23 @@ async def test_step_done_without_tool_calls_yields_formatting_error():
         )
     ]
 
-    assert events[-1]["event"] == "formatting_error"
-    assert "must either call" in events[-1]["data"]
+    assert events[-1]["event"] == "step_error"
+    assert events[-1]["data"]["kind"] == "formatting"
+    assert "must either call" in events[-1]["data"]["message"]
+    assert events[-1]["data"]["usage"]["approximate"] is True
 
 
 @pytest.mark.no_network
 async def test_step_forwards_llm_error_chunk_and_exceptions():
-    chunk_error = StreamingLLM([{"type": "error", "message": "provider said no"}])
-    exception_error = StreamingLLM(raises=RuntimeError("stream broke"))
+    chunk_error = StreamingLLM(
+        [
+            {
+                "event": "step_error",
+                "data": {"kind": "provider", "message": "provider said no"},
+            }
+        ]
+    )
+    exception_error = StreamingLLM(raises=LLMProviderError("stream broke"))
 
     chunk_events = [
         event
@@ -260,11 +265,17 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
     ]
 
     assert chunk_events == [
-        {"event": "error", "data": {"message": "provider said no"}}
+        {
+            "event": "step_error",
+            "data": {"kind": "provider", "message": "provider said no"},
+        }
     ]
     assert exception_events == [
         {
-            "event": "error",
-            "data": {"message": "LLM API failure: stream broke"},
+            "event": "step_error",
+            "data": {
+                "kind": "provider",
+                "message": "LLM API failure: stream broke",
+            },
         }
     ]

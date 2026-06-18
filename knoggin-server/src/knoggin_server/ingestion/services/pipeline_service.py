@@ -12,6 +12,7 @@ from loguru import logger
 from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
+from common.exceptions import ConfigurationError, LLMError
 from common.schema.contracts import (
     BatchResult,
     BulkRelevanceResult,
@@ -573,9 +574,7 @@ class BatchProcessor:
         boosted_score: float,
         candidate_id: int,
     ) -> bool:
-        compatibility = self._is_schema_compatible(
-            mention_type, mention_topic, profile
-        )
+        compatibility = self._is_schema_compatible(mention_type, mention_topic, profile)
         if compatibility == "incompatible":
             return False
 
@@ -760,9 +759,7 @@ class BatchProcessor:
             return False
 
         for known_name in [canonical_name, *aliases]:
-            initials = "".join(
-                token[0] for token in self._word_tokens(known_name)
-            )
+            initials = "".join(token[0] for token in self._word_tokens(known_name))
             if initials and mention == initials:
                 return True
         return False
@@ -851,19 +848,20 @@ class BatchProcessor:
 
                 prompt = (
                     "For each index, determine if the message relates to the "
-                    "entity's facts.\n\n"
-                    + "\n".join(lines)
+                    "entity's facts.\n\n" + "\n".join(lines)
                 )
 
                 try:
-                    bulk_relevance: BulkRelevanceResult = await self.llm.call_llm(
-                        response_model=BulkRelevanceResult,
-                        system=(
-                            "You are a relevance judge. For each provided pair "
-                            "(message + entity facts), decide if they are related."
-                        ),
-                        user=prompt,
-                        temperature=0.0,
+                    bulk_relevance: BulkRelevanceResult = (
+                        await self.llm.generate_structured(
+                            response_model=BulkRelevanceResult,
+                            system=(
+                                "You are a relevance judge. For each provided pair "
+                                "(message + entity facts), decide if they are related."
+                            ),
+                            user=prompt,
+                            temperature=0.0,
+                        )
                     )
 
                     if bulk_relevance and bulk_relevance.judgments:
@@ -883,7 +881,7 @@ class BatchProcessor:
                                 results.get(candidate_id, base_score), base_score
                             )
 
-                except Exception as e:
+                except (ConfigurationError, LLMError) as e:
                     logger.warning(
                         f"Fact relevance LLM failed for chunk, using base scores: {e}"
                     )
@@ -987,13 +985,13 @@ class BatchProcessor:
         )
 
         try:
-            conn_result: ConnectionsResult = await self.llm.call_llm(
+            conn_result: ConnectionsResult = await self.llm.generate_structured(
                 response_model=ConnectionsResult,
                 system=system_03,
                 user=user_03,
                 temperature=0.0,
             )
-        except Exception as e:
+        except (ConfigurationError, LLMError) as e:
             logger.warning(
                 "VP-02 connection extraction failed, continuing without "
                 f"connections: {e}"
@@ -1105,8 +1103,7 @@ class BatchProcessor:
                 record_issue(
                     code="invalid_user_connection_msg_id",
                     message=(
-                        "VP-02 returned invalid user connection msg_id "
-                        f"{conn.msg_id}"
+                        f"VP-02 returned invalid user connection msg_id {conn.msg_id}"
                     ),
                     item_ref=f"user->{conn.entity_name}",
                     metadata={
@@ -1125,8 +1122,7 @@ class BatchProcessor:
                 record_issue(
                     code="invalid_user_connection_entity",
                     message=(
-                        "VP-02 returned a user connection with an unknown "
-                        "entity name"
+                        "VP-02 returned a user connection with an unknown entity name"
                     ),
                     item_ref=f"user->{conn.entity_name}",
                     metadata={"entity_name": conn.entity_name},

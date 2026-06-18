@@ -7,7 +7,14 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from common.exceptions import ToolExecutionError
+from common.exceptions import ConfigurationError, LLMError, ToolExecutionError
+from common.schema.agent_stream import (
+    ErrorEvent,
+    InternalAgentStreamEvent,
+    PublicAgentStreamEvent,
+    StreamToolCall,
+    StreamUsage,
+)
 from common.schema.tool_schema import get_filtered_schemas
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
@@ -35,6 +42,7 @@ from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.agent.types import ClarificationRequest, FinalResponse, ToolCall
 from knoggin_server.knowledge.services.memory_service import MemoryManager
 
+MAX_TOKEN_CHUNK_SIZE = 10000
 
 class AgentExecutor:
     """
@@ -63,7 +71,7 @@ class AgentExecutor:
         agent_instructions: Optional[str] = None,
         agent_directives: Optional[str] = None,
         client_tools: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[Dict, None]:
+    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
         """Runs the reasoning loop and yields events."""
 
         # Prepare environment
@@ -101,17 +109,19 @@ class AgentExecutor:
                 self.ctx.state.consecutive_errors
                 >= self.ctx.config.max_consecutive_errors
             ):
-                logger.warning(
-                    f"AgentExecutor: Global consecutive error limit reached ({self.ctx.state.consecutive_errors}). Aborting."
-                )
-                break
+                yield self._terminal_error()
+                return
 
             self.ctx.state.attempt_count += 1
 
             current_model = None
             current_reasoning = None
 
-            if self.ctx.state.attempt_count == 1 or needs_replanning or needs_final_synthesis:
+            if (
+                self.ctx.state.attempt_count == 1
+                or needs_replanning
+                or needs_final_synthesis
+            ):
                 # Architect Mode: Strategic planning or final synthesis
                 current_mode_name = "Architect"
                 current_model = model or self.llm.agent_model
@@ -130,7 +140,7 @@ class AgentExecutor:
                 current_model = model or self.llm.extraction_model
                 current_reasoning = "medium"
 
-            # Reset flags so the next turn defaults back to Librarian unless triggered again
+            # Reset flags so the next turn defaults to Librarian.
             needs_replanning = False
             needs_final_synthesis = False
 
@@ -138,6 +148,10 @@ class AgentExecutor:
             await self._emit_llm_call(current_model, current_reasoning)
 
             # Call LLM for this step
+            pending_tool_calls: List[ToolCall] = []
+            step_failed = False
+            step_completed = False
+
             async for event in self._step(
                 current_time,
                 current_model,
@@ -152,114 +166,159 @@ class AgentExecutor:
                 last_result,
                 client_tools,
             ):
-                event_type = event.get("event")
-                data = event.get("data")
+                event_type = event["event"]
+                data = event["data"]
 
-                if event_type == "formatting_error":
-                    logger.warning(
-                        "AgentExecutor: Model emitted text without tool calls. "
-                        "Returning error to loop."
+                if event_type in ("token", "thinking"):
+                    yield event
+                    continue
+
+                if event_type == "tool_calls":
+                    pending_tool_calls.extend(
+                        self._parse_tool_calls(
+                            data["calls"],
+                            data["content"],
+                        )
                     )
-                    current_results = [{"error": data}]
-                    last_result = current_results
+                    continue
+
+                if event_type == "step_error":
+                    self._accumulate_usage(data.get("usage"))
+                    self._record_step_error(data["message"], data["kind"])
+                    step_failed = True
                     break
 
-                if event_type == "done":
-                    # If step returned ToolCalls (List[ToolCall]), execute them
-                    if isinstance(data, list):
-                        current_results = []
+                if event_type == "step_completed":
+                    step_completed = True
+                    self._accumulate_usage(data["usage"])
+                    current_results = []
 
-                        if not data:
-                            logger.warning(
-                                "AgentExecutor: Librarian stalled with empty tool calls."
-                            )
-                            needs_replanning = True
-                            break
-
-                        # Intercept submit_answer before tool execution
-                        submit = next(
-                            (tc for tc in data if tc.name == "submit_answer"),
-                            None,
+                    if not pending_tool_calls:
+                        self._record_step_error(
+                            "LLM step completed without tool calls",
+                            "formatting",
                         )
-                        if submit:
-                            content = submit.args.get("content", "")
-                            response = FinalResponse(content=content)
-
-                            if current_mode_name == "Librarian":
-                                logger.info(
-                                    "AgentExecutor: Librarian believes we have the answer. Promoting to Architect for final synthesis."
-                                )
-                                needs_final_synthesis = True
-                                break
-
-                            yield self._wrap_final_response(response)
-                            return
-
-                        # Intercept clarification before tool execution
-                        clarification = next(
-                            (tc for tc in data if tc.name == "request_clarification"),
-                            None,
-                        )
-                        if clarification:
-                            question = clarification.args.get(
-                                "question", "Could you clarify?"
-                            )
-                            yield {
-                                "event": "clarification",
-                                "data": {
-                                    "question": question,
-                                    "usage": self.ctx.state.usage,
-                                },
-                            }
-                            return
-
-                        # Intercept replanning request before tool execution
-                        replanning = next(
-                            (tc for tc in data if tc.name == "request_replanning"),
-                            None,
-                        )
-                        if replanning:
-                            reason = replanning.args.get("reason", "No reason provided")
-                            logger.info(
-                                f"AgentExecutor: Librarian requested re-planning. Reason: {reason}"
-                            )
-                            needs_replanning = True
-                            break
-
-                        async for tool_event in self._execute_tools(
-                            data, current_results
-                        ):
-                            yield tool_event
-
-                        last_result = current_results
-                        await self._manage_context_size()
-
-                        # Track consecutive empty results for deterministic replanning
-                        all_empty = all(
-                            "error" in r or not r.get("result", {}).get("data")
-                            for r in current_results
-                        ) if current_results else True
-
-                        if all_empty:
-                            self.ctx.state.consecutive_empty_results += 1
-                            if (
-                                self.ctx.state.consecutive_empty_results
-                                >= self.ctx.config.empty_result_replan_threshold
-                            ):
-                                logger.info(
-                                    f"AgentExecutor: {self.ctx.state.consecutive_empty_results} "
-                                    "consecutive empty results. Forcing replan."
-                                )
-                                needs_replanning = True
-                                self.ctx.state.consecutive_empty_results = 0
-                        else:
-                            self.ctx.state.consecutive_empty_results = 0
-
+                        step_failed = True
                         break
-                else:
-                    yield event
+
+                    submit = next(
+                        (
+                            call
+                            for call in pending_tool_calls
+                            if call.name == "submit_answer"
+                        ),
+                        None,
+                    )
+                    if submit:
+                        content = submit.args.get("content", "")
+                        response = FinalResponse(content=content)
+
+                        if current_mode_name == "Librarian":
+                            logger.info(
+                                "AgentExecutor: Librarian believes we have the answer. "
+                                "Promoting to Architect for final synthesis."
+                            )
+                            needs_final_synthesis = True
+                            break
+
+                        yield self._wrap_final_response(response)
+                        return
+
+                    clarification = next(
+                        (
+                            call
+                            for call in pending_tool_calls
+                            if call.name == "request_clarification"
+                        ),
+                        None,
+                    )
+                    if clarification:
+                        question = clarification.args.get(
+                            "question", "Could you clarify?"
+                        )
+                        yield {
+                            "event": "clarification",
+                            "data": {
+                                "question": question,
+                                "usage": self.ctx.state.usage,
+                            },
+                        }
+                        return
+
+                    replanning = next(
+                        (
+                            call
+                            for call in pending_tool_calls
+                            if call.name == "request_replanning"
+                        ),
+                        None,
+                    )
+                    if replanning:
+                        reason = replanning.args.get("reason", "No reason provided")
+                        logger.info(
+                            "AgentExecutor: Librarian requested re-planning. "
+                            f"Reason: {reason}"
+                        )
+                        needs_replanning = True
+                        break
+
+                    async for tool_event in self._execute_tools(
+                        pending_tool_calls,
+                        current_results,
+                    ):
+                        yield tool_event
+
+                    last_result = current_results
+                    await self._manage_context_size()
+
+                    all_empty = (
+                        all(
+                            "error" in result
+                            or not result.get("result", {}).get("data")
+                            for result in current_results
+                        )
+                        if current_results
+                        else True
+                    )
+
+                    if all_empty:
+                        self.ctx.state.consecutive_empty_results += 1
+                        if (
+                            self.ctx.state.consecutive_empty_results
+                            >= self.ctx.config.empty_result_replan_threshold
+                        ):
+                            logger.info(
+                                f"AgentExecutor: "
+                                f"{self.ctx.state.consecutive_empty_results} "
+                                "consecutive empty results. Forcing replan."
+                            )
+                            needs_replanning = True
+                            self.ctx.state.consecutive_empty_results = 0
+                    else:
+                        self.ctx.state.consecutive_empty_results = 0
+
+                    break
+
+            if not step_failed and not step_completed:
+                self._record_step_error(
+                    "LLM stream ended without a terminal step event",
+                    "provider",
+                )
+                step_failed = True
+
+            if step_failed:
+                if (
+                    self.ctx.state.consecutive_errors
+                    >= self.ctx.config.max_consecutive_errors
+                ):
+                    yield self._terminal_error()
+                    return
+                continue
 
         # Fallback if max attempts reached
+        if self.ctx.state.consecutive_errors:
+            yield self._terminal_error()
+            return
         yield await self._fallback()
 
     async def _step(
@@ -276,7 +335,7 @@ class AgentExecutor:
         agent_instructions: str,
         last_result: Optional[List[Dict]],
         client_tools: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[Dict, None]:
+    ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
 
         system_prompt = get_agent_prompt(
@@ -300,11 +359,10 @@ class AgentExecutor:
         if client_tools:
             active_schemas = active_schemas + client_tools
 
-        pending_tool_calls = []
-        content_accumulator = ""
+        saw_tool_calls = False
 
         try:
-            async for chunk in self.llm.call_llm_with_tools_streaming(
+            async for event in self.llm.stream_with_tools(
                 system=system_prompt,
                 user=user_message,
                 tools=active_schemas,
@@ -312,42 +370,70 @@ class AgentExecutor:
                 temperature=temp,
                 reasoning=reasoning,
             ):
-                chunk_type = chunk.get("type")
-
-                if chunk_type == "token":
-                    content_accumulator += chunk["content"]
-                    yield {"event": "token", "data": {"content": chunk["content"]}}
-                elif chunk_type == "thinking":
-                    yield {"event": "thinking", "data": {"content": chunk["content"]}}
-                elif chunk_type == "tool_calls":
-                    for call in chunk.get("calls", []):
-                        args = self._safe_parse_args(call.get("arguments", "{}"))
-                        pending_tool_calls.append(
-                            ToolCall(
-                                name=call["name"],
-                                args=args,
-                                thinking=content_accumulator.strip() or None,
-                                call_id=call.get("id", str(uuid.uuid4())),
-                            )
-                        )
-                elif chunk_type == "done":
-                    u = chunk.get("usage")
-                    if u:
-                        u["approximate"] = True
-                    self._accumulate_usage(u)
-                    if not pending_tool_calls:
-                        # Model chatted without calling tools. This is a formatting error.
-                        yield {
-                            "event": "formatting_error",
-                            "data": "Error: You must either call an investigative tool or call submit_answer. Do not output raw text.",
-                        }
-                    else:
-                        yield {"event": "done", "data": pending_tool_calls}
-                elif chunk_type == "error":
-                    yield {"event": "error", "data": {"message": chunk["message"]}}
-        except Exception as e:
+                if event["event"] == "tool_calls":
+                    saw_tool_calls = True
+                    yield event
+                elif event["event"] == "step_completed" and not saw_tool_calls:
+                    yield {
+                        "event": "step_error",
+                        "data": {
+                            "kind": "formatting",
+                            "message": (
+                                "You must either call an investigative tool or call "
+                                "submit_answer. Do not output raw text."
+                            ),
+                            "usage": event["data"]["usage"],
+                        },
+                    }
+                else:
+                    yield event
+        except (ConfigurationError, LLMError) as e:
             logger.error(f"LLM API Stream failed: {e}")
-            yield {"event": "error", "data": {"message": f"LLM API failure: {str(e)}"}}
+            yield {
+                "event": "step_error",
+                "data": {
+                    "kind": "provider",
+                    "message": f"LLM API failure: {str(e)}",
+                },
+            }
+
+    def _parse_tool_calls(
+        self,
+        calls: List[StreamToolCall],
+        content: str,
+    ) -> List[ToolCall]:
+        thinking = content.strip() or None
+        return [
+            ToolCall(
+                name=call["name"],
+                args=self._safe_parse_args(call.get("arguments", "{}")),
+                thinking=thinking,
+                call_id=call.get("id") or str(uuid.uuid4()),
+            )
+            for call in calls
+        ]
+
+    def _record_step_error(self, message: str, kind: str) -> None:
+        self.ctx.state.last_error = message
+        self.ctx.state.consecutive_errors += 1
+        logger.warning(
+            f"AgentExecutor: {kind} step failure "
+            f"({self.ctx.state.consecutive_errors}/"
+            f"{self.ctx.config.max_consecutive_errors}): {message}"
+        )
+
+    def _terminal_error(self) -> ErrorEvent:
+        message = self.ctx.state.last_error or "Agent execution failed"
+        return {
+            "event": "error",
+            "data": {
+                "message": (
+                    "Agent stopped after "
+                    f"{self.ctx.state.consecutive_errors} consecutive errors: "
+                    f"{message}"
+                )
+            },
+        }
 
     @staticmethod
     def _safe_parse_args(json_str: str) -> Dict:
@@ -446,6 +532,7 @@ class AgentExecutor:
                 update_accumulators(self.ctx, call.name, result)
 
                 self.ctx.state.consecutive_errors = 0
+                self.ctx.state.last_error = None
                 results_out.append({"tool": call.name, "result": result})
 
                 yield {
@@ -466,19 +553,24 @@ class AgentExecutor:
                 }
             except Exception as e:
                 logger.exception(f"Tool {call.name} unexpected failure: {e}")
+                self.ctx.state.last_error = "Internal tool failure"
                 self.ctx.state.consecutive_errors += 1
                 yield {
                     "event": "tool_error",
                     "data": {"tool": call.name, "error": "Internal tool failure"},
                 }
 
-    def _accumulate_usage(self, usage: Optional[Dict]):
+    def _accumulate_usage(self, usage: Optional[StreamUsage]):
         if usage:
             self.ctx.state.usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
             self.ctx.state.usage["completion_tokens"] += usage.get(
                 "completion_tokens", 0
             )
             self.ctx.state.usage["total_tokens"] += usage.get("total_tokens", 0)
+            self.ctx.state.usage["approximate"] = (
+                self.ctx.state.usage["approximate"]
+                or usage.get("approximate", False)
+            )
 
     def _wrap_final_response(
         self, response: Union[FinalResponse, ClarificationRequest]
@@ -503,7 +595,8 @@ class AgentExecutor:
     async def _fallback(self) -> Dict:
         """Unified fallback when agent exhausts attempts."""
         logger.warning(
-            f"AgentExecutor: Entering fallback after {self.ctx.state.attempt_count} attempts, "
+            "AgentExecutor: Entering fallback after "
+            f"{self.ctx.state.attempt_count} attempts, "
             f"{self.ctx.state.call_count} tool calls. "
             f"Evidence: {self.ctx.evidence.has_any()}"
         )
@@ -535,9 +628,15 @@ class AgentExecutor:
         """Generate a final response summary from accumulated evidence."""
         evidence_ctx = ""
         if self.ctx.evidence.profiles:
-            evidence_ctx += f"\nProfiles FOUND:\n{format_entity_results(self.ctx.evidence.profiles)}\n"
+            evidence_ctx += (
+                "\nProfiles FOUND:\n"
+                f"{format_entity_results(self.ctx.evidence.profiles)}\n"
+            )
         if self.ctx.evidence.messages:
-            evidence_ctx += f"\nRelevant Messages:\n{format_retrieved_messages(self.ctx.evidence.messages)}\n"
+            evidence_ctx += (
+                "\nRelevant Messages:\n"
+                f"{format_retrieved_messages(self.ctx.evidence.messages)}\n"
+            )
         if self.ctx.evidence.graph:
             evidence_ctx += (
                 f"\nGraph Context:\n{format_graph_results(self.ctx.evidence.graph)}\n"
@@ -547,8 +646,11 @@ class AgentExecutor:
             self.ctx.user_name, self.ctx.user_query, evidence_ctx
         )
 
-        return await self.llm.call_llm(
-            system="You are a helpful assistant providing a summary of found information.",
+        return await self.llm.generate_text(
+            system=(
+                "You are a helpful assistant providing a summary of found "
+                "information."
+            ),
             user=prompt,
             temperature=0.3,
         )
@@ -558,9 +660,10 @@ class AgentExecutor:
         evidence_str = build_evidence_context(self.ctx.evidence)
         self.ctx.evidence.token_count = self.llm.count_tokens(evidence_str)
 
-        if self.ctx.evidence.token_count > 10000:
+        if self.ctx.evidence.token_count > MAX_TOKEN_CHUNK_SIZE:
             logger.info(
-                f"Evidence size ({self.ctx.evidence.token_count} tokens) exceeds limit. Summarizing..."
+                f"Evidence size ({self.ctx.evidence.token_count} tokens) "
+                "exceeds limit. Summarizing..."
             )
 
             summary = await self._generate_evidence_summary(evidence_str)
@@ -569,7 +672,8 @@ class AgentExecutor:
                 self.ctx.evidence.summary = summary
             else:
                 logger.warning(
-                    "Evidence summarization failed. Truncating raw evidence as fallback."
+                    "Evidence summarization failed. Truncating raw evidence as "
+                    "fallback."
                 )
 
             self.ctx.evidence.messages = self.ctx.evidence.messages[-5:]
@@ -589,19 +693,24 @@ class AgentExecutor:
     async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
         """Call LLM to condense existing evidence into a core summary."""
         prompt = (
-            f"I have gathered the following evidence regarding: '{self.ctx.user_query}'\n\n"
+            "I have gathered the following evidence regarding: "
+            f"'{self.ctx.user_query}'\n\n"
             f"{evidence_text}\n\n"
-            "Summarize the key facts, connections, and relevant information into a concise summary. "
-            "Keep important IDs (message IDs, entity IDs) if they are critical for further operations."
+            "Summarize the key facts, connections, and relevant information into "
+            "a concise summary. Keep important IDs (message IDs, entity IDs) if "
+            "they are critical for further operations."
         )
 
         try:
-            return await self.llm.call_llm(
-                system="You are a data librarian. Condense retrieved evidence into a factual summary without losing key details.",
+            return await self.llm.generate_text(
+                system=(
+                    "You are a data librarian. Condense retrieved evidence into "
+                    "a factual summary without losing key details."
+                ),
                 user=prompt,
                 temperature=0.0,  # Strict factual summary
             )
-        except Exception as e:
+        except (ConfigurationError, LLMError) as e:
             logger.error(f"Failed to summarize evidence: {e}")
             return None
 

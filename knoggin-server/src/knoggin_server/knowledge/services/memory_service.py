@@ -123,7 +123,7 @@ class MemoryManager:
                 success=False, error=f"Topic '{topic}' is not active."
             )
 
-        key = RedisKeys.agent_memory(self.user_name, self.session_id, normalized)
+        key = RedisKeys.session_memory(self.user_name, self.session_id, normalized)
         existing = await self.redis.hgetall(key)
         if len(existing) >= MAX_BLOCK_SIZE:
             return MemorySaveResult(
@@ -165,7 +165,7 @@ class MemoryManager:
 
         pipe = self.redis.pipeline()
         for topic in all_topics:
-            key = RedisKeys.agent_memory(self.user_name, self.session_id, topic)
+            key = RedisKeys.session_memory(self.user_name, self.session_id, topic)
             pipe.hdel(key, memory_id)
 
         results = await pipe.execute()
@@ -209,7 +209,7 @@ class MemoryManager:
 
         blocks: Dict[str, List[MemoryEntry]] = {}
         for topic in topics_to_fetch:
-            key = RedisKeys.agent_memory(self.user_name, self.session_id, topic)
+            key = RedisKeys.session_memory(self.user_name, self.session_id, topic)
             raw = await self.redis.hgetall(key)
             if not raw:
                 continue
@@ -237,7 +237,7 @@ class MemoryManager:
     # DIRECTIVES
 
     def _directive_key(self) -> str:
-        return RedisKeys.agent_working_memory(self.agent_id, DIRECTIVES_CATEGORY)
+        return RedisKeys.agent_directives(self.user_name, self.agent_id)
 
     def _validate_directive_mode(self, mode: str) -> Optional[str]:
         normalized = (mode or "").strip().lower()

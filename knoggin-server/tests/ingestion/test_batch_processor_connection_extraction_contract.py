@@ -1,5 +1,6 @@
 import pytest
 
+from common.exceptions import LLMProviderError
 from common.schema.contracts import (
     ConnectionsResult,
     ExtractionTrace,
@@ -22,10 +23,10 @@ class FakeConnectionLLM:
         self.raise_error = raise_error
         self.calls = []
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
         if self.raise_error:
-            raise RuntimeError("fake connection failure")
+            raise LLMProviderError("fake connection failure")
         return self.response
 
 

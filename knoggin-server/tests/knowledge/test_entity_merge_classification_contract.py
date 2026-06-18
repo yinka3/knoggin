@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from common.exceptions import LLMProviderError
 from common.schema.contracts import MergeJudgment
 from common.schema.primitives import FactRecord
 from infrastructure.job.base import JobContext
@@ -77,10 +78,10 @@ class FakeMergeLLM:
         self.raise_error = raise_error
         self.calls = []
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
         if self.raise_error:
-            raise RuntimeError("fake merge judgment failure")
+            raise LLMProviderError("fake merge judgment failure")
         if self.judgments:
             return self.judgments.pop(0)
         return MergeJudgment(

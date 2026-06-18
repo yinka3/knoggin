@@ -77,8 +77,8 @@ Redis currently acts as several different systems at once.
 - `sessions`
 - `agents`
 - `agents_default`
-- `agent_working_memory`
-- `agent_memory`
+- `agent_directives`
+- `session_memory`
 - `community_agent_memory`
 
 This data is durable product state rather than disposable cache state. Losing
@@ -87,13 +87,10 @@ behavior, and prompt memory.
 
 ### Conversation Runtime
 
-- `global_next_turn_id`
 - `conversation`
 - `recent_conversation`
-- `msg_to_turn_lookup`
 - `message_content`
 - message deduplication keys
-- `last_activity`
 - `heartbeat_counter`
 
 Canonical messages now live in PostgreSQL, so these keys duplicate or index
@@ -127,8 +124,8 @@ contain canonical knowledge, but they determine what maintenance work happens.
 
 ### Scheduler and Operational State
 
-- `job_last_run`
-- `job_pending`
+- `job_last_run` (scheduler-owned cadence anchor)
+- `job_lease`
 - `project_last_activity`
 - `project_heartbeat_counter`
 - `community_discussion_active`
@@ -233,7 +230,6 @@ CREATE TABLE public.sessions (
     enabled_tools JSONB,
     status TEXT NOT NULL DEFAULT 'open'
         CHECK (status IN ('open', 'closed', 'deleted')),
-    next_turn_id BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at TIMESTAMPTZ
@@ -255,44 +251,30 @@ Extend `public.messages`:
 
 ```sql
 ALTER TABLE public.messages
-    ADD COLUMN turn_id BIGINT,
     ADD COLUMN user_message_id BIGINT,
     ADD COLUMN metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN dedup_key TEXT;
 
-CREATE UNIQUE INDEX messages_session_turn_idx
-ON public.messages(user_name, session_id, turn_id);
+CREATE INDEX messages_session_time_idx
+ON public.messages(user_name, session_id, timestamp_ms, message_id);
 
 CREATE UNIQUE INDEX messages_dedup_idx
 ON public.messages(user_name, session_id, dedup_key)
 WHERE dedup_key IS NOT NULL;
 ```
 
-Conversation order, message-to-turn lookup, message content, and recent history
-then come from one canonical table.
-
-The session turn can be allocated atomically:
-
-```sql
-UPDATE public.sessions
-SET next_turn_id = next_turn_id + 1,
-    last_active_at = now()
-WHERE user_name = %(user_name)s
-  AND session_id = %(session_id)s
-RETURNING next_turn_id;
-```
-
-The returned value is inserted into `messages.turn_id` in the same transaction.
-There is no global hot counter; each active session updates its own row.
+Conversation identity, content, and recent history then come from one canonical
+table. The existing PostgreSQL `message_id` is the sole identifier; no separate
+session-local turn sequence is needed.
 
 Conversation queries become ordinary indexed SQL:
 
 ```sql
-SELECT message_id, turn_id, role, content, timestamp_ms, metadata
+SELECT message_id, role, content, timestamp_ms, metadata
 FROM public.messages
 WHERE user_name = %(user_name)s
   AND session_id = %(session_id)s
-ORDER BY turn_id DESC
+ORDER BY timestamp_ms DESC, message_id DESC
 LIMIT %(limit)s;
 ```
 
@@ -342,7 +324,7 @@ ON public.ingestion_queue(user_name, session_id, queue_id);
 A user message should be inserted into `messages` and `ingestion_queue` in the
 same transaction. This is the key simplification:
 
-1. Allocate the canonical message and turn IDs.
+1. Allocate the canonical message ID.
 2. Insert the canonical message.
 3. Insert its ingestion work row.
 4. Commit.
@@ -518,7 +500,6 @@ CREATE TABLE public.project_job_state (
     user_name TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id),
     job_name TEXT NOT NULL,
-    pending BOOLEAN NOT NULL DEFAULT FALSE,
     running BOOLEAN NOT NULL DEFAULT FALSE,
     last_started_at TIMESTAMPTZ,
     last_completed_at TIMESTAMPTZ,
@@ -530,8 +511,8 @@ CREATE TABLE public.project_job_state (
 );
 ```
 
-This replaces `job_last_run`, `job_pending`, profile-complete flags, temporary
-profile-run flags, and similar scheduler markers.
+This replaces `job_last_run`, the Redis execution lease, profile-complete flags,
+temporary profile-run flags, and similar scheduler markers.
 
 Not every scheduler field must be persisted. `_running_tasks` and the scheduler
 monitor task remain local Python state. SQL only stores state that must survive
@@ -593,11 +574,9 @@ rules differ.
 | `project_sessions` | query `sessions.project_id` |
 | `project_topic_config` | `projects.topic_config` |
 | `sessions` | `sessions` |
-| `get_session_scoped_keys` | removed; relational deletes use foreign keys and typed repositories |
-| `global_next_turn_id` | `sessions.next_turn_id` |
-| `conversation` | `messages` ordered by `turn_id` |
-| `recent_conversation` | indexed `messages.turn_id` query |
-| `msg_to_turn_lookup` | `messages.message_id -> turn_id` |
+| `session_keys` | removed; relational deletes use foreign keys and typed repositories |
+| `conversation` | `messages` keyed by canonical `message_id` |
+| `recent_conversation` | indexed timestamp/message-ID query |
 | `message_content` | `messages.content` |
 | message dedup key | unique `messages.dedup_key` |
 | `buffer` | `ingestion_queue` |
@@ -615,15 +594,15 @@ rules differ.
 | `project_profile_complete` | derived query or job metadata |
 | `project_user_profile_ran` | job metadata with expiry timestamp |
 | `job_last_run` | `project_job_state.last_completed_at` |
-| `job_pending` | `project_job_state.pending` |
+| `job_lease` | `project_job_state.lease_until` plus worker ownership metadata |
 | `project_last_activity` | `projects` runtime activity column or max session activity |
 | `project_heartbeat_counter` | local counter or job metadata |
 | `heartbeat_counter` | local counter or computed pending message count |
 | `last_activity` | `sessions.last_active_at` |
 | `agents` | `agents` |
 | `agents_default` | partial unique `agents.is_default` |
-| `agent_working_memory` | `agent_directives` |
-| `agent_memory` | `session_memories` |
+| `agent_directives` | `agent_directives` |
+| `session_memory` | `session_memories` |
 | `community_agent_memory` | typed community memory table |
 | `community_discussion_active` | community discussion SQL state |
 | `community_pubsub_channel` | local event fanout or PostgreSQL notification |
@@ -1092,8 +1071,8 @@ Move:
 
 - `agents`
 - `agents_default`
-- `agent_working_memory`
-- `agent_memory`
+- `agent_directives`
+- `session_memory`
 - `community_agent_memory`
 
 Primary files:
@@ -1126,10 +1105,8 @@ Exit check:
 
 Move:
 
-- `global_next_turn_id`
 - `conversation`
 - `recent_conversation`
-- `msg_to_turn_lookup`
 - `message_content`
 - message deduplication keys
 - session heartbeat counters if they only support conversation flushing
@@ -1152,10 +1129,9 @@ self.consumer.signal()
 The store method should atomically:
 
 1. allocate or use a canonical message ID,
-2. allocate a session-local turn ID,
-3. insert the canonical message,
-4. insert the ingestion queue row,
-5. update session/project activity.
+2. insert the canonical message,
+3. insert the ingestion queue row,
+4. update session/project activity.
 
 `Context.add_assistant_turn(...)` should also write directly to canonical SQL
 and should not stage Redis conversation state before SQL persistence.
@@ -1172,8 +1148,7 @@ Exit check:
 - context add tests pass,
 - search/evidence retrieval tests pass,
 - assistant-message failure cleanup code is gone,
-- `AsyncRedisClient.log_conversation_turn`,
-  `update_message_mapping`, and `delete_message_turn` are unused.
+- `AsyncRedisClient` remains connection-lifecycle-only.
 
 ### Step 8: Move Ingestion Buffer And DLQ
 
@@ -1240,7 +1215,7 @@ Move:
 - `project_profile_complete`
 - `project_user_profile_ran`
 - `job_last_run`
-- `job_pending`
+- `job_lease`
 - `project_last_activity`
 - `project_heartbeat_counter`
 
@@ -1391,7 +1366,7 @@ Exit condition:
 
 ### Phase 2: Make Messages the Only Conversation Store
 
-Add turn IDs, metadata, and deduplication to canonical messages.
+Add metadata and deduplication to canonical messages.
 
 Change `Context.add` so user message persistence and ingestion enqueue happen
 atomically in PostgreSQL.
@@ -1409,8 +1384,6 @@ Remove:
 - conversation hashes,
 - recent-conversation sorted sets,
 - message-content hashes,
-- message-to-turn lookup hashes,
-- session-local Redis turn counters,
 - staged-message cleanup logic.
 
 Exit condition:

@@ -5,6 +5,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 import numpy as np
 from loguru import logger
 
+from common.exceptions import ConfigurationError, LLMError
 from common.schema.contracts import (
     BulkContradictionResult,
     FactMergeResult,
@@ -13,7 +14,7 @@ from common.schema.contracts import (
 from common.schema.primitives import FactRecord
 from common.utils.events import emit
 from common.utils.time_utils import get_now
-from infrastructure.graph_client import GraphClient
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.llm_client import LLMService
 from knoggin_server.agent.prompts import get_contradiction_judgment_prompt
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
@@ -36,7 +37,7 @@ class FactResolutionUtils:
         existing_facts: List[FactRecord],
         valid_msg_ids: Optional[set],
         session_id: str,
-        graph_client: GraphClient,
+        graph_client: GraphInterface,
         embedding_service: EmbeddingService,
         llm: LLMService,
         contradiction_sim_low: float = 0.70,
@@ -170,9 +171,7 @@ class FactResolutionUtils:
                 return FactResolutionSummary(
                     active_facts=active_existing,
                     created_facts=facts_to_create,
-                    invalidated_fact_ids=FactResolutionUtils._sorted_ids(
-                        to_invalidate
-                    ),
+                    invalidated_fact_ids=FactResolutionUtils._sorted_ids(to_invalidate),
                     failed_invalidations=failed_invalidations,
                     contradicted_fact_ids=FactResolutionUtils._sorted_ids(
                         contradicted_fact_ids
@@ -199,12 +198,8 @@ class FactResolutionUtils:
                         f for f in active_existing if f not in facts_to_create
                     ],
                     created_facts=[],
-                    invalidated_fact_ids=FactResolutionUtils._sorted_ids(
-                        to_invalidate
-                    ),
-                    failed_invalidations=FactResolutionUtils._sorted_ids(
-                        to_invalidate
-                    ),
+                    invalidated_fact_ids=FactResolutionUtils._sorted_ids(to_invalidate),
+                    failed_invalidations=FactResolutionUtils._sorted_ids(to_invalidate),
                     contradicted_fact_ids=FactResolutionUtils._sorted_ids(
                         contradicted_fact_ids
                     ),
@@ -261,7 +256,7 @@ class FactResolutionUtils:
         fact_ids: set,
         entity_id: int,
         session_id: str,
-        graph_client: GraphClient,
+        graph_client: GraphInterface,
         now: datetime,
         project_id: Optional[str] = None,
     ) -> List[str]:
@@ -269,9 +264,7 @@ class FactResolutionUtils:
         failed_invalidations = []
         for fact_id in fact_ids:
             try:
-                await graph_client.invalidate_fact(
-                    fact_id, now, project_id=project_id
-                )
+                await graph_client.invalidate_fact(fact_id, now, project_id=project_id)
             except Exception as e:
                 logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
                 failed_invalidations.append(fact_id)
@@ -423,7 +416,7 @@ class FactResolutionUtils:
                 verbose_only=True,
             )
 
-            bulk_contradiction: BulkContradictionResult = await llm.call_llm(
+            bulk_contradiction: BulkContradictionResult = await llm.generate_structured(
                 response_model=BulkContradictionResult,
                 system=system,
                 user=user,
@@ -439,6 +432,6 @@ class FactResolutionUtils:
                 j.index - 1: j.is_contradiction for j in bulk_contradiction.judgments
             }
 
-        except Exception as e:
+        except (ConfigurationError, LLMError) as e:
             logger.error(f"Structured contradiction detection failed: {e}")
             return {}

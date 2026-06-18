@@ -1,10 +1,10 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from common.schema.primitives import Message
-from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from infrastructure.redis_client import RedisKeys
 from knoggin_server.session.context import Context
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer, FakeResources
@@ -18,7 +18,6 @@ def context(monkeypatch):
     ctx.project_id = "project-1"
     ctx.project = make_project_state("project-1", redis=resources.redis)
     ctx.consumer = FakeConsumer()
-    monkeypatch.setattr(AsyncRedisClient, "_instance", resources.redis)
     monkeypatch.setattr(
         Context,
         "current_config",
@@ -52,14 +51,12 @@ async def test_context_add_persists_maps_enqueues_and_signals_consumer(context):
 
     conv_key = RedisKeys.conversation("ada", "session-1")
     recent_key = RedisKeys.recent_conversation("ada", "session-1")
-    mapping_key = RedisKeys.msg_to_turn_lookup("ada", "session-1")
     content_key = RedisKeys.message_content("ada", "session-1")
     buffer_key = RedisKeys.buffer("ada", "session-1")
     project_heartbeat_key = RedisKeys.project_heartbeat_counter("ada", "project-1")
 
     assert json.loads(resources.redis.hashes[conv_key]["1"])["content"] == "hello world"
     assert resources.redis.zsets[recent_key]["1"] == timestamp.timestamp()
-    assert resources.redis.hashes[mapping_key]["1"] == "1"
 
     content_payload = json.loads(resources.redis.hashes[content_key]["msg_1"])
     assert content_payload == {
@@ -94,6 +91,55 @@ async def test_context_add_deduplicates_same_message_timestamp_and_session(conte
     assert second.id == 1
     assert ctx.consumer.signaled == 1
     assert ctx.project.scheduler.activity_count == 1
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_context_normalizes_naive_message_timestamp_to_utc(context):
+    ctx, resources = context
+    timestamp = datetime(2026, 1, 2, 3, 4)
+
+    msg = await ctx.add(Message(content="hello", timestamp=timestamp))
+
+    conv_key = RedisKeys.conversation("ada", "session-1")
+    recent_key = RedisKeys.recent_conversation("ada", "session-1")
+    payload = json.loads(resources.redis.hashes[conv_key][str(msg.id)])
+    expected = timestamp.replace(tzinfo=timezone.utc)
+
+    assert payload["timestamp"] == expected.isoformat()
+    assert resources.redis.zsets[recent_key][str(msg.id)] == expected.timestamp()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_conversation_message_uses_one_pipeline_and_normalizes_offset(context):
+    ctx, resources = context
+    timestamp = datetime(
+        2026,
+        1,
+        2,
+        3,
+        4,
+        tzinfo=timezone(timedelta(hours=-5)),
+    )
+    initial_pipeline_calls = resources.redis.pipeline_calls
+
+    await ctx._record_conversation_message(
+        message_id=42,
+        role="assistant",
+        content="hello",
+        timestamp=timestamp,
+    )
+
+    conv_key = RedisKeys.conversation("ada", "session-1")
+    recent_key = RedisKeys.recent_conversation("ada", "session-1")
+    payload = json.loads(resources.redis.hashes[conv_key]["42"])
+    expected = timestamp.astimezone(timezone.utc)
+
+    assert resources.redis.pipeline_calls == initial_pipeline_calls + 1
+    assert payload["message_id"] == 42
+    assert payload["timestamp"] == expected.isoformat()
+    assert resources.redis.zsets[recent_key]["42"] == expected.timestamp()
 
 
 @pytest.mark.runtime
@@ -152,9 +198,13 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
 
     await ctx.add_assistant_turn("hello from assistant", timestamp)
 
-    mapping_key = RedisKeys.msg_to_turn_lookup("ada", "session-1")
-    assert resources.redis.hashes[mapping_key]["1"] == "1"
-    assert resources.graph_client.saved_message_logs == [
+    conv_key = RedisKeys.conversation("ada", "session-1")
+    recent_key = RedisKeys.recent_conversation("ada", "session-1")
+    content_key = RedisKeys.message_content("ada", "session-1")
+    assert json.loads(resources.redis.hashes[conv_key]["1"])["message_id"] == 1
+    assert resources.redis.zsets[recent_key]["1"] == timestamp.timestamp()
+    assert json.loads(resources.redis.hashes[content_key]["msg_1"])["id"] == 1
+    assert resources.graph.saved_message_logs == [
         [
             {
                 "id": 1,
@@ -187,18 +237,19 @@ async def test_context_assistant_turn_failure_rolls_back_redis_and_raises(
     async def skip_retry_delay(delay):
         return None
 
-    monkeypatch.setattr(resources.graph_client, "save_message_logs", fail_save)
-    monkeypatch.setattr("knoggin_server.session.context.asyncio.sleep", skip_retry_delay)
+    monkeypatch.setattr(resources.graph, "save_message_logs", fail_save)
+    monkeypatch.setattr(
+        "knoggin_server.session.context.asyncio.sleep",
+        skip_retry_delay,
+    )
 
     with pytest.raises(ConnectionError, match="Postgres unavailable"):
         await ctx.add_assistant_turn("failed assistant response", timestamp)
 
     conv_key = RedisKeys.conversation("ada", "session-1")
     recent_key = RedisKeys.recent_conversation("ada", "session-1")
-    mapping_key = RedisKeys.msg_to_turn_lookup("ada", "session-1")
     content_key = RedisKeys.message_content("ada", "session-1")
     assert resources.redis.hashes[conv_key] == {}
     assert resources.redis.zsets[recent_key] == {}
-    assert resources.redis.hashes[mapping_key] == {}
     assert resources.redis.hashes[content_key] == {}
     assert attempts == 3

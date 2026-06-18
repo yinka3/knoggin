@@ -5,9 +5,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.conf.manager import ConfigManager
 from common.schema.contracts import EntityProfilesResult
 from common.schema.primitives import FactRecord
+from common.schema.settings import ProfileSettings
 from common.scoping import IDENTITY_SCOPE
 from common.utils.core_utils import format_vp04_input
 from common.utils.data_utils import (
@@ -15,7 +15,7 @@ from common.utils.data_utils import (
 )
 from common.utils.events import emit
 from common.utils.time_utils import get_now_unix, parse_iso_time_or_now
-from infrastructure.graph_client import GraphClient
+from infrastructure.graph_interface import GraphInterface
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
@@ -45,7 +45,7 @@ class ProfileRefinementJob(BaseJob):
         self,
         llm: LLMService,
         entities: EntityManager,
-        graph_client: GraphClient,
+        graph_client: GraphInterface,
         executor: ThreadPoolExecutor,
         embedding_service: EmbeddingService,
         redis_client: aioredis.Redis,
@@ -84,6 +84,17 @@ class ProfileRefinementJob(BaseJob):
     @property
     def name(self) -> str:
         return "profile_refinement"
+
+    def update_settings(self, settings: ProfileSettings) -> None:
+        self.msg_window = settings.msg_window
+        self.volume_threshold = settings.volume_threshold
+        self.idle_threshold = settings.idle_threshold
+        self.profile_batch_size = settings.profile_batch_size
+        self.max_facts_context = settings.max_facts_context
+        self.contradiction_sim_low = settings.contradiction_sim_low
+        self.contradiction_sim_high = settings.contradiction_sim_high
+        self.contradiction_batch_size = settings.contradiction_batch_size
+        logger.info("ProfileRefinementJob settings updated")
 
     async def _emit_fact_merge_diagnostics(
         self, ctx: JobContext, entity_id: int, merge_result
@@ -368,16 +379,11 @@ class ProfileRefinementJob(BaseJob):
                         updated_ids = [str(u["id"]) for u in updates]
 
                         if updated_ids:
-                            config = ConfigManager.get().config
-                            merger_enabled = (
-                                config.developer_settings.jobs.merger.enabled
+                            await self.redis.sadd(merge_queue, *updated_ids)
+                            logger.info(
+                                f"Passed {len(updated_ids)} updated entities "
+                                "to Merge Queue"
                             )
-
-                            if updated_ids and merger_enabled:
-                                await self.redis.sadd(merge_queue, *updated_ids)
-                                logger.info(
-                                    f"Passed {len(updated_ids)} updated entities to Merge Queue"
-                                )
 
                 except Exception as e:
                     logger.exception(f"Profile refinement batch process failed: {e}")
@@ -484,7 +490,7 @@ class ProfileRefinementJob(BaseJob):
             verbose_only=True,
         )
 
-        profiles_result: EntityProfilesResult = await self.llm.call_llm(
+        profiles_result: EntityProfilesResult = await self.llm.generate_structured(
             response_model=EntityProfilesResult,
             system=system_reasoning,
             user=user_content,
@@ -626,7 +632,7 @@ class ProfileRefinementJob(BaseJob):
                 verbose_only=True,
             )
 
-            profiles_result: EntityProfilesResult = await self.llm.call_llm(
+            profiles_result: EntityProfilesResult = await self.llm.generate_structured(
                 response_model=EntityProfilesResult,
                 system=system_reasoning,
                 user=user_content,

@@ -27,6 +27,33 @@ class DependencyError(KnogginError):
         super().__init__(message, code="dependency_error", details=details)
 
 
+class LLMError(KnogginError):
+    """Base class for LLM request and response failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "llm_error",
+        details: Optional[Dict] = None,
+    ):
+        super().__init__(message, code=code, details=details)
+
+
+class LLMProviderError(LLMError):
+    """Raised when the configured LLM provider cannot complete a request."""
+
+    def __init__(self, message: str, details: Optional[Dict] = None):
+        super().__init__(message, code="llm_provider_error", details=details)
+
+
+class LLMResponseError(LLMError):
+    """Raised when an LLM response is empty, malformed, or fails validation."""
+
+    def __init__(self, message: str, details: Optional[Dict] = None):
+        super().__init__(message, code="llm_response_error", details=details)
+
+
 class ToolExecutionError(KnogginError):
     """Raised when a tool fails to execute correctly."""
 

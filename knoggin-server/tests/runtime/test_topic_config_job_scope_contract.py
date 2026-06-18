@@ -15,7 +15,7 @@ class RecordingLLM:
     def __init__(self):
         self.calls = []
 
-    async def call_llm(self, **kwargs):
+    async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
         return TopicConfigResult(
             topics={"General": TopicDetail(active=True, labels=[])}

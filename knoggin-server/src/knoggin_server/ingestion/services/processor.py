@@ -8,6 +8,7 @@ from loguru import logger
 from spacy.matcher import PhraseMatcher
 
 from common.conf.topics_config import TopicConfig
+from common.exceptions import ConfigurationError, LLMError
 from common.schema.contracts import ExtractionTrace, NERResult, ValidationIssue
 from common.schema.settings import TextProcessorSettings
 from common.utils.core_utils import (
@@ -343,13 +344,13 @@ class TextProcessor:
         )
 
         try:
-            ner_result: NERResult = await self.llm_client.call_llm(
+            ner_result: NERResult = await self.llm_client.generate_structured(
                 response_model=NERResult,
                 system=system_prompt,
                 user=user_content,
                 temperature=0.0,
             )
-        except Exception as e:
+        except (ConfigurationError, LLMError) as e:
             logger.warning(
                 f"VP-01 extraction failed, using deterministic mentions only: {e}"
             )

@@ -6,9 +6,9 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.schema.contracts import BatchResult, EngineScope, EngineWorkUnit
+from common.schema.settings import DLQSettings
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
-from common.utils.time_utils import get_now_unix
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.pipeline_service import (
@@ -76,21 +76,12 @@ class DLQReplayJob(BaseJob):
     def name(self) -> str:
         return "dlq_auto_replay"
 
+    @property
+    def cadence_seconds(self) -> float:
+        return self.interval
+
     async def should_run(self, ctx: JobContext) -> bool:
-        last_run_key = RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id)
-        last_run_ts = await self.redis.get(last_run_key)
-
-        if not last_run_ts:
-            await self.redis.set(last_run_key, get_now_unix())
-            return False
-
-        try:
-            elapsed = get_now_unix() - float(last_run_ts)
-        except ValueError:
-            await self.redis.set(last_run_key, get_now_unix())
-            return False
-
-        return elapsed >= self.interval
+        return False
 
     def _is_transient(self, error: str) -> bool:
         return any(t.lower() in error.lower() for t in self.TRANSIENT_ERRORS)
@@ -388,10 +379,6 @@ class DLQReplayJob(BaseJob):
 
         queue_len = await self.redis.llen(dlq_key)
         if queue_len == 0:
-            await self.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
-                get_now_unix(),
-            )
             return JobResult(success=True, summary="DLQ empty")
 
         await emit(
@@ -518,11 +505,6 @@ class DLQReplayJob(BaseJob):
                 await self.redis.rpush(park_key, raw_item)
                 parked += 1
 
-        await self.redis.set(
-            RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
-            get_now_unix(),
-        )
-
         summary = f"Processed {processed}: {retried} retried, {parked} parked"
         logger.info(f"DLQ job complete: {summary}")
 
@@ -535,20 +517,10 @@ class DLQReplayJob(BaseJob):
 
         return JobResult(success=True, summary=summary)
 
-    def update_settings(
-        self,
-        interval: int = None,
-        interval_seconds: int = None,
-        batch_size: int = None,
-        max_attempts: int = None,
-    ):
-        new_interval = interval_seconds if interval_seconds is not None else interval
-        if new_interval is not None:
-            self.interval = new_interval
-        if batch_size is not None:
-            self.batch_size = batch_size
-        if max_attempts is not None:
-            self.max_attempts = max_attempts
+    def update_settings(self, settings: DLQSettings) -> None:
+        self.interval = settings.interval_seconds
+        self.batch_size = settings.batch_size
+        self.max_attempts = settings.max_attempts
         logger.info(
             "DLQReplayJob updated: "
             f"interval={self.interval}, "

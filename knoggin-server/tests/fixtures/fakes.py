@@ -1,10 +1,13 @@
 import fnmatch
 import json
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
+from common.schema.settings import RedisConnectionSettings
 from common.utils.time_utils import get_now_iso
+from infrastructure.redis_client import AsyncRedisClient
 
 
 class FakePipeline:
@@ -86,11 +89,23 @@ class FakeRedis:
         self.expirations: list[tuple[str, int]] = []
         self.deleted_keys: list[str] = []
         self.evals: list[tuple[str, tuple[Any, ...]]] = []
+        self.string_expirations: dict[str, float] = {}
+        self.published: list[tuple[str, str]] = []
+        self.closed = False
+        self.pipeline_calls = 0
 
     async def ping(self):
         return True
 
+    async def aclose(self, close_connection_pool=True):
+        self.closed = True
+
+    async def publish(self, channel, message):
+        self.published.append((channel, message))
+        return 1
+
     def pipeline(self):
+        self.pipeline_calls += 1
         return FakePipelineWriter(self)
 
     async def hset(self, key, field, value):
@@ -143,11 +158,13 @@ class FakeRedis:
     async def delete(self, *keys):
         deleted = 0
         for key in keys:
+            self._purge_expired(key)
             existed = False
             for store in (self.strings, self.hashes, self.sets, self.lists, self.zsets):
                 if key in store:
                     existed = True
                     del store[key]
+            self.string_expirations.pop(key, None)
             if existed:
                 self.deleted_keys.append(key)
                 deleted += 1
@@ -170,16 +187,24 @@ class FakeRedis:
         return current
 
     async def get(self, key):
+        self._purge_expired(key)
         return self.strings.get(key)
 
     async def set(self, key, value, ex=None, nx=False):
+        self._purge_expired(key)
         if nx and key in self.strings:
             return False
         self.strings[key] = str(value)
+        if ex is not None:
+            self.string_expirations[key] = time.monotonic() + float(ex)
+            self.expirations.append((key, ex))
+        else:
+            self.string_expirations.pop(key, None)
         return True
 
     async def setex(self, key, ttl, value):
         self.strings[key] = str(value)
+        self.string_expirations[key] = time.monotonic() + float(ttl)
         self.expirations.append((key, ttl))
         return True
 
@@ -208,11 +233,26 @@ class FakeRedis:
 
     async def eval(self, script, numkeys, *args):
         self.evals.append((script, args))
+        if numkeys == 1 and len(args) >= 2:
+            key, expected_value = args[0], str(args[1])
+            self._purge_expired(key)
+            if self.strings.get(key) == expected_value:
+                await self.delete(key)
+                return 1
+            return 0
         return None
 
     async def expire(self, key, ttl):
+        if key in self.strings:
+            self.string_expirations[key] = time.monotonic() + float(ttl)
         self.expirations.append((key, ttl))
         return True
+
+    def _purge_expired(self, key):
+        expires_at = self.string_expirations.get(key)
+        if expires_at is not None and expires_at <= time.monotonic():
+            self.strings.pop(key, None)
+            self.string_expirations.pop(key, None)
 
     async def zadd(self, key, mapping):
         for member, score in mapping.items():
@@ -223,6 +263,42 @@ class FakeRedis:
         items = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1])
         if desc:
             items = list(reversed(items))
+        if kwargs.get("byscore"):
+            def parse_bound(value):
+                exclusive = isinstance(value, str) and value.startswith("(")
+                raw = value[1:] if exclusive else value
+                if raw == "-inf":
+                    return float("-inf"), exclusive
+                if raw == "+inf":
+                    return float("inf"), exclusive
+                return float(raw), exclusive
+
+            start_score, start_exclusive = parse_bound(start)
+            end_score, end_exclusive = parse_bound(end)
+
+            def in_range(score):
+                if desc:
+                    below_start = (
+                        score < start_score
+                        if start_exclusive
+                        else score <= start_score
+                    )
+                    above_end = (
+                        score > end_score if end_exclusive else score >= end_score
+                    )
+                    return below_start and above_end
+                above_start = (
+                    score > start_score if start_exclusive else score >= start_score
+                )
+                below_end = score < end_score if end_exclusive else score <= end_score
+                return above_start and below_end
+
+            items = [item for item in items if in_range(item[1])]
+            offset = int(kwargs.get("offset") or 0)
+            num = kwargs.get("num")
+            if num is None:
+                return [member for member, _ in items[offset:]]
+            return [member for member, _ in items[offset : offset + int(num)]]
         if end == -1:
             sliced = items[start:]
         else:
@@ -338,15 +414,29 @@ class FakeLLMService:
         pass
 
 
+class FakeRedisManager(AsyncRedisClient):
+    def __init__(self, client: FakeRedis):
+        super().__init__(RedisConnectionSettings())
+        self._client = client
+
+    async def connect(self):
+        return self.client
+
+
 @dataclass
 class FakeResources:
     redis: FakeRedis = field(default_factory=FakeRedis)
-    graph_client: FakeGraphClient = field(default_factory=FakeGraphClient)
+    redis_manager: Any = None
+    graph: FakeGraphClient = field(default_factory=FakeGraphClient)
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None
     gliner: Any = None
     spacy: Any = None
+
+    def __post_init__(self):
+        if self.redis_manager is None:
+            self.redis_manager = FakeRedisManager(self.redis)
 
 
 class FakeScheduler:

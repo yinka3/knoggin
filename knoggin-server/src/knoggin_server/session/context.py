@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -24,7 +24,7 @@ from common.utils.core_utils import (
 from common.utils.events import DebugEventEmitter, emit
 from common.utils.tasks import BackgroundTaskGroup
 from common.utils.time_utils import get_now, parse_iso_time_or_now
-from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin_server.agent.prompts import get_lightweight_extraction_prompt
 from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
@@ -80,7 +80,7 @@ class Context:
 
     @property
     def graph_client(self):
-        return self.resources.graph_client
+        return self.resources.graph
 
     @property
     def llm(self):
@@ -112,14 +112,11 @@ class Context:
 
         return ctx
 
-    async def get_next_turn_id(self) -> int:
-        return await self.redis_client.incr(
-            RedisKeys.global_next_turn_id(self.user_name, self.session_id)
-        )
-
     async def add(self, msg: Message) -> Message:
         if not self.project or not self.project.scheduler or not self.consumer:
             raise RuntimeError("Context is not fully initialized for message ingestion")
+
+        msg.timestamp = self._normalize_timestamp(msg.timestamp)
 
         # Deterministic ID: same content + session + timestamp_ns = same ID
         timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
@@ -127,7 +124,11 @@ class Context:
             f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}".encode()
         ).hexdigest()[:12]
 
-        dedup_key = f"msg_dedup:{self.session_id}:{content_hash}"
+        dedup_key = RedisKeys.message_dedup(
+            self.user_name,
+            self.session_id,
+            content_hash,
+        )
 
         existing_id = await self.redis_client.get(dedup_key)
         if existing_id:
@@ -163,56 +164,77 @@ class Context:
 
         return msg
 
-    async def _add_to_conversation_log(
+    @staticmethod
+    def _normalize_timestamp(timestamp: datetime) -> datetime:
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(timezone.utc)
+
+    async def _record_conversation_message(
         self,
+        message_id: int,
         role: str,
         content: str,
         timestamp: datetime,
         user_msg_id: Optional[int] = None,
         metadata: Optional[dict] = None,
-    ) -> int:
-        """Saves a conversation turn to Redis via the hardened Smart Client."""
-        turn_id = await self.get_next_turn_id()
+    ) -> None:
+        """Atomically cache one canonical message and its conversation position."""
+        normalized_timestamp = self._normalize_timestamp(timestamp)
+        timestamp_iso = normalized_timestamp.isoformat()
+        message_key = str(message_id)
 
         payload = {
+            "message_id": message_id,
             "role": role,
             "role_label": "Assistant" if role == "assistant" else "User",
             "content": content,
-            "timestamp": timestamp.isoformat(),
+            "timestamp": timestamp_iso,
             "metadata": metadata,
             "user_msg_id": user_msg_id,
         }
-
-        # Use the Smart Client to handle storage and history pruning
-        await AsyncRedisClient.log_conversation_turn(
-            user_name=self.user_name,
-            session_id=self.session_id,
-            turn_id=turn_id,
-            payload=payload,
-            max_history=self.current_config.developer_settings.limits.conversation_context_turns
-            or 100,
+        content_payload = {
+            "id": message_id,
+            "message": content,
+            "content": content,
+            "timestamp": timestamp_iso,
+            "role": role,
+        }
+        max_history = (
+            self.current_config.developer_settings.limits.conversation_context_turns
+            or 100
         )
 
-        return turn_id
+        pipe = self.redis_client.pipeline()
+        pipe.hset(
+            RedisKeys.conversation(self.user_name, self.session_id),
+            message_key,
+            json.dumps(payload),
+        )
+        pipe.zadd(
+            RedisKeys.recent_conversation(self.user_name, self.session_id),
+            {message_key: normalized_timestamp.timestamp()},
+        )
+        pipe.hset(
+            RedisKeys.message_content(self.user_name, self.session_id),
+            f"msg_{message_id}",
+            json.dumps(content_payload),
+        )
+        pipe.zremrangebyrank(
+            RedisKeys.recent_conversation(self.user_name, self.session_id),
+            0,
+            -(max_history + 1),
+        )
+        await pipe.execute()
 
     async def _persist_user_turn(self, msg: Message):
-        """Maps a message to a turn and stores its content via the Smart Client."""
-        turn_id = await self._add_to_conversation_log(
+        """Cache a canonical user message in the active conversation."""
+        await self._record_conversation_message(
+            message_id=msg.id,
             role="user",
             content=msg.content.strip(),
             timestamp=msg.timestamp,
             user_msg_id=msg.id,
-        )
-
-        # Map the message ID to this turn and store content
-        await AsyncRedisClient.update_message_mapping(
-            user_name=self.user_name,
-            session_id=self.session_id,
-            msg_id=msg.id,
-            turn_id=turn_id,
-            content=msg.content.strip(),
-            timestamp=msg.timestamp.isoformat(),
-            role="user",
         )
 
     async def _enqueue_user_message(self, msg: Message):
@@ -249,8 +271,10 @@ class Context:
         if metadata is None:
             metadata = {}
 
+        timestamp = self._normalize_timestamp(timestamp)
         message_id = await self.graph_client.allocate_message_id()
-        turn_id = await self._add_to_conversation_log(
+        await self._record_conversation_message(
+            message_id=message_id,
             role="assistant",
             content=content,
             timestamp=timestamp,
@@ -259,40 +283,42 @@ class Context:
         )
 
         try:
-            await AsyncRedisClient.update_message_mapping(
-                user_name=self.user_name,
-                session_id=self.session_id,
-                msg_id=message_id,
-                turn_id=turn_id,
-                content=content,
-                timestamp=timestamp.isoformat(),
-                role="assistant",
-            )
             await self._persist_assistant_message_log(
                 message_id,
-                turn_id,
                 content,
                 timestamp,
             )
         except Exception:
             try:
-                await AsyncRedisClient.delete_message_turn(
-                    user_name=self.user_name,
-                    session_id=self.session_id,
-                    msg_id=message_id,
-                    turn_id=turn_id,
-                )
+                await self._delete_conversation_message(message_id)
             except Exception as cleanup_exc:
                 logger.error(
                     "Failed to remove assistant message after persistence "
-                    f"failure for message {message_id} (turn {turn_id}): "
-                    f"{cleanup_exc}"
+                    f"failure for message {message_id}: {cleanup_exc}"
                 )
             raise
 
+    async def _delete_conversation_message(self, message_id: int) -> None:
+        """Remove all staged Redis state for one canonical message."""
+        message_key = str(message_id)
+        pipe = self.redis_client.pipeline()
+        pipe.hdel(
+            RedisKeys.conversation(self.user_name, self.session_id),
+            message_key,
+        )
+        pipe.zrem(
+            RedisKeys.recent_conversation(self.user_name, self.session_id),
+            message_key,
+        )
+        pipe.hdel(
+            RedisKeys.message_content(self.user_name, self.session_id),
+            f"msg_{message_id}",
+        )
+        await pipe.execute()
+
     async def _maybe_extract_llm(self, content: str, user_msg_id: int) -> bool:
         """
-        Classify assistant response and extract facts if worthy via structured Pydantic models.
+        Classify an assistant response and extract facts with structured models.
         Only attaches facts to entities that resolve. Unresolved subjects are skipped.
 
         Returns: True if facts were found, False otherwise.
@@ -304,7 +330,7 @@ class Context:
         user_prompt = get_lightweight_extraction_prompt(content)
 
         try:
-            result: EntityProfilesResult = await self.llm.call_llm(
+            result: EntityProfilesResult = await self.llm.generate_structured(
                 system=system_prompt,
                 user=user_prompt,
                 response_model=EntityProfilesResult,
@@ -406,7 +432,8 @@ class Context:
 
             if total_count > 0:
                 logger.info(
-                    f"Extracted {total_count} facts from assistant response (source='llm')"
+                    f"Extracted {total_count} facts from assistant response "
+                    "(source='llm')"
                 )
 
             return total_count > 0
@@ -418,7 +445,6 @@ class Context:
     async def _persist_assistant_message_log(
         self,
         message_id: int,
-        turn_id: int,
         content: str,
         timestamp: datetime,
     ):
@@ -447,14 +473,13 @@ class Context:
                     logger.warning(
                         "Assistant message log failed "
                         f"(attempt {attempt + 1}/{max_retries}) for message "
-                        f"{message_id} (turn {turn_id}): {e}"
+                        f"{message_id}: {e}"
                     )
                     await asyncio.sleep(0.5 * (attempt + 1))
                 else:
                     logger.error(
                         "Failed to persist assistant message log for message "
-                        f"{message_id} (turn {turn_id}) after {max_retries} "
-                        f"attempts: {e}"
+                        f"{message_id} after {max_retries} attempts: {e}"
                     )
                     raise
 
@@ -524,13 +549,12 @@ class Context:
             redis_client=self.redis_client,
         )
 
-
-
     async def refresh_session_ttls(self):
-        """Refresh TTLs on all session-scoped Redis keys via the Smart Client."""
-        await AsyncRedisClient.refresh_session_ttls(
-            self.user_name, self.session_id, SESSION_KEY_TTL
-        )
+        """Refresh TTLs on all fixed session-scoped Redis keys."""
+        pipe = self.redis_client.pipeline()
+        for key in RedisKeys.session_keys(self.user_name, self.session_id):
+            pipe.expire(key, SESSION_KEY_TTL)
+        await pipe.execute()
 
     async def shutdown(self):
         for unsubscribe in self.config_unsubscribers:

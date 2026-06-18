@@ -33,7 +33,7 @@ async def test_memory_manager_saves_lists_and_forgets_session_memory(memory_mana
     saved = await manager.save_memory(" remember this ", "General")
 
     assert saved.success is True
-    key = RedisKeys.agent_memory("ada", "session-1", "General")
+    key = RedisKeys.session_memory("ada", "session-1", "General")
     assert saved.memory_id in redis.hashes[key]
     payload = json.loads(redis.hashes[key][saved.memory_id])
     assert payload["content"] == "remember this"
@@ -66,7 +66,7 @@ async def test_memory_manager_prompt_strings_include_only_requested_active_topic
     with frozen_time("2026-01-01T10:05:00+00:00"):
         work = await manager.save_memory("Work note", "job")
 
-    identity_key = RedisKeys.agent_memory("ada", "session-1", "Identity")
+    identity_key = RedisKeys.session_memory("ada", "session-1", "Identity")
     await redis.hset(
         identity_key,
         "mem_identity",
@@ -79,7 +79,7 @@ async def test_memory_manager_prompt_strings_include_only_requested_active_topic
         ),
     )
     await redis.hset(
-        RedisKeys.agent_memory("ada", "session-1", "General"),
+        RedisKeys.session_memory("ada", "session-1", "General"),
         "mem_corrupt",
         "{not-json",
     )
@@ -154,13 +154,13 @@ async def test_memory_manager_session_and_user_scopes_do_not_leak():
     miss = await same_user_other_session.forget_memory(saved.memory_id)
     assert miss.success is False
     assert saved.memory_id in redis.hashes[
-        RedisKeys.agent_memory("ada", "session-1", "General")
+        RedisKeys.session_memory("ada", "session-1", "General")
     ]
 
     removed = await manager.forget_memory(saved.memory_id)
     assert removed.success is True
     assert saved.memory_id not in redis.hashes[
-        RedisKeys.agent_memory("ada", "session-1", "General")
+        RedisKeys.session_memory("ada", "session-1", "General")
     ]
 
 
@@ -198,7 +198,7 @@ async def test_memory_manager_directive_lifecycle(memory_manager):
     assert listed.directives[0].content == "Be concise"
     assert listed.directives[0].mode == "require"
     assert removed.success is True
-    assert redis.hashes[RedisKeys.agent_working_memory("agent-1", "directives")] == {}
+    assert redis.hashes[RedisKeys.agent_directives("ada", "agent-1")] == {}
     assert [event[1] for event in events] == [
         "directive_added",
         "directive_removed",
