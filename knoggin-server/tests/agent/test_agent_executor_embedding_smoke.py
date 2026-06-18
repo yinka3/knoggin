@@ -25,9 +25,11 @@ class FakeMemoryManager:
         self.calls.append(list(hot_topics))
         return (
             "[Testing]\n- Agent tests use fake LLMs and real local embeddings.",
-            "Keep tool evidence grounded.",
-            "Prefer subsystem-sized coverage.",
-            "Do not hide retrieval failures.",
+            (
+                "Keep tool evidence grounded. "
+                "Prefer subsystem-sized coverage. "
+                "Do not hide retrieval failures."
+            ),
         )
 
 

@@ -57,7 +57,14 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
             self.unregister_calls = []
             self.emit_calls = []
 
-        async def emit(self, session_id, component, event, data=None, verbose_only=False):
+        async def emit(
+            self,
+            session_id,
+            component,
+            event,
+            data=None,
+            verbose_only=False,
+        ):
             self.emit_calls.append((session_id, component, event, data, verbose_only))
 
         async def cleanup_scope(self, session_id):
@@ -69,7 +76,7 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     emitter = FakeEmitter()
     monkeypatch.setattr(
         project_manager,
-        "get_or_start_project",
+        "_get_or_start_project",
         fake_get_or_start_project,
     )
     monkeypatch.setattr(Context, "create", fake_create)

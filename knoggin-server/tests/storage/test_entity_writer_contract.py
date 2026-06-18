@@ -10,7 +10,6 @@ from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
 from knoggin_server.knowledge.db.writers.fact_writer import FactWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
-
 ENTITY_GRAPH_FIELDS = {
     "id",
     "canonical_name",
@@ -351,7 +350,7 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
             "relationship_id": "project-1:2:4",
             "user_name": "ada",
             "session_id": "session-2",
-            "message_id": 1_000_000_005,
+            "message_id": 125,
         },
     ]
 

@@ -306,5 +306,10 @@ async def test_graph_client_facade_delegates_correctly(
     result = await method(*args, **kwargs)
 
     # Verify the facade routed the call to the expected storage component.
-    assert result == f"{method_name}-result"
-    assert components[component_name].calls == [(method_name, args, kwargs)]
+    component_method_name = {
+        "rebuild_project_search_indexes": "rebuild_project_indexes",
+    }.get(method_name, method_name)
+    assert result == f"{component_method_name}-result"
+    assert components[component_name].calls == [
+        (component_method_name, args, kwargs)
+    ]
