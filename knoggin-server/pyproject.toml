@@ -41,6 +41,7 @@ dependencies = [
     "ddgs>=9.11.3",
     "instructor>=1.14.5",
     "pyyaml>=6.0.3",
+    "ruff>=0.15.12",
 ]
 
 [project.optional-dependencies]
@@ -51,19 +52,13 @@ dev = [
     "ruff>=0.9.0"
 ]
 
-[project.scripts]
-knoggin = "cli.main:app"
-
 [build-system]
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["cli*", "api*", "common*", "knoggin*", "infrastructure*", "log*"]
-
-[tool.setuptools.package-data]
-cli = ["templates/*"]
+include = ["common*", "knoggin_server*", "infrastructure*", "log*"]
 
 [tool.uvicorn]
 reload-exclude = ["redis_data", "*.log"]
@@ -72,9 +67,27 @@ reload-exclude = ["redis_data", "*.log"]
 en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" }
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+]
+markers = [
+    "unit: pure or mostly pure fast tests",
+    "smoke: package and import boundary checks",
+    "runtime: fake-backed engine lifecycle tests",
+    "storage: storage contract tests",
+    "ingestion: ingestion and queue behavior tests",
+    "integration: cross-subsystem tests",
+    "slow: expensive tests",
+    "requires_redis: requires a real Redis service",
+    "requires_postgres: requires a real Postgres service",
+    "requires_pgvector: requires pgvector support",
+    "requires_async_psycopg: requires psycopg async support in this OS/event loop",
+    "no_network: test is expected to make no external network calls",
+]
 
 [tool.ruff]
 line-length = 88
@@ -85,4 +98,4 @@ select = ["E", "F", "I", "W"]
 ignore = []
 
 [tool.ruff.lint.isort]
-known-first-party = ["api", "common", "infrastructure", "knoggin", "log", "cli"]
+known-first-party = ["common", "infrastructure", "knoggin_server", "log"]

@@ -152,8 +152,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "request_clarification",
             "description": (
-                "Use this tool when the user's request is ambiguous, vague, or missing critical information (like which 'Project' they mean). "
-                "Instead of guessing and calling a search tool with bad data, call this to ask the user a clarifying question."
+                "Use this tool ONLY when the user's request is completely ambiguous and you cannot resolve it yourself. "
+                "If the user mentions a vague concept or person, you MUST attempt to search the graph or recent messages for context first. "
+                "Only ask for clarification if your searches return zero results or conflicting data."
             ),
             "parameters": {
                 "type": "object",
@@ -258,6 +259,10 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Optional: restrict search to a specific file by name.",
                     },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max chunks to return (default 5).",
+                    },
                 },
                 "required": ["query"],
             },
@@ -291,7 +296,15 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The news search query."}
+                    "query": {"type": "string", "description": "The news search query."},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 5)",
+                    },
+                    "freshness": {
+                        "type": "string",
+                        "description": "Time window: 'pd' (past day), 'pw' (past week), 'pm' (past month), 'py' (past year).",
+                    },
                 },
                 "required": ["query"],
             },
@@ -318,6 +331,24 @@ TOOL_SCHEMAS = [
             "tags": ["core"],
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_answer",
+            "description": "Submit your final synthesized answer to the user. You MUST call this tool when you are finished gathering evidence and are ready to respond.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The final markdown response.",
+                    }
+                },
+                "required": ["content"],
+            },
+            "tags": ["core"],
+        },
+    },
 ]
 
 ALL_TOOL_NAMES = [s["function"]["name"] for s in TOOL_SCHEMAS]
@@ -339,7 +370,7 @@ def get_filtered_schemas(
 
     for schema in TOOL_SCHEMAS:
         name = schema["function"]["name"]
-        if name in ("request_clarification", "request_replanning"):
+        if name in ("request_clarification", "request_replanning", "submit_answer"):
             filtered.append(schema)
             continue
 

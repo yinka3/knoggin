@@ -24,4 +24,14 @@ Bad labels (abstract, not entity types):
 6. The output should be a mapping of TopicName to its configuration.
 </rules>
 
+<schema_contract>
+Return exactly this top-level shape:
+{
+  "topics": {
+    "TopicName": {"active": bool, "labels": [str], "aliases": [str], "hierarchy": {str: [str]}}
+  }
+}
+Every topic detail must include active, labels, aliases, and hierarchy.
+</schema_contract>
+
 Respond with the FULL updated config as valid JSON in the requested format.

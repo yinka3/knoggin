@@ -4,9 +4,9 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 import httpx
 import instructor
 import redis.asyncio as aioredis
+import tiktoken
 from loguru import logger
 from openai import AsyncOpenAI
-import tiktoken
 
 from common.exceptions import ConfigurationError
 from common.utils.tasks import BackgroundTaskGroup
@@ -271,6 +271,10 @@ class LLMService:
                     create_kwargs["extra_body"] = self._extra_body(reasoning)
 
                 if response_model:
+                    create_kwargs["response_model"] = response_model
+                    if mode is not None:
+                        create_kwargs["mode"] = mode
+                        
                     (
                         response,
                         completion,

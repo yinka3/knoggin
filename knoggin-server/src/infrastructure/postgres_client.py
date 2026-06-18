@@ -11,12 +11,14 @@ def _configure_sync_conn(conn: psycopg.Connection):
     """Load Apache AGE and set search path on every sync connection."""
     conn.execute("LOAD 'age';")
     conn.execute('SET search_path = ag_catalog, "$user", public;')
+    conn.commit()
 
 
 async def _configure_async_conn(conn: psycopg.AsyncConnection):
     """Load Apache AGE and set search path on every async connection."""
     await conn.execute("LOAD 'age';")
     await conn.execute('SET search_path = ag_catalog, "$user", public;')
+    await conn.commit()
 
 
 class PostgresClient:
@@ -41,18 +43,22 @@ class PostgresClient:
                 max_size=self.max_size,
                 kwargs={"autocommit": False, "row_factory": dict_row},
                 configure=_configure_async_conn,
+                open=False,
             )
             await self.async_pool.open()
 
             # Sync pool initialized in thread to avoid blocking event loop
             def _init_sync():
-                return ConnectionPool(
+                pool = ConnectionPool(
                     conninfo=self.dsn,
                     min_size=self.min_size,
                     max_size=self.max_size,
                     kwargs={"autocommit": False, "row_factory": dict_row},
                     configure=_configure_sync_conn,
+                    open=False,
                 )
+                pool.open()
+                return pool
 
             self.sync_pool = await asyncio.to_thread(_init_sync)
 
@@ -80,10 +86,10 @@ class PostgresClient:
             raise RuntimeError("PostgresClient async_pool is not initialized")
 
         async with self.async_pool.connection() as conn:
-            # We don't strictly need a transaction for read, but it's safe.
-            async with conn.cursor() as cur:
-                await cur.execute(query, params or {})
-                return await cur.fetchall()
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    await cur.execute(query, params or {})
+                    return await cur.fetchall()
 
     async def execute_write(
         self, query: str, params: Optional[Dict[str, Any]] = None
@@ -108,9 +114,10 @@ class PostgresClient:
             raise RuntimeError("PostgresClient sync_pool is not initialized")
 
         with self.sync_pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, params or {})
-                return cur.fetchall()
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(query, params or {})
+                    return cur.fetchall()
 
     def execute_write_sync(
         self, query: str, params: Optional[Dict[str, Any]] = None

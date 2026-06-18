@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from common.utils.time_utils import parse_iso_time
+from common.utils.time_utils import get_now, parse_iso_time
 
 # ═══════════════════════════════════════════════════════════════════
 #  ENTITY — any discrete concept in the knowledge graph
@@ -120,9 +120,15 @@ def _parse_dt(val) -> datetime:
 class FactRecord(Fact):
     """DB-stored fact"""
 
+    source_user_name: Optional[str] = Field(
+        None, description="User scope for the source message"
+    )
+    source_session_id: Optional[str] = Field(
+        None, description="Session scope for the source message"
+    )
     id: str = Field(..., description="Unique fact identifier")
     source_entity_id: int = Field(..., description="DB ID of the source entity")
-    valid_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    valid_at: datetime = Field(default_factory=get_now)
     invalid_at: Optional[datetime] = None
     confidence: float = 1.0
     source: str = "user"
@@ -153,6 +159,8 @@ class FactRecord(Fact):
             confidence=record.get("confidence", 1.0),
             embedding=record.get("embedding") or [],
             source_msg_id=record.get("source_msg_id"),
+            source_user_name=record.get("source_user_name"),
+            source_session_id=record.get("source_session_id"),
             source=record.get("source", "user"),
         )
 
@@ -167,7 +175,7 @@ class Message(BaseModel):
 
     content: str = Field(..., description="The message text")
     id: int = Field(-1, description="DB-assigned message ID")
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=get_now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 

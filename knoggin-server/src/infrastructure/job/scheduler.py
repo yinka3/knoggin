@@ -1,12 +1,12 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, Optional
 
 import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
-from common.utils.time_utils import parse_iso_time
+from common.utils.time_utils import get_now, get_now_iso, parse_iso_time
 from infrastructure.job.base import BaseJob, JobContext
 from infrastructure.redis_client import RedisKeys
 
@@ -20,16 +20,21 @@ class Scheduler:
     CHECK_INTERVAL = 30
     JOB_EXECUTION_TIMEOUT = 300
 
-    def __init__(self, user_name: str, session_id: str, redis: aioredis.Redis):
+    def __init__(
+        self,
+        user_name: str,
+        project_id: str,
+        redis: aioredis.Redis,
+    ):
         self.user_name = user_name
-        self.session_id = session_id
+        self.project_id = project_id
         self.redis = redis
         self._jobs: Dict[str, BaseJob] = {}
         self._last_runs: Dict[str, datetime] = {}
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._monitor_task: Optional[asyncio.Task] = None
         self._is_running = False
-    
+
     @property
     def running(self) -> bool:
         return self._is_running
@@ -44,7 +49,7 @@ class Scheduler:
         idle_seconds = await self._get_idle_seconds()
         return JobContext(
             user_name=self.user_name,
-            session_id=self.session_id,
+            project_id=self.project_id,
             idle_seconds=idle_seconds,
         )
 
@@ -56,7 +61,7 @@ class Scheduler:
 
         self._monitor_task = asyncio.create_task(self._monitor_loop())
         await emit(
-            self.session_id,
+            self.project_id,
             "job",
             "scheduler_started",
             {"jobs": list(self._jobs.keys())},
@@ -95,28 +100,28 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"Job {job.name} shutdown failed: {e}")
 
-        await emit(self.session_id, "job", "scheduler_stopped", {})
+        await emit(self.project_id, "job", "scheduler_stopped", {})
 
         logger.info("Scheduler stopped")
 
     async def record_activity(self):
         """Record user activity timestamp. Call on each user message."""
         await self.redis.set(
-            RedisKeys.last_activity(self.user_name, self.session_id),
-            datetime.now(timezone.utc).isoformat(),
+            RedisKeys.project_last_activity(self.user_name, self.project_id),
+            get_now_iso(),
         )
 
     async def _get_idle_seconds(self) -> float:
         """Calculate seconds since last user activity."""
         last_activity = await self.redis.get(
-            RedisKeys.last_activity(self.user_name, self.session_id)
+            RedisKeys.project_last_activity(self.user_name, self.project_id)
         )
         if not last_activity:
             return 0.0
         last_ts = parse_iso_time(last_activity)
         if not last_ts:
             return 0.0
-        return (datetime.now(timezone.utc) - last_ts).total_seconds()
+        return (get_now() - last_ts).total_seconds()
 
     async def _run_pending_checks(self):
         """Check for work pending from previous session."""
@@ -126,7 +131,7 @@ class Scheduler:
             if not getattr(job, "enabled", True):
                 continue
             pending_key = RedisKeys.job_pending(
-                self.user_name, self.session_id, job_name
+                self.user_name, self.project_id, job_name
             )
             if await self.redis.get(pending_key):
                 logger.info(f"Found pending work for job: {job_name}")
@@ -172,13 +177,13 @@ class Scheduler:
     async def _execute_job(self, job: BaseJob, ctx: JobContext):
         """Execute a single job with error handling."""
         logger.info(f"Executing job: {job.name}")
-        await emit(ctx.session_id, "job", "started", {"name": job.name})
+        await emit(ctx.project_id, "job", "started", {"name": job.name})
         try:
             result = await asyncio.wait_for(
                 job.execute(ctx), timeout=self.JOB_EXECUTION_TIMEOUT
             )
             await emit(
-                ctx.session_id,
+                ctx.project_id,
                 "job",
                 "completed",
                 {
@@ -187,7 +192,7 @@ class Scheduler:
                     "summary": result.summary,
                 },
             )
-            self._last_runs[job.name] = datetime.now(timezone.utc)
+            self._last_runs[job.name] = get_now()
 
             if result.summary:
                 logger.info(f"Job {job.name}: {result.summary}")
@@ -205,11 +210,11 @@ class Scheduler:
             logger.error(
                 f"Job {job.name} timed out after {self.JOB_EXECUTION_TIMEOUT}s"
             )
-            await emit(ctx.session_id, "job", "timeout", {"name": job.name})
+            await emit(ctx.project_id, "job", "timeout", {"name": job.name})
 
         except Exception as e:
             await emit(
-                ctx.session_id, "job", "failed", {"name": job.name, "error": str(e)}
+                ctx.project_id, "job", "failed", {"name": job.name, "error": str(e)}
             )
             logger.error(f"Job {job.name} execution failed: {e}")
 

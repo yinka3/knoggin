@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from knoggin.agent.prompts import (
+from knoggin_server.agent.prompts import (
     get_connection_reasoning_prompt,
     get_contradiction_judgment_prompt,
     get_merge_judgment_prompt,
@@ -17,6 +17,42 @@ class TopicSchema(BaseModel):
     labels: List[str] = Field(default_factory=list)
     hierarchy: Dict[str, Any] = Field(default_factory=dict)
     aliases: List[str] = Field(default_factory=list)
+
+
+DEFAULT_SPARSE_CONTEXT_VERBS = [
+    "accepted",
+    "acknowledged",
+    "added",
+    "agreed",
+    "answered",
+    "approved",
+    "asked",
+    "called",
+    "checked",
+    "confirmed",
+    "did",
+    "emailed",
+    "forwarded",
+    "liked",
+    "mentioned",
+    "messaged",
+    "noted",
+    "okayed",
+    "pinged",
+    "reacted",
+    "replied",
+    "responded",
+    "said",
+    "sent",
+    "shared",
+    "signed",
+    "submitted",
+    "texted",
+    "told",
+    "updated",
+    "wrote",
+    "yes",
+]
 
 
 
@@ -93,7 +129,7 @@ class AgentLimitSettings(BaseModel):
             "search_messages": 6,
             "get_connections": 8,
             "search_entity": 8,
-            "get_activity": 8,
+            "get_recent_activity": 8,
             "find_path": 8,
             "get_hierarchy": 8,
             "fact_check": 6,
@@ -124,7 +160,6 @@ class TextProcessorSettings(BaseModel):
 
 
 class SearchSettings(BaseModel):
-    vector_limit: int = Field(50, ge=1)
     fts_limit: int = Field(50, ge=1)
     rerank_candidates: int = Field(45, ge=1)
     default_message_limit: int = Field(8, ge=1)
@@ -139,6 +174,11 @@ class EntityResolutionSettings(BaseModel):
     candidate_fuzzy_threshold: int = Field(85, ge=50, le=100)
     candidate_vector_threshold: float = Field(0.85, ge=0.0, le=1.0)
     resolution_threshold: float = Field(0.85, ge=0.0, le=1.0)
+    common_word_frequency_threshold: float = Field(1e-5, ge=0.0)
+    context_support_epsilon: float = Field(1e-6, ge=0.0)
+    sparse_context_verbs: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_SPARSE_CONTEXT_VERBS)
+    )
 
 
 class LLMSettings(BaseModel):
@@ -176,10 +216,6 @@ class DeveloperSettings(BaseModel):
 
 
 class RootConfig(BaseModel):
-    _warning: str = Field(
-        "This file is auto-generated. Use the UI to modify settings. Manual edits may be overwritten.",
-        alias="_warning",
-    )
     user_name: str = Field("")
     user_aliases: List[str] = Field(default_factory=list)
     user_facts: List[str] = Field(default_factory=list)
@@ -253,7 +289,9 @@ class RootConfig(BaseModel):
     default_topics: Dict[str, TopicSchema] = Field(
         default_factory=lambda: {
             "General": TopicSchema(active=True, labels=[], hierarchy={}, aliases=[]),
-            "Identity": TopicSchema(active=True, labels=["person"], hierarchy={}, aliases=[]),
+            "Identity": TopicSchema(
+                active=True, labels=["person"], hierarchy={}, aliases=[]
+            ),
         }
     )
     developer_settings: DeveloperSettings = Field(default_factory=DeveloperSettings)

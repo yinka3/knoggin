@@ -52,7 +52,9 @@ class TopicConfig:
     """
 
     DEFAULT_CONFIG: Dict[str, TopicSchema] = {
-        "General": TopicSchema(active=True, hot=False, labels=[], hierarchy={}, aliases=[])
+        "General": TopicSchema(
+            active=True, hot=False, labels=[], hierarchy={}, aliases=[]
+        )
     }
 
     def __init__(self, config: Dict[str, TopicSchema]):
@@ -65,10 +67,12 @@ class TopicConfig:
 
     @classmethod
     async def load(
-        cls, redis_client: aioredis.Redis, user_name: str, session_id: str
+        cls, redis_client: aioredis.Redis, user_name: str, project_id: str
     ) -> "TopicConfig":
         """Load config from Redis."""
-        raw = await redis_client.hget(RedisKeys.session_config(user_name), session_id)
+        raw = await redis_client.hget(
+            RedisKeys.project_topic_config(user_name), project_id
+        )
         if raw:
             try:
                 raw_dict = safe_json_loads(raw)
@@ -83,13 +87,13 @@ class TopicConfig:
             config = copy.deepcopy(cls.DEFAULT_CONFIG)
         return cls(config)
 
-    async def save(self, redis_client: aioredis.Redis, user_name: str, session_id: str):
+    async def save(self, redis_client: aioredis.Redis, user_name: str, project_id: str):
         """Persist config to Redis."""
         dumped = {k: v.model_dump() for k, v in self._config.items()}
         await redis_client.hset(
-            RedisKeys.session_config(user_name), session_id, json.dumps(dumped)
+            RedisKeys.project_topic_config(user_name), project_id, json.dumps(dumped)
         )
-        logger.debug(f"TopicConfig saved for session {session_id}")
+        logger.debug(f"TopicConfig saved for project {project_id}")
 
     def _clear_cache(self):
         """Clear all cached derived values."""
@@ -182,13 +186,14 @@ class TopicConfig:
                 topic_cfg = TopicSchema(**topic_cfg_dict)
             else:
                 topic_cfg = topic_cfg_dict
-                
+
             if topic_name in self._config:
                 old_labels = set(self._config[topic_name].labels)
                 new_labels = set(topic_cfg.labels)
                 if old_labels != new_labels:
                     logger.warning(
-                        f"Labels modified for '{topic_name}': {old_labels} → {new_labels}"
+                        f"Labels modified for '{topic_name}': "
+                        f"{old_labels} → {new_labels}"
                     )
             else:
                 logger.info(f"Adding new topic via update: {topic_name}")
@@ -227,7 +232,7 @@ class TopicConfig:
         logger.info(f"Topic '{topic_name}' active={active}")
 
     def validate_hot_topics(self, hot_topics: List[str]) -> List[str]:
-        """Filter hot topics to only include active ones."""
+        """Normalize and filter hot topics to configured active topics."""
         if not hot_topics:
             return []
 
@@ -236,7 +241,11 @@ class TopicConfig:
         invalid = []
 
         for topic in hot_topics:
-            canonical = self.normalize_topic(topic)
+            canonical = (
+                self.alias_lookup.get(topic.strip().lower())
+                if isinstance(topic, str) and topic.strip()
+                else None
+            )
             if canonical and canonical in active:
                 if canonical not in valid:
                     valid.append(canonical)

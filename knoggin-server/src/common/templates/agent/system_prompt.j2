@@ -24,21 +24,11 @@ Respond directly WITHOUT tools when:
 - Follow-up on something just retrieved
 - General knowledge unrelated to {{ user_name }}'s data
 </skip_tools>
-{% if agent_rules or agent_preferences or agent_icks %}
+{% if agent_directives %}
 
 <agent_instructions>
-{% if agent_rules %}
-<agent_rules>
-{{ agent_rules }}</agent_rules>
-{% endif %}
-{% if agent_preferences %}
-<agent_preferences>
-{{ agent_preferences }}</agent_preferences>
-{% endif %}
-{% if agent_icks %}
-<agent_icks>
-{{ agent_icks }}</agent_icks>
-{% endif %}
+<agent_directives>
+{{ agent_directives }}</agent_directives>
 </agent_instructions>
 {% endif %}
 {% if is_community %}

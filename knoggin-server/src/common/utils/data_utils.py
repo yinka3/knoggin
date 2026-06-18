@@ -3,19 +3,26 @@ from typing import List, Optional, Tuple
 import numpy as np
 from loguru import logger
 from rapidfuzz import fuzz
-from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 
-from common.schema.dtypes import Fact, FactMergeResult, FactRecord
+from common.schema.contracts import FactMergeResult, SkippedFactChange
+from common.schema.primitives import Fact, FactRecord
 
 
 def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
     if not vec_a or not vec_b or None in vec_a or None in vec_b:
         return 0.0
 
-    a = np.array(vec_a).reshape(1, -1)
-    b = np.array(vec_b).reshape(1, -1)
+    a = np.asarray(vec_a, dtype=float)
+    b = np.asarray(vec_b, dtype=float)
 
-    return float(sklearn_cosine_similarity(a, b)[0][0])
+    if a.shape != b.shape:
+        return 0.0
+
+    denominator = np.linalg.norm(a) * np.linalg.norm(b)
+    if denominator == 0:
+        return 0.0
+
+    return float(np.dot(a, b) / denominator)
 
 
 def find_duplicate_facts(
@@ -34,10 +41,17 @@ def find_duplicate_facts(
     if not active_a or not active_b:
         return []
 
-    emb_a = [f.embedding for f in active_a]
-    emb_b = [f.embedding for f in active_b]
+    emb_a = np.asarray([f.embedding for f in active_a], dtype=float)
+    emb_b = np.asarray([f.embedding for f in active_b], dtype=float)
 
-    similarity_matrix = sklearn_cosine_similarity(emb_b, emb_a)
+    dot_products = emb_b @ emb_a.T
+    norms = np.outer(np.linalg.norm(emb_b, axis=1), np.linalg.norm(emb_a, axis=1))
+    similarity_matrix = np.divide(
+        dot_products,
+        norms,
+        out=np.zeros_like(dot_products, dtype=float),
+        where=norms != 0,
+    )
 
     to_invalidate = []
 
@@ -67,11 +81,12 @@ def process_extracted_facts(
     Returns IDs to invalidate and new Fact objects to be inserted.
     """
     if not new_facts:
-        return FactMergeResult(to_invalidate=[], new_contents=[])
+        return FactMergeResult()
 
     to_invalidate = []
-    # We'll return the Fact objects themselves as they now contain all metadata
     updates_to_keep = []
+    skipped = []
+    missing_targets = []
 
     active_facts = [f for f in existing_facts if f.invalid_at is None]
 
@@ -87,9 +102,24 @@ def process_extracted_facts(
                 active_facts = [f for f in active_facts if f.id != matched_fact.id]
             else:
                 logger.warning(f"SUPERSEDES target not found: '{old_text}'")
+                missing_targets.append(
+                    SkippedFactChange(
+                        content=old_text,
+                        reason="supersedes_target_not_found",
+                        metadata={"new_content": content},
+                    )
+                )
 
             if not _is_duplicate(content, active_facts):
                 updates_to_keep.append(fact_update)
+            else:
+                skipped.append(
+                    SkippedFactChange(
+                        content=content,
+                        reason="duplicate",
+                        metadata={"operation": "supersedes"},
+                    )
+                )
             continue
 
         # Handle invalidates
@@ -99,21 +129,36 @@ def process_extracted_facts(
             if matched_fact:
                 to_invalidate.append(matched_fact.id)
                 active_facts = [f for f in active_facts if f.id != matched_fact.id]
+            else:
+                logger.warning(f"INVALIDATES target not found: '{old_text}'")
+                missing_targets.append(
+                    SkippedFactChange(
+                        content=old_text,
+                        reason="invalidates_target_not_found",
+                        metadata={"new_content": content},
+                    )
+                )
             continue
 
         # Normal new fact
         if not _is_duplicate(content, active_facts):
             updates_to_keep.append(fact_update)
             logger.debug(f"Adding new fact: {content}")
+        else:
+            skipped.append(
+                SkippedFactChange(
+                    content=content,
+                    reason="duplicate",
+                    metadata={"operation": "create"},
+                )
+            )
 
-    return FactMergeResult(to_invalidate=to_invalidate, new_contents=updates_to_keep)
-
-
-def extract_fact_with_source(fact_update: Fact) -> Tuple[str, Optional[int]]:
-    """
-    Helper to extract content and source msg_id from a Fact.
-    """
-    return fact_update.content, fact_update.source_msg_id
+    return FactMergeResult(
+        to_invalidate=to_invalidate,
+        new_contents=updates_to_keep,
+        skipped=skipped,
+        missing_targets=missing_targets,
+    )
 
 
 def _find_matching_fact(
