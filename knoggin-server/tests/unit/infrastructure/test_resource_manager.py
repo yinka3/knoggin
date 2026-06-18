@@ -34,8 +34,9 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
             return unsubscribe
 
     class FakeGraphClient:
-        def __init__(self, dsn):
+        def __init__(self, dsn, embedding_service):
             self.dsn = dsn
+            self.embedding_service = embedding_service
             self.connected = False
             self.closed = False
 
@@ -156,7 +157,7 @@ async def test_resource_manager_raises_if_database_url_missing(monkeypatch):
 @pytest.mark.no_network
 async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
     class FakeGraphClient:
-        def __init__(self, dsn): pass
+        def __init__(self, dsn, embedding_service): pass
         async def connect(self): pass
         async def close(self): pass
 
@@ -212,7 +213,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
 async def test_resource_manager_resolves_gpu_mps(monkeypatch):
     # Same mocks as cuda
     class FakeGraphClient:
-        def __init__(self, dsn): pass
+        def __init__(self, dsn, embedding_service): pass
         async def connect(self): pass
         async def close(self): pass
 
@@ -280,7 +281,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch):
 @pytest.mark.no_network
 async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch):
     class FakeGraphClient:
-        def __init__(self, dsn): pass
+        def __init__(self, dsn, embedding_service): pass
         async def connect(self): pass
         async def close(self): pass
 
