@@ -45,26 +45,20 @@ class MemoryTools:
         self,
         name: str,
         persona: str,
-        initial_rules: List[str] = None,
-        initial_preferences: List[str] = None,
-        initial_icks: List[str] = None,
+        initial_directives: List[Dict] = None,
     ) -> Dict:
         return {"error": "spawn_specialist is only available in community discussions."}
 
     @staticmethod
     def _is_message_id(msg_id) -> bool:
-        """Check if numeric ID belongs to message collection or turn collection."""
+        """Check whether the value identifies a canonical message."""
         if isinstance(msg_id, str):
             return msg_id.startswith("msg_")
-        return msg_id < 1_000_000_000
+        return isinstance(msg_id, int)
 
     @staticmethod
     def _format_message_id(msg_id) -> str:
-        """Format an ID as a string for message/turn reference."""
+        """Format a canonical message ID."""
         if isinstance(msg_id, str):
             return msg_id
-        return (
-            f"msg_{msg_id}"
-            if msg_id < 1_000_000_000
-            else f"turn_{msg_id - 1_000_000_000}"
-        )
+        return f"msg_{msg_id}"

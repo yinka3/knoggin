@@ -1,6 +1,5 @@
 import asyncio
 import json
-from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
@@ -17,6 +16,7 @@ from common.utils.data_utils import (
 )
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now, get_now_iso
 from infrastructure.graph_client import GraphClient
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
@@ -25,12 +25,15 @@ from knoggin_server.agent.prompts import (
     enrich_facts_with_sources,
     get_merge_judgment_prompt,
 )
+from knoggin_server.knowledge.services.entity_embedding import (
+    build_entity_embedding_text,
+)
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
 
 class MergeDetectionJob(BaseJob):
     """
-    Detects and processes duplicate entities (merge) and parent/child relationships (hierarchy).
+    Detects duplicate entities and parent/child relationships.
     """
 
     def __init__(
@@ -64,7 +67,7 @@ class MergeDetectionJob(BaseJob):
         return "merge_detection"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
+        merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.project_id)
         queue_size = await self.redis.scard(merge_key)
         return queue_size > 0
 
@@ -76,9 +79,9 @@ class MergeDetectionJob(BaseJob):
 
     async def execute(self, ctx: JobContext) -> JobResult:
         with logger.contextualize(
-            user=ctx.user_name, job=self.name, session=ctx.session_id
+            user=ctx.user_name, job=self.name, project=ctx.project_id
         ):
-            merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.session_id)
+            merge_key = RedisKeys.merge_queue(ctx.user_name, ctx.project_id)
 
             dirty_raw = await self.redis.srandmember(merge_key, 50)
 
@@ -89,7 +92,7 @@ class MergeDetectionJob(BaseJob):
 
             logger.info(f"Merge detection starting: {len(dirty_ids)} dirty entities")
             await emit(
-                ctx.session_id,
+                ctx.project_id,
                 "job",
                 "merge_job_started",
                 {"dirty_count": len(dirty_ids)},
@@ -120,7 +123,7 @@ class MergeDetectionJob(BaseJob):
             )
 
     async def _get_merge_judgment(
-        self, candidate: dict, session_id: str = None
+        self, candidate: dict, event_scope_id: str = None
     ) -> Tuple[Optional[float], Optional[str]]:
         system = self.merge_prompt if self.merge_prompt else get_merge_judgment_prompt()
 
@@ -128,13 +131,11 @@ class MergeDetectionJob(BaseJob):
             candidate.get("facts_a", []),
             self.graph_client,
             user_name=self.user_name,
-            session_id=session_id,
         )
         enriched_facts_b = await enrich_facts_with_sources(
             candidate.get("facts_b", []),
             self.graph_client,
             user_name=self.user_name,
-            session_id=session_id,
         )
 
         user_content = format_vp05_input(
@@ -152,7 +153,7 @@ class MergeDetectionJob(BaseJob):
             },
         )
         await emit(
-            session_id,
+            event_scope_id,
             "job",
             "llm_call",
             {
@@ -184,6 +185,48 @@ class MergeDetectionJob(BaseJob):
 
         return judgment.confidence, judgment.new_canonical_name
 
+    @staticmethod
+    def _clean_topic(value) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip().strip('"')
+        return cleaned or None
+
+    @staticmethod
+    def _as_int(value) -> int:
+        if value is None or value == "":
+            return 0
+        return int(value)
+
+    @staticmethod
+    def _as_float(value) -> float:
+        if value is None or value == "":
+            return 0.0
+        return float(value)
+
+    @classmethod
+    def _topic_strength_score(cls, prefix: str, strength: Dict) -> Tuple:
+        return (
+            cls._as_int(strength.get(f"{prefix}_fact_count")),
+            cls._as_int(strength.get(f"{prefix}_relationship_count")),
+            cls._as_int(strength.get(f"{prefix}_last")),
+            cls._as_float(strength.get(f"{prefix}_conf")),
+        )
+
+    @classmethod
+    def _select_merge_topic(cls, strength: Dict) -> Optional[str]:
+        if not strength:
+            return None
+
+        primary_topic = cls._clean_topic(strength.get("p_topic")) or "General"
+        secondary_topic = cls._clean_topic(strength.get("s_topic")) or primary_topic
+        primary_score = cls._topic_strength_score("p", strength)
+        secondary_score = cls._topic_strength_score("s", strength)
+
+        if secondary_score > primary_score:
+            return secondary_topic
+        return primary_topic
+
     async def _execute_merge_db_only(
         self,
         primary_id: int,
@@ -196,18 +239,28 @@ class MergeDetectionJob(BaseJob):
         user_id = await self.entities.get_id(self.user_name)
         if user_id is not None and secondary_id == user_id:
             logger.critical(
-                f"BLOCKED: Attempted to delete user entity (id={user_id}) during merge with {primary_id}"
+                "BLOCKED: Attempted to delete user entity "
+                f"(id={user_id}) during merge with {primary_id}"
             )
             return False
 
         for attempt in range(1, max_retries + 1):
             try:
+                topic_strength = await self.graph_client.get_merge_topic_strength(
+                    primary_id,
+                    secondary_id,
+                    project_id,
+                )
+                final_topic = self._select_merge_topic(topic_strength)
                 success = await self.graph_client.merge_entities(
-                    primary_id, secondary_id, project_id=project_id
+                    primary_id,
+                    secondary_id,
+                    project_id=project_id,
+                    final_topic=final_topic,
                 )
 
                 if success:
-                    now = datetime.now(timezone.utc)
+                    now = get_now()
                     for fact_id in duplicate_fact_ids:
                         try:
                             await self.graph_client.invalidate_fact(
@@ -215,17 +268,22 @@ class MergeDetectionJob(BaseJob):
                             )
                         except Exception as e:
                             logger.warning(
-                                f"Failed to invalidate duplicate fact {fact_id} during merge: {e}"
+                                "Failed to invalidate duplicate fact "
+                                f"{fact_id} during merge: {e}"
                             )
                     return True
                 else:
                     logger.warning(
-                        f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): graph_client returned False"
+                        f"Merge attempt {attempt}/{max_retries} "
+                        f"({primary_id}, {secondary_id}): "
+                        "graph_client returned False"
                     )
 
             except Exception as e:
                 logger.error(
-                    f"Merge attempt {attempt}/{max_retries} ({primary_id}, {secondary_id}): {type(e).__name__} - {e}"
+                    f"Merge attempt {attempt}/{max_retries} "
+                    f"({primary_id}, {secondary_id}): "
+                    f"{type(e).__name__} - {e}"
                 )
 
             if attempt < max_retries:
@@ -235,7 +293,7 @@ class MergeDetectionJob(BaseJob):
 
     async def recover_pending_merges(self, ctx: JobContext):
         """Scan Redis for intents that didn't complete and finish them."""
-        index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.session_id)
+        index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.project_id)
         intent_keys = await self.redis.smembers(index_key)
 
         if not intent_keys:
@@ -262,10 +320,10 @@ class MergeDetectionJob(BaseJob):
 
             logger.info(f"Recovery: Finishing merge {p_id} <- {s_id}")
             # We assume the DB merge might have finished (it's idempotent enough),
-            # but if the transaction aborted during the crash, skipping it fully fragments the Graph DB.
-            # We MUST explicitly re-run the DB transaction to guarantee safety before finalizing.
+            # but skipping an aborted transaction can fragment the graph DB.
+            # Re-run the DB transaction before finalizing.
             db_success = await self._execute_merge_db_only(
-                p_id, s_id, item.get("duplicate_fact_ids", []), ctx.session_id
+                p_id, s_id, item.get("duplicate_fact_ids", []), ctx.project_id
             )
 
             if db_success:
@@ -278,8 +336,9 @@ class MergeDetectionJob(BaseJob):
                 await self._finalize_merge(ctx, item)
             else:
                 logger.warning(
-                    f"Recovery: DB merge failed for {p_id} <- {s_id} and no completion flag. "
-                    f"Secondary may have been deleted by cleanup or absorbed by another merge. "
+                    f"Recovery: DB merge failed for {p_id} <- {s_id} "
+                    "and no completion flag. Secondary may have been deleted "
+                    "by cleanup or absorbed by another merge. "
                     f"Skipping finalization to avoid data corruption."
                 )
 
@@ -289,14 +348,14 @@ class MergeDetectionJob(BaseJob):
 
     async def _finalize_merge(self, ctx: JobContext, merge_info: dict):
         """
-        Finalizes the merge operation by updating entity metadata and clearing resolver data.
+        Finalize by updating metadata and clearing resolver data.
 
-        IMPORTANT: This function is called *after* a successful database merge operation.
-        Its purpose is strictly to clean up transient state and ensure the Resolver cache
+        IMPORTANT: This function is called after a successful database merge.
+        Its purpose is strictly to clean up transient state and ensure the cache
         considers the merge complete. It does NOT perform the DB merge itself.
         """
 
-        project_id = ctx.project_id or ctx.session_id
+        project_id = ctx.project_id
         async with self.entities.resolution_lock:
             p_id = merge_info["primary_id"]
             s_id = merge_info["secondary_id"]
@@ -305,7 +364,19 @@ class MergeDetectionJob(BaseJob):
             suggested_name = merge_info.get("suggested_name")
 
             try:
-                self._sync_resolver(p_id, s_id)
+                refreshed_primary = await self.graph_client.get_entity_by_id(
+                    p_id,
+                    visible_project_ids=getattr(
+                        self.entities,
+                        "readable_project_ids",
+                        None,
+                    ),
+                )
+                profile_updates = {}
+                if refreshed_primary and refreshed_primary.get("topic"):
+                    profile_updates["topic"] = refreshed_primary["topic"]
+
+                self._sync_resolver(p_id, s_id, profile_updates)
 
                 if suggested_name and suggested_name != p_name:
                     logger.info(
@@ -317,12 +388,17 @@ class MergeDetectionJob(BaseJob):
                     p_name = suggested_name
 
                 all_facts = await self.graph_client.get_facts_for_entity(p_id, True)
-                if all_facts:
-                    resolution_text = f"{p_name}. " + " ".join(
-                        [f.content for f in all_facts]
-                    )
-                else:
-                    resolution_text = f"{p_name} (merged with {s_name})"
+                primary_profile = await self.entities.get_profile(p_id)
+                primary_type = (
+                    primary_profile.get("type", "unknown")
+                    if primary_profile
+                    else "unknown"
+                )
+                resolution_text = build_entity_embedding_text(
+                    p_name,
+                    primary_type,
+                    all_facts or [],
+                )
 
                 new_embedding = await self.entities.compute_embedding(
                     p_id, resolution_text
@@ -335,11 +411,11 @@ class MergeDetectionJob(BaseJob):
                 logger.exception(f"Finalize merge failed for {p_id}<-{s_id}: {e}")
             finally:
                 # Always mark dirty so profile refinement picks up any incomplete work
-                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.session_id)
+                dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
                 await self.redis.sadd(dirty_key, str(p_id))
 
             await emit(
-                ctx.session_id,
+                ctx.project_id,
                 "job",
                 "entities_merged",
                 {
@@ -352,9 +428,18 @@ class MergeDetectionJob(BaseJob):
                 verbose_only=True,
             )
 
-    def _sync_resolver(self, primary_id: int, secondary_id: int):
+    def _sync_resolver(
+        self,
+        primary_id: int,
+        secondary_id: int,
+        primary_profile_updates: dict = None,
+    ):
         """Update EntityManager after merge."""
-        self.entities.merge_into(primary_id, secondary_id)
+        self.entities.merge_into(
+            primary_id,
+            secondary_id,
+            primary_profile_updates=primary_profile_updates,
+        )
 
     async def _judgement(self, candidates: List, ctx: JobContext) -> Tuple[List, List]:
         auto_merge = []
@@ -376,25 +461,44 @@ class MergeDetectionJob(BaseJob):
             topic_a = candidate.get("topic_a", "General")
             topic_b = candidate.get("topic_b", "General")
             same_topic = self._same_topic(topic_a, topic_b)
+            type_a = candidate.get("primary_type")
+            type_b = candidate.get("secondary_type")
+
+            if type_a and type_b and type_a != type_b:
+                logger.debug(
+                    "Rejected "
+                    f"({candidate['primary_id']}, {candidate['secondary_id']}) "
+                    f"| type mismatch {type_a!r} != {type_b!r}"
+                )
+                continue
 
             # Alias collision path
             if pair_key in collision_set:
                 if same_topic:
                     logger.info(
-                        f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | Alias collision, same topic"
+                        "Auto-merge "
+                        f"({candidate['primary_id']}, "
+                        f"{candidate['secondary_id']}) "
+                        "| Alias collision, same topic"
                     )
                     auto_merge.append(candidate)
                     continue
                 else:
                     logger.info(
-                        f"Cross-topic alias collision ({candidate['primary_id']}, {candidate['secondary_id']}) | Queuing for LLM"
+                        "Cross-topic alias collision "
+                        f"({candidate['primary_id']}, "
+                        f"{candidate['secondary_id']}) "
+                        "| Queuing for LLM"
                     )
                     llm_tasks.append(candidate)
                     continue
 
             if not has_sufficient_facts(candidate):
                 logger.debug(
-                    f"Skipped ({candidate['primary_id']}, {candidate['secondary_id']}) | Insufficient facts"
+                    "Skipped "
+                    f"({candidate['primary_id']}, "
+                    f"{candidate['secondary_id']}) "
+                    "| Insufficient facts"
                 )
                 continue
 
@@ -424,25 +528,36 @@ class MergeDetectionJob(BaseJob):
             if cosine_score >= self.auto_threshold:
                 if same_topic:
                     logger.info(
-                        f"Auto-merge ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}, same topic"
+                        "Auto-merge "
+                        f"({candidate['primary_id']}, "
+                        f"{candidate['secondary_id']}) "
+                        f"| cosine={cosine_score:.3f}, same topic"
                     )
                     auto_merge.append(candidate)
                     continue
                 else:
                     logger.info(
-                        f"High cosine but cross-topic ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}, queuing for LLM"
+                        "High cosine but cross-topic "
+                        f"({candidate['primary_id']}, "
+                        f"{candidate['secondary_id']}) "
+                        f"| cosine={cosine_score:.3f}, queuing for LLM"
                     )
                     llm_tasks.append(candidate)
                     continue
 
             if cosine_score < self.cosine_threshold:
                 logger.debug(
-                    f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}"
+                    "Rejected "
+                    f"({candidate['primary_id']}, "
+                    f"{candidate['secondary_id']}) "
+                    f"| cosine={cosine_score:.3f}"
                 )
                 continue
 
             logger.debug(
-                f"Undecided ({candidate['primary_id']}, {candidate['secondary_id']}) | cosine={cosine_score:.3f}, queuing for LLM"
+                "Undecided "
+                f"({candidate['primary_id']}, {candidate['secondary_id']}) "
+                f"| cosine={cosine_score:.3f}, queuing for LLM"
             )
             llm_tasks.append(candidate)
 
@@ -452,7 +567,7 @@ class MergeDetectionJob(BaseJob):
         # Step 2: Run LLM judgments in parallel with a semaphore
         sem = asyncio.Semaphore(5)
         results = await asyncio.gather(
-            *[self._judge_with_sem(c, ctx.session_id, sem) for c in llm_tasks]
+            *[self._judge_with_sem(c, ctx.project_id, sem) for c in llm_tasks]
         )
 
         # Step 3: Categorize results
@@ -468,7 +583,10 @@ class MergeDetectionJob(BaseJob):
                 hitl.append(candidate)
             else:
                 logger.info(
-                    f"Rejected ({candidate['primary_id']}, {candidate['secondary_id']}) | LLM={score:.3f}"
+                    "Rejected "
+                    f"({candidate['primary_id']}, "
+                    f"{candidate['secondary_id']}) "
+                    f"| LLM={score:.3f}"
                 )
 
         return auto_merge, hitl
@@ -481,7 +599,7 @@ class MergeDetectionJob(BaseJob):
 
         logger.info(f"Merge split: {len(auto_merge)} auto, {len(hitl)} HITL")
         await emit(
-            ctx.session_id,
+            ctx.project_id,
             "job",
             "merge_judgments_complete",
             {
@@ -538,7 +656,7 @@ class MergeDetectionJob(BaseJob):
         successful = 0
         failed = 0
 
-        index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.session_id)
+        index_key = RedisKeys.merge_intents_index(ctx.user_name, ctx.project_id)
 
         for item in final_merge_list:
             item_dict: dict = item
@@ -546,13 +664,13 @@ class MergeDetectionJob(BaseJob):
             s_id: int = item_dict["secondary_id"]
 
             intent_key = RedisKeys.merge_intent(
-                ctx.user_name, ctx.session_id, p_id, s_id
+                ctx.user_name, ctx.project_id, p_id, s_id
             )
             await self.redis.set(intent_key, json.dumps(item_dict))
             await self.redis.sadd(index_key, intent_key)
 
             db_success = await self._execute_merge_db_only(
-                p_id, s_id, item_dict["duplicate_fact_ids"], ctx.session_id
+                p_id, s_id, item_dict["duplicate_fact_ids"], ctx.project_id
             )
 
             if db_success:
@@ -577,7 +695,8 @@ class MergeDetectionJob(BaseJob):
 
         if len(filtered_hitl) < len(hitl):
             logger.info(
-                f"Filtered {len(hitl) - len(filtered_hitl)} HITL proposals that overlap with auto-merges"
+                f"Filtered {len(hitl) - len(filtered_hitl)} HITL proposals "
+                "that overlap with auto-merges"
             )
 
         proposals_stored = await self._store_hitl_proposals(
@@ -595,7 +714,7 @@ class MergeDetectionJob(BaseJob):
             return "0 hierarchy edges"
 
         created = 0
-        project_id = ctx.project_id or ctx.session_id
+        project_id = ctx.project_id
 
         for topic, type_rules in self.topic_config.hierarchy.items():
             if not type_rules:
@@ -603,10 +722,11 @@ class MergeDetectionJob(BaseJob):
 
             for parent_type, child_types in type_rules.items():
                 candidates = await self.graph_client.get_hierarchy_candidates(
+                    project_id,
                     topic,
                     parent_type,
                     child_types,
-                    2,  # min_weight: ensures they have been mentioned together at least twice
+                    2,
                 )
 
                 for c in candidates:
@@ -617,12 +737,13 @@ class MergeDetectionJob(BaseJob):
                     if success:
                         created += 1
                         logger.info(
-                            f"Hierarchy Established: {c['child_name']} ({c['child_type']}) "
+                            "Hierarchy Established: "
+                            f"{c['child_name']} ({c['child_type']}) "
                             f"-[:PART_OF]-> {c['parent_name']} ({c['parent_type']})"
                         )
 
                         await emit(
-                            ctx.session_id,
+                            ctx.project_id,
                             "job",
                             "hierarchy_created",
                             {
@@ -639,7 +760,7 @@ class MergeDetectionJob(BaseJob):
         self, ctx: JobContext, proposals: list, merged_ids: set
     ) -> int:
         stored = 0
-        proposal_key = RedisKeys.merge_proposals(ctx.user_name, ctx.session_id)
+        proposal_key = RedisKeys.merge_proposals(ctx.user_name, ctx.project_id)
 
         for candidate in proposals:
             if (
@@ -654,7 +775,7 @@ class MergeDetectionJob(BaseJob):
                 "primary_name": candidate.get("primary_name", "Unknown"),
                 "secondary_name": candidate.get("secondary_name", "Unknown"),
                 "llm_score": candidate["llm_score"],
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": get_now_iso(),
                 "status": "pending",
             }
 
@@ -690,20 +811,24 @@ class MergeDetectionJob(BaseJob):
     async def on_shutdown(self, ctx: JobContext) -> None:
         """Set pending flag so next session picks up merge work."""
         await self.redis.set(
-            RedisKeys.job_pending(ctx.user_name, ctx.session_id, self.name), "true"
+            RedisKeys.job_pending(ctx.user_name, ctx.project_id, self.name), "true"
         )
         logger.debug("Merge detection pending flag set")
 
     async def _judge_with_sem(
-        self, candidate: dict, session_id: str, sem: asyncio.Semaphore
+        self, candidate: dict, event_scope_id: str, sem: asyncio.Semaphore
     ) -> Tuple[dict, Tuple[Optional[float], Optional[str]]]:
         async with sem:
             try:
-                score, new_name = await self._get_merge_judgment(candidate, session_id)
+                score, new_name = await self._get_merge_judgment(
+                    candidate, event_scope_id
+                )
                 return candidate, (score, new_name)
             except Exception as e:
                 logger.error(
-                    f"LLM judgment failed for ({candidate['primary_id']}, {candidate['secondary_id']}): {e}"
+                    "LLM judgment failed for "
+                    f"({candidate['primary_id']}, "
+                    f"{candidate['secondary_id']}): {e}"
                 )
                 return candidate, (None, None)
 
@@ -741,6 +866,8 @@ class MergeDetectionJob(BaseJob):
                 }
             except Exception as e:
                 logger.error(
-                    f"Failed to prepare merge ({candidate['primary_id']}, {candidate['secondary_id']}): {e}"
+                    "Failed to prepare merge "
+                    f"({candidate['primary_id']}, "
+                    f"{candidate['secondary_id']}): {e}"
                 )
                 return None

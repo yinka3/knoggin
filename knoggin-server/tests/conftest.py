@@ -11,9 +11,6 @@ for path in (SERVER_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 
 @pytest.fixture(autouse=True)
 def reset_async_redis_singleton(monkeypatch):

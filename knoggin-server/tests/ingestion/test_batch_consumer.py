@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -9,19 +10,72 @@ from tests.fixtures.fakes import FakeGraphClient, FakeRedis
 
 
 class FakeProcessor:
-    def __init__(self, result=None):
+    def __init__(self, result=None, *, raise_on_run=False, dlq_success=True):
         self.entities = type("Entities", (), {"project_id": "project-1"})()
+        self.project_id = "project-1"
         self.result = result or BatchResult()
+        self.raise_on_run = raise_on_run
+        self.dlq_success = dlq_success
         self.run_calls = []
         self.dlq_calls = []
 
-    async def run(self, messages, session_text):
-        self.run_calls.append((messages, session_text))
+    async def run(self, messages, session_text, *, session_id):
+        self.run_calls.append((messages, session_text, session_id))
+        if self.raise_on_run:
+            raise RuntimeError("processor boom")
         return self.result
 
     async def move_to_dead_letter(self, messages, error, **kwargs):
         self.dlq_calls.append((messages, error, kwargs))
-        return True
+        return self.dlq_success
+
+
+class RecordingContext:
+    def __init__(self, turns=None):
+        self.turns = turns or []
+        self.calls = []
+
+    async def __call__(self, window, up_to_msg_id=None):
+        self.calls.append((window, up_to_msg_id))
+        return self.turns
+
+
+class RecordingGraphClient(FakeGraphClient):
+    def __init__(self, events=None, *, raise_on_save=False):
+        super().__init__()
+        self.events = events if events is not None else []
+        self.raise_on_save = raise_on_save
+
+    async def save_message_logs(self, messages):
+        self.events.append("save_message_logs")
+        if self.raise_on_save:
+            raise RuntimeError("message log down")
+        return await super().save_message_logs(messages)
+
+
+class RecordingWriteToGraph:
+    def __init__(
+        self,
+        events=None,
+        *,
+        response=(True, None),
+        raise_error=False,
+        sleep_seconds=0,
+    ):
+        self.events = events if events is not None else []
+        self.response = response
+        self.raise_error = raise_error
+        self.sleep_seconds = sleep_seconds
+        self.calls = []
+
+    async def __call__(self, result):
+        self.events.append("write_to_graph")
+        self.calls.append(result)
+        if self.sleep_seconds:
+            await asyncio.sleep(self.sleep_seconds)
+        if self.raise_error:
+            raise RuntimeError("write boom")
+        return self.response
 
 
 async def empty_context(window, up_to_msg_id=None):
@@ -32,7 +86,39 @@ async def successful_write_to_graph(result):
     return True, None
 
 
-def make_consumer(redis=None, processor=None, graph_client=None):
+def make_message(msg_id, text=None):
+    return {
+        "id": msg_id,
+        "message": text or f"message {msg_id}",
+        "timestamp": f"2026-01-01T00:0{msg_id}:00+00:00",
+        "role": "user",
+    }
+
+
+async def push_messages(redis, key, *messages):
+    for message in messages:
+        await redis.rpush(key, json.dumps(message))
+
+
+def graph_write_result():
+    return BatchResult(new_entity_ids={101})
+
+
+def failed_result(error="boom"):
+    return BatchResult(success=False, error=error)
+
+
+def make_consumer(
+    redis=None,
+    processor=None,
+    graph_client=None,
+    get_session_context=None,
+    write_to_graph=None,
+    batch_size=8,
+    checkpoint_interval=4,
+    batch_timeout=360.0,
+    session_window=18,
+):
     redis = redis or FakeRedis()
     processor = processor or FakeProcessor()
     graph_client = graph_client or FakeGraphClient()
@@ -42,10 +128,12 @@ def make_consumer(redis=None, processor=None, graph_client=None):
         graph_client=graph_client,
         processor=processor,
         redis=redis,
-        get_session_context=empty_context,
-        write_to_graph=successful_write_to_graph,
-        batch_size=8,
-        checkpoint_interval=4,
+        get_session_context=get_session_context or empty_context,
+        write_to_graph=write_to_graph or successful_write_to_graph,
+        batch_size=batch_size,
+        checkpoint_interval=checkpoint_interval,
+        batch_timeout=batch_timeout,
+        session_window=session_window,
     )
     return consumer, redis, processor, graph_client
 
@@ -81,6 +169,7 @@ async def test_batch_consumer_skips_corrupt_entries_and_processes_valid_messages
                 }
             ],
             "",
+            "session-1",
         )
     ]
     assert graph_client.saved_message_logs == [
@@ -97,6 +186,7 @@ async def test_batch_consumer_skips_corrupt_entries_and_processes_valid_messages
         ]
     ]
     assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "1"
+    assert await redis.get(RedisKeys.project_last_processed("ada", "project-1")) == "1"
     assert await redis.get(consumer._checkpoint_key) == "1"
 
 
@@ -137,3 +227,263 @@ async def test_batch_consumer_dlqs_message_log_failures_and_drains_processed_bat
     ]
     assert error.startswith("MESSAGE_LOG_SAVE_FAILED")
     assert kwargs["stage"] == "message_log"
+    assert kwargs["session_id"] == "session-1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_formats_session_context_and_calls_processor():
+    context = RecordingContext(
+        [
+            {"role_label": "USER", "content": "Earlier user turn."},
+            {"role_label": "ASSISTANT", "content": "Earlier assistant turn."},
+        ]
+    )
+    consumer, redis, processor, _ = make_consumer(
+        get_session_context=context,
+        session_window=7,
+    )
+    message = make_message(5, "current message")
+    await push_messages(redis, consumer._buffer_key, message)
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert context.calls == [(7, 5)]
+    assert processor.run_calls == [
+        (
+            [message],
+            "[USER]: Earlier user turn.\n[ASSISTANT]: Earlier assistant turn.",
+            "session-1",
+        )
+    ]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_success_without_graph_writes_skips_write_to_graph():
+    write_to_graph = RecordingWriteToGraph()
+    consumer, redis, processor, graph_client = make_consumer(
+        write_to_graph=write_to_graph
+    )
+    message = make_message(1, "hello")
+    await push_messages(redis, consumer._buffer_key, message)
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert graph_client.saved_message_logs
+    assert write_to_graph.calls == []
+    assert await redis.get(consumer._checkpoint_key) == "1"
+    assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "1"
+    assert await redis.get(RedisKeys.project_last_processed("ada", "project-1")) == "1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_success_with_graph_writes_calls_write_to_graph():
+    events = []
+    write_to_graph = RecordingWriteToGraph(events)
+    graph_client = RecordingGraphClient(events)
+    processor = FakeProcessor(graph_write_result())
+    consumer, redis, _, _ = make_consumer(
+        processor=processor,
+        graph_client=graph_client,
+        write_to_graph=write_to_graph,
+    )
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert write_to_graph.calls == [processor.result]
+    assert events == ["save_message_logs", "write_to_graph"]
+    assert await redis.get(consumer._checkpoint_key) == "1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_processor_failure_goes_to_processing_dlq():
+    processor = FakeProcessor(failed_result("boom"))
+    consumer, redis, _, _ = make_consumer(processor=processor)
+    message = make_message(1)
+    await push_messages(redis, consumer._buffer_key, message)
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.llen(consumer._buffer_key) == 0
+    assert len(processor.dlq_calls) == 1
+    messages, error, kwargs = processor.dlq_calls[0]
+    assert messages == [message]
+    assert error == "boom"
+    assert kwargs["stage"] == "processing"
+    assert kwargs["session_text"] == ""
+    assert kwargs["session_id"] == "session-1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_processor_exception_goes_to_processing_dlq():
+    processor = FakeProcessor(raise_on_run=True)
+    consumer, redis, _, _ = make_consumer(processor=processor)
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.llen(consumer._buffer_key) == 0
+    _, error, kwargs = processor.dlq_calls[0]
+    assert error.startswith("Fatal exception: processor boom")
+    assert kwargs["stage"] == "processing"
+    assert kwargs["session_id"] == "session-1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_graph_write_failure_goes_to_graph_write_dlq():
+    processor = FakeProcessor(graph_write_result())
+    write_to_graph = RecordingWriteToGraph(response=(False, "graph failed"))
+    consumer, redis, _, _ = make_consumer(
+        processor=processor,
+        write_to_graph=write_to_graph,
+    )
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.llen(consumer._buffer_key) == 0
+    _, error, kwargs = processor.dlq_calls[0]
+    assert error == "graph failed"
+    assert kwargs["stage"] == "graph_write"
+    assert kwargs["batch_result"] is processor.result
+    assert kwargs["session_id"] == "session-1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_graph_write_exception_goes_to_graph_write_dlq():
+    processor = FakeProcessor(graph_write_result())
+    write_to_graph = RecordingWriteToGraph(raise_error=True)
+    consumer, redis, _, _ = make_consumer(
+        processor=processor,
+        write_to_graph=write_to_graph,
+    )
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    _, error, kwargs = processor.dlq_calls[0]
+    assert error == "write boom"
+    assert kwargs["stage"] == "graph_write"
+    assert kwargs["session_id"] == "session-1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_graph_write_timeout_goes_to_graph_write_dlq():
+    processor = FakeProcessor(graph_write_result())
+    write_to_graph = RecordingWriteToGraph(sleep_seconds=0.05)
+    consumer, redis, _, _ = make_consumer(
+        processor=processor,
+        write_to_graph=write_to_graph,
+        batch_timeout=0.001,
+    )
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    _, error, kwargs = processor.dlq_calls[0]
+    assert error == "GRAPH_WRITE_TIMEOUT"
+    assert kwargs["stage"] == "graph_write"
+    assert kwargs["session_id"] == "session-1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_dlq_failure_leaves_buffer_for_retry():
+    processor = FakeProcessor(failed_result("boom"), dlq_success=False)
+    consumer, redis, _, _ = make_consumer(processor=processor)
+    message = make_message(1)
+    await push_messages(redis, consumer._buffer_key, message)
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.llen(consumer._buffer_key) == 1
+    assert await redis.lrange(consumer._buffer_key, 0, -1) == [json.dumps(message)]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_message_log_dlq_failure_leaves_buffer_for_retry():
+    processor = FakeProcessor(dlq_success=False)
+    graph_client = RecordingGraphClient(raise_on_save=True)
+    consumer, redis, _, _ = make_consumer(
+        processor=processor,
+        graph_client=graph_client,
+    )
+    message = make_message(1)
+    await push_messages(redis, consumer._buffer_key, message)
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.llen(consumer._buffer_key) == 1
+    assert processor.dlq_calls[0][2]["stage"] == "message_log"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_checkpoint_resets_when_interval_reached():
+    consumer, redis, _, _ = make_consumer(checkpoint_interval=2)
+    await push_messages(redis, consumer._buffer_key, make_message(1), make_message(2))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.get(consumer._checkpoint_key) == "0"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_sets_last_processed_to_max_message_id():
+    consumer, redis, _, _ = make_consumer()
+    await push_messages(redis, consumer._buffer_key, make_message(3), make_message(2))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "3"
+    assert await redis.get(RedisKeys.project_last_processed("ada", "project-1")) == "3"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_processes_multiple_batches_in_one_drain():
+    consumer, redis, processor, _ = make_consumer(batch_size=2)
+    await push_messages(
+        redis,
+        consumer._buffer_key,
+        make_message(1),
+        make_message(2),
+        make_message(3),
+    )
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.llen(consumer._buffer_key) == 0
+    assert [call[0] for call in processor.run_calls] == [
+        [make_message(1), make_message(2)],
+        [make_message(3)],
+    ]
+    assert [call[2] for call in processor.run_calls] == ["session-1", "session-1"]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_invalid_only_buffer_does_not_call_context_or_processor():
+    context = RecordingContext()
+    consumer, redis, processor, graph_client = make_consumer(
+        get_session_context=context
+    )
+    await redis.rpush(consumer._buffer_key, "not-json")
+    await redis.rpush(consumer._buffer_key, json.dumps({"id": 1}))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert await redis.llen(consumer._buffer_key) == 0
+    assert context.calls == []
+    assert processor.run_calls == []
+    assert graph_client.saved_message_logs == []

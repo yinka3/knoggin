@@ -7,9 +7,9 @@ from common.schema.contracts import (
     GraphMutationPlan,
     MessageConnections,
     MessageUserConnections,
+    UserConnectionRecord,
 )
 from common.schema.primitives import ConnectionRecord
-from common.schema.contracts import UserConnectionRecord
 from common.scoping import IDENTITY_ENTITY_ID
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.db import write_graph_db
@@ -247,8 +247,10 @@ async def test_graph_mutation_plan_builds_writes_and_filters_zombies():
     assert writes_by_id[2].canonical_name == "Ada Lovelace"
     assert writes_by_id[2].aliases == ["Ada", "Analyst"]
     assert writes_by_id[2].embedding == [0.2, 0.1]
+    assert writes_by_id[2].is_new is True
     assert writes_by_id[2].session_id == "profile-session"
     assert writes_by_id[2].project_id == "profile-project"
+    assert writes_by_id[3].is_new is False
     assert writes_by_id[3].session_id == "session-1"
     assert writes_by_id[3].project_id == "project-1"
 
@@ -338,7 +340,7 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
     graph = FakeGraphMutationClient()
     entities = FakeEntityManagerForPlan()
     redis = FakeRedis()
-    profile_key = RedisKeys.profile_complete("ada", "project-1")
+    profile_key = RedisKeys.project_profile_complete("ada", "project-1")
     await redis.set(profile_key, "done")
     plan = await build_graph_mutation_plan(
         batch,
@@ -444,6 +446,7 @@ async def test_write_batch_to_graph_marks_failed_plan_when_execution_raises(monk
         entity_writes=[
             {
                 "id": 2,
+                "is_new": True,
                 "canonical_name": "Ada Lovelace",
                 "type": "person",
                 "confidence": 1.0,

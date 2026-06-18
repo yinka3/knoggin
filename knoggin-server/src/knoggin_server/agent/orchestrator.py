@@ -46,9 +46,7 @@ class Orchestrator:
         simulated_date: Optional[str] = None,
         agent_temperature: Optional[float] = None,
         agent_instructions: Optional[str] = None,
-        agent_rules: Optional[List[str]] = None,
-        agent_preferences: Optional[List[str]] = None,
-        agent_icks: Optional[List[str]] = None,
+        agent_directives: Optional[str] = None,
         conversation_history: Optional[List[Dict]] = None,
         hot_topics: Optional[List[str]] = None,
         agent_persona_override: Optional[str] = None,
@@ -99,9 +97,22 @@ class Orchestrator:
             )
 
             # Context & State Assembly
-            effective_hot_topics = (
+            requested_hot_topics = (
                 hot_topics if hot_topics is not None else topic_config.hot_topics
             )
+            effective_hot_topics = topic_config.validate_hot_topics(
+                requested_hot_topics
+            )
+            hot_topic_context = {}
+            if effective_hot_topics:
+                try:
+                    hot_topic_context = await tools.get_hot_topic_context(
+                        effective_hot_topics,
+                        slim=True,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to preload hot topic context: {exc}")
+
             ctx = AgentContext(
                 config=run_config,
                 state=AgentState(),
@@ -111,6 +122,8 @@ class Orchestrator:
                 user_query=user_query,
                 run_id=str(uuid.uuid4()),
                 hot_topics=effective_hot_topics,
+                active_topics=topic_config.active_topics,
+                hot_topic_context=hot_topic_context,
                 agent_name=identity["name"],
                 agent_persona=identity["persona"],
                 history=conversation_history or [],
@@ -130,9 +143,7 @@ class Orchestrator:
                 agent_temperature=effective_temperature,
                 agent_instructions=agent_instructions
                 or (agent_cfg.instructions if agent_cfg else None),
-                agent_rules=agent_rules,
-                agent_preferences=agent_preferences,
-                agent_icks=agent_icks,
+                agent_directives=agent_directives,
                 client_tools=client_tools,
             ):
                 yield event
@@ -168,7 +179,8 @@ class Orchestrator:
 
         return {
             "config": agent_cfg,
-            "name": name_override or (agent_cfg.name if agent_cfg else "knoggin_server"),
+            "name": name_override
+            or (agent_cfg.name if agent_cfg else "knoggin_server"),
             "persona": persona_override
             or (
                 agent_cfg.persona
@@ -182,9 +194,7 @@ class Orchestrator:
         context: Context,
         agent_id: Optional[str] = None,
     ) -> Dict:
-        """
-        Retrieves pre-wired service components from the active Context and instantiates MemoryManager.
-        """
+        """Retrieve Context services and instantiate the session MemoryManager."""
         config = ConfigManager.get().config
         search_cfg = {
             **config.developer_settings.search.model_dump(),

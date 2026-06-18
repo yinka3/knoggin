@@ -1,20 +1,27 @@
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import Dict, List
 
 from common.conf.manager import ConfigManager
+from common.schema.aac_schema import AAC_DEFAULT_ENABLED_TOOLS
 from common.schema.agent_contracts import AgentConfig
 from common.utils.events import emit_community
+from common.utils.time_utils import get_now_iso
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.community.community_store import CommunityStore
-from knoggin_server.knowledge.services.memory_service import MemoryManager
+from knoggin_server.knowledge.services.memory_service import (
+    DIRECTIVE_MODES,
+    DIRECTIVES_CATEGORY,
+    MemoryManager,
+)
+
+MAX_SPAWNED_SPECIALISTS = 10
 
 
 class CommunityTools(Tools):
     """
-    Restricted suite of tools specifically designed for Autonomous Agent Community (AAC) agents.
+    Restricted suite of tools for Autonomous Agent Community (AAC) agents.
     Inherits from core Tools for read access, but restricts write operations
     strictly to the community's isolated discussion space.
     """
@@ -55,7 +62,7 @@ class CommunityTools(Tools):
         )
         return {"saved": True, "type": "insight"}
 
-    async def save_memory(self, content: str) -> Dict:
+    async def save_memory(self, content: str, topic: str = "General") -> Dict:
         """
         Saves a short-term working memory specifically for this active agent instance.
         Capped at 10 memories per sub-agent to force summarization over accumulation.
@@ -68,7 +75,8 @@ class CommunityTools(Tools):
         payload = json.dumps(
             {
                 "content": content,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "topic": topic,
+                "created_at": get_now_iso(),
                 "discussion_id": self.discussion_id,
             }
         )
@@ -79,19 +87,19 @@ class CommunityTools(Tools):
         self,
         name: str,
         persona: str,
-        initial_rules: List[str] = None,
-        initial_preferences: List[str] = None,
-        initial_icks: List[str] = None,
+        initial_directives: List[Dict] = None,
     ) -> Dict:
-        """Spawn a new specialist sub-agent. Max 3 per discussion."""
-        spawned_count = sum(
-            1 for p in self.current_participants if p.startswith("spawned_")
-        )
-        if spawned_count >= 3:
-            return {"error": "Spawn limit reached. Max 3 sub-agents per discussion."}
+        """Spawn a new specialist sub-agent."""
+        spawned_count = await self._count_spawned_participants()
+        if spawned_count >= MAX_SPAWNED_SPECIALISTS:
+            return {
+                "error": (
+                    "Spawn limit reached. Max "
+                    f"{MAX_SPAWNED_SPECIALISTS} sub-agents per discussion."
+                )
+            }
 
         new_id = f"spawned_{uuid.uuid4().hex[:8]}"
-        self.current_participants.append(new_id)
 
         llm_config = ConfigManager.get().config.llm
         new_agent = AgentConfig(
@@ -99,6 +107,7 @@ class CommunityTools(Tools):
             name=name,
             persona=persona,
             model=llm_config.agent_model,
+            enabled_tools=AAC_DEFAULT_ENABLED_TOOLS,
             is_spawned=True,
             spawned_by=self.agent_id,
         )
@@ -107,31 +116,31 @@ class CommunityTools(Tools):
             RedisKeys.agents(self.user_name), new_id, json.dumps(new_agent.to_dict())
         )
 
-        now = datetime.now(timezone.utc).isoformat()
-        seeded_counts = {"rules": 0, "preferences": 0, "icks": 0}
+        now = get_now_iso()
+        seeded_directives = 0
+        directives_key = RedisKeys.agent_working_memory(new_id, DIRECTIVES_CATEGORY)
+        for directive in initial_directives or []:
+            if not isinstance(directive, dict):
+                continue
+            mode = (directive.get("mode") or "").strip().lower()
+            content = (directive.get("content") or "").strip()
+            if mode not in DIRECTIVE_MODES or not content:
+                continue
 
-        initial_data = {
-            "rules": initial_rules or [],
-            "preferences": initial_preferences or [],
-            "icks": initial_icks or [],
-        }
-
-        for category, items in initial_data.items():
-            if items:
-                key = RedisKeys.agent_working_memory(new_id, category)
-                for content in items:
-                    mem_id = f"mem_{uuid.uuid4().hex[:8]}"
-                    payload = json.dumps(
-                        {
-                            "content": content,
-                            "created_at": now,
-                            "seeded_by": self.agent_id,
-                        }
-                    )
-                    await self.redis.hset(key, mem_id, payload)
-                    seeded_counts[category] += 1
+            directive_id = f"directive_{uuid.uuid4().hex[:8]}"
+            payload = json.dumps(
+                {
+                    "mode": mode,
+                    "content": content,
+                    "created_at": now,
+                    "seeded_by": self.agent_id,
+                }
+            )
+            await self.redis.hset(directives_key, directive_id, payload)
+            seeded_directives += 1
 
         await self.community_store.register_agent_spawn(self.agent_id, new_id, persona)
+        self.current_participants.append(new_id)
 
         await emit_community(
             self.user_name,
@@ -143,12 +152,26 @@ class CommunityTools(Tools):
                 "agent_id": new_id,
                 "name": name,
                 "persona": persona,
-                "seeded_memory": seeded_counts,
+                "seeded_directives": seeded_directives,
             },
         )
 
         return {
             "id": new_id,
             "message": f"Spawned {name} and added to discussion pool.",
-            "seeded_memory": seeded_counts,
+            "seeded_directives": seeded_directives,
         }
+
+    async def _count_spawned_participants(self) -> int:
+        count = 0
+        for agent_id in self.current_participants:
+            raw = await self.redis.hget(RedisKeys.agents(self.user_name), agent_id)
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if data.get("is_spawned"):
+                count += 1
+        return count

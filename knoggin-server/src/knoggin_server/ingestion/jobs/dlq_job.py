@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 from typing import Awaitable, Callable, Optional
 
 import redis.asyncio as aioredis
@@ -9,6 +8,7 @@ from loguru import logger
 from common.schema.contracts import BatchResult, EngineScope, EngineWorkUnit
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now_unix
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.pipeline_service import (
@@ -77,17 +77,17 @@ class DLQReplayJob(BaseJob):
         return "dlq_auto_replay"
 
     async def should_run(self, ctx: JobContext) -> bool:
-        last_run_key = RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id)
+        last_run_key = RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id)
         last_run_ts = await self.redis.get(last_run_key)
 
         if not last_run_ts:
-            await self.redis.set(last_run_key, time.time())
+            await self.redis.set(last_run_key, get_now_unix())
             return False
 
         try:
-            elapsed = time.time() - float(last_run_ts)
+            elapsed = get_now_unix() - float(last_run_ts)
         except ValueError:
-            await self.redis.set(last_run_key, time.time())
+            await self.redis.set(last_run_key, get_now_unix())
             return False
 
         return elapsed >= self.interval
@@ -101,20 +101,14 @@ class DLQReplayJob(BaseJob):
         ctx: JobContext,
         batch_result: Optional[BatchResult] = None,
     ) -> EngineScope:
-        batch_scope = batch_result.scope if batch_result else None
+        session_id = entry.get("session_id")
+        if not session_id:
+            raise ValueError("DLQ entry missing required session_id")
+
         return EngineScope(
-            user_name=(
-                batch_scope.user_name if batch_scope else None
-            )
-            or entry.get("user_name", ctx.user_name),
-            session_id=(
-                batch_scope.session_id if batch_scope else None
-            )
-            or entry.get("session_id", ctx.session_id),
-            project_id=(
-                batch_scope.project_id if batch_scope else None
-            )
-            or entry.get("project_id")
+            user_name=entry.get("user_name") or ctx.user_name,
+            session_id=session_id,
+            project_id=entry.get("project_id")
             or getattr(self.entities, "project_id", None)
             or ctx.project_id,
         )
@@ -140,6 +134,9 @@ class DLQReplayJob(BaseJob):
         batch_result: BatchResult,
     ) -> None:
         replay_unit.scope = self._resolve_replay_scope(entry, ctx, batch_result)
+        batch_result.scope = replay_unit.scope
+        if batch_result.work_unit:
+            batch_result.work_unit.scope = replay_unit.scope
 
     def _attach_replay_unit(
         self,
@@ -155,7 +152,7 @@ class DLQReplayJob(BaseJob):
         self, ctx: JobContext, replay_unit: EngineWorkUnit
     ) -> None:
         await emit(
-            ctx.session_id,
+            ctx.project_id,
             "job",
             "dlq_work_unit_finished",
             replay_unit.model_dump(mode="json"),
@@ -213,10 +210,11 @@ class DLQReplayJob(BaseJob):
                 self._attach_replay_unit(result, replay_unit)
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 logger.info(
-                    f"DLQ: Graph write retry succeeded for {len(result.entity_ids)} entities"
+                    "DLQ: Graph write retry succeeded for "
+                    f"{len(result.entity_ids)} entities"
                 )
                 await emit(
-                    ctx.session_id,
+                    ctx.project_id,
                     "job",
                     "dlq_graph_write_success",
                     {"entity_count": len(result.entity_ids)},
@@ -253,7 +251,8 @@ class DLQReplayJob(BaseJob):
             batch_result_dict = entry.get("batch_result")
             if not batch_result_dict:
                 logger.error(
-                    "DLQ: No batch_result mapped for message_log retry. Falling back to full processing."
+                    "DLQ: No batch_result mapped for message_log retry. "
+                    "Falling back to full processing."
                 )
                 return await self._retry_processing(entry, ctx)
 
@@ -290,7 +289,8 @@ class DLQReplayJob(BaseJob):
                 success, err = await self.write_to_graph(result)
                 if not success:
                     logger.error(
-                        f"DLQ: Message log succeeded, but paired graph write failed: {err}"
+                        "DLQ: Message log succeeded, but paired graph write "
+                        f"failed: {err}"
                     )
                     replay_unit.mark_failed(err or "Graph write failed")
                     self._attach_replay_unit(result, replay_unit)
@@ -336,7 +336,9 @@ class DLQReplayJob(BaseJob):
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 return True
 
-            result = await self.processor.run(messages, session_text)
+            result = await self.processor.run(
+                messages, session_text, session_id=replay_unit.scope.session_id
+            )
             self._refresh_replay_scope(replay_unit, entry, ctx, result)
             if result.work_unit:
                 result.work_unit.trace.attempt = entry.get("attempt", 1)
@@ -365,7 +367,7 @@ class DLQReplayJob(BaseJob):
             self._attach_replay_unit(result, replay_unit)
             await self._emit_replay_unit_finished(ctx, replay_unit)
             await emit(
-                ctx.session_id,
+                ctx.project_id,
                 "job",
                 "dlq_reprocess_success",
                 {"msg_count": len(messages), "entity_count": len(result.entity_ids)},
@@ -381,19 +383,19 @@ class DLQReplayJob(BaseJob):
             return False
 
     async def execute(self, ctx: JobContext) -> JobResult:
-        dlq_key = RedisKeys.dlq(ctx.user_name, ctx.session_id)
-        park_key = RedisKeys.dlq_parked(ctx.user_name, ctx.session_id)
+        dlq_key = RedisKeys.dlq(ctx.user_name, ctx.project_id)
+        park_key = RedisKeys.dlq_parked(ctx.user_name, ctx.project_id)
 
         queue_len = await self.redis.llen(dlq_key)
         if queue_len == 0:
             await self.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id),
-                time.time(),
+                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
+                get_now_unix(),
             )
             return JobResult(success=True, summary="DLQ empty")
 
         await emit(
-            ctx.session_id,
+            ctx.project_id,
             "job",
             "dlq_processing",
             {"queue_length": queue_len, "batch_size": min(queue_len, self.batch_size)},
@@ -410,7 +412,8 @@ class DLQReplayJob(BaseJob):
         for _ in range(batch_size):
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 logger.error(
-                    f"DLQ circuit breaker triggered: {consecutive_failures} consecutive failures. Halting batch."
+                    "DLQ circuit breaker triggered: "
+                    f"{consecutive_failures} consecutive failures. Halting batch."
                 )
                 break
 
@@ -433,6 +436,23 @@ class DLQReplayJob(BaseJob):
                 attempt = entry.get("attempt", 1)
                 stage = entry.get("stage", "processing")
 
+                if not entry.get("session_id"):
+                    consecutive_failures = 0
+                    await self.redis.rpush(park_key, raw_item)
+                    parked += 1
+                    logger.error("DLQ: Malformed entry missing session_id, parking")
+                    await emit(
+                        ctx.project_id,
+                        "job",
+                        "dlq_parked",
+                        {
+                            "reason": "missing_session_id",
+                            "error": error_msg[:200],
+                            "attempt": attempt,
+                        },
+                    )
+                    continue
+
                 is_transient = self._is_transient(error_msg)
 
                 if is_transient and attempt < self.max_attempts:
@@ -447,7 +467,7 @@ class DLQReplayJob(BaseJob):
                         retried += 1
                         consecutive_failures = 0
                         await emit(
-                            ctx.session_id,
+                            ctx.project_id,
                             "job",
                             "dlq_retry_success",
                             {"stage": stage, "attempt": attempt},
@@ -457,10 +477,11 @@ class DLQReplayJob(BaseJob):
                         entry["attempt"] = attempt + 1
                         await self.redis.rpush(dlq_key, json.dumps(entry))
                         logger.info(
-                            f"DLQ: Retry failed, re-queued (attempt {attempt + 1}/{self.max_attempts})"
+                            "DLQ: Retry failed, re-queued "
+                            f"(attempt {attempt + 1}/{self.max_attempts})"
                         )
                         await emit(
-                            ctx.session_id,
+                            ctx.project_id,
                             "job",
                             "dlq_retry_failed",
                             {
@@ -481,7 +502,7 @@ class DLQReplayJob(BaseJob):
                     )
                     logger.warning(f"DLQ: Parked entry ({reason}): {error_msg[:100]}")
                     await emit(
-                        ctx.session_id,
+                        ctx.project_id,
                         "job",
                         "dlq_parked",
                         {
@@ -498,15 +519,15 @@ class DLQReplayJob(BaseJob):
                 parked += 1
 
         await self.redis.set(
-            RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id),
-            time.time(),
+            RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
+            get_now_unix(),
         )
 
         summary = f"Processed {processed}: {retried} retried, {parked} parked"
         logger.info(f"DLQ job complete: {summary}")
 
         await emit(
-            ctx.session_id,
+            ctx.project_id,
             "job",
             "dlq_complete",
             {"processed": processed, "retried": retried, "parked": parked},
@@ -515,14 +536,22 @@ class DLQReplayJob(BaseJob):
         return JobResult(success=True, summary=summary)
 
     def update_settings(
-        self, interval: int = None, batch_size: int = None, max_attempts: int = None
+        self,
+        interval: int = None,
+        interval_seconds: int = None,
+        batch_size: int = None,
+        max_attempts: int = None,
     ):
-        if interval is not None:
-            self.interval = interval
+        new_interval = interval_seconds if interval_seconds is not None else interval
+        if new_interval is not None:
+            self.interval = new_interval
         if batch_size is not None:
             self.batch_size = batch_size
         if max_attempts is not None:
             self.max_attempts = max_attempts
         logger.info(
-            f"DLQReplayJob updated: interval={self.interval}, batch_size={self.batch_size}, max_attempts={self.max_attempts}"
+            "DLQReplayJob updated: "
+            f"interval={self.interval}, "
+            f"batch_size={self.batch_size}, "
+            f"max_attempts={self.max_attempts}"
         )

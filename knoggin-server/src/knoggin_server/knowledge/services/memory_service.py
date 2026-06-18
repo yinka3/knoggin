@@ -1,6 +1,5 @@
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import Callable, Dict, List, NamedTuple, Optional
 
 import redis.asyncio as aioredis
@@ -8,41 +7,48 @@ from loguru import logger
 
 from common.conf.topics_config import TopicConfig
 from common.schema.memory import (
+    DirectiveAddResult,
+    DirectiveClearResult,
+    DirectiveEntry,
+    DirectiveListResult,
+    DirectiveRemoveResult,
     MemoryEntry,
     MemoryForgetResult,
     MemoryListResult,
     MemorySaveResult,
-    WorkingMemoryAddResult,
-    WorkingMemoryClearResult,
-    WorkingMemoryEntry,
-    WorkingMemoryListResult,
-    WorkingMemoryRemoveResult,
 )
 from common.utils.json_utils import safe_json_loads
-from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from common.utils.time_utils import get_now_iso
+from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.formatters import format_memory_context
-
-
-class WorkingMemoryStrings(NamedTuple):
-    rules: str
-    preferences: str
-    icks: str
 
 
 class PromptStrings(NamedTuple):
     memory_ctx: str
-    rules: str
-    preferences: str
-    icks: str
-
-
-assert len(WorkingMemoryStrings._fields) == 3, (
-    f"WorkingMemoryStrings changed to {len(WorkingMemoryStrings._fields)} items — "
-    f"update _load_working_memory_strings and all callers"
-)
+    directives: str
 
 MAX_BLOCK_SIZE = 10
 MAX_CONTENT_LEN = 200
+DIRECTIVES_CATEGORY = "directives"
+DIRECTIVE_MODES = ("require", "prefer", "avoid")
+DIRECTIVE_LABELS = {
+    "require": "Required",
+    "prefer": "Preferred",
+    "avoid": "Avoid",
+}
+
+
+def format_directives_for_prompt(directives: List[DirectiveEntry]) -> str:
+    sections = []
+    for mode in DIRECTIVE_MODES:
+        lines = [
+            f"- {directive.content}"
+            for directive in directives
+            if directive.mode == mode and directive.content
+        ]
+        if lines:
+            sections.append(f"{DIRECTIVE_LABELS[mode]}:\n" + "\n".join(lines))
+    return "\n\n".join(sections)
 
 
 class MemoryManager:
@@ -50,7 +56,7 @@ class MemoryManager:
 
     Covers two tiers:
       - Session memory blocks: topic-scoped notes (save/forget/list)
-      - Working memory: agent-level rules/preferences/icks (add/remove/list/clear)
+      - Directives: agent-level behavioral guidance (add/remove/list/clear)
 
     Accepts an optional event emitter so callers (SDK, server) can plug in
     their own telemetry without the manager importing from either side.
@@ -94,7 +100,10 @@ class MemoryManager:
         if len(content) > MAX_CONTENT_LEN:
             return MemorySaveResult(
                 success=False,
-                error=f"Memory too long ({len(content)} chars). Max {MAX_CONTENT_LEN}. Condense and retry.",
+                error=(
+                    f"Memory too long ({len(content)} chars). "
+                    f"Max {MAX_CONTENT_LEN}. Condense and retry."
+                ),
             )
 
         normalized = self.topic_config.normalize_topic(topic) if topic else None
@@ -105,7 +114,7 @@ class MemoryManager:
                     success=False, error="No active topics available."
                 )
             return MemorySaveResult(
-                success=False, 
+                success=False,
                 error=f"Topic '{topic}' is invalid. Active topics are: {active_list}"
             )
 
@@ -119,8 +128,11 @@ class MemoryManager:
         if len(existing) >= MAX_BLOCK_SIZE:
             return MemorySaveResult(
                 success=False,
-                error=f"Memory block '{normalized}' is full ({MAX_BLOCK_SIZE}/{MAX_BLOCK_SIZE}). "
-                "Use forget_memory to remove outdated entries first.",
+                error=(
+                    f"Memory block '{normalized}' is full "
+                    f"({MAX_BLOCK_SIZE}/{MAX_BLOCK_SIZE}). "
+                    "Use forget_memory to remove outdated entries first."
+                ),
             )
 
         mem_id = f"mem_{uuid.uuid4().hex[:8]}"
@@ -128,7 +140,7 @@ class MemoryManager:
             {
                 "content": content,
                 "topic": normalized,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": get_now_iso(),
                 "source_session": self.session_id,
             }
         )
@@ -184,13 +196,16 @@ class MemoryManager:
         self,
         hot_topics: List[str] = None,
     ) -> MemoryListResult:
-        """Fetch session memory blocks. Always includes General + hot topics."""
+        """Fetch requested active session memory blocks."""
         topics_to_fetch: List[str] = []
-        if self.topic_config.is_active("General"):
-            topics_to_fetch.append("General")
         for t in hot_topics or []:
-            if t not in topics_to_fetch:
-                topics_to_fetch.append(t)
+            normalized = self.topic_config.alias_lookup.get(t.lower()) if t else None
+            if (
+                normalized
+                and self.topic_config.is_active(normalized)
+                and normalized not in topics_to_fetch
+            ):
+                topics_to_fetch.append(normalized)
 
         blocks: Dict[str, List[MemoryEntry]] = {}
         for topic in topics_to_fetch:
@@ -219,146 +234,152 @@ class MemoryManager:
         total = sum(len(v) for v in blocks.values())
         return MemoryListResult(blocks=blocks, total=total)
 
-    # WORKING MEMORY (rules, preferences, icks)
+    # DIRECTIVES
 
-    async def add_working_memory(
+    def _directive_key(self) -> str:
+        return RedisKeys.agent_working_memory(self.agent_id, DIRECTIVES_CATEGORY)
+
+    def _validate_directive_mode(self, mode: str) -> Optional[str]:
+        normalized = (mode or "").strip().lower()
+        return normalized if normalized in DIRECTIVE_MODES else None
+
+    async def add_directive(
         self,
-        category: str,
+        mode: str,
         content: str,
-    ) -> WorkingMemoryAddResult:
-        """Add entry to a working memory category."""
-        if category not in WorkingMemoryStrings._fields:
-            return WorkingMemoryAddResult(
+    ) -> DirectiveAddResult:
+        """Add agent behavioral guidance."""
+        normalized_mode = self._validate_directive_mode(mode)
+        if normalized_mode is None:
+            return DirectiveAddResult(
                 success=False,
-                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
+                error=f"Invalid directive mode. Must be one of: {DIRECTIVE_MODES}",
             )
 
         if not content or not content.strip():
-            return WorkingMemoryAddResult(success=False, error="Empty memory content")
+            return DirectiveAddResult(success=False, error="Empty directive content")
 
         content = content.strip()
         if len(content) > MAX_CONTENT_LEN:
-            return WorkingMemoryAddResult(
+            return DirectiveAddResult(
                 success=False,
-                error=f"Working memory too long ({len(content)} chars). Max {MAX_CONTENT_LEN}.",
+                error=(
+                    f"Directive too long ({len(content)} chars). "
+                    f"Max {MAX_CONTENT_LEN}."
+                ),
             )
 
-        mem_id = f"mem_{uuid.uuid4().hex[:8]}"
-        key = RedisKeys.agent_working_memory(self.agent_id, category)
+        directive_id = f"directive_{uuid.uuid4().hex[:8]}"
         payload = json.dumps(
             {
+                "mode": normalized_mode,
                 "content": content,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": get_now_iso(),
             }
         )
-        await self.redis.hset(key, mem_id, payload)
+        await self.redis.hset(self._directive_key(), directive_id, payload)
 
         self._fire(
             "agent",
-            "working_memory_added",
+            "directive_added",
             {
-                "category": category,
-                "memory_id": mem_id,
+                "mode": normalized_mode,
+                "directive_id": directive_id,
             },
         )
-        return WorkingMemoryAddResult(
+        return DirectiveAddResult(
             success=True,
-            memory_id=mem_id,
+            directive_id=directive_id,
+            mode=normalized_mode,
             content=content,
-            category=category,
         )
 
-    async def remove_working_memory(
-        self,
-        category: str,
-        memory_id: str,
-    ) -> WorkingMemoryRemoveResult:
-        """Remove a working memory entry."""
-        if category not in WorkingMemoryStrings._fields:
-            return WorkingMemoryRemoveResult(
-                success=False,
-                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
-            )
-
-        key = RedisKeys.agent_working_memory(self.agent_id, category)
-        deleted = await self.redis.hdel(key, memory_id)
+    async def remove_directive(self, directive_id: str) -> DirectiveRemoveResult:
+        """Remove a directive by its internal storage ID."""
+        deleted = await self.redis.hdel(self._directive_key(), directive_id)
         if not deleted:
-            return WorkingMemoryRemoveResult(
+            return DirectiveRemoveResult(
                 success=False,
-                error=f"Memory '{memory_id}' not found in {category}",
+                error=f"Directive '{directive_id}' not found",
             )
 
         self._fire(
             "agent",
-            "working_memory_removed",
+            "directive_removed",
             {
-                "category": category,
-                "memory_id": memory_id,
+                "directive_id": directive_id,
             },
         )
-        return WorkingMemoryRemoveResult(
-            success=True,
-            memory_id=memory_id,
-            category=category,
-        )
+        return DirectiveRemoveResult(success=True, directive_id=directive_id)
 
-    async def list_working_memory(
-        self,
-        category: str = None,
-    ) -> WorkingMemoryListResult:
-        """List working memory. Pass category or None for all."""
-        categories = [category] if category else list(WorkingMemoryStrings._fields)
-        blocks: Dict[str, List[WorkingMemoryEntry]] = {}
+    async def list_directives(self, mode: str = None) -> DirectiveListResult:
+        """List directives, optionally filtered by mode."""
+        normalized_mode = None
+        if mode is not None:
+            normalized_mode = self._validate_directive_mode(mode)
+            if normalized_mode is None:
+                return DirectiveListResult()
 
-        for cat in categories:
-            if cat not in WorkingMemoryStrings._fields:
+        raw = await self.redis.hgetall(self._directive_key())
+        directives: List[DirectiveEntry] = []
+        for directive_id, payload in (raw or {}).items():
+            data = safe_json_loads(payload)
+            if not data or not isinstance(data, dict):
+                logger.warning(f"Corrupt directive {directive_id}")
                 continue
-            key = RedisKeys.agent_working_memory(self.agent_id, cat)
-            raw = await self.redis.hgetall(key)
 
-            entries = []
-            if raw:
-                for mem_id, payload in raw.items():
-                    data = safe_json_loads(payload)
-                    if data and isinstance(data, dict):
-                        entries.append(
-                            WorkingMemoryEntry(
-                                id=mem_id,
-                                content=data.get("content", ""),
-                                created_at=data.get("created_at", ""),
-                            )
-                        )
-                    else:
-                        logger.warning(f"Corrupt working memory {mem_id} in {cat}")
-                entries.sort(key=lambda e: e.created_at)
-            blocks[cat] = entries
+            directive_mode = self._validate_directive_mode(data.get("mode"))
+            if directive_mode is None:
+                logger.warning(f"Directive {directive_id} has invalid mode")
+                continue
+            if normalized_mode is not None and directive_mode != normalized_mode:
+                continue
 
-        return WorkingMemoryListResult(blocks=blocks)
-
-    async def clear_working_memory(self, category: str) -> WorkingMemoryClearResult:
-        """Clear all entries in a working memory category."""
-        if category not in WorkingMemoryStrings._fields:
-            return WorkingMemoryClearResult(
-                success=False,
-                error=f"Invalid category. Must be one of: {WorkingMemoryStrings._fields}",
+            directives.append(
+                DirectiveEntry(
+                    directive_id=directive_id,
+                    mode=directive_mode,
+                    content=data.get("content", ""),
+                    created_at=data.get("created_at", ""),
+                )
             )
 
-        key = RedisKeys.agent_working_memory(self.agent_id, category)
-        count = await self.redis.hlen(key)
-        await self.redis.delete(key)
+        directives.sort(key=lambda e: e.created_at)
+        return DirectiveListResult(directives=directives)
+
+    async def clear_directives(self, mode: str = None) -> DirectiveClearResult:
+        """Clear directives. Pass mode to remove only one mode."""
+        normalized_mode = None
+        if mode is not None:
+            normalized_mode = self._validate_directive_mode(mode)
+            if normalized_mode is None:
+                return DirectiveClearResult(
+                    success=False,
+                    error=f"Invalid directive mode. Must be one of: {DIRECTIVE_MODES}",
+                )
+
+        key = self._directive_key()
+        if normalized_mode is None:
+            count = await self.redis.hlen(key)
+            await self.redis.delete(key)
+        else:
+            result = await self.list_directives(normalized_mode)
+            count = 0
+            for directive in result.directives:
+                count += int(await self.redis.hdel(key, directive.directive_id))
 
         self._fire(
             "agent",
-            "working_memory_cleared",
+            "directives_cleared",
             {
-                "category": category,
+                "mode": normalized_mode or "",
                 "cleared": count,
             },
         )
-        return WorkingMemoryClearResult(
+        return DirectiveClearResult(
             success=True,
             cleared=count,
-            category=category,
+            mode=normalized_mode or "",
         )
 
     async def load_prompt_strings(
@@ -367,7 +388,7 @@ class MemoryManager:
     ) -> PromptStrings:
         """Load all memory as formatted strings for prompt injection.
 
-        Returns PromptStrings(memory_ctx, rules, prefs, icks).
+        Returns PromptStrings(memory_ctx, directives).
         Caller wraps these into whatever context object they need
         (SDK uses PromptContext, server uses loose variables).
         """
@@ -381,24 +402,14 @@ class MemoryManager:
         }
         memory_ctx = format_memory_context(raw_blocks)
 
-        rules, prefs, icks = await self._load_working_memory_strings()
+        directives = await self.load_directive_string()
 
-        return PromptStrings(
-            memory_ctx=memory_ctx, rules=rules, preferences=prefs, icks=icks
-        )
+        return PromptStrings(memory_ctx=memory_ctx, directives=directives)
 
-    async def _load_working_memory_strings(self) -> WorkingMemoryStrings:
-        """Loads all working memory categories using the hardened Smart Client."""
-        categories = list(WorkingMemoryStrings._fields)
-        formatted = await AsyncRedisClient.load_formatted_memories(
-            agent_id=self.agent_id, categories=categories
-        )
-
-        return WorkingMemoryStrings(
-            rules=formatted.get("rules", ""),
-            preferences=formatted.get("preferences", ""),
-            icks=formatted.get("icks", ""),
-        )
+    async def load_directive_string(self) -> str:
+        """Load all directives as a prompt-ready grouped string."""
+        result = await self.list_directives()
+        return format_directives_for_prompt(result.directives)
 
     async def save_memory_dict(self, content: str, topic: str = "General") -> dict:
         """save_memory returning a raw dict — used by the tool dispatch path."""

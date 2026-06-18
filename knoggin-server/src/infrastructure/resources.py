@@ -78,7 +78,6 @@ class ResourceManager:
                     raise ConfigurationError(
                         "DATABASE_URL environment variable is not set"
                     )
-                instance.graph_client = GraphClient(dsn=dsn)
                 instance.redis = await AsyncRedisClient.get_instance()
 
                 config = ConfigManager.get().config
@@ -93,9 +92,25 @@ class ResourceManager:
                     redis_client=instance.redis,
                 )
                 instance.config_unsubscribers.append(
-                    ConfigManager.get().subscribe(instance.llm_service.update_settings, "llm")
+                    ConfigManager.get().subscribe(
+                        instance.llm_service.update_settings, "llm"
+                    )
                 )
-                instance.embedding = EmbeddingService(device=device)
+                embedding_model = os.getenv(
+                    "KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"
+                )
+                reranker_model = os.getenv(
+                    "KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"
+                )
+                instance.embedding = EmbeddingService(
+                    embedding_model=embedding_model,
+                    reranker_model=reranker_model,
+                    device=device,
+                )
+                instance.graph_client = GraphClient(
+                    dsn=dsn,
+                    embedding_service=instance.embedding,
+                )
 
                 async def load_spacy():
                     exclude = ["ner", "lemmatizer", "attribute_ruler"]

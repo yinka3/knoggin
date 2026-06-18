@@ -1,5 +1,7 @@
 import pytest
+import torch
 
+from common.exceptions import ConfigurationError
 from common.schema.settings import LLMSettings, RootConfig
 from infrastructure import resources as resources_module
 
@@ -67,7 +69,9 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
             pass
 
     class FakeEmbeddingService:
-        def __init__(self, device):
+        def __init__(self, embedding_model=None, reranker_model=None, device=None):
+            self.embedding_model = embedding_model
+            self.reranker_model = reranker_model
             self.device = device
 
         async def load_models(self):
@@ -101,7 +105,11 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("KNOGGIN_GPU", "false")
-    monkeypatch.setattr(resources_module.ConfigManager, "get", staticmethod(lambda: fake_config))
+    monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", "custom/embedder")
+    monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", "custom/reranker")
+    monkeypatch.setattr(
+        resources_module.ConfigManager, "get", staticmethod(lambda: fake_config)
+    )
     monkeypatch.setattr(resources_module, "GraphClient", FakeGraphClient)
     monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
@@ -115,6 +123,8 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
     manager = await resources_module.ResourceManager.initialize()
 
     assert captured_llm_kwargs["base_url"] == "https://llm.example/v1"
+    assert manager.embedding.embedding_model == "custom/embedder"
+    assert manager.embedding.reranker_model == "custom/reranker"
     assert subscribe_calls == [(manager.llm_service.update_settings, "llm")]
     assert manager.llm_service.updated_settings == [
         {
@@ -129,3 +139,194 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
     await manager.shutdown()
 
     assert unsubscribe_calls == ["llm"]
+
+
+@pytest.mark.no_network
+async def test_resource_manager_raises_if_database_url_missing(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    resources_module.ResourceManager._instance = None
+    resources_module.ResourceManager._lock = None
+
+    with pytest.raises(
+        ConfigurationError, match="DATABASE_URL environment variable is not set"
+    ):
+        await resources_module.ResourceManager.initialize()
+
+
+@pytest.mark.no_network
+async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
+    class FakeGraphClient:
+        def __init__(self, dsn): pass
+        async def connect(self): pass
+        async def close(self): pass
+
+    class FakeAsyncRedisClient:
+        @staticmethod
+        async def get_instance(): return object()
+        @staticmethod
+        async def close_redis(): pass
+
+    class FakeLLMService:
+        def __init__(self, **kwargs): pass
+        async def load_tokenizer(self): pass
+        def update_settings(self, **kwargs): pass
+        async def close(self): pass
+
+    class FakeEmbeddingService:
+        def __init__(self, embedding_model=None, reranker_model=None, device=None):
+            self.device = device
+        async def load_models(self): pass
+        def cleanup(self): pass
+
+    class FakeSpacy:
+        @staticmethod
+        def load(name, exclude=None): return MagicMock()
+
+    class FakeGLiNER:
+        @staticmethod
+        def from_pretrained(name): return MagicMock()
+
+    from unittest.mock import MagicMock
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("KNOGGIN_GPU", "true")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(resources_module, "GraphClient", FakeGraphClient)
+    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
+    monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
+    monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
+    monkeypatch.setattr(resources_module, "EntityManager", MagicMock)
+    monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
+    monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
+
+    resources_module.ResourceManager._instance = None
+    resources_module.ResourceManager._lock = None
+
+    manager = await resources_module.ResourceManager.initialize()
+    assert manager.embedding.device.type == "cuda"
+    await manager.shutdown()
+
+
+@pytest.mark.no_network
+async def test_resource_manager_resolves_gpu_mps(monkeypatch):
+    # Same mocks as cuda
+    class FakeGraphClient:
+        def __init__(self, dsn): pass
+        async def connect(self): pass
+        async def close(self): pass
+
+    class FakeAsyncRedisClient:
+        @staticmethod
+        async def get_instance(): return object()
+        @staticmethod
+        async def close_redis(): pass
+
+    class FakeLLMService:
+        def __init__(self, **kwargs): pass
+        async def load_tokenizer(self): pass
+        def update_settings(self, **kwargs): pass
+        async def close(self): pass
+
+    class FakeEmbeddingService:
+        def __init__(self, embedding_model=None, reranker_model=None, device=None):
+            self.device = device
+        async def load_models(self): pass
+        def cleanup(self): pass
+
+    class FakeSpacy:
+        @staticmethod
+        def load(name, exclude=None): return MagicMock()
+
+    class FakeGLiNER:
+        @staticmethod
+        def from_pretrained(name): return MagicMock()
+
+    from unittest.mock import MagicMock
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("KNOGGIN_GPU", "true")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    # Mock torch.backends.mps.is_available
+    if not hasattr(torch, "backends"):
+        class FakeBackends:
+            pass
+        torch.backends = FakeBackends()
+    if not hasattr(torch.backends, "mps"):
+        class FakeMPS:
+            @staticmethod
+            def is_available(): return True
+        torch.backends.mps = FakeMPS()
+    else:
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+
+    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(resources_module, "GraphClient", FakeGraphClient)
+    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
+    monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
+    monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
+    monkeypatch.setattr(resources_module, "EntityManager", MagicMock)
+    monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
+    monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
+
+    resources_module.ResourceManager._instance = None
+    resources_module.ResourceManager._lock = None
+
+    manager = await resources_module.ResourceManager.initialize()
+    assert manager.embedding.device.type == "mps"
+    await manager.shutdown()
+
+
+@pytest.mark.no_network
+async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch):
+    class FakeGraphClient:
+        def __init__(self, dsn): pass
+        async def connect(self): pass
+        async def close(self): pass
+
+    class FakeAsyncRedisClient:
+        @staticmethod
+        async def get_instance(): return object()
+        @staticmethod
+        async def close_redis(): pass
+
+    class FakeLLMService:
+        def __init__(self, **kwargs): pass
+        async def load_tokenizer(self): pass
+        def update_settings(self, **kwargs): pass
+        async def close(self): pass
+
+    class FakeEmbeddingService:
+        def __init__(self, embedding_model=None, reranker_model=None, device=None):
+            self.device = device
+        async def load_models(self): pass
+        def cleanup(self): pass
+
+    class FakeSpacy:
+        @staticmethod
+        def load(name, exclude=None): return MagicMock()
+
+    class FakeGLiNER:
+        @staticmethod
+        def from_pretrained(name): return MagicMock()
+
+    from unittest.mock import MagicMock
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("KNOGGIN_GPU", "false")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True) # Should ignore this
+
+    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(resources_module, "GraphClient", FakeGraphClient)
+    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
+    monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
+    monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
+    monkeypatch.setattr(resources_module, "EntityManager", MagicMock)
+    monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
+    monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
+
+    resources_module.ResourceManager._instance = None
+    resources_module.ResourceManager._lock = None
+
+    manager = await resources_module.ResourceManager.initialize()
+    assert manager.embedding.device.type == "cpu"
+    await manager.shutdown()

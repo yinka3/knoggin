@@ -161,13 +161,6 @@ def process_extracted_facts(
     )
 
 
-def extract_fact_with_source(fact_update: Fact) -> Tuple[str, Optional[int]]:
-    """
-    Helper to extract content and source msg_id from a Fact.
-    """
-    return fact_update.content, fact_update.source_msg_id
-
-
 def _find_matching_fact(
     text: str, facts: List[FactRecord], threshold: int = 90
 ) -> FactRecord | None:

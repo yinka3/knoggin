@@ -1,10 +1,10 @@
 import asyncio
-import time
 
 import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
+from common.utils.time_utils import get_now_ms, get_now_unix
 from infrastructure.graph_client import GraphClient
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
@@ -47,37 +47,41 @@ class EntityCleanupJob(BaseJob):
 
     async def should_run(self, ctx: JobContext) -> bool:
         """Run if we haven't run in X hours."""
-        last_run_key = RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id)
+        last_run_key = RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id)
         last_run_ts = await self.redis.get(last_run_key)
 
         if not last_run_ts:
-            await self.redis.set(last_run_key, time.time())
+            await self.redis.set(last_run_key, get_now_unix())
             return False
 
         try:
-            elapsed = time.time() - float(last_run_ts)
+            elapsed = get_now_unix() - float(last_run_ts)
         except ValueError:
-            await self.redis.set(last_run_key, time.time())
+            await self.redis.set(last_run_key, get_now_unix())
             return False
 
         return elapsed >= self.run_interval_seconds
 
     async def execute(self, ctx: JobContext) -> JobResult:
         with logger.contextualize(
-            user=ctx.user_name, job=self.name, session=ctx.session_id
+            user=ctx.user_name, job=self.name, project=ctx.project_id
         ):
-            project_id = ctx.project_id or ctx.session_id
-            await self.graph_client.cleanup_null_entities(project_id=project_id)
+            project_id = ctx.project_id
+            null_deleted_ids = await self.graph_client.cleanup_null_entities(
+                project_id=project_id
+            )
+            if null_deleted_ids:
+                self.entities.remove_entities(null_deleted_ids)
 
-            now_ms = int(time.time() * 1000)
+            now_ms = get_now_ms()
             orphan_cutoff = now_ms - self.orphan_cutoff_ms
             junk_cutoff = now_ms - self.stale_cutoff_ms
 
             user_id = await self.entities.get_id(self.user_name)
             if user_id is None:
                 await self.redis.set(
-                    RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id),
-                    time.time(),
+                    RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id),
+                    get_now_unix(),
                 )
                 return JobResult(success=True, summary="User entity not initialized")
 
@@ -85,7 +89,7 @@ class EntityCleanupJob(BaseJob):
                 user_id, orphan_cutoff, junk_cutoff, project_id=project_id
             )
 
-            merge_key = RedisKeys.merge_queue(self.user_name, ctx.session_id)
+            merge_key = RedisKeys.merge_queue(self.user_name, ctx.project_id)
             pending_merge = await self.redis.smembers(merge_key)
             if pending_merge:
                 pending_ids = {int(eid) for eid in pending_merge}
@@ -98,9 +102,14 @@ class EntityCleanupJob(BaseJob):
 
             if not orphan_ids:
                 await self.redis.set(
-                    RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id),
-                    time.time(),
+                    RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id),
+                    get_now_unix(),
                 )
+                if null_deleted_ids:
+                    return JobResult(
+                        success=True,
+                        summary=f"Cleaned {len(null_deleted_ids)} entities",
+                    )
                 return JobResult(success=True, summary="No orphans found")
 
             logger.info(
@@ -111,22 +120,25 @@ class EntityCleanupJob(BaseJob):
                 logger.debug(f"Cleaning entity ID: {eid}")
 
             batch_size = 100
-            deleted_count = 0
+            deleted_ids = list(null_deleted_ids)
             for i in range(0, len(orphan_ids), batch_size):
                 batch = orphan_ids[i : i + batch_size]
-                deleted_count += await self.graph_client.bulk_delete_entities(
+                batch_deleted_ids = await self.graph_client.bulk_delete_entities(
                     batch, project_id=project_id
                 )
-                self.entities.remove_entities(batch)
+                deleted_ids.extend(batch_deleted_ids)
+                self.entities.remove_entities(batch_deleted_ids)
                 await asyncio.sleep(0.1)  # Yield to other tasks
 
+            deleted_count = len(deleted_ids)
+
             await self.redis.set(
-                RedisKeys.job_last_run(self.name, self.user_name, ctx.session_id),
-                time.time(),
+                RedisKeys.job_last_run(self.name, self.user_name, ctx.project_id),
+                get_now_unix(),
             )
 
             await emit(
-                ctx.session_id,
+                ctx.project_id,
                 "job",
                 "entities_cleaned",
                 {"orphan_count": len(orphan_ids), "deleted_count": deleted_count},

@@ -1,10 +1,10 @@
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import redis.asyncio as aioredis
 from loguru import logger
 
 from common.utils.events import emit
+from common.utils.time_utils import get_now, get_now_unix
 from infrastructure.graph_client import GraphClient
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
@@ -37,29 +37,29 @@ class FactArchivalJob(BaseJob):
     async def should_run(self, ctx: JobContext) -> bool:
         profile_done = (
             await self.redis.get(
-                RedisKeys.profile_complete(ctx.user_name, ctx.session_id)
+                RedisKeys.project_profile_complete(ctx.user_name, ctx.project_id)
             )
             is not None
         )
 
         if profile_done:
             await self.redis.delete(
-                RedisKeys.profile_complete(ctx.user_name, ctx.session_id)
+                RedisKeys.project_profile_complete(ctx.user_name, ctx.project_id)
             )
             return True
 
         last_run_ts = await self.redis.get(
-            RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id)
+            RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id)
         )
         if not last_run_ts:
             await self.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id),
-                time.time(),
+                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
+                get_now_unix(),
             )
             return False
 
         try:
-            elapsed = time.time() - float(last_run_ts)
+            elapsed = get_now_unix() - float(last_run_ts)
         except ValueError:
             return False
 
@@ -67,10 +67,10 @@ class FactArchivalJob(BaseJob):
 
     async def execute(self, ctx: JobContext) -> JobResult:
         with logger.contextualize(
-            user=ctx.user_name, job=self.name, session=ctx.session_id
+            user=ctx.user_name, job=self.name, project=ctx.project_id
         ):
-            project_id = ctx.project_id or ctx.session_id
-            cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
+            project_id = ctx.project_id
+            cutoff = get_now() - timedelta(days=self.retention_days)
 
             deleted_count = await self.graph_client.delete_old_invalidated_facts(
                 cutoff, project_id=project_id
@@ -80,7 +80,7 @@ class FactArchivalJob(BaseJob):
             if deleted_count > 0:
                 logger.info(summary)
                 await emit(
-                    ctx.session_id,
+                    ctx.project_id,
                     "job",
                     "facts_archived",
                     {
@@ -90,8 +90,8 @@ class FactArchivalJob(BaseJob):
                 )
 
             await self.redis.set(
-                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.session_id),
-                time.time(),
+                RedisKeys.job_last_run(self.name, ctx.user_name, ctx.project_id),
+                get_now_unix(),
             )
 
             return JobResult(success=True, summary=summary)

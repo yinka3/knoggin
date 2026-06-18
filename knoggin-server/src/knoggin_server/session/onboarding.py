@@ -1,481 +1,182 @@
-import asyncio
-import uuid
-from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+from __future__ import annotations
 
-from loguru import logger
+from typing import Any, Optional
 
 from common.conf.manager import ConfigManager
-from common.conf.topics_config import TopicConfig
-from common.schema.contracts import ConnectionsResult, EntityProfilesResult
-from common.schema.primitives import FactRecord
-from common.scoping import GLOBAL_PROJECT_SCOPE
-from common.utils.core_utils import format_vp02_input, format_vp04_input
-from infrastructure.redis_client import RedisKeys
-from infrastructure.resources import ResourceManager
-from knoggin_server.agent.prompts import (
-    get_connection_reasoning_prompt,
-    get_profile_extraction_prompt,
-)
-from knoggin_server.ingestion.services.processor import TextProcessor
+from common.schema.primitives import Message
+from common.utils.time_utils import get_now_iso
 
 
-def _build_messages(responses: List[dict]) -> List[dict]:
-    messages = []
-    for i, r in enumerate(responses, start=1):
-        answer = r.get("answer", "").strip()
-        if answer:
-            messages.append({"id": i, "message": answer, "role": "user"})
-    return messages
+class OnboardingService:
+    """Small onboarding facade for identity setup and project quickstart."""
 
+    def __init__(
+        self,
+        *,
+        project_manager: Any = None,
+        session_manager: Any = None,
+        config_manager: Any = None,
+    ):
+        self.project_manager = project_manager
+        self.session_manager = session_manager
+        self.config_manager = config_manager or ConfigManager.get()
 
-async def _create_user_entity(resources: ResourceManager, user_name: str) -> int:
-    existing = await resources.graph_client.get_entity_by_id(1)
+    def complete_user_onboarding(
+        self,
+        display_name: str,
+        aliases: Optional[list[str]] = None,
+    ) -> dict:
+        """Set the storage-scoped user identity once, before real data exists."""
+        name = _clean_required(display_name, "display_name")
+        config = self.config_manager.config
+        existing_name = (config.user_name or "").strip()
 
-    if existing and existing["canonical_name"] == user_name:
-        logger.info("[SETUP] User entity already exists, reusing id=1")
-        return 1
+        if existing_name and existing_name != name:
+            raise ValueError(
+                "Changing user_name after onboarding is not supported. "
+                "Create a migration before renaming stored user data."
+            )
 
-    if existing and existing["canonical_name"] != user_name:
-        raise RuntimeError(
-            f"[SETUP] Entity at ID=1 is '{existing['canonical_name']}', "
-            f"expected '{user_name}'. Database may be corrupted or from a different user. "
-            f"Wipe the database or resolve manually."
-        )
+        updates: dict[str, Any] = {
+            "user_name": name,
+            "configured_at": config.configured_at or get_now_iso(),
+        }
 
-    config = ConfigManager.get().config
-    user_aliases = config.user_aliases
-    all_aliases = [user_name] + [a.strip() for a in user_aliases if a.strip()]
-    all_aliases = list(dict.fromkeys(all_aliases))
+        if aliases is not None:
+            updates["user_aliases"] = _clean_list(aliases)
+        elif not existing_name:
+            updates["user_aliases"] = []
 
-    embedding = await resources.embedding.encode_single(user_name)
-
-    user_entity = {
-        "id": 1,
-        "canonical_name": user_name,
-        "type": "person",
-        "confidence": 1.0,
-        "topic": "Identity",
-        "embedding": embedding,
-        "aliases": all_aliases,
-        "user_name": user_name,
-        "session_id": "onboarding",
-        "project_id": GLOBAL_PROJECT_SCOPE,
-    }
-
-    user_facts_raw = config.user_facts
-    fact_contents = (
-        [f.strip() for f in user_facts_raw if f.strip()]
-        if user_facts_raw
-        else [f"The primary user named {user_name}"]
-    )
-
-    fact_embeddings = await resources.embedding.encode(fact_contents)
-
-    now = datetime.now(timezone.utc)
-    facts = [
-        FactRecord(
-            id=str(uuid.uuid4()),
-            content=content,
-            valid_at=now,
-            embedding=emb,
-            source_entity_id=1,
-        )
-        for content, emb in zip(fact_contents, fact_embeddings)
-    ]
-
-    await resources.graph_client.write_batch([user_entity], [])
-    await resources.graph_client.create_facts_batch(
-        1,
-        facts,
-        user_name=user_name,
-        session_id="onboarding",
-        project_id=GLOBAL_PROJECT_SCOPE,
-    )
-
-    current = await resources.redis.get(RedisKeys.global_next_ent_id())
-    if not current or int(current) < 1:
-        await resources.redis.set(RedisKeys.global_next_ent_id(), 1)
-
-    logger.info(f"[SETUP] Created user entity '{user_name}' (id=1)")
-    return 1
-
-
-def _build_user_lookup(
-    user_id: int, user_name: str, user_aliases: List[str]
-) -> Tuple[Dict[str, dict], Dict[str, int]]:
-    entity_lookup: Dict[str, dict] = {}
-    entity_lookup[user_name.lower()] = {
-        "id": user_id,
-        "canonical_name": user_name,
-        "type": "person",
-        "topic": "Identity",
-    }
-    for alias in user_aliases:
-        if alias.strip():
-            entity_lookup[alias.strip().lower()] = entity_lookup[user_name.lower()]
-
-    known_aliases = {user_name.lower(): user_id}
-    for alias in user_aliases:
-        if alias.strip():
-            known_aliases[alias.strip().lower()] = user_id
-
-    return entity_lookup, known_aliases
-
-
-async def _process_mentions_into_entities(
-    resources: ResourceManager,
-    mentions: List[Tuple],
-    entity_lookup: Dict[str, dict],
-    user_name: str,
-) -> Tuple[List[dict], Dict[str, dict]]:
-    seen: Dict[str, dict] = {}
-    for msg_id, name, typ, topic in mentions:
-        key = name.strip().lower()
-        if key not in seen:
-            seen[key] = {
-                "name": name.strip(),
-                "type": typ,
-                "topic": topic,
-                "msg_ids": [msg_id],
-            }
+        if hasattr(self.config_manager, "update_settings"):
+            saved = self.config_manager.update_settings(updates)
+            if saved is False:
+                raise RuntimeError("Failed to save onboarding settings")
         else:
-            if msg_id not in seen[key]["msg_ids"]:
-                seen[key]["msg_ids"].append(msg_id)
+            for key, value in updates.items():
+                setattr(config, key, value)
 
-    names_list = [e["name"] for e in seen.values()]
-    embeddings = await resources.embedding.encode(names_list)
-
-    entities = []
-
-    for i, (key, entry) in enumerate(seen.items()):
-        ent_id = await resources.redis.incr(RedisKeys.global_next_ent_id())
-
-        entity = {
-            "id": ent_id,
-            "canonical_name": entry["name"],
-            "type": entry["type"],
-            "confidence": 0.9,
-            "topic": entry["topic"],
-            "embedding": embeddings[i],
-            "aliases": [entry["name"]],
-            "user_name": user_name,
-            "session_id": "onboarding",
-            "project_id": GLOBAL_PROJECT_SCOPE,
-        }
-        entities.append(entity)
-        entity_lookup[key] = entity
-
-    logger.info(f"[SETUP] Registered {len(entities)} entities")
-    return entities, seen
-
-
-async def _extract_connections(
-    resources: ResourceManager,
-    entities: List[dict],
-    messages: List[dict],
-    user_name: str,
-    entity_lookup: Dict[str, dict],
-    seen: Dict[str, dict],
-) -> List[dict]:
-    candidates = [
-        {
-            "canonical_name": e["canonical_name"],
-            "type": e["type"],
-            "mentions": e["aliases"],
-            "source_msgs": seen[e["canonical_name"].lower()]["msg_ids"],
-        }
-        for e in entities
-    ]
-
-    system_03 = get_connection_reasoning_prompt(user_name)
-    user_03 = format_vp02_input(candidates, messages, "", user_name=user_name)
-    logger.info(f"[SETUP] Running connection extraction on {len(candidates)} entities")
-    conn_result: ConnectionsResult = await resources.llm_service.call_llm(
-        response_model=ConnectionsResult, system=system_03, user=user_03
-    )
-
-    relationships = []
-    user_key = user_name.lower()
-    user_entity = entity_lookup.get(user_key)
-    if conn_result:
-        for pair in conn_result.connections:
-            ent_a = entity_lookup.get(pair.entity_a.lower())
-            ent_b = entity_lookup.get(pair.entity_b.lower())
-            if pair.entity_a.lower() == user_key or pair.entity_b.lower() == user_key:
-                logger.warning(
-                    f"[SETUP] Skipping user-root edge returned in connections: "
-                    f"{pair.entity_a} - {pair.entity_b}"
-                )
-                continue
-            if ent_a and ent_b:
-                evidence_ref = {
-                    "user_name": user_name,
-                    "session_id": "onboarding",
-                    "message_id": int(pair.msg_id),
-                }
-                relationships.append(
-                    {
-                        "entity_a": ent_a["canonical_name"],
-                        "entity_b": ent_b["canonical_name"],
-                        "entity_a_id": ent_a["id"],
-                        "entity_b_id": ent_b["id"],
-                        "message_id": f"msg_{pair.msg_id}",
-                        "evidence_ref": evidence_ref,
-                        "user_name": user_name,
-                        "session_id": "onboarding",
-                        "project_id": GLOBAL_PROJECT_SCOPE,
-                        "confidence": pair.confidence,
-                        "context": pair.context,
-                    }
-                )
-        for pair in conn_result.user_connections:
-            target = entity_lookup.get(pair.entity_name.lower())
-            if user_entity and target and target["id"] != user_entity["id"]:
-                evidence_ref = {
-                    "user_name": user_name,
-                    "session_id": "onboarding",
-                    "message_id": int(pair.msg_id),
-                }
-                relationships.append(
-                    {
-                        "entity_a": user_entity["canonical_name"],
-                        "entity_b": target["canonical_name"],
-                        "entity_a_id": user_entity["id"],
-                        "entity_b_id": target["id"],
-                        "message_id": f"msg_{pair.msg_id}",
-                        "evidence_ref": evidence_ref,
-                        "user_name": user_name,
-                        "session_id": "onboarding",
-                        "project_id": GLOBAL_PROJECT_SCOPE,
-                        "confidence": pair.confidence,
-                        "context": pair.context,
-                    }
-                )
-
-    logger.info(f"[SETUP] Extracted {len(relationships)} connections")
-    return relationships
-
-
-async def _extract_and_save_profiles(
-    resources: ResourceManager,
-    entities: List[dict],
-    messages: List[dict],
-    user_name: str,
-    user_aliases_list: List[str],
-    entity_lookup: Dict[str, dict],
-) -> int:
-    conversation_text = "\n".join(f"[USER]: {m['message']}" for m in messages)
-
-    llm_input = [
-        {
-            "entity_name": e["canonical_name"],
-            "entity_type": e["type"],
-            "existing_facts": [],
-            "known_aliases": e["aliases"],
-        }
-        for e in entities
-    ]
-
-    llm_input.append(
-        {
-            "entity_name": user_name,
-            "entity_type": "person",
-            "existing_facts": [],
-            "known_aliases": [user_name]
-            + [a.strip() for a in user_aliases_list if a.strip()],
-        }
-    )
-
-    system_04 = get_profile_extraction_prompt(user_name)
-    user_04 = format_vp04_input(llm_input, conversation_text)
-
-    logger.info(f"[SETUP] Running profile extraction for {len(entities)} entities")
-    profiles_result: EntityProfilesResult = await resources.llm_service.call_llm(
-        response_model=EntityProfilesResult, system=system_04, user=user_04
-    )
-
-    facts_created = 0
-
-    if profiles_result and profiles_result.profiles:
-        parsed_profiles = profiles_result.profiles
-
-        if parsed_profiles:
-            # Optimize: Batch all fact encodings together
-            all_fact_contents = []
-            fact_mapping = []  # (profile_idx, fact_idx)
-
-            for p_idx, profile in enumerate(parsed_profiles):
-                entity = entity_lookup.get(profile.canonical_name.lower())
-                if not entity:
-                    continue
-                for f_idx, fact_update in enumerate(profile.facts):
-                    all_fact_contents.append(fact_update.content)
-                    fact_mapping.append((p_idx, f_idx))
-
-            if all_fact_contents:
-                all_fact_embeddings = await resources.embedding.encode(
-                    all_fact_contents
-                )
-
-                # Map embeddings back to profiles
-                fact_embeddings_map = {}
-                for i, (p_idx, _f_idx) in enumerate(fact_mapping):
-                    if p_idx not in fact_embeddings_map:
-                        fact_embeddings_map[p_idx] = []
-                    fact_embeddings_map[p_idx].append(all_fact_embeddings[i])
-
-                write_tasks = []
-                resolution_texts = []
-                resolution_entities = []
-
-                for p_idx, profile in enumerate(parsed_profiles):
-                    entity = entity_lookup.get(profile.canonical_name.lower())
-                    if not entity or p_idx not in fact_embeddings_map:
-                        continue
-
-                    ent_id = entity["id"]
-                    new_facts = []
-
-                    for f_idx, fact_update in enumerate(profile.facts):
-                        fact_embedding = fact_embeddings_map[p_idx][f_idx]
-                        new_facts.append(
-                            FactRecord(
-                                id=str(uuid.uuid4()),
-                                content=fact_update.content,
-                                valid_at=datetime.now(timezone.utc),
-                                embedding=fact_embedding,
-                                source_entity_id=ent_id,
-                                source_msg_id=fact_update.source_msg_id,
-                            )
-                        )
-
-                    if new_facts:
-                        write_tasks.append(
-                            resources.graph_client.create_facts_batch(
-                                ent_id,
-                                new_facts,
-                                user_name=user_name,
-                                session_id="onboarding",
-                                project_id=GLOBAL_PROJECT_SCOPE,
-                            )
-                        )
-
-                        resolution_text = f"{entity['canonical_name']}. " + " ".join(
-                            f.content for f in new_facts
-                        )
-                        resolution_texts.append(resolution_text)
-                        resolution_entities.append(ent_id)
-
-                if write_tasks:
-                    counts = await asyncio.gather(*write_tasks)
-                    facts_created += sum(counts)
-
-                if resolution_texts:
-                    res_embeddings = await resources.embedding.encode(resolution_texts)
-
-                    update_tasks = [
-                        resources.graph_client.update_entity_embedding(
-                            ent_id, emb, project_id=GLOBAL_PROJECT_SCOPE
-                        )
-                        for ent_id, emb in zip(resolution_entities, res_embeddings)
-                    ]
-                    await asyncio.gather(*update_tasks)
-
-    logger.info(
-        f"[SETUP] Created {facts_created} facts across {len(entities)} entities"
-    )
-    return facts_created
-
-
-async def run_setup(
-    resources: ResourceManager,
-    topic_config: TopicConfig,
-    user_name: str,
-    responses: List[dict],
-) -> dict:
-    """
-    Run onboarding extraction pipeline.
-    Blocking — returns when complete.
-
-    Args:
-        resources: Shared ResourceManager instance
-        topic_config: The finalized TopicConfig (post user review)
-        user_name: The user's name (for VP prompt speaker context)
-        responses: List of {"question": str, "answer": str}
-
-    Returns:
-        Summary dict with entity/connection/fact counts
-    """
-    messages = _build_messages(responses)
-    if not messages:
+        updated = self.config_manager.config
         return {
-            "success": True,
-            "entities_created": 0,
-            "connections_created": 0,
-            "facts_created": 0,
-            "entities": [],
+            "user_name": updated.user_name,
+            "user_aliases": list(updated.user_aliases),
+            "configured_at": updated.configured_at,
         }
 
-    user_id = await _create_user_entity(resources, user_name)
+    async def create_project_quickstart(
+        self,
+        name: str,
+        description: Optional[str] = None,
+        kickoff_note: Optional[str] = None,
+        facts: Optional[list[str]] = None,
+        preferences: Optional[list[str]] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        enabled_tools: Optional[list[str]] = None,
+        seed_user_profile: bool = True,
+    ) -> dict:
+        """Create a project/session and seed optional context through ingestion."""
+        if self.project_manager is None or self.session_manager is None:
+            raise RuntimeError(
+                "create_project_quickstart requires project_manager and session_manager"
+            )
 
-    config = ConfigManager.get().config
-    user_aliases = config.user_aliases
-
-    entity_lookup, known_aliases = _build_user_lookup(user_id, user_name, user_aliases)
-
-    async def _get_profile(eid):
-        if eid == user_id:
-            return {"canonical_name": user_name, "type": "person", "topic": "Identity"}
-        return None
-
-    processor = TextProcessor(
-        llm=resources.llm_service,
-        topic_config=topic_config,
-        get_known_aliases=lambda: known_aliases,
-        get_profile=_get_profile,
-        gliner=resources.gliner,
-        spacy=resources.spacy,
-    )
-
-    logger.info(f"[SETUP] Running NER on {len(messages)} responses")
-    mentions = await processor.extract_mentions(user_name, messages, "onboarding")
-
-    if not mentions:
-        logger.info("[SETUP] No entities found in onboarding responses")
-        return {
-            "success": True,
-            "entities_created": 0,
-            "connections_created": 0,
-            "facts_created": 0,
-            "entities": [],
-        }
-
-    entities, seen = await _process_mentions_into_entities(
-        resources, mentions, entity_lookup, user_name
-    )
-
-    relationships = await _extract_connections(
-        resources, entities, messages, user_name, entity_lookup, seen
-    )
-
-    if entities or relationships:
-        await resources.graph_client.write_batch(entities, relationships)
-        logger.info(
-            f"[SETUP] Wrote {len(entities)} entities and {len(relationships)} relationships to graph"
+        project_name = _clean_required(name, "name")
+        project_description = _clean_optional(description)
+        project = await self.project_manager.create_project(
+            project_name,
+            description=project_description,
+        )
+        ctx = await self.session_manager.create_session(
+            model=model,
+            agent_id=agent_id,
+            enabled_tools=enabled_tools,
+            project_id=project["id"],
         )
 
-    facts_created = await _extract_and_save_profiles(
-        resources, entities, messages, user_name, user_aliases, entity_lookup
-    )
+        seed_text = self._build_seed_message(
+            project_name=project_name,
+            description=project_description,
+            kickoff_note=kickoff_note,
+            facts=facts,
+            preferences=preferences,
+            seed_user_profile=seed_user_profile,
+        )
 
-    return {
-        "success": True,
-        "entities_created": len(entities),
-        "connections_created": len(relationships),
-        "facts_created": facts_created,
-        "entities": [
-            {"name": e["canonical_name"], "type": e["type"], "topic": e["topic"]}
-            for e in entities
-        ],
-    }
+        seeded = False
+        seed_error = None
+        if seed_text:
+            try:
+                await ctx.add(Message(content=seed_text))
+                seeded = True
+            except Exception as exc:
+                seed_error = str(exc)
+
+        return {
+            "project": project,
+            "session_id": ctx.session_id,
+            "project_id": project["id"],
+            "seeded": seeded,
+            "seed_error": seed_error,
+        }
+
+    def _build_seed_message(
+        self,
+        *,
+        project_name: str,
+        description: Optional[str],
+        kickoff_note: Optional[str],
+        facts: Optional[list[str]],
+        preferences: Optional[list[str]],
+        seed_user_profile: bool,
+    ) -> str:
+        sections = []
+
+        if seed_user_profile:
+            cleaned_facts = _clean_list(facts or [])
+            if cleaned_facts:
+                sections.append(
+                    "Project-scoped user facts:\n"
+                    + "\n".join(f"- {fact}" for fact in cleaned_facts)
+                )
+
+            cleaned_preferences = _clean_list(preferences or [])
+            if cleaned_preferences:
+                sections.append(
+                    "Project-scoped user preferences:\n"
+                    + "\n".join(f"- {preference}" for preference in cleaned_preferences)
+                )
+
+        if description:
+            sections.append(f"Project description for {project_name}:\n{description}")
+
+        kickoff = _clean_optional(kickoff_note)
+        if kickoff:
+            sections.append(f"Project kickoff note:\n{kickoff}")
+
+        return "\n\n".join(sections)
+
+
+def _clean_required(value: str, field_name: str) -> str:
+    cleaned = _clean_optional(value)
+    if not cleaned:
+        raise ValueError(f"{field_name} is required")
+    return cleaned
+
+
+def _clean_optional(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _clean_list(values: list[str]) -> list[str]:
+    cleaned = []
+    seen = set()
+    for value in values:
+        item = value.strip()
+        if not item or item in seen:
+            continue
+        cleaned.append(item)
+        seen.add(item)
+    return cleaned

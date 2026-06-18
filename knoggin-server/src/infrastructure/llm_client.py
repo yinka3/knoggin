@@ -271,6 +271,10 @@ class LLMService:
                     create_kwargs["extra_body"] = self._extra_body(reasoning)
 
                 if response_model:
+                    create_kwargs["response_model"] = response_model
+                    if mode is not None:
+                        create_kwargs["mode"] = mode
+                        
                     (
                         response,
                         completion,

@@ -2,8 +2,9 @@ import fnmatch
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
+
+from common.utils.time_utils import get_now_iso
 
 
 class FakePipeline:
@@ -31,12 +32,20 @@ class FakePipelineWriter:
         self.commands.append(("zremrangebyrank", key, start, end))
         return self
 
+    def zrem(self, key, *members):
+        self.commands.append(("zrem", key, members))
+        return self
+
     def expire(self, key, ttl):
         self.commands.append(("expire", key, ttl))
         return self
 
     def hdel(self, key, *fields):
         self.commands.append(("hdel", key, fields))
+        return self
+
+    def hget(self, key, field):
+        self.commands.append(("hget", key, field))
         return self
 
     async def execute(self):
@@ -52,12 +61,18 @@ class FakePipelineWriter:
             elif name == "zremrangebyrank":
                 _, key, start, end = command
                 results.append(await self.redis.zremrangebyrank(key, start, end))
+            elif name == "zrem":
+                _, key, members = command
+                results.append(await self.redis.zrem(key, *members))
             elif name == "expire":
                 _, key, ttl = command
                 results.append(await self.redis.expire(key, ttl))
             elif name == "hdel":
                 _, key, fields = command
                 results.append(await self.redis.hdel(key, *fields))
+            elif name == "hget":
+                _, key, field = command
+                results.append(await self.redis.hget(key, field))
         return results
 
 
@@ -119,6 +134,12 @@ class FakeRedis:
     async def scard(self, key):
         return len(self.sets.get(key, set()))
 
+    async def srandmember(self, key, number=None):
+        values = sorted(self.sets.get(key, set()))
+        if number is None:
+            return values[0] if values else None
+        return values[: int(number)]
+
     async def delete(self, *keys):
         deleted = 0
         for key in keys:
@@ -155,6 +176,11 @@ class FakeRedis:
         if nx and key in self.strings:
             return False
         self.strings[key] = str(value)
+        return True
+
+    async def setex(self, key, ttl, value):
+        self.strings[key] = str(value)
+        self.expirations.append((key, ttl))
         return True
 
     async def rpush(self, key, value):
@@ -206,6 +232,14 @@ class FakeRedis:
     async def zscore(self, key, member):
         return self.zsets.get(key, {}).get(str(member))
 
+    async def zrank(self, key, member):
+        items = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1])
+        target = str(member)
+        for index, (item, _) in enumerate(items):
+            if item == target:
+                return index
+        return None
+
     async def zremrangebyrank(self, key, start, end):
         items = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1])
         if not items:
@@ -216,17 +250,79 @@ class FakeRedis:
             self.zsets[key].pop(member, None)
         return len(removed)
 
+    async def zrem(self, key, *members):
+        removed = 0
+        for member in members:
+            removed += int(
+                self.zsets.get(key, {}).pop(str(member), None) is not None
+            )
+        return removed
+
 
 class FakeGraphClient:
     def __init__(self):
         self.saved_message_logs = []
+        self.recent_project_messages = []
+        self.identity_calls = []
+        self.next_entity_id = 2
+        self.next_message_id = 1
+        self.search_rebuild_calls = []
+
+    async def allocate_entity_id(self):
+        entity_id = self.next_entity_id
+        self.next_entity_id += 1
+        return entity_id
+
+    async def allocate_message_id(self):
+        message_id = self.next_message_id
+        self.next_message_id += 1
+        return message_id
+
+    async def rebuild_project_search_indexes(
+        self,
+        project_id,
+        user_name,
+        identity_project_ids,
+    ):
+        call = {
+            "project_id": project_id,
+            "user_name": user_name,
+            "identity_project_ids": list(identity_project_ids),
+        }
+        self.search_rebuild_calls.append(call)
+        return {"messages": 0, "entities": 0, "facts": 0, "identity": 1}
 
     async def get_max_entity_id(self):
         return 0
 
+    async def ensure_identity_entity(self, user_name, aliases=None):
+        self.identity_calls.append((user_name, list(aliases or [])))
+        return {
+            "id": 1,
+            "user_name": user_name,
+            "canonical_name": user_name,
+            "aliases": list(aliases or []),
+            "project_id": "__identity__",
+        }
+
     async def save_message_logs(self, messages):
         self.saved_message_logs.append(messages)
         return True
+
+    async def get_recent_project_messages(
+        self, user_name, project_id, limit, before_message_id=None
+    ):
+        messages = [
+            message
+            for message in self.recent_project_messages
+            if message.get("user_name", user_name) == user_name
+            and message.get("project_id", project_id) == project_id
+            and (
+                before_message_id is None
+                or int(message.get("id", 0)) <= int(before_message_id)
+            )
+        ]
+        return messages[-limit:]
 
 
 class FakeEmbeddingService:
@@ -293,7 +389,7 @@ class FakeFileRAG:
 
 
 class FakeContext:
-    def __init__(self, session_id="session-1", project_id="global"):
+    def __init__(self, session_id="session-1", project_id="project-1"):
         self.session_id = session_id
         self.project_id = project_id
         self.shutdown_count = 0
@@ -307,12 +403,16 @@ class FakeProjectManager:
     def __init__(self, project_state=None):
         self.project_state = project_state
         self.acquire_calls: list[tuple[str, str]] = []
+        self.acquire_topic_configs = []
         self.release_calls: list[str] = []
         self.add_session_calls: list[tuple[str, str]] = []
         self.remove_session_calls: list[tuple[str, str]] = []
 
-    async def acquire_project_for_session(self, project_id, session_id, topics_config=None):
+    async def acquire_project_for_session(
+        self, project_id, session_id, topics_config=None
+    ):
         self.acquire_calls.append((project_id, session_id))
+        self.acquire_topic_configs.append(topics_config)
         if self.project_state is not None:
             return self.project_state
         return object()
@@ -343,7 +443,7 @@ class FakeConfigValue:
 
 
 def make_turn_payload(role="user", content="hello", timestamp=None, user_msg_id=1):
-    timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+    timestamp = timestamp or get_now_iso()
     return json.dumps(
         {
             "role": role,

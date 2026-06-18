@@ -1,7 +1,6 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 from functools import partial
 from typing import Dict, List, Optional
 
@@ -9,8 +8,9 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig
-from common.scoping import build_readable_project_ids
+from common.scoping import IDENTITY_ENTITY_ID, build_readable_project_ids
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now_iso
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
@@ -25,6 +25,7 @@ from knoggin_server.knowledge.jobs.merge_job import MergeDetectionJob
 from knoggin_server.knowledge.jobs.profile_job import ProfileRefinementJob
 from knoggin_server.knowledge.jobs.topics_job import TopicConfigJob
 from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.project.lifecycle import ProjectStatus
 from knoggin_server.project.state import ProjectState
 
 
@@ -35,6 +36,8 @@ class ProjectManager:
         self.resources = resources
         self.user_name = user_name
         self.active_projects: Dict[str, ProjectState] = {}
+        self._identity_initialized = False
+        self._maintenance_lock = asyncio.Lock()
 
     @property
     def config(self):
@@ -52,16 +55,27 @@ class ProjectManager:
         allowed_projects: Optional[List[str]] = None,
     ) -> dict:
         """Create a new project and store its metadata in Redis."""
+        if not name or not name.strip():
+            raise ValueError("create_project requires a non-empty project name")
+
+        name = name.strip()
         project_id = str(uuid.uuid4())
+        now = get_now_iso()
+        allowed_projects = await self._validate_allowed_project_ids(
+            project_id, allowed_projects or []
+        )
 
         metadata = {
             "id": project_id,
             "name": name,
             "description": description,
             "access_mode": access_mode,
-            "allowed_projects": allowed_projects or [],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "allowed_projects": allowed_projects,
+            "status": ProjectStatus.ACTIVE.value,
+            "archived_at": None,
+            "deleted_at": None,
+            "created_at": now,
+            "updated_at": now,
         }
 
         key = RedisKeys.projects(self.user_name)
@@ -107,61 +121,211 @@ class ProjectManager:
         return meta
 
     async def get_readable_project_ids(self, project_id: str) -> List[str]:
-        """Return projects readable from project_id: global identity, own project, and allowed projects."""
+        """Return projects readable from project_id."""
         meta = await self.get_project(project_id)
-        allowed = meta.get("allowed_projects", []) if meta else []
+        if not meta or meta["status"] == ProjectStatus.DELETED.value:
+            return []
+
+        allowed = meta.get("allowed_projects", [])
 
         if allowed:
-            existing = await self.resources.redis.hgetall(RedisKeys.projects(self.user_name))
-            allowed = [pid for pid in allowed if pid in existing]
+            stored_projects = await self.resources.redis.hgetall(
+                RedisKeys.projects(self.user_name)
+            )
+            readable_statuses = {
+                ProjectStatus.ACTIVE.value,
+                ProjectStatus.ARCHIVED.value,
+            }
+            allowed = []
+            for allowed_id in meta.get("allowed_projects", []):
+                raw = stored_projects.get(allowed_id)
+                metadata = safe_json_loads(raw, {}) if raw else {}
+                if metadata.get("status") in readable_statuses:
+                    allowed.append(allowed_id)
 
         return build_readable_project_ids(project_id, allowed)
+
+    async def _validate_allowed_project_ids(
+        self, project_id: str, allowed_projects: List[str]
+    ) -> List[str]:
+        requested = list(
+            dict.fromkeys(
+                allowed_id
+                for allowed_id in allowed_projects
+                if allowed_id and allowed_id != project_id
+            )
+        )
+        stored_projects = await self.resources.redis.hgetall(
+            RedisKeys.projects(self.user_name)
+        )
+        readable_statuses = {
+            ProjectStatus.ACTIVE.value,
+            ProjectStatus.ARCHIVED.value,
+        }
+        unavailable = []
+        for allowed_id in requested:
+            raw = stored_projects.get(allowed_id)
+            metadata = safe_json_loads(raw, {}) if raw else {}
+            if metadata.get("status") not in readable_statuses:
+                unavailable.append(allowed_id)
+        if unavailable:
+            raise ValueError(
+                f"Unavailable allowed project IDs for '{project_id}': {unavailable}"
+            )
+        return requested
 
     async def update_project(
         self,
         project_id: str,
         name: Optional[str] = None,
         description: Optional[str] = None,
+        allowed_projects: Optional[List[str]] = None,
     ) -> Optional[dict]:
-        """Update project name or description."""
+        """Update project metadata that does not control lifecycle status."""
         meta = await self.get_project(project_id)
         if not meta:
             return None
+        if meta["status"] == ProjectStatus.DELETED.value:
+            raise ValueError(f"Deleted project '{project_id}' cannot be updated")
 
         updated = False
         if name is not None:
-            meta["name"] = name
+            if not name.strip():
+                raise ValueError("update_project requires a non-empty project name")
+            meta["name"] = name.strip()
             updated = True
         if description is not None:
             meta["description"] = description
             updated = True
+        if allowed_projects is not None:
+            active_state = self.active_projects.get(project_id)
+            if active_state and active_state.active_runtime_sessions_count > 0:
+                raise RuntimeError(
+                    f"Project '{project_id}' has active runtime sessions and "
+                    "cannot change its readable project scope"
+                )
+            validated_allowed_projects = (
+                await self._validate_allowed_project_ids(
+                    project_id, allowed_projects
+                )
+            )
+            if active_state:
+                await active_state.shutdown()
+                del self.active_projects[project_id]
+
+            meta["allowed_projects"] = validated_allowed_projects
+            updated = True
 
         if updated:
-            meta["updated_at"] = datetime.now(timezone.utc).isoformat()
-            # session_count is dynamic, don't store it in hash
-            meta_to_save = {k: v for k, v in meta.items() if k != "session_count"}
-            key = RedisKeys.projects(self.user_name)
-            await self.resources.redis.hset(key, project_id, json.dumps(meta_to_save))
+            meta["updated_at"] = get_now_iso()
+            await self._save_project_metadata(meta)
 
         return meta
 
-    async def delete_project(self, project_id: str) -> List[str]:
-        """Delete project metadata and return orphaned session IDs for caller to clean up."""
-        # Get orphaned sessions
-        session_ids = await self.get_session_ids(project_id)
+    async def archive_project(self, project_id: str) -> Optional[dict]:
+        """Retire a project while retaining its sessions and knowledge."""
+        meta = await self.get_project(project_id)
+        if not meta:
+            return None
+        if meta["status"] == ProjectStatus.DELETED.value:
+            raise ValueError(f"Deleted project '{project_id}' cannot be archived")
+        if meta["status"] == ProjectStatus.ARCHIVED.value:
+            return meta
 
-        # Delete from projects hash
-        key = RedisKeys.projects(self.user_name)
-        await self.resources.redis.hdel(key, project_id)
+        active_state = self.active_projects.get(project_id)
+        if active_state and active_state.active_runtime_sessions_count > 0:
+            raise RuntimeError(
+                f"Project '{project_id}' has active runtime sessions and "
+                "cannot be archived"
+            )
+        if active_state:
+            await active_state.shutdown()
+            del self.active_projects[project_id]
 
-        # Delete the project_sessions set
-        sessions_key = RedisKeys.project_sessions(self.user_name, project_id)
-        await self.resources.redis.delete(sessions_key)
+        now = get_now_iso()
+        meta["status"] = ProjectStatus.ARCHIVED.value
+        meta["archived_at"] = now
+        meta["updated_at"] = now
+        await self._save_project_metadata(meta)
+        logger.info(f"Archived project {project_id} with knowledge retained")
+        return meta
 
-        logger.info(
-            f"Deleted project {project_id}, orphaned {len(session_ids)} sessions"
+    async def reactivate_project(self, project_id: str) -> Optional[dict]:
+        """Make an archived project eligible for sessions again."""
+        meta = await self.get_project(project_id)
+        if not meta:
+            return None
+        if meta["status"] == ProjectStatus.DELETED.value:
+            raise ValueError(f"Deleted project '{project_id}' cannot be reactivated")
+        if meta["status"] == ProjectStatus.ACTIVE.value:
+            return meta
+
+        meta["status"] = ProjectStatus.ACTIVE.value
+        meta["archived_at"] = None
+        meta["updated_at"] = get_now_iso()
+        await self._save_project_metadata(meta)
+        logger.info(f"Reactivated project {project_id}")
+        return meta
+
+    async def _save_project_metadata(self, meta: dict) -> None:
+        project_id = meta["id"]
+        stored = {key: value for key, value in meta.items() if key != "session_count"}
+        await self.resources.redis.hset(
+            RedisKeys.projects(self.user_name),
+            project_id,
+            json.dumps(stored),
         )
-        return session_ids
+
+    async def delete_project(self, project_id: str) -> Optional[dict]:
+        """Mark a project deleted while retaining all project-owned data."""
+        meta = await self.get_project(project_id)
+        if not meta:
+            return None
+        if meta["status"] == ProjectStatus.DELETED.value:
+            return meta
+
+        active_state = self.active_projects.get(project_id)
+        if active_state and active_state.active_runtime_sessions_count > 0:
+            raise RuntimeError(
+                f"Project '{project_id}' has active runtime sessions and "
+                "cannot be deleted"
+            )
+        if active_state:
+            await active_state.shutdown()
+            del self.active_projects[project_id]
+
+        now = get_now_iso()
+        meta["status"] = ProjectStatus.DELETED.value
+        meta["deleted_at"] = now
+        meta["updated_at"] = now
+        await self._save_project_metadata(meta)
+        self._remove_project_from_active_read_scopes(project_id)
+        logger.info(f"Marked project {project_id} deleted with data retained")
+        return meta
+
+    def _remove_project_from_active_read_scopes(self, project_id: str) -> None:
+        for active_project_id, state in self.active_projects.items():
+            if active_project_id == project_id:
+                continue
+
+            readable_scopes = [
+                state.readable_project_ids,
+                state.entities.readable_project_ids,
+            ]
+            for readable_project_ids in readable_scopes:
+                if readable_project_ids and project_id in readable_project_ids:
+                    readable_project_ids[:] = [
+                        readable_id
+                        for readable_id in readable_project_ids
+                        if readable_id != project_id
+                    ]
+
+            cached_ids = [
+                entity_id
+                for entity_id, profile in state.entities.get_profiles().items()
+                if profile.get("project_id") == project_id
+            ]
+            state.entities.remove_entities(cached_ids)
 
     async def add_session(self, project_id: str, session_id: str):
         """Add durable session membership to a project."""
@@ -182,7 +346,32 @@ class ProjectManager:
         self, project_id: str, session_id: str, topics_config: Optional[dict] = None
     ) -> ProjectState:
         """Acquire runtime project state and record durable session membership."""
-        project_state = await self.get_or_start_project(
+        async with self._maintenance_lock:
+            return await self._acquire_project_for_session(
+                project_id,
+                session_id,
+                topics_config=topics_config,
+            )
+
+    async def _acquire_project_for_session(
+        self, project_id: str, session_id: str, topics_config: Optional[dict] = None
+    ) -> ProjectState:
+        if not project_id or not project_id.strip():
+            raise ValueError("A persisted project_id is required to acquire a project")
+        project = await self.get_project(project_id)
+        if project is None:
+            raise ValueError(
+                f"Project '{project_id}' does not exist; "
+                "create it before creating a session"
+            )
+        if project["status"] != ProjectStatus.ACTIVE.value:
+            raise ValueError(
+                f"Project '{project_id}' is {project['status']} and cannot "
+                "create or resume sessions"
+            )
+
+        await self._ensure_identity_invariant()
+        project_state = await self._get_or_start_project(
             project_id, initial_topics_config=topics_config
         )
         await self.add_session(project_id, session_id)
@@ -198,7 +387,7 @@ class ProjectManager:
         self, project_id: str, initial_topics_config: Optional[dict] = None
     ) -> None:
         existing_topics = await self.resources.redis.hget(
-            RedisKeys.session_config(self.user_name), project_id
+            RedisKeys.project_topic_config(self.user_name), project_id
         )
         if existing_topics:
             return
@@ -210,7 +399,7 @@ class ProjectManager:
         )
         topics_json = json.dumps(self._serialize_topics_config(topics_config_dict))
         await self.resources.redis.hset(
-            RedisKeys.session_config(self.user_name),
+            RedisKeys.project_topic_config(self.user_name),
             project_id,
             topics_json,
         )
@@ -219,6 +408,27 @@ class ProjectManager:
         self, project_id: str, initial_topics_config: Optional[dict] = None
     ) -> ProjectState:
         """Get an existing ProjectState or bootstrap a new one."""
+        async with self._maintenance_lock:
+            return await self._get_or_start_project(
+                project_id,
+                initial_topics_config=initial_topics_config,
+            )
+
+    async def _get_or_start_project(
+        self, project_id: str, initial_topics_config: Optional[dict] = None
+    ) -> ProjectState:
+        project = await self.get_project(project_id)
+        if project is None:
+            raise ValueError(
+                f"Project '{project_id}' does not exist; "
+                "create it before starting project runtime"
+            )
+        if project["status"] != ProjectStatus.ACTIVE.value:
+            raise ValueError(
+                f"Project '{project_id}' is {project['status']} and cannot "
+                "start project runtime"
+            )
+
         if project_id in self.active_projects:
             self.active_projects[project_id].active_runtime_sessions_count += 1
             return self.active_projects[project_id]
@@ -266,9 +476,8 @@ class ProjectManager:
             ),
         )
 
-        # Project-Level Batch Processor (for DLQ Replay)
         project_processor = BatchProcessor(
-            session_id=project_id,
+            project_id=project_id,
             redis_client=self.resources.redis,
             llm=self.resources.llm_service,
             entities=entities,
@@ -277,23 +486,16 @@ class ProjectManager:
             cpu_executor=self.resources.executor,
             user_name=self.user_name,
             topic_config=t_config,
-            get_next_ent_id=lambda: self.resources.redis.incr(
-                RedisKeys.global_next_ent_id()
-            ),
+            get_next_ent_id=self.resources.graph_client.allocate_entity_id,
             resolution_threshold=er_cfg.resolution_threshold,
+            common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
+            context_support_epsilon=er_cfg.context_support_epsilon,
+            sparse_context_verbs=er_cfg.sparse_context_verbs,
         )
 
         await self._verify_user_entity(entities)
 
-        # Scheduler & Background Jobs
-        # Project background jobs use the scheduler's session_id field as a
-        # project scope id because their Redis queues are project-scoped.
-        scheduler = Scheduler(
-            self.user_name,
-            project_id,
-            self.resources.redis,
-            project_id=project_id,
-        )
+        scheduler = Scheduler(self.user_name, project_id, self.resources.redis)
         profile_job = self._init_profile_job(entities)
         merge_job = self._init_merge_job(entities, t_config)
 
@@ -306,6 +508,7 @@ class ProjectManager:
             user_name=self.user_name,
             redis_client=self.resources.redis,
             readable_project_ids=readable_project_ids,
+            batch_processor=project_processor,
         )
         project_state.profile_job = profile_job
         project_state.merge_job = merge_job
@@ -318,30 +521,75 @@ class ProjectManager:
 
         return project_state
 
+    async def rebuild_project_search_indexes(self, project_id: str) -> Dict[str, int]:
+        async with self._maintenance_lock:
+            project = await self.get_project(project_id)
+            if project is None:
+                raise ValueError(f"Project '{project_id}' does not exist")
+
+            active_runtime_projects = [
+                active_id
+                for active_id, state in self.active_projects.items()
+                if state.active_runtime_sessions_count > 0
+            ]
+            if active_runtime_projects:
+                raise RuntimeError(
+                    "Search index repair requires all project runtimes to be "
+                    f"inactive; active projects: {active_runtime_projects}"
+                )
+
+            stored_projects = await self.resources.redis.hgetall(
+                RedisKeys.projects(self.user_name)
+            )
+            retained_statuses = {
+                ProjectStatus.ACTIVE.value,
+                ProjectStatus.ARCHIVED.value,
+            }
+            identity_project_ids = sorted(
+                stored_id
+                for stored_id, raw in stored_projects.items()
+                if safe_json_loads(raw, {}).get("status") in retained_statuses
+            )
+            return await self.resources.graph_client.rebuild_project_search_indexes(
+                project_id,
+                self.user_name,
+                identity_project_ids,
+            )
+
     async def release_project(self, project_id: str):
         """Release runtime project state when an active session closes."""
-        if project_id not in self.active_projects:
-            return
+        async with self._maintenance_lock:
+            if project_id not in self.active_projects:
+                return
 
-        state = self.active_projects[project_id]
-        state.active_runtime_sessions_count -= 1
+            state = self.active_projects[project_id]
+            state.active_runtime_sessions_count -= 1
 
-        if state.active_runtime_sessions_count <= 0:
-            await state.shutdown()
-            del self.active_projects[project_id]
-            logger.info(f"Released ProjectState for project_id: {project_id}")
+            if state.active_runtime_sessions_count <= 0:
+                await state.shutdown()
+                del self.active_projects[project_id]
+                logger.info(f"Released ProjectState for project_id: {project_id}")
 
     async def _verify_user_entity(self, entities: EntityManager) -> None:
         user_id = await entities.get_id(self.user_name)
-        if user_id is not None:
-            logger.info(f"User entity verified: {self.user_name} (id={user_id})")
+        if user_id != IDENTITY_ENTITY_ID:
+            raise RuntimeError(
+                f"Configured user '{self.user_name}' did not resolve to reserved "
+                f"entity ID {IDENTITY_ENTITY_ID}"
+            )
+        logger.info(
+            f"User entity verified: {self.user_name} (id={IDENTITY_ENTITY_ID})"
+        )
+
+    async def _ensure_identity_invariant(self) -> None:
+        if self._identity_initialized:
             return
 
-        logger.info(f"User entity not found, creating: {self.user_name}")
-        new_id = await self.resources.redis.incr(RedisKeys.global_next_ent_id())
-        await entities.register_entity(
-            new_id, self.user_name, [self.user_name], "person", "Identity"
+        await self.resources.graph_client.ensure_identity_entity(
+            self.user_name,
+            getattr(self.config, "user_aliases", []),
         )
+        self._identity_initialized = True
 
     def _init_profile_job(self, entities: EntityManager) -> ProfileRefinementJob:
         jobs_cfg = self.dev_settings.jobs
@@ -402,11 +650,13 @@ class ProjectManager:
         config_mgr = ConfigManager.get()
 
         async def _dlq_write_callback(result):
+            if not result.scope or not result.scope.session_id:
+                return False, "DLQ graph replay missing source session_id"
             return await write_batch_callback(
                 result,
                 graph_client=self.resources.graph_client,
                 entities=entities,
-                session_id=project_id,
+                session_id=result.scope.session_id,
                 project_id=project_id,
                 user_name=self.user_name,
                 redis_client=self.resources.redis,
@@ -430,9 +680,13 @@ class ProjectManager:
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(_global_topics_updated_cb, "default_topics")
         )
+        def _entity_resolution_updated(config):
+            entities.update_settings(config)
+            processor.update_settings(config)
+
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(
-                entities.update_settings, "developer_settings.entity_resolution"
+                _entity_resolution_updated, "developer_settings.entity_resolution"
             )
         )
         project_state.add_config_unsubscriber(
@@ -507,6 +761,7 @@ class ProjectManager:
             topic_config=topic_config,
             update_callback=_update_topics_callback,
             redis_client=self.resources.redis,
+            graph_client=self.resources.graph_client,
             interval_msgs=topic_cfg.interval_msgs,
             conversation_window=topic_cfg.conversation_window,
         )

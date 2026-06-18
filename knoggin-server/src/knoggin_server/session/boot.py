@@ -4,26 +4,13 @@ from typing import Callable, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.conf.topics_config import TopicConfig
 from common.utils.events import DebugEventEmitter
-from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
 from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
-from knoggin_server.ingestion.services.processor import TextProcessor
-from knoggin_server.knowledge.services.entity_service import EntityManager
 from knoggin_server.knowledge.services.file_rag import FileRAGService
 from knoggin_server.project.state import ProjectState
 from knoggin_server.session.context import Context
-
-LUA_SYNC_COUNTER_SCRIPT = """
-local current = tonumber(redis.call('GET', KEYS[1])) or 0
-local proposed = tonumber(ARGV[1])
-if proposed > current then
-    redis.call('SET', KEYS[1], ARGV[1])
-end
-"""
-
 
 class SessionAssembler:
     """
@@ -66,8 +53,6 @@ class SessionAssembler:
         """
         session_id = session_id or str(uuid.uuid4())
 
-        await self._sync_entity_counters()
-
         # Instantiate Context shell first
         ctx = Context(
             self.user_name,
@@ -79,14 +64,11 @@ class SessionAssembler:
         ctx.project = project_state
         ctx.model = model
 
-        # Initialize Batch Processor
-        processor = self._init_batch_processor(
-            session_id,
-            project_state.entities,
-            project_state.pipeline,
-            project_state.topic_config,
-        )
-        processor.get_next_ent_id = ctx.get_next_ent_id
+        # Use the project-owned processor so config updates and background jobs
+        # share the same ingestion runtime as session consumers.
+        processor = project_state.batch_processor
+        if processor is None:
+            raise RuntimeError("project_state.batch_processor not wired")
         ctx.batch_processor = processor
 
         # Initialize Batch Consumer with direct callbacks
@@ -133,33 +115,6 @@ class SessionAssembler:
             ctx.consumer.start()
 
         logger.info(f"System launched successfully for session {ctx.session_id}")
-
-    async def _sync_entity_counters(self):
-        max_id = (await self.resources.graph_client.get_max_entity_id()) or 0
-        await self.resources.redis.eval(
-            LUA_SYNC_COUNTER_SCRIPT, 1, RedisKeys.global_next_ent_id(), max_id
-        )
-
-    def _init_batch_processor(
-        self,
-        session_id: str,
-        entities: EntityManager,
-        pipeline: TextProcessor,
-        topic_config: TopicConfig,
-    ) -> BatchProcessor:
-        er_cfg = self.dev_settings.entity_resolution
-        return BatchProcessor(
-            session_id=session_id,
-            redis_client=self.resources.redis,
-            llm=self.resources.llm_service,
-            entities=entities,
-            processor=pipeline,
-            cpu_executor=self.resources.executor,
-            user_name=self.user_name,
-            topic_config=topic_config,
-            get_next_ent_id=None,
-            resolution_threshold=er_cfg.resolution_threshold,
-        )
 
     def _init_batch_consumer(
         self,

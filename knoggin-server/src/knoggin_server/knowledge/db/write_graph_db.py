@@ -100,6 +100,9 @@ async def build_graph_mutation_plan(
     entity_writes = []
 
     async def build_entity_write(entity_id: int) -> Optional[EntityWrite]:
+        if entity_id == IDENTITY_ENTITY_ID:
+            return None
+
         profile = entities.entity_profiles.get(entity_id)
         if not profile:
             return None
@@ -107,6 +110,7 @@ async def build_graph_mutation_plan(
         embedding = await entities.get_embedding_for_id(entity_id)
         return EntityWrite(
             id=entity_id,
+            is_new=entity_id in new_entity_ids,
             canonical_name=profile["canonical_name"],
             type=profile.get("type", ""),
             confidence=1.0,
@@ -309,7 +313,6 @@ async def execute_graph_mutation_plan(
         await graph_client.update_entity_aliases(
             alias_update_map, project_id=plan.scope.project_id
         )
-        logger.info(f"Persisted alias updates for {len(alias_update_map)} entities")
 
     entity_payloads, relationship_payloads = plan.to_graph_payloads()
     if entity_payloads or relationship_payloads:
@@ -324,7 +327,9 @@ async def execute_graph_mutation_plan(
             dirty_key, *[str(entity_id) for entity_id in plan.dirty_entity_ids]
         )
         await redis_client.delete(
-            RedisKeys.profile_complete(plan.scope.user_name, plan.scope.project_id)
+            RedisKeys.project_profile_complete(
+                plan.scope.user_name, plan.scope.project_id
+            )
         )
         dirty_count = len(plan.dirty_entity_ids)
 

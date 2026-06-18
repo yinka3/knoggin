@@ -25,6 +25,20 @@ def session_manager():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_create_session_requires_project_id_without_side_effects(
+    session_manager,
+):
+    manager, _, project_manager, active_sessions = session_manager
+
+    with pytest.raises(ValueError, match="requires a project_id"):
+        await manager.create_session(project_id="")
+
+    assert project_manager.acquire_calls == []
+    assert active_sessions == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_create_session_stores_metadata_and_active_context(
     monkeypatch, session_manager
 ):
@@ -46,6 +60,7 @@ async def test_create_session_stores_metadata_and_active_context(
     assert ctx.session_id in active_sessions
     assert active_sessions[ctx.session_id] is ctx
     assert project_manager.acquire_calls == [("project-1", ctx.session_id)]
+    assert project_manager.acquire_topic_configs == [{"General": {"active": True}}]
 
     raw = await resources.redis.hget(RedisKeys.sessions("ada"), ctx.session_id)
     metadata = json.loads(raw)
@@ -53,7 +68,7 @@ async def test_create_session_stores_metadata_and_active_context(
     assert metadata["model"] == "test-model"
     assert metadata["agent_id"] == "agent-1"
     assert metadata["enabled_tools"] == ["search"]
-    assert metadata["topics_config"] == {"General": {"active": True}}
+    assert "topics_config" not in metadata
 
 
 @pytest.mark.runtime
@@ -107,6 +122,23 @@ async def test_resume_session_uses_persisted_project_and_updates_last_active(
         await resources.redis.hget(RedisKeys.sessions("ada"), "session-1")
     )
     assert metadata["last_active"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_resume_session_without_project_id_is_rejected(session_manager):
+    manager, resources, project_manager, active_sessions = session_manager
+    await resources.redis.hset(
+        RedisKeys.sessions("ada"),
+        "session-1",
+        json.dumps({"model": "legacy-model"}),
+    )
+
+    with pytest.raises(ValueError, match="has no valid project_id"):
+        await manager.get_or_resume_session("session-1")
+
+    assert project_manager.acquire_calls == []
+    assert active_sessions == {}
 
 
 @pytest.mark.runtime

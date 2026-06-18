@@ -1,7 +1,6 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -9,6 +8,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.utils.events import DebugEventEmitter
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now_iso
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.services.file_rag import FileRAGService
 from knoggin_server.project.project_manager import ProjectManager
@@ -30,12 +30,6 @@ class SessionManager:
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
-    def _serialize_topics_config(self, topics_config: dict) -> dict:
-        return {
-            name: cfg.model_dump() if hasattr(cfg, "model_dump") else cfg
-            for name, cfg in topics_config.items()
-        }
-
     async def list_sessions(self) -> Dict[str, dict]:
         try:
             raw = await self.resources.redis.hgetall(RedisKeys.sessions(self.user_name))
@@ -51,12 +45,17 @@ class SessionManager:
 
     async def create_session(
         self,
+        project_id: str,
         topics_config: Optional[dict] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
-        project_id: Optional[str] = None,
     ) -> Context:
+        if not project_id or not project_id.strip():
+            raise ValueError(
+                "create_session requires a project_id from an existing project"
+            )
+
         session_id = str(uuid.uuid4())
 
         if topics_config is None:
@@ -64,9 +63,8 @@ class SessionManager:
             topics_config = config.default_topics
 
         async with self._lock:
-            actual_project_id = project_id or "global"
             project_state = await self.project_manager.acquire_project_for_session(
-                actual_project_id, session_id, topics_config=topics_config
+                project_id, session_id, topics_config=topics_config
             )
 
             try:
@@ -78,18 +76,18 @@ class SessionManager:
                     project_state=project_state,
                 )
             except Exception:
-                await self.project_manager.remove_session(actual_project_id, session_id)
-                await self.project_manager.release_project(actual_project_id)
+                await self.project_manager.remove_session(project_id, session_id)
+                await self.project_manager.release_project(project_id)
                 raise
 
+            now = get_now_iso()
             metadata = {
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "topics_config": self._serialize_topics_config(topics_config),
-                "last_active": datetime.now(timezone.utc).isoformat(),
+                "created_at": now,
+                "last_active": now,
                 "model": model,
                 "agent_id": agent_id,
                 "enabled_tools": enabled_tools,
-                "project_id": actual_project_id,
+                "project_id": project_id,
             }
 
             await self.resources.redis.hset(
@@ -122,9 +120,14 @@ class SessionManager:
             if not metadata:
                 return None
 
-            actual_project_id = metadata.get("project_id") or "global"
+            project_id = metadata.get("project_id")
+            if not isinstance(project_id, str) or not project_id.strip():
+                raise ValueError(
+                    f"Session '{session_id}' has no valid project_id and cannot resume"
+                )
+
             project_state = await self.project_manager.acquire_project_for_session(
-                actual_project_id, session_id
+                project_id, session_id
             )
 
             try:
@@ -136,12 +139,12 @@ class SessionManager:
                     project_state=project_state,
                 )
             except Exception:
-                await self.project_manager.release_project(actual_project_id)
+                await self.project_manager.release_project(project_id)
                 raise
 
             self.active_sessions[session_id] = context
 
-            metadata["last_active"] = datetime.now(timezone.utc).isoformat()
+            metadata["last_active"] = get_now_iso()
             await self.resources.redis.hset(
                 RedisKeys.sessions(self.user_name), session_id, json.dumps(metadata)
             )
@@ -163,7 +166,9 @@ class SessionManager:
                 if hasattr(context, "shutdown"):
                     await context.shutdown()
             finally:
-                DebugEventEmitter.get().unregister_session(context.project_id, session_id)
+                DebugEventEmitter.get().unregister_session(
+                    context.project_id, session_id
+                )
                 await self.project_manager.release_project(context.project_id)
         elif hasattr(context, "shutdown"):
             await context.shutdown()
@@ -174,7 +179,7 @@ class SessionManager:
         if raw:
             metadata = safe_json_loads(raw, {})
             if metadata:
-                metadata["last_active"] = datetime.now(timezone.utc).isoformat()
+                metadata["last_active"] = get_now_iso()
                 await self.resources.redis.hset(
                     RedisKeys.sessions(self.user_name), session_id, json.dumps(metadata)
                 )
@@ -226,7 +231,7 @@ class SessionManager:
         if raw_metadata:
             metadata = safe_json_loads(raw_metadata, {})
             if metadata:
-                project_id = metadata.get("project_id") or "global"
+                project_id = metadata.get("project_id")
 
         if not project_id and session_id in self.active_sessions:
             project_id = self.active_sessions[session_id].project_id
@@ -254,15 +259,9 @@ class SessionManager:
             )
             temp_rag.cleanup_session()
 
-        job_names = ["cleaner", "profile", "merger", "dlq", "archival"]
-        for job in job_names:
-            direct_keys.append(RedisKeys.job_last_run(job, user, session_id))
-            direct_keys.append(RedisKeys.job_pending(user, session_id, job))
-
         if direct_keys:
             deleted += await redis.delete(*direct_keys)
 
-        await redis.hdel(RedisKeys.session_config(user), session_id)
         await redis.hdel(RedisKeys.sessions(user), session_id)
         if project_id:
             await self.project_manager.remove_session(project_id, session_id)

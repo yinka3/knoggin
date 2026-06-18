@@ -14,6 +14,7 @@ class AgentRunConfig:
     max_history_turns: int = 7
     max_accumulated_messages: int = 30
     max_consecutive_errors: int = 3
+    empty_result_replan_threshold: int = 3
     tool_timeout: float = 30.0
     tool_limits: Tuple[Tuple[str, int], ...] = (
         ("search_messages", 6),
@@ -50,6 +51,7 @@ class AgentState:
     call_count: int = 0
     attempt_count: int = 0
     consecutive_errors: int = 0
+    consecutive_empty_results: int = 0
     tools_used: List[str] = field(default_factory=list)
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     last_error: Optional[str] = None

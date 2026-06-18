@@ -1,8 +1,7 @@
-import time
-
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.utils.time_utils import get_now_unix
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.community.community_manager import CommunityManager
@@ -37,7 +36,7 @@ class AACJob(BaseJob):
             return True
 
         try:
-            elapsed = time.time() - float(last_run)
+            elapsed = get_now_unix() - float(last_run)
         except (ValueError, TypeError):
             return True
         return elapsed >= (interval_min * 60)
@@ -57,7 +56,7 @@ class AACJob(BaseJob):
             last_run_key = RedisKeys.job_last_run(
                     self.name, ctx.user_name, self.project_state.project_id
                 )
-            await self.resources.redis.set(last_run_key, time.time())
+            await self.resources.redis.set(last_run_key, get_now_unix())
 
             return JobResult(success=True, summary="Discussion triggered")
         except Exception as e:

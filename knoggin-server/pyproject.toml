@@ -41,6 +41,7 @@ dependencies = [
     "ddgs>=9.11.3",
     "instructor>=1.14.5",
     "pyyaml>=6.0.3",
+    "ruff>=0.15.12",
 ]
 
 [project.optional-dependencies]
@@ -69,6 +70,10 @@ en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/dow
 pythonpath = ["src", "."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+]
 markers = [
     "unit: pure or mostly pure fast tests",
     "smoke: package and import boundary checks",

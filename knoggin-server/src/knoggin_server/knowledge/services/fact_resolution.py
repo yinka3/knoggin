@@ -1,6 +1,6 @@
 import uuid
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 from loguru import logger
@@ -11,8 +11,8 @@ from common.schema.contracts import (
     FactResolutionSummary,
 )
 from common.schema.primitives import FactRecord
-from common.utils.data_utils import extract_fact_with_source
 from common.utils.events import emit
+from common.utils.time_utils import get_now
 from infrastructure.graph_client import GraphClient
 from infrastructure.llm_client import LLMService
 from knoggin_server.agent.prompts import get_contradiction_judgment_prompt
@@ -45,12 +45,13 @@ class FactResolutionUtils:
         contradiction_prompt: Optional[str] = None,
         user_name: Optional[str] = None,
         project_id: Optional[str] = None,
+        source_session_by_msg_id: Optional[Mapping[int, str]] = None,
     ) -> FactResolutionSummary:
         """
         Invalidate old facts and create new ones. Creates first, invalidates after.
         Returns the final set of active facts.
         """
-        now = datetime.now(timezone.utc)
+        now = get_now()
 
         to_invalidate = set(merge_result.to_invalidate)
         contradicted_fact_ids = set()
@@ -64,7 +65,7 @@ class FactResolutionUtils:
         facts_to_create = []
 
         for fact_update in merge_result.new_contents:
-            content, msg_id = extract_fact_with_source(fact_update)
+            content, msg_id = fact_update.content, fact_update.source_msg_id
 
             if (
                 msg_id is not None
@@ -82,6 +83,17 @@ class FactResolutionUtils:
                 )
                 invalid_source_msg_ids.append(msg_id)
                 msg_id = None
+
+            source_session_id = None
+            if msg_id is not None and source_session_by_msg_id is not None:
+                source_session_id = source_session_by_msg_id.get(msg_id)
+                if not source_session_id:
+                    logger.warning(
+                        f"[{session_id}] FactResolutionUtils: "
+                        f"No source session found for valid msg_id {msg_id}"
+                    )
+                    invalid_source_msg_ids.append(msg_id)
+                    msg_id = None
 
             embedding = await embedding_service.encode_single(content)
 
@@ -112,6 +124,8 @@ class FactResolutionUtils:
                 content=content,
                 valid_at=now,
                 source_msg_id=msg_id,
+                source_user_name=user_name if source_session_id else None,
+                source_session_id=source_session_id,
                 embedding=embedding,
                 source_entity_id=entity_id,
             )
@@ -120,11 +134,14 @@ class FactResolutionUtils:
 
         if facts_to_create:
             try:
+                fallback_session_id = (
+                    None if source_session_by_msg_id is not None else session_id
+                )
                 count = await graph_client.create_facts_batch(
                     entity_id,
                     facts_to_create,
                     user_name=user_name,
-                    session_id=session_id,
+                    session_id=fallback_session_id,
                     project_id=project_id,
                 )
                 logger.debug(f"Created {count} facts for entity {entity_id}")

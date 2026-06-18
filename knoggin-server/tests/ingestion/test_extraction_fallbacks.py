@@ -27,7 +27,7 @@ class FakeEntities:
 
 def make_processor(llm_response):
     return BatchProcessor(
-        session_id="session-1",
+        project_id="project-1",
         redis_client=None,
         llm=FakeLLM(llm_response),
         entities=FakeEntities(),
@@ -71,6 +71,7 @@ async def test_connection_extraction_falls_back_to_empty_on_llm_failure():
         entity_msg_map={1: [7], 2: [7]},
         messages=[{"id": 7, "message": "Alice met Bob."}],
         session_text="",
+        session_id="session-1",
     )
 
     assert result == ([], [])
@@ -99,6 +100,7 @@ async def test_connection_extraction_keeps_valid_connections():
         entity_msg_map={1: [7], 2: [7]},
         messages=[{"id": 7, "message": "Alice met Bob."}],
         session_text="",
+        session_id="session-1",
     )
 
     assert result == ([

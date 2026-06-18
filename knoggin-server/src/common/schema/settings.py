@@ -19,6 +19,42 @@ class TopicSchema(BaseModel):
     aliases: List[str] = Field(default_factory=list)
 
 
+DEFAULT_SPARSE_CONTEXT_VERBS = [
+    "accepted",
+    "acknowledged",
+    "added",
+    "agreed",
+    "answered",
+    "approved",
+    "asked",
+    "called",
+    "checked",
+    "confirmed",
+    "did",
+    "emailed",
+    "forwarded",
+    "liked",
+    "mentioned",
+    "messaged",
+    "noted",
+    "okayed",
+    "pinged",
+    "reacted",
+    "replied",
+    "responded",
+    "said",
+    "sent",
+    "shared",
+    "signed",
+    "submitted",
+    "texted",
+    "told",
+    "updated",
+    "wrote",
+    "yes",
+]
+
+
 
 
 class IngestionSettings(BaseModel):
@@ -138,6 +174,11 @@ class EntityResolutionSettings(BaseModel):
     candidate_fuzzy_threshold: int = Field(85, ge=50, le=100)
     candidate_vector_threshold: float = Field(0.85, ge=0.0, le=1.0)
     resolution_threshold: float = Field(0.85, ge=0.0, le=1.0)
+    common_word_frequency_threshold: float = Field(1e-5, ge=0.0)
+    context_support_epsilon: float = Field(1e-6, ge=0.0)
+    sparse_context_verbs: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_SPARSE_CONTEXT_VERBS)
+    )
 
 
 class LLMSettings(BaseModel):
@@ -248,7 +289,9 @@ class RootConfig(BaseModel):
     default_topics: Dict[str, TopicSchema] = Field(
         default_factory=lambda: {
             "General": TopicSchema(active=True, labels=[], hierarchy={}, aliases=[]),
-            "Identity": TopicSchema(active=True, labels=["person"], hierarchy={}, aliases=[]),
+            "Identity": TopicSchema(
+                active=True, labels=["person"], hierarchy={}, aliases=[]
+            ),
         }
     )
     developer_settings: DeveloperSettings = Field(default_factory=DeveloperSettings)

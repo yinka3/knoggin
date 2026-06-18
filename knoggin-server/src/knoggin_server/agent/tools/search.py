@@ -253,12 +253,16 @@ class SearchTools:
 
         results = {}
 
-        visible_session_ids = await self._get_visible_session_ids()
+        project_ids = getattr(self, "readable_project_ids", None)
+        visible_session_ids = None
+        if not project_ids:
+            visible_session_ids = await self._get_visible_session_ids()
         fts_results = await self.graph_client.search_messages_fts(
             query,
             fts_limit,
             user_name=self.user_name,
             session_ids=visible_session_ids,
+            project_ids=project_ids,
         )
 
         max_fts = max([s for _, s, _ in fts_results], default=1.0) or 1.0
@@ -355,14 +359,10 @@ class SearchTools:
 
     @staticmethod
     def _format_message_id(msg_id) -> str:
-        """Format an ID as a string for message/turn reference."""
+        """Format a canonical message ID."""
         if isinstance(msg_id, str):
             return msg_id
-        return (
-            f"msg_{msg_id}"
-            if msg_id < 1_000_000_000
-            else f"turn_{msg_id - 1_000_000_000}"
-        )
+        return f"msg_{msg_id}"
 
     @staticmethod
     def _parse_message_ref_id(raw_id) -> int:
@@ -370,7 +370,7 @@ class SearchTools:
             if raw_id.startswith("msg_"):
                 return int(raw_id.split("_", 1)[1])
             if raw_id.startswith("turn_"):
-                return int(raw_id.split("_", 1)[1]) + 1_000_000_000
+                raise ValueError("Conversation turn IDs are not canonical message IDs")
         return int(raw_id)
 
     async def _hydrate_evidence(
@@ -456,10 +456,7 @@ class SearchTools:
                         message["timestamp"] / 1000.0, timezone.utc
                     ).isoformat()
 
-                if message["id"] >= 1_000_000_000:
-                    str_id = f"turn_{message['id'] - 1_000_000_000}"
-                else:
-                    str_id = f"msg_{message['id']}"
+                str_id = f"msg_{message['id']}"
 
                 for idx, item in normalized_by_idx.items():
                     if (

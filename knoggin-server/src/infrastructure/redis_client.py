@@ -164,6 +164,35 @@ class AsyncRedisClient:
         await pipe.execute()
 
     @classmethod
+    async def delete_message_turn(
+        cls,
+        user_name: str,
+        session_id: str,
+        msg_id: int,
+        turn_id: int,
+    ) -> None:
+        """Remove all staged Redis state for a failed canonical message."""
+        redis = await cls.get_instance()
+        pipe = redis.pipeline()
+        pipe.hdel(
+            RedisKeys.conversation(user_name, session_id),
+            str(turn_id),
+        )
+        pipe.zrem(
+            RedisKeys.recent_conversation(user_name, session_id),
+            str(turn_id),
+        )
+        pipe.hdel(
+            RedisKeys.msg_to_turn_lookup(user_name, session_id),
+            str(msg_id),
+        )
+        pipe.hdel(
+            RedisKeys.message_content(user_name, session_id),
+            f"msg_{msg_id}",
+        )
+        await pipe.execute()
+
+    @classmethod
     async def refresh_session_ttls(cls, user_name: str, session_id: str, ttl: int):
         """Refreshes TTLs for all session-scoped keys in a single pipeline."""
         redis = await cls.get_instance()
@@ -219,7 +248,7 @@ class AsyncRedisClient:
 
 
 class RedisKeys:
-    """Centralized Redis key patterns - session-scoped by default."""
+    """Centralized Redis key patterns for explicit project and session scopes."""
 
     @staticmethod
     def projects(user: str) -> str:
@@ -256,8 +285,28 @@ class RedisKeys:
         return f"last_profile_update:{user}:{project_id}:{entity_id}"
 
     @staticmethod
-    def profile_complete(user: str, session_id: str) -> str:
-        return f"profile_complete:{user}:{session_id}"
+    def project_profile_complete(user: str, project_id: str) -> str:
+        return f"project_profile_complete:{user}:{project_id}"
+
+    @staticmethod
+    def project_user_profile_ran(user: str, project_id: str) -> str:
+        return f"project_user_profile_ran:{user}:{project_id}"
+
+    @staticmethod
+    def project_last_processed(user: str, project_id: str) -> str:
+        return f"project_last_processed_msg:{user}:{project_id}"
+
+    @staticmethod
+    def project_last_activity(user: str, project_id: str) -> str:
+        return f"project_last_activity:{user}:{project_id}"
+
+    @staticmethod
+    def project_heartbeat_counter(user: str, project_id: str) -> str:
+        return f"project_heartbeat_counter:{user}:{project_id}"
+
+    @staticmethod
+    def project_topic_config(user: str) -> str:
+        return f"project_topic_config:{user}"
 
     @staticmethod
     def get_session_scoped_keys(user: str, session: str) -> list[str]:
@@ -267,13 +316,11 @@ class RedisKeys:
             RedisKeys.buffer(user, session),
             RedisKeys.checkpoint(user, session),
             RedisKeys.message_content(user, session),
-            RedisKeys.profile_complete(user, session),
             RedisKeys.last_processed(user, session),
             RedisKeys.conversation(user, session),
             RedisKeys.recent_conversation(user, session),
             RedisKeys.msg_to_turn_lookup(user, session),
             RedisKeys.last_activity(user, session),
-            RedisKeys.user_profile_ran(user, session),
             RedisKeys.heartbeat_counter(user, session),
         ]
 
@@ -318,26 +365,22 @@ class RedisKeys:
         return f"merge_undo:{session}:{primary_id}:{secondary_id}"
 
     @staticmethod
-    def user_profile_ran(user: str, session: str) -> str:
-        return f"user_profile_ran:{user}:{session}"
-
-    @staticmethod
     def merge_intent(
-        user: str, session: str, primary_id: int, secondary_id: int
+        user: str, project_id: str, primary_id: int, secondary_id: int
     ) -> str:
-        return f"merge_intent:{user}:{session}:{primary_id}:{secondary_id}"
+        return f"merge_intent:{user}:{project_id}:{primary_id}:{secondary_id}"
 
     @staticmethod
-    def merge_intents_index(user: str, session: str) -> str:
-        return f"merge_intents_index:{user}:{session}"
+    def merge_intents_index(user: str, project_id: str) -> str:
+        return f"merge_intents_index:{user}:{project_id}"
 
     @staticmethod
-    def job_last_run(job_name: str, user: str, session: str) -> str:
-        return f"last_run:{job_name}:{user}:{session}"
+    def job_last_run(job_name: str, user: str, project_id: str) -> str:
+        return f"last_run:{job_name}:{user}:{project_id}"
 
     @staticmethod
-    def job_pending(user: str, session: str, job_name: str) -> str:
-        return f"pending:{user}:{session}:{job_name}"
+    def job_pending(user: str, project_id: str, job_name: str) -> str:
+        return f"pending:{user}:{project_id}:{job_name}"
 
     @staticmethod
     def agent_memory(user: str, session: str, topic: str) -> str:
@@ -348,20 +391,8 @@ class RedisKeys:
         return f"heartbeat_counter:{user}:{session}"
 
     @staticmethod
-    def global_next_msg_id() -> str:
-        return "global:next_msg_id"
-
-    @staticmethod
-    def global_next_ent_id() -> str:
-        return "global:next_ent_id"
-
-    @staticmethod
     def sessions(user: str) -> str:
         return f"sessions:{user}"
-
-    @staticmethod
-    def session_config(user: str) -> str:
-        return f"session_config:{user}"
 
     @staticmethod
     def agents_default(user: str) -> str:

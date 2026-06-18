@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -7,7 +8,6 @@ from typing import Dict, List, Optional, Tuple
 from cachetools import LRUCache, TTLCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
-from redis import asyncio
 
 from common.schema.primitives import FactRecord
 from common.schema.settings import EntityResolutionSettings
@@ -16,6 +16,9 @@ from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
 from infrastructure.graph_client import GraphClient
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
+from knoggin_server.knowledge.services.entity_embedding import (
+    build_entity_embedding_text,
+)
 
 
 class EntityManager:
@@ -65,11 +68,14 @@ class EntityManager:
         self.candidate_vector_threshold = config.candidate_vector_threshold
 
         logger.info(
-            f"EntityManager settings updated: sub={self.fuzzy_substring_threshold}, non-sub={self.fuzzy_non_substring_threshold}, freq={self.generic_token_freq}"
+            "EntityManager settings updated: "
+            f"sub={self.fuzzy_substring_threshold}, "
+            f"non-sub={self.fuzzy_non_substring_threshold}, "
+            f"freq={self.generic_token_freq}"
         )
 
     def _populate_cache(self, entity: dict) -> dict:
-        """Shared helper to hydrate internal indexes from a GraphClient entity record."""
+        """Hydrate internal indexes from a GraphClient entity record."""
         eid = entity["id"]
         canonical = entity.get("canonical_name")
 
@@ -212,14 +218,22 @@ class EntityManager:
             if entity_id not in self.entity_profiles:
                 return
             for mention in aliases:
-                self._name_to_id[mention.lower()] = entity_id
+                mention_lower = mention.lower()
+                existing_id = self._name_to_id.get(mention_lower)
+                if existing_id and existing_id != entity_id:
+                    logger.warning(
+                        f"Alias collision: '{mention}' belongs to {existing_id}, "
+                        f"skipping for {entity_id}"
+                    )
+                    continue
+                self._name_to_id[mention_lower] = entity_id
                 if entity_id not in self._id_to_names:
                     self._id_to_names[entity_id] = set()
-                self._id_to_names[entity_id].add(mention.lower())
+                self._id_to_names[entity_id].add(mention_lower)
 
     @cached(cache=TTLCache(maxsize=1, ttl=300))
     def _build_generic_tokens(self) -> set:
-        """Tokens appearing in N+ distinct entities are generic. Cached for 5 minutes."""
+        """Tokens appearing in N+ distinct entities are generic."""
         token_to_entities = defaultdict(set)
 
         with self._lock:
@@ -317,21 +331,13 @@ class EntityManager:
         topic: str,
         session_id: str = None,
         project_id: str = None,
-        source_context: str = None,
     ) -> List[float]:
         """
         Register new entity: update all indexes and return embedding.
         """
 
         project_id = project_id or self.project_id
-        text_to_embed = None
-        if source_context:
-            text_to_embed = (
-                f"{canonical_name} ({entity_type}). Context: {source_context}"
-            )
-        else:
-            text_to_embed = f"{canonical_name} ({entity_type})"
-
+        text_to_embed = build_entity_embedding_text(canonical_name, entity_type)
         embedding = await self.embedding_service.encode_single(text_to_embed)
 
         with self._lock:
@@ -357,7 +363,8 @@ class EntityManager:
                 existing_id = self._name_to_id.get(mention_lower)
                 if existing_id and existing_id != entity_id:
                     logger.warning(
-                        f"Alias collision: '{mention}' belongs to {existing_id}, skipping for {entity_id}"
+                        f"Alias collision: '{mention}' belongs to {existing_id}, "
+                        f"skipping for {entity_id}"
                     )
                     continue
                 self._name_to_id[mention_lower] = entity_id
@@ -386,8 +393,13 @@ class EntityManager:
 
         return embedding
 
-    def merge_into(self, primary_id: int, secondary_id: int):
-        """Transfer secondary entity's aliases to primary, remove secondary from indexes."""
+    def merge_into(
+        self,
+        primary_id: int,
+        secondary_id: int,
+        primary_profile_updates: dict = None,
+    ):
+        """Transfer secondary aliases to primary and remove secondary indexes."""
         with self._lock:
             secondary_aliases = list(self._id_to_names.get(secondary_id, set()))
 
@@ -399,11 +411,15 @@ class EntityManager:
                 self._id_to_names[primary_id] = set()
             self._id_to_names[primary_id].update(secondary_names)
 
+            if primary_profile_updates and primary_id in self.entity_profiles:
+                self.entity_profiles[primary_id].update(primary_profile_updates)
+
             if secondary_id in self.entity_profiles:
                 del self.entity_profiles[secondary_id]
 
             logger.info(
-                f"Merged entity {secondary_id} into {primary_id}, transferred {len(secondary_aliases)} aliases"
+                f"Merged entity {secondary_id} into {primary_id}, "
+                f"transferred {len(secondary_aliases)} aliases"
             )
             emit_sync(
                 self.project_id,
@@ -457,7 +473,7 @@ class EntityManager:
 
     async def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
         """Detect potential entity merges using vector search + fuzzy matching."""
-        # Note: with lazy loading, we scan what's in memory or what's specifically passed.
+        # With lazy loading, scan memory or the specifically passed IDs.
         # If dirty_ids is None, we scan the current memory cache.
         with self._lock:
             scan_targets = dirty_ids if dirty_ids else list(self.entity_profiles.keys())
@@ -467,7 +483,8 @@ class EntityManager:
             return []
 
         logger.info(
-            f"Merge detection started. Scanning {len(scan_targets)} entities against graph."
+            "Merge detection started. "
+            f"Scanning {len(scan_targets)} entities against graph."
         )
 
         generic_tokens = self._build_generic_tokens()
@@ -484,13 +501,15 @@ class EntityManager:
             entity_ids.add(id_b)
 
         facts_by_entity = await self.graph_client.get_facts_for_entities(
-            list(entity_ids), active_only=True
+            sorted(entity_ids), active_only=True
         )
 
         candidates = []
-        for (id_a, id_b), fuzz_score in candidate_pairs.items():
+        for (id_a, id_b), candidate_meta in candidate_pairs.items():
+            fuzz_score = candidate_meta["fuzz_score"]
             result = await self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity)
             if result:
+                result["reasons"] = list(candidate_meta["reasons"])
                 candidates.append(result)
 
         logger.info(f"Detection complete: {len(candidates)} candidates found")
@@ -526,10 +545,10 @@ class EntityManager:
 
     async def _collect_candidate_pairs(
         self, target_ids: list, generic_tokens: set
-    ) -> Dict[Tuple[int, int], int]:
+    ) -> Dict[Tuple[int, int], dict]:
         """
         Vector search + fuzzy filter.
-        Returns {(id_a, id_b): fuzz_score}
+        Returns {(id_a, id_b): {"fuzz_score": score, "reasons": [...]}}
         """
         seen_pairs = {}
 
@@ -576,10 +595,16 @@ class EntityManager:
                         cos_sim = cosine_similarity(emb_a, emb_b)
                         if cos_sim >= 0.90:
                             logger.info(
-                                f"Cosine-first candidate: ({primary_id}, {neighbor_id}) "
-                                f"names='{primary_name}'/'{neighbor_name}' cos={cos_sim:.3f}"
+                                "Cosine-first candidate: "
+                                f"({primary_id}, {neighbor_id}) "
+                                f"names='{primary_name}'/'{neighbor_name}' "
+                                f"cos={cos_sim:.3f}"
                             )
-                            seen_pairs[pair_key] = (0, False)
+                            seen_pairs[pair_key] = {
+                                "fuzz_score": 0,
+                                "is_substring": False,
+                                "reasons": ["vector_similarity"],
+                            }
                             continue
                     continue
 
@@ -589,10 +614,23 @@ class EntityManager:
                 if not (tokens_i & tokens_j):
                     continue
 
-                if pair_key not in seen_pairs or score > seen_pairs[pair_key][0]:
-                    seen_pairs[pair_key] = (score, is_substring)
+                if (
+                    pair_key not in seen_pairs
+                    or score > seen_pairs[pair_key]["fuzz_score"]
+                ):
+                    seen_pairs[pair_key] = {
+                        "fuzz_score": score,
+                        "is_substring": is_substring,
+                        "reasons": ["name_similarity"],
+                    }
 
-        return {k: v[0] for k, v in seen_pairs.items()}
+        return {
+            pair: {
+                "fuzz_score": metadata["fuzz_score"],
+                "reasons": metadata["reasons"],
+            }
+            for pair, metadata in seen_pairs.items()
+        }
 
     async def _classify_pair(
         self,

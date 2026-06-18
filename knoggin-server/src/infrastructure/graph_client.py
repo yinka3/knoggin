@@ -6,13 +6,17 @@ from loguru import logger
 from common.schema.primitives import FactRecord
 from infrastructure.postgres_client import PostgresClient
 from knoggin_server.community.community_store import CommunityStore
+from knoggin_server.knowledge.db.id_allocator import IdAllocator
+from knoggin_server.knowledge.db.projection_rebuilder import ProjectionRebuilder
 from knoggin_server.knowledge.db.readers.entity_reader import EntityReader
 from knoggin_server.knowledge.db.readers.fact_reader import FactReader
 from knoggin_server.knowledge.db.readers.graph_reader import GraphReader
+from knoggin_server.knowledge.db.search_index_rebuilder import SearchIndexRebuilder
 from knoggin_server.knowledge.db.tool_queries import ToolQueries
 from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
 from knoggin_server.knowledge.db.writers.fact_writer import FactWriter
 from knoggin_server.knowledge.db.writers.graph_writer import GraphWriter
+from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 
 class GraphClient:
@@ -24,8 +28,9 @@ class GraphClient:
     without making each subsystem know the storage layout.
     """
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, embedding_service: EmbeddingService):
         self._postgres_client = PostgresClient(dsn=dsn)
+        self._id_allocator = IdAllocator(self._postgres_client)
         self._entity_writer = EntityWriter(self._postgres_client)
         self._fact_writer = FactWriter(self._postgres_client)
         self._graph_writer = GraphWriter(self._postgres_client)
@@ -33,6 +38,11 @@ class GraphClient:
         self._fact_reader = FactReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._tools = ToolQueries(self._postgres_client)
+        self._projection_rebuilder = ProjectionRebuilder(self._postgres_client)
+        self._search_index_rebuilder = SearchIndexRebuilder(
+            self._postgres_client,
+            embedding_service,
+        )
         self._community = CommunityStore(self._postgres_client)
         logger.info("GraphClient initialized with internal Postgres/AGE backend")
 
@@ -49,10 +59,21 @@ class GraphClient:
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         return await self._graph_writer.save_message_logs(messages)
 
+    async def allocate_entity_id(self) -> int:
+        return await self._id_allocator.allocate_entity_id()
+
+    async def allocate_message_id(self) -> int:
+        return await self._id_allocator.allocate_message_id()
+
     async def write_batch(
         self, entities: List[Dict], relationships: List[Dict]
     ) -> bool:
         return await self._entity_writer.write_batch(entities, relationships)
+
+    async def ensure_identity_entity(
+        self, user_name: str, aliases: Optional[List[str]] = None
+    ) -> Dict:
+        return await self._entity_writer.ensure_identity_entity(user_name, aliases)
 
     async def create_facts_batch(
         self,
@@ -112,7 +133,7 @@ class GraphClient:
 
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], project_id: Optional[str] = None
-    ):
+    ) -> None:
         return await self._entity_writer.update_entity_aliases(
             alias_updates, project_id=project_id
         )
@@ -125,13 +146,22 @@ class GraphClient:
         )
 
     async def merge_entities(
-        self, primary_id: int, secondary_id: int, project_id: Optional[str] = None
+        self,
+        primary_id: int,
+        secondary_id: int,
+        project_id: Optional[str] = None,
+        final_topic: Optional[str] = None,
     ) -> bool:
         return await self._graph_writer.merge_entities(
-            primary_id, secondary_id, project_id=project_id
+            primary_id,
+            secondary_id,
+            project_id=project_id,
+            final_topic=final_topic,
         )
 
-    async def cleanup_null_entities(self, project_id: Optional[str] = None) -> int:
+    async def cleanup_null_entities(
+        self, project_id: Optional[str] = None
+    ) -> List[int]:
         return await self._entity_writer.cleanup_null_entities(project_id=project_id)
 
     async def delete_entity(
@@ -141,7 +171,7 @@ class GraphClient:
 
     async def bulk_delete_entities(
         self, entity_ids: List[int], project_id: Optional[str] = None
-    ) -> int:
+    ) -> List[int]:
         return await self._entity_writer.bulk_delete_entities(
             entity_ids, project_id=project_id
         )
@@ -168,6 +198,28 @@ class GraphClient:
             entity_a_id, entity_b_id, project_id=project_id
         )
 
+    async def rebuild_project_projection(
+        self,
+        project_id: str,
+        user_name: Optional[str] = None,
+    ) -> Dict[str, int]:
+        return await self._projection_rebuilder.rebuild_project_projection(
+            project_id,
+            user_name=user_name,
+        )
+
+    async def rebuild_project_search_indexes(
+        self,
+        project_id: str,
+        user_name: str,
+        identity_project_ids: List[str],
+    ) -> Dict[str, int]:
+        return await self._search_index_rebuilder.rebuild_project_indexes(
+            project_id,
+            user_name,
+            identity_project_ids,
+        )
+
     async def get_max_entity_id(self) -> int:
         return await self._entity_reader.get_max_entity_id()
 
@@ -191,6 +243,20 @@ class GraphClient:
             ids, user_name=user_name, session_ids=session_ids
         )
 
+    async def get_recent_project_messages(
+        self,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        before_message_id: Optional[int] = None,
+    ) -> List[Dict]:
+        return await self._graph_reader.get_recent_project_messages(
+            user_name,
+            project_id,
+            limit,
+            before_message_id=before_message_id,
+        )
+
     async def get_surrounding_messages(
         self,
         message_id: int,
@@ -200,7 +266,11 @@ class GraphClient:
         session_id: Optional[str] = None,
     ) -> List[Dict]:
         return await self._graph_reader.get_surrounding_messages(
-            message_id, forward, target_total, user_name=user_name, session_id=session_id
+            message_id,
+            forward,
+            target_total,
+            user_name=user_name,
+            session_id=session_id,
         )
 
     async def get_facts_for_entity(
@@ -267,10 +337,27 @@ class GraphClient:
         return await self._graph_reader.get_child_entities(entity_id)
 
     async def get_hierarchy_candidates(
-        self, topic: str, parent_type: str, child_types: List[str], min_weight: int = 2
+        self,
+        project_id: str,
+        topic: str,
+        parent_type: str,
+        child_types: List[str],
+        min_weight: int = 2,
     ) -> List[Dict]:
         return await self._graph_reader.get_hierarchy_candidates(
-            topic, parent_type, child_types, min_weight
+            project_id, topic, parent_type, child_types, min_weight
+        )
+
+    async def get_merge_topic_strength(
+        self,
+        primary_id: int,
+        secondary_id: int,
+        project_id: str,
+    ) -> Dict:
+        return await self._graph_reader.get_merge_topic_strength(
+            primary_id,
+            secondary_id,
+            project_id,
         )
 
     async def has_direct_edge(self, id_a: int, id_b: int) -> bool:
@@ -313,7 +400,7 @@ class GraphClient:
         self, entity_id: int, visible_project_ids: List[str] = None
     ) -> Optional[Dict]:
         return await self._entity_reader.get_entity_by_id(
-            entity_id=entity_id, visible_project_ids=visible_project_ids
+            entity_id, visible_project_ids
         )
 
     async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:
@@ -370,9 +457,14 @@ class GraphClient:
         limit: int = 50,
         user_name: str = None,
         session_ids: List[str] = None,
+        project_ids: List[str] = None,
     ) -> List[Tuple[int, float, str]]:
         return await self._tools.search_messages_fts(
-            query, limit, user_name, session_ids
+            query,
+            limit,
+            user_name=user_name,
+            session_ids=session_ids,
+            project_ids=project_ids,
         )
 
     async def search_entity(

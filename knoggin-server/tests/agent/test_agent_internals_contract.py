@@ -1,0 +1,271 @@
+import pytest
+
+from knoggin_server.agent.internals import (
+    build_user_message,
+    summarize_result,
+    update_accumulators,
+)
+from knoggin_server.agent.types import (
+    AgentContext,
+    AgentRunConfig,
+    AgentState,
+    RetrievedEvidence,
+)
+
+
+def make_ctx(**overrides):
+    data = {
+        "config": AgentRunConfig(max_history_turns=2, max_accumulated_messages=2),
+        "state": AgentState(),
+        "evidence": RetrievedEvidence(),
+        "user_name": "ada",
+        "session_id": "session-1",
+        "user_query": "What changed in profile behavior?",
+        "run_id": "run-1",
+    }
+    data.update(overrides)
+    return AgentContext(**data)
+
+
+@pytest.mark.no_network
+def test_build_user_message_trims_history_and_includes_runtime_context():
+    ctx = make_ctx(
+        history=[
+            {"role": "user", "content": "oldest"},
+            {
+                "role": "assistant",
+                "content": "middle",
+                "timestamp": "2026-01-01T10:01:00+00:00",
+            },
+            {"role": "user", "content": "newest"},
+        ],
+        is_community=True,
+        current_participants=["agent-1", "agent-2"],
+        hot_topic_context={
+            "Identity": {
+                "entities": [
+                    {
+                        "name": "Ada",
+                        "facts": ["prefers scoped profile updates"],
+                    }
+                ]
+            }
+        },
+    )
+    ctx.state.call_count = 1
+    ctx.state.last_error = "Duplicate call skipped"
+    ctx.evidence.profiles.append({"id": 7, "canonical_name": "Ada"})
+    ctx.evidence.profiles.append({"id": 8, "canonical_name": "Grace"})
+
+    message = build_user_message(
+        ctx,
+        last_result=[
+            {
+                "tool": "search_entity",
+                "result": {"data": [{"id": 7, "canonical_name": "Ada"}]},
+            },
+            {"tool": "save_memory", "result": {"data": {"saved": True}}},
+            {"tool": "fact_check", "result": {"data": []}},
+            {"tool": "search_messages", "error": "boom"},
+        ],
+    )
+
+    assert "oldest" not in message
+    assert "[10:01] AGENT: middle" in message
+    assert "USER: newest" in message
+    assert "**Participants:** agent-1, agent-2" in message
+    assert "**Query:** What changed in profile behavior?" in message
+    assert "**Calls remaining:** 11" in message
+    assert "**Last action rejected:** Duplicate call skipped" in message
+    assert "`search_entity`: Found 1 items" in message
+    assert '`save_memory`: {\n  "saved": true\n}' in message
+    assert "`fact_check`: No results found." in message
+    assert "`search_messages`: Error - boom" in message
+    assert "[HOT: Identity]" in message
+    assert "Ada: prefers scoped profile updates" in message
+    assert "Previously retrieved entities: Grace" in message
+    assert "**New entity results:**" in message
+
+
+@pytest.mark.no_network
+def test_build_user_message_omits_participants_outside_community():
+    ctx = make_ctx(
+        is_community=False,
+        current_participants=["agent-1"],
+    )
+
+    message = build_user_message(ctx)
+
+    assert "Participants" not in message
+
+
+@pytest.mark.no_network
+def test_update_accumulators_dedupes_and_trims_messages_by_score():
+    ctx = make_ctx()
+
+    update_accumulators(
+        ctx,
+        "search_messages",
+        {
+            "data": [
+                {
+                    "id": "msg_1",
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "score": 0.1,
+                },
+                {
+                    "id": "msg_2",
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "score": 0.9,
+                },
+                {
+                    "id": "msg_1",
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "score": 1.0,
+                },
+            ]
+        },
+    )
+    update_accumulators(
+        ctx,
+        "search_messages",
+        {
+            "data": [
+                {
+                    "id": "msg_3",
+                    "user_name": "ada",
+                    "session_id": "session-2",
+                    "score": 0.7,
+                }
+            ]
+        },
+    )
+
+    assert [msg["id"] for msg in ctx.evidence.messages] == ["msg_2", "msg_3"]
+
+
+@pytest.mark.no_network
+def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
+    ctx = make_ctx()
+
+    update_accumulators(
+        ctx,
+        "search_entity",
+        {"data": [{"id": 1, "canonical_name": "Ada"}, {"id": 1}]},
+    )
+    update_accumulators(
+        ctx,
+        "get_connections",
+        {
+            "data": [
+                {"source": "Ada", "target": "Knoggin", "score": 0.8},
+                {"source": "Ada", "target": "Knoggin", "score": 0.5},
+            ]
+        },
+    )
+    update_accumulators(
+        ctx,
+        "get_recent_activity",
+        {"data": [{"source": "Ada", "target": "Testing"}]},
+    )
+    update_accumulators(
+        ctx,
+        "find_path",
+        {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
+    )
+    update_accumulators(ctx, "get_hierarchy", {"data": {"entity": "Knoggin"}})
+    update_accumulators(ctx, "fact_check", {"data": {"resolution": "exact"}})
+    update_accumulators(
+        ctx,
+        "search_files",
+        {
+            "data": [
+                {
+                    "file_id": "file-1",
+                    "chunk_index": 2,
+                    "content": "profile plan",
+                    "file_name": "plan.md",
+                },
+                {
+                    "file_id": "file-1",
+                    "chunk_index": 2,
+                    "content": "duplicate",
+                    "file_name": "plan.md",
+                },
+                {"error": "skip"},
+            ]
+        },
+    )
+    update_accumulators(
+        ctx,
+        "web_search",
+        {"data": [{"url": "https://example.test/a"}, {"url": "https://example.test/a"}]},
+    )
+    update_accumulators(
+        ctx,
+        "news_search",
+        {"data": [{"url": "https://example.test/news"}]},
+    )
+
+    assert ctx.evidence.profiles == [{"id": 1, "canonical_name": "Ada"}]
+    assert ctx.evidence.graph == [
+        {"source": "Ada", "target": "Knoggin", "score": 0.8},
+        {"source": "Ada", "target": "Testing"},
+    ]
+    assert ctx.evidence.paths == [{"entity_a": "Ada", "entity_b": "Knoggin"}]
+    assert ctx.evidence.hierarchy == [{"entity": "Knoggin"}]
+    assert ctx.evidence.facts == [{"resolution": "exact"}]
+    assert [
+        (msg["id"], msg["source_type"], msg["message"])
+        for msg in ctx.evidence.messages
+    ] == [("file:file-1:2", "file", "profile plan")]
+    assert ctx.evidence.sources == [
+        {"url": "https://example.test/a"},
+        {"url": "https://example.test/news"},
+    ]
+
+
+@pytest.mark.no_network
+def test_update_accumulators_ignores_errors_and_empty_results():
+    ctx = make_ctx()
+
+    update_accumulators(ctx, "search_messages", {"error": "failed"})
+    update_accumulators(ctx, "search_messages", {"data": []})
+    update_accumulators(ctx, "unknown", {"data": [{"id": "x"}]})
+
+    assert ctx.evidence.has_any() is False
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("tool_name", "result", "expected"),
+    [
+        ("search_messages", {"data": [{"id": 1}, {"id": 2}]}, ("Found 2 results", 2)),
+        ("search_entity", {"data": []}, ("Found 0 results", 0)),
+        ("find_path", {"data": [{"hop": 1}]}, ("Path found: 1 hops", 1)),
+        ("find_path", {"data": []}, ("No path", 0)),
+        (
+            "fact_check",
+            {"data": {"resolution": "exact", "results": [{}, {}]}},
+            ("Resolved via exact (2 matches)", 2),
+        ),
+        ("fact_check", {"data": []}, ("No results", 0)),
+        ("save_memory", {"data": {"saved": True}}, ("Memory updated", 1)),
+        ("forget_memory", {"data": {"forgotten": True}}, ("Memory updated", 1)),
+        ("search_files", {"data": [{"id": "chunk"}]}, ("Found 1 relevant chunks", 1)),
+        ("search_files", {"data": [{"error": "nope"}]}, ("No results", 0)),
+        (
+            "request_replanning",
+            {"data": {"replanning": "stuck"}},
+            ("Requested a new plan", 1),
+        ),
+        ("anything_else", {"data": {"ok": True}}, ("Completed", 1)),
+        ("anything_else", {"data": None}, ("No results", 0)),
+        ("anything_else", {"error": "boom"}, ("Error: boom", 0)),
+    ],
+)
+def test_summarize_result_returns_stable_summaries(tool_name, result, expected):
+    assert summarize_result(tool_name, result) == expected

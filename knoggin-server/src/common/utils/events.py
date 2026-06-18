@@ -1,12 +1,11 @@
 import asyncio
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 
-from common.utils.time_utils import parse_iso_time
+from common.utils.time_utils import get_now, get_now_iso, parse_iso_time
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 
 
@@ -122,7 +121,7 @@ class BaseEventEmitter:
         self._remember_loop()
         async with self._lock:
             stale = []
-            now = datetime.now(timezone.utc)
+            now = get_now()
 
             for scope_id, history in self._history.items():
                 if scope_id in self._subscribers and self._subscribers[scope_id]:
@@ -197,7 +196,7 @@ class DebugEventEmitter(BaseEventEmitter):
             active_sess_list = list(self.project_sessions[session_id])
             for active_sess in active_sess_list:
                 evt = DebugEvent(
-                    ts=datetime.now(timezone.utc).isoformat(),
+                    ts=get_now_iso(),
                     session_id=active_sess,
                     component=component,
                     event=event,
@@ -207,7 +206,7 @@ class DebugEventEmitter(BaseEventEmitter):
                 await self._emit_to_subs(active_sess, evt)
         else:
             evt = DebugEvent(
-                ts=datetime.now(timezone.utc).isoformat(),
+                ts=get_now_iso(),
                 session_id=session_id,
                 component=component,
                 event=event,
@@ -240,7 +239,7 @@ class CommunityEventEmitter(BaseEventEmitter):
         self, user_name: str, component: str, event: str, data: Dict[str, Any] = None
     ):
         evt = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": get_now_iso(),
             "user_name": user_name,
             "component": component,
             "event": event,

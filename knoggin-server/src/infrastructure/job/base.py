@@ -11,8 +11,7 @@ class JobContext:
     """Context passed to every job method."""
 
     user_name: str
-    session_id: str
-    project_id: Optional[str] = None
+    project_id: str
     idle_seconds: float = 0.0
     last_run: Optional[datetime] = None
 

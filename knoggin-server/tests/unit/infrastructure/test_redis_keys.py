@@ -14,3 +14,5 @@ def test_session_scoped_keys_include_runtime_cleanup_targets():
     assert RedisKeys.conversation("ada", "session-1") in keys
     assert RedisKeys.recent_conversation("ada", "session-1") in keys
     assert RedisKeys.heartbeat_counter("ada", "session-1") in keys
+    assert RedisKeys.project_profile_complete("ada", "project-1") not in keys
+    assert RedisKeys.project_topic_config("ada") not in keys

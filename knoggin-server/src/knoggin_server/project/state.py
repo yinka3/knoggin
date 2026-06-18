@@ -24,6 +24,7 @@ class ProjectState:
         user_name: str,
         redis_client: aioredis.Redis,
         readable_project_ids: Optional[list[str]] = None,
+        batch_processor: Optional[Any] = None,
     ):
         self.project_id = project_id
         self.readable_project_ids = readable_project_ids or [project_id]
@@ -33,6 +34,7 @@ class ProjectState:
         self.scheduler = scheduler
         self.user_name = user_name
         self.redis_client = redis_client
+        self.batch_processor = batch_processor
 
         self.profile_job: Optional[Any] = None
         self.merge_job: Optional[Any] = None
@@ -62,4 +64,7 @@ class ProjectState:
         self.topic_config.update(new_config)
         await self.topic_config.save(self.redis_client, self.user_name, self.project_id)
         self.entities.hierarchy_config = self.topic_config.hierarchy
-        self.pipeline.refresh_topic_mappings()
+        if self.batch_processor is not None:
+            self.batch_processor.refresh_topic_mappings()
+        else:
+            self.pipeline.refresh_topic_mappings()
