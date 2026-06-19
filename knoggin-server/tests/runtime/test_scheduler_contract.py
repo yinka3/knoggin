@@ -372,7 +372,7 @@ async def test_stale_lease_expiry_allows_execution(monkeypatch):
     job = ControlledJob()
     lease_key = RedisKeys.job_lease("ada", "project-1", job.name)
     await redis.set(lease_key, "stale-owner", ex=360, nx=True)
-    redis.string_expirations[lease_key] = 0
+    redis.key_expirations[lease_key] = 0
 
     result = await scheduler._execute_job(job, context())
 

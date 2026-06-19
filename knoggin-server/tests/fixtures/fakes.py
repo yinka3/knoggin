@@ -89,7 +89,7 @@ class FakeRedis:
         self.expirations: list[tuple[str, int]] = []
         self.deleted_keys: list[str] = []
         self.evals: list[tuple[str, tuple[Any, ...]]] = []
-        self.string_expirations: dict[str, float] = {}
+        self.key_expirations: dict[str, float] = {}
         self.published: list[tuple[str, str]] = []
         self.closed = False
         self.pipeline_calls = 0
@@ -109,33 +109,41 @@ class FakeRedis:
         return FakePipelineWriter(self)
 
     async def hset(self, key, field, value):
+        self._purge_expired(key)
         self.hashes[key][str(field)] = value
         return 1
 
     async def hget(self, key, field):
+        self._purge_expired(key)
         return self.hashes.get(key, {}).get(str(field))
 
     async def hgetall(self, key):
+        self._purge_expired(key)
         return dict(self.hashes.get(key, {}))
 
     async def hlen(self, key):
+        self._purge_expired(key)
         return len(self.hashes.get(key, {}))
 
     async def hmget(self, key, *fields):
+        self._purge_expired(key)
         return [self.hashes.get(key, {}).get(str(f)) for f in fields]
 
     async def hdel(self, key, *fields):
+        self._purge_expired(key)
         removed = 0
         for f in fields:
             removed += int(self.hashes.get(key, {}).pop(str(f), None) is not None)
         return removed
 
     async def sadd(self, key, *values):
+        self._purge_expired(key)
         before = len(self.sets[key])
         self.sets[key].update(str(value) for value in values)
         return len(self.sets[key]) - before
 
     async def srem(self, key, *values):
+        self._purge_expired(key)
         removed = 0
         for value in values:
             if str(value) in self.sets.get(key, set()):
@@ -144,12 +152,15 @@ class FakeRedis:
         return removed
 
     async def smembers(self, key):
+        self._purge_expired(key)
         return set(self.sets.get(key, set()))
 
     async def scard(self, key):
+        self._purge_expired(key)
         return len(self.sets.get(key, set()))
 
     async def srandmember(self, key, number=None):
+        self._purge_expired(key)
         values = sorted(self.sets.get(key, set()))
         if number is None:
             return values[0] if values else None
@@ -164,13 +175,14 @@ class FakeRedis:
                 if key in store:
                     existed = True
                     del store[key]
-            self.string_expirations.pop(key, None)
+            self.key_expirations.pop(key, None)
             if existed:
                 self.deleted_keys.append(key)
                 deleted += 1
         return deleted
 
     async def scan(self, cursor=0, match=None, count=100):
+        self._purge_all_expired()
         keys = set()
         for store in (self.strings, self.hashes, self.sets, self.lists, self.zsets):
             keys.update(store.keys())
@@ -182,6 +194,7 @@ class FakeRedis:
         return await self.incrby(key, 1)
 
     async def incrby(self, key, amount):
+        self._purge_expired(key)
         current = int(self.strings.get(key, "0")) + int(amount)
         self.strings[key] = str(current)
         return current
@@ -196,36 +209,42 @@ class FakeRedis:
             return False
         self.strings[key] = str(value)
         if ex is not None:
-            self.string_expirations[key] = time.monotonic() + float(ex)
+            self.key_expirations[key] = time.monotonic() + float(ex)
             self.expirations.append((key, ex))
         else:
-            self.string_expirations.pop(key, None)
+            self.key_expirations.pop(key, None)
         return True
 
     async def setex(self, key, ttl, value):
+        self._purge_expired(key)
         self.strings[key] = str(value)
-        self.string_expirations[key] = time.monotonic() + float(ttl)
+        self.key_expirations[key] = time.monotonic() + float(ttl)
         self.expirations.append((key, ttl))
         return True
 
     async def rpush(self, key, value):
+        self._purge_expired(key)
         self.lists[key].append(value)
         return len(self.lists[key])
 
     async def lpop(self, key):
+        self._purge_expired(key)
         if not self.lists.get(key):
             return None
         return self.lists[key].pop(0)
 
     async def llen(self, key):
+        self._purge_expired(key)
         return len(self.lists.get(key, []))
 
     async def lrange(self, key, start, end):
+        self._purge_expired(key)
         items = self.lists.get(key, [])
         stop = len(items) if end == -1 else end + 1
         return items[start:stop]
 
     async def ltrim(self, key, start, end):
+        self._purge_expired(key)
         items = self.lists.get(key, [])
         stop = len(items) if end == -1 else end + 1
         self.lists[key] = items[start:stop]
@@ -243,23 +262,41 @@ class FakeRedis:
         return None
 
     async def expire(self, key, ttl):
-        if key in self.strings:
-            self.string_expirations[key] = time.monotonic() + float(ttl)
+        self._purge_expired(key)
+        if not self._key_exists(key):
+            return False
         self.expirations.append((key, ttl))
+        if float(ttl) <= 0:
+            await self.delete(key)
+            return True
+        self.key_expirations[key] = time.monotonic() + float(ttl)
         return True
 
     def _purge_expired(self, key):
-        expires_at = self.string_expirations.get(key)
+        expires_at = self.key_expirations.get(key)
         if expires_at is not None and expires_at <= time.monotonic():
-            self.strings.pop(key, None)
-            self.string_expirations.pop(key, None)
+            for store in (self.strings, self.hashes, self.sets, self.lists, self.zsets):
+                store.pop(key, None)
+            self.key_expirations.pop(key, None)
+
+    def _purge_all_expired(self):
+        for key in list(self.key_expirations):
+            self._purge_expired(key)
+
+    def _key_exists(self, key):
+        return any(
+            key in store
+            for store in (self.strings, self.hashes, self.sets, self.lists, self.zsets)
+        )
 
     async def zadd(self, key, mapping):
+        self._purge_expired(key)
         for member, score in mapping.items():
             self.zsets[key][str(member)] = float(score)
         return len(mapping)
 
     async def zrange(self, key, start, end, desc=False, **kwargs):
+        self._purge_expired(key)
         items = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1])
         if desc:
             items = list(reversed(items))
@@ -306,9 +343,11 @@ class FakeRedis:
         return [member for member, _ in sliced]
 
     async def zscore(self, key, member):
+        self._purge_expired(key)
         return self.zsets.get(key, {}).get(str(member))
 
     async def zrank(self, key, member):
+        self._purge_expired(key)
         items = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1])
         target = str(member)
         for index, (item, _) in enumerate(items):
@@ -317,6 +356,7 @@ class FakeRedis:
         return None
 
     async def zremrangebyrank(self, key, start, end):
+        self._purge_expired(key)
         items = sorted(self.zsets.get(key, {}).items(), key=lambda item: item[1])
         if not items:
             return 0
@@ -327,6 +367,7 @@ class FakeRedis:
         return len(removed)
 
     async def zrem(self, key, *members):
+        self._purge_expired(key)
         removed = 0
         for member in members:
             removed += int(

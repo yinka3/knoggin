@@ -126,6 +126,19 @@ def test_client_property_requires_connection():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("redis://cache.example/0", "redis://cache.example:6379/0"),
+        ("rediss://cache.example/0", "rediss://cache.example:6380/0"),
+    ],
+)
+def test_endpoint_label_uses_scheme_default_port(url, expected):
+    assert redis_module._endpoint_label(url) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_connect_validates_once_and_reuses_stable_client(monkeypatch):
     candidate = make_client()
     manager = AsyncRedisClient(settings())

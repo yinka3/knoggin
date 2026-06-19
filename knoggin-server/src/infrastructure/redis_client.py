@@ -14,7 +14,7 @@ def _endpoint_label(url: str) -> str:
     try:
         parsed = urlsplit(url)
         host = parsed.hostname or "unknown"
-        port = parsed.port or (6380 if parsed.scheme == "redis" else 6379)
+        port = parsed.port or (6380 if parsed.scheme == "rediss" else 6379)
         path = parsed.path or "/0"
         return urlunsplit((parsed.scheme, f"{host}:{port}", path, "", ""))
     except ValueError:

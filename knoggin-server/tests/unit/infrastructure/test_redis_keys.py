@@ -1,6 +1,7 @@
 import pytest
 
 from infrastructure.redis_client import RedisKeys
+from tests.fixtures.fakes import FakeRedis
 
 
 @pytest.mark.unit
@@ -41,3 +42,27 @@ def test_session_scan_patterns_match_their_key_families():
     assert RedisKeys.session_memory_pattern("ada", "session-1") == (
         "memory:ada:session-1:*"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_fake_redis_expiration_applies_to_every_supported_key_type():
+    redis = FakeRedis()
+    await redis.set("string", "value")
+    await redis.hset("hash", "field", "value")
+    await redis.sadd("set", "value")
+    await redis.rpush("list", "value")
+    await redis.zadd("zset", {"value": 1})
+
+    keys = ("string", "hash", "set", "list", "zset")
+    for key in keys:
+        assert await redis.expire(key, 60) is True
+        redis.key_expirations[key] = 0
+
+    assert await redis.get("string") is None
+    assert await redis.hgetall("hash") == {}
+    assert await redis.smembers("set") == set()
+    assert await redis.lrange("list", 0, -1) == []
+    assert await redis.zrange("zset", 0, -1) == []
+    assert await redis.scan() == (0, [])
+    assert await redis.expire("missing", 60) is False

@@ -1,17 +1,9 @@
-import asyncio
 from typing import Any, Dict, List, Optional
 
 import psycopg
 from loguru import logger
 from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool, ConnectionPool
-
-
-def _configure_sync_conn(conn: psycopg.Connection):
-    """Load Apache AGE and set search path on every sync connection."""
-    conn.execute("LOAD 'age';")
-    conn.execute('SET search_path = ag_catalog, "$user", public;')
-    conn.commit()
+from psycopg_pool import AsyncConnectionPool
 
 
 async def _configure_async_conn(conn: psycopg.AsyncConnection):
@@ -23,21 +15,38 @@ async def _configure_async_conn(conn: psycopg.AsyncConnection):
 
 class PostgresClient:
     """
-    Unified Postgres client managing both Async and Sync connection pools.
+    Asynchronous Postgres connection-pool client.
     Supports Apache AGE (graph) and pgvector/tsvector (hybrid storage).
     """
 
-    def __init__(self, dsn: str, min_size: int = 1, max_size: int = 10):
+    def __init__(
+        self,
+        dsn: str,
+        min_size: int = 1,
+        max_size: int = 10,
+        startup_timeout: float = 30.0,
+    ):
+        if min_size < 1:
+            raise ValueError("PostgresClient min_size must be at least 1")
+        if max_size < min_size:
+            raise ValueError(
+                "PostgresClient max_size must be greater than or equal to min_size"
+            )
+        if startup_timeout <= 0:
+            raise ValueError("PostgresClient startup_timeout must be greater than 0")
+
         self.dsn = dsn
         self.min_size = min_size
         self.max_size = max_size
+        self.startup_timeout = startup_timeout
         self.async_pool: Optional[AsyncConnectionPool] = None
-        self.sync_pool: Optional[ConnectionPool] = None
 
     async def connect(self):
-        """Initialize both connection pools asynchronously."""
+        """Open the pool after its minimum connections are ready for use."""
+        pool: Optional[AsyncConnectionPool] = None
+
         try:
-            self.async_pool = AsyncConnectionPool(
+            pool = AsyncConnectionPool(
                 conninfo=self.dsn,
                 min_size=self.min_size,
                 max_size=self.max_size,
@@ -45,38 +54,28 @@ class PostgresClient:
                 configure=_configure_async_conn,
                 open=False,
             )
-            await self.async_pool.open()
-
-            # Sync pool initialized in thread to avoid blocking event loop
-            def _init_sync():
-                pool = ConnectionPool(
-                    conninfo=self.dsn,
-                    min_size=self.min_size,
-                    max_size=self.max_size,
-                    kwargs={"autocommit": False, "row_factory": dict_row},
-                    configure=_configure_sync_conn,
-                    open=False,
-                )
-                pool.open()
-                return pool
-
-            self.sync_pool = await asyncio.to_thread(_init_sync)
-
-            logger.info(
-                "Connected to Postgres (Async and Sync pools initialized with AGE loaded)"
-            )
+            self.async_pool = pool
+            await pool.open(wait=True, timeout=self.startup_timeout)
+            logger.info("Connected to Postgres (async pool ready with AGE loaded)")
         except Exception as e:
             logger.error(f"Failed to connect to Postgres: {e}")
+            if pool is not None:
+                try:
+                    await pool.close()
+                except Exception as cleanup_error:
+                    logger.error(
+                        "Failed to close partially initialized Postgres pool: "
+                        f"{cleanup_error}"
+                    )
+            self.async_pool = None
             raise
 
     async def close(self):
-        """Close both connection pools."""
+        """Close the asynchronous connection pool."""
         if self.async_pool:
             await self.async_pool.close()
-        if self.sync_pool:
-            await asyncio.to_thread(self.sync_pool.close)
 
-    # --- Async Helpers ---
+    # --- Query Helpers ---
 
     async def execute_read(
         self, query: str, params: Optional[Dict[str, Any]] = None
@@ -102,34 +101,6 @@ class PostgresClient:
             async with conn.transaction():
                 async with conn.cursor() as cur:
                     await cur.execute(query, params or {})
-                    return cur.rowcount
-
-    # --- Sync Helpers (for Background Threads) ---
-
-    def execute_read_sync(
-        self, query: str, params: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """Execute a read-only SQL or AGE query synchronously."""
-        if not self.sync_pool:
-            raise RuntimeError("PostgresClient sync_pool is not initialized")
-
-        with self.sync_pool.connection() as conn:
-            with conn.transaction():
-                with conn.cursor() as cur:
-                    cur.execute(query, params or {})
-                    return cur.fetchall()
-
-    def execute_write_sync(
-        self, query: str, params: Optional[Dict[str, Any]] = None
-    ) -> int:
-        """Execute a write SQL or AGE query synchronously. Returns rowcount."""
-        if not self.sync_pool:
-            raise RuntimeError("PostgresClient sync_pool is not initialized")
-
-        with self.sync_pool.connection() as conn:
-            with conn.transaction():
-                with conn.cursor() as cur:
-                    cur.execute(query, params or {})
                     return cur.rowcount
 
     # --- Cypher Helpers ---
