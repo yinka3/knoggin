@@ -90,7 +90,7 @@ class AgentExecutor:
 
         files_context = ""
         if self.tools.file_rag:
-            manifest = self.tools.get_file_manifest()
+            manifest = await self.tools.get_file_manifest()
             if manifest:
                 files_context = format_files_context(manifest)
 

@@ -1514,7 +1514,6 @@ name = "knoggin-server"
 version = "0.1.0"
 source = { editable = "knoggin-server" }
 dependencies = [
-    { name = "asyncpg" },
     { name = "cachetools" },
     { name = "ddgs" },
     { name = "docx2txt" },
@@ -1526,8 +1525,6 @@ dependencies = [
     { name = "huggingface-hub", extra = ["cli"] },
     { name = "instructor" },
     { name = "llama-index-core" },
-    { name = "llama-index-readers-file" },
-    { name = "llama-index-vector-stores-postgres" },
     { name = "loguru" },
     { name = "markitdown" },
     { name = "mcp" },
@@ -1538,7 +1535,6 @@ dependencies = [
     { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "rank-bm25" },
     { name = "rapidfuzz" },
     { name = "redis" },
     { name = "redis-tools" },
@@ -1546,7 +1542,6 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "sentence-transformers" },
     { name = "spacy" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "tiktoken" },
     { name = "torch" },
     { name = "wordfreq" },
@@ -1563,7 +1558,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "cachetools", specifier = ">=5.4.0" },
     { name = "ddgs", specifier = ">=9.11.3" },
     { name = "docx2txt", specifier = ">=0.9" },
@@ -1575,8 +1569,6 @@ requires-dist = [
     { name = "huggingface-hub", extras = ["cli"], specifier = ">=0.36.0" },
     { name = "instructor", specifier = ">=1.14.5" },
     { name = "llama-index-core", specifier = ">=0.12.0" },
-    { name = "llama-index-readers-file", specifier = ">=0.4.0" },
-    { name = "llama-index-vector-stores-postgres", specifier = ">=0.3.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "markitdown", specifier = ">=0.1.5" },
     { name = "mcp", specifier = ">=1.2.0,<2.0" },
@@ -1590,7 +1582,6 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "rapidfuzz", specifier = ">=3.14.3" },
     { name = "redis", specifier = ">=7.1.0" },
     { name = "redis-tools", specifier = ">=0.0.2" },
@@ -1599,7 +1590,6 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.8.0" },
     { name = "sentence-transformers", specifier = ">=5.2.0" },
     { name = "spacy", specifier = ">=3.8.11" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "torch", specifier = ">=2.6.0,<2.7.0" },
     { name = "wordfreq", specifier = ">=3.1.1" },

@@ -17,16 +17,7 @@ class RecordingComponent:
 
 
 class RecordingPostgresClient:
-    def __init__(self, dsn):
-        self.dsn = dsn
-        self.connected = False
-        self.closed = False
-
-    async def connect(self):
-        self.connected = True
-
-    async def close(self):
-        self.closed = True
+    pass
 
 
 @pytest.fixture
@@ -41,7 +32,6 @@ def graph_client(monkeypatch):
 
         return Component
 
-    monkeypatch.setattr(graph_client_module, "PostgresClient", RecordingPostgresClient)
     monkeypatch.setattr(
         graph_client_module, "IdAllocator", component_factory("id_allocator")
     )
@@ -78,29 +68,27 @@ def graph_client(monkeypatch):
         graph_client_module, "CommunityStore", component_factory("community")
     )
 
+    postgres = RecordingPostgresClient()
     client = graph_client_module.GraphInterface(
-        "postgresql://example",
+        postgres_client=postgres,
         embedding_service=object(),
     )
-    return client, components
+    return client, components, postgres
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_client_connect_and_close_delegate_to_postgres(graph_client):
-    client, _ = graph_client
+def test_graph_client_uses_injected_postgres_client(graph_client):
+    client, components, postgres = graph_client
 
-    await client.connect()
-    await client.close()
-
-    assert client._postgres_client.connected is True
-    assert client._postgres_client.closed is True
+    assert client._postgres_client is postgres
+    assert all(component.client is postgres for component in components.values())
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 def test_graph_client_community_property(graph_client):
-    client, components = graph_client
+    client, components, _ = graph_client
     assert client.community is components["community"]
 
 
@@ -297,7 +285,7 @@ def test_graph_client_community_property(graph_client):
 async def test_graph_client_facade_delegates_correctly(
     graph_client, method_name, component_name, args, kwargs
 ):
-    client, components = graph_client
+    client, components, _ = graph_client
 
     # Retrieve the method to test dynamically
     method = getattr(client, method_name)

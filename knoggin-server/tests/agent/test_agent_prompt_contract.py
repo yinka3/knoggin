@@ -77,7 +77,10 @@ def test_agent_prompt_renders_files_without_memory_section():
 
     assert "<persistent_context>" in prompt
     assert "<uploaded_files>" in prompt
-    assert "Files available in this session. Use search_files to query them." in prompt
+    assert (
+        "Indexed files visible in this project context. "
+        "Use search_files to query them."
+    ) in prompt
     assert "- profile-plan.md (2KB, 3 chunks)" in prompt
     assert "<your_memory>" not in prompt
     assert "Active topics you can categorize memories under" not in prompt

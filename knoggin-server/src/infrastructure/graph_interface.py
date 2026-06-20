@@ -28,8 +28,12 @@ class GraphInterface:
     without making each subsystem know the storage layout.
     """
 
-    def __init__(self, dsn: str, embedding_service: EmbeddingService):
-        self._postgres_client = PostgresClient(dsn=dsn)
+    def __init__(
+        self,
+        postgres_client: PostgresClient,
+        embedding_service: EmbeddingService,
+    ):
+        self._postgres_client = postgres_client
         self._id_allocator = IdAllocator(self._postgres_client)
         self._entity_writer = EntityWriter(self._postgres_client)
         self._fact_writer = FactWriter(self._postgres_client)
@@ -44,13 +48,7 @@ class GraphInterface:
             embedding_service,
         )
         self._community = CommunityStore(self._postgres_client)
-        logger.info("GraphClient initialized with internal Postgres/AGE backend")
-
-    async def connect(self):
-        await self._postgres_client.connect()
-
-    async def close(self):
-        await self._postgres_client.close()
+        logger.info("GraphClient initialized with shared Postgres/AGE backend")
 
     @property
     def community(self) -> CommunityStore:

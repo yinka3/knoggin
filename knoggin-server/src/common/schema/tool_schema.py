@@ -246,7 +246,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_files",
             "description": (
-                "Search through files the user has uploaded to this session."
+                "Search indexed files visible in the current project context."
             ),
             "parameters": {
                 "type": "object",

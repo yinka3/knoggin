@@ -3,6 +3,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from common.schema.settings import RedisConnectionSettings
@@ -464,11 +465,30 @@ class FakeRedisManager(AsyncRedisClient):
         return self.client
 
 
+class FakePostgresClient:
+    def __init__(self):
+        self.read_results = []
+        self.write_count = 1
+        self.calls = []
+
+    async def execute_read(self, query, params=None):
+        self.calls.append(("execute_read", query, params))
+        if not self.read_results:
+            return []
+        return self.read_results.pop(0)
+
+    async def execute_write(self, query, params=None):
+        self.calls.append(("execute_write", query, params))
+        return self.write_count
+
+
 @dataclass
 class FakeResources:
     redis: FakeRedis = field(default_factory=FakeRedis)
     redis_manager: Any = None
     graph: FakeGraphClient = field(default_factory=FakeGraphClient)
+    postgres: FakePostgresClient = field(default_factory=FakePostgresClient)
+    file_storage_root: Path = field(default_factory=lambda: Path("data/files"))
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None
@@ -511,20 +531,12 @@ class FakeConsumer:
         self.stopped += 1
 
 
-class FakeFileRAG:
-    def __init__(self):
-        self.cleanup_count = 0
-
-    def cleanup_session(self):
-        self.cleanup_count += 1
-
-
 class FakeContext:
     def __init__(self, session_id="session-1", project_id="project-1"):
         self.session_id = session_id
         self.project_id = project_id
         self.shutdown_count = 0
-        self.file_rag = FakeFileRAG()
+        self.file_rag = None
 
     async def shutdown(self):
         self.shutdown_count += 1

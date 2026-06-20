@@ -30,7 +30,7 @@ class FakeTools:
         self.file_rag = object() if files is not None else None
         self.files = files or []
 
-    def get_file_manifest(self):
+    async def get_file_manifest(self):
         return self.files
 
 

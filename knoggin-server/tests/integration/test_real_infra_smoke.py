@@ -24,6 +24,8 @@ EXPECTED_TABLES = {
     "entity_search",
     "message_search",
     "fact_search",
+    "project_files",
+    "file_chunks",
 }
 
 EXPECTED_SEQUENCES = {
@@ -53,6 +55,11 @@ EXPECTED_INDEXES = {
     "message_search_session_idx",
     "message_search_project_idx",
     "fact_search_project_idx",
+    "project_files_project_idx",
+    "project_files_visibility_idx",
+    "project_files_hash_idx",
+    "file_chunks_file_idx",
+    "file_chunks_embedding_idx",
 }
 
 
@@ -128,7 +135,9 @@ async def test_real_postgres_schema_tables_and_indexes_are_present():
                 ('hierarchy_edges'),
                 ('entity_search'),
                 ('message_search'),
-                ('fact_search')
+                ('fact_search'),
+                ('project_files'),
+                ('file_chunks')
         ) AS expected(table_name)
         """,
         load_age=False,

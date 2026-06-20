@@ -198,3 +198,56 @@ ON public.message_search(user_name, project_id);
 
 CREATE INDEX IF NOT EXISTS fact_search_project_idx
 ON public.fact_search(user_name, project_id);
+
+-- Project-owned source files and their derived retrieval chunks.
+CREATE TABLE IF NOT EXISTS public.project_files (
+    file_id UUID PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    visibility_scope TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    extension TEXT NOT NULL DEFAULT '',
+    size_bytes BIGINT NOT NULL,
+    content_hash TEXT NOT NULL,
+    storage_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'uploaded',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT project_files_visibility_scope_check
+        CHECK (visibility_scope IN ('project', 'session')),
+    CONSTRAINT project_files_session_visibility_check
+        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
+    CONSTRAINT project_files_status_check
+        CHECK (status IN ('uploaded', 'indexed', 'failed')),
+    CONSTRAINT project_files_size_check
+        CHECK (size_bytes >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS project_files_project_idx
+ON public.project_files(project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS project_files_visibility_idx
+ON public.project_files(project_id, visibility_scope, session_id);
+
+CREATE INDEX IF NOT EXISTS project_files_hash_idx
+ON public.project_files(project_id, content_hash);
+
+CREATE TABLE IF NOT EXISTS public.file_chunks (
+    chunk_id UUID PRIMARY KEY,
+    file_id UUID NOT NULL REFERENCES public.project_files(file_id)
+        ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    embedding vector(1024) NOT NULL,
+    CONSTRAINT file_chunks_file_index_unique
+        UNIQUE (file_id, chunk_index),
+    CONSTRAINT file_chunks_index_check
+        CHECK (chunk_index >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS file_chunks_file_idx
+ON public.file_chunks(file_id);
+
+CREATE INDEX IF NOT EXISTS file_chunks_embedding_idx
+ON public.file_chunks USING hnsw (embedding vector_cosine_ops);

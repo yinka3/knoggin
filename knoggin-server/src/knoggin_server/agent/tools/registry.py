@@ -65,11 +65,12 @@ class Tools(SearchTools, GraphTools, MemoryTools):
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
 
-    def get_file_manifest(self):
+    async def get_file_manifest(self):
         """Get list of uploaded files for prompt context."""
         if not self.file_rag:
             return []
-        return self.file_rag.list_files()
+        files = await self.file_rag.list_files(session_id=self.session_id)
+        return [file for file in files if file.get("status") == "indexed"]
 
     async def close(self):
         await self._http_client.aclose()

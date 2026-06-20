@@ -312,7 +312,8 @@ def format_files_context(files: list) -> str:
     for f in files:
         size_kb = f.get("size_bytes", 0) / 1024
         lines.append(
-            f"- {f['original_name']} ({size_kb:.0f}KB, {f['chunk_count']} chunks)"
+            f"- {f['original_name']} "
+            f"({size_kb:.0f}KB, {f.get('chunk_count', 0)} chunks)"
         )
 
     return "\n".join(lines)

@@ -1,6 +1,7 @@
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -16,6 +17,7 @@ from common.schema.settings import RedisConnectionSettings
 from common.utils.events import CommunityEventEmitter
 from infrastructure.graph_interface import GraphInterface
 from infrastructure.llm_client import LLMService
+from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 from knoggin_server.knowledge.services.entity_service import EntityManager
@@ -41,6 +43,8 @@ class ResourceManager:
     def __init__(self):
 
         self.graph: Optional[GraphInterface] = None
+        self.postgres: Optional[PostgresClient] = None
+        self.file_storage_root: Optional[Path] = None
         self.embedding: Optional[EmbeddingService] = None
         self.redis_manager: Optional[AsyncRedisClient] = None
         self.redis: Optional[aioredis.Redis] = None
@@ -83,6 +87,16 @@ class ResourceManager:
                     raise ConfigurationError(
                         "DATABASE_URL environment variable is not set"
                     )
+                instance.postgres = PostgresClient(dsn=dsn)
+                await instance.postgres.connect()
+                instance.file_storage_root = Path(
+                    os.getenv("KNOGGIN_FILE_STORAGE_DIR", "./data/files")
+                ).expanduser().resolve()
+                await asyncio.to_thread(
+                    instance.file_storage_root.mkdir,
+                    parents=True,
+                    exist_ok=True,
+                )
                 redis_settings = RedisConnectionSettings.from_env()
                 instance.redis_manager = AsyncRedisClient(redis_settings)
                 instance.redis = await instance.redis_manager.connect()
@@ -120,7 +134,7 @@ class ResourceManager:
                     device=device,
                 )
                 instance.graph = GraphInterface(
-                    dsn=dsn,
+                    postgres_client=instance.postgres,
                     embedding_service=instance.embedding,
                 )
 
@@ -158,8 +172,6 @@ class ResourceManager:
                         details={"original_error": str(e)},
                     )
 
-                await instance.graph.connect()
-
                 instance.active_entities = EntityManager(
                     graph_client=instance.graph,
                     embedding_service=instance.embedding,
@@ -193,9 +205,10 @@ class ResourceManager:
             self.redis_manager = None
         self.redis = None
 
-        if self.graph:
-            await self.graph.close()
-            self.graph = None
+        self.graph = None
+        if self.postgres:
+            await self.postgres.close()
+            self.postgres = None
         if self.embedding:
             self.embedding.cleanup()
         if self.llm_service:
@@ -204,6 +217,7 @@ class ResourceManager:
         self.gliner = None
         self.spacy = None
         self.graph = None
+        self.file_storage_root = None
 
     async def shutdown(self):
         """Release all managed resources."""

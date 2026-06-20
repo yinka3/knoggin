@@ -155,7 +155,7 @@ class SearchTools:
         self, query: str, file_name: str = None, limit: int = 5
     ) -> List[Dict]:
         """
-        Search uploaded session files for relevant content.
+        Search indexed files visible to the current project and session.
 
         Args:
             query: What to search for
@@ -166,12 +166,15 @@ class SearchTools:
             List of matching chunks with file name, content, and relevance score.
         """
         if not self.file_rag:
-            return [{"error": "No file service available for this session"}]
+            return [{"error": "No project file service available"}]
 
-        files = self.file_rag.list_files()
+        visible_files = await self.file_rag.list_files(session_id=self.session_id)
+        files = [
+            file for file in visible_files if file.get("status") == "indexed"
+        ]
 
         if not files:
-            return [{"error": "No files uploaded to this session"}]
+            return [{"error": "No indexed files available in this project"}]
 
         file_filter = None
         if file_name:
@@ -195,7 +198,7 @@ class SearchTools:
         )
 
         if not results:
-            return [{"info": "No relevant content found in uploaded files"}]
+            return [{"info": "No relevant content found in indexed files"}]
 
         return results
 

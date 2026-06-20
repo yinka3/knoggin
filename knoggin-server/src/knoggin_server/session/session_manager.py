@@ -10,7 +10,6 @@ from common.utils.events import DebugEventEmitter
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.services.file_rag import FileRAGService
 from knoggin_server.project.project_manager import ProjectManager
 from knoggin_server.session.context import Context
 
@@ -253,17 +252,6 @@ class SessionManager:
                     deleted += int(await redis.delete(*keys))  # type: ignore
                 if cursor == 0:
                     break
-
-        if session_id in self.active_sessions:
-            ctx = self.active_sessions[session_id]
-            if ctx.file_rag:
-                ctx.file_rag.cleanup_session()
-        else:
-            temp_rag = FileRAGService(
-                session_id=session_id,
-                embedding_service=self.resources.embedding,
-            )
-            temp_rag.cleanup_session()
 
         if direct_keys:
             deleted += await redis.delete(*direct_keys)

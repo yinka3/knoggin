@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -5,8 +6,10 @@ from loguru import logger
 
 from common.conf.topics_config import TopicConfig
 from infrastructure.job.scheduler import Scheduler
+from infrastructure.postgres_client import PostgresClient
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.file_rag import FileRAGService
 
 
 class ProjectState:
@@ -23,6 +26,8 @@ class ProjectState:
         scheduler: Scheduler,
         user_name: str,
         redis_client: aioredis.Redis,
+        postgres_client: PostgresClient,
+        file_storage_root: Path,
         readable_project_ids: Optional[list[str]] = None,
         batch_processor: Optional[Any] = None,
     ):
@@ -34,7 +39,14 @@ class ProjectState:
         self.scheduler = scheduler
         self.user_name = user_name
         self.redis_client = redis_client
+        self.postgres_client = postgres_client
+        self.file_storage_root = file_storage_root
         self.batch_processor = batch_processor
+        self.file_rag = FileRAGService(
+            project_id=project_id,
+            postgres_client=postgres_client,
+            storage_root=file_storage_root,
+        )
 
         self.profile_job: Optional[Any] = None
         self.merge_job: Optional[Any] = None

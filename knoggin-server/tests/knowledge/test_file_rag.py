@@ -1,4 +1,5 @@
-from pathlib import Path
+import hashlib
+from datetime import datetime, timezone
 
 import pytest
 
@@ -6,260 +7,293 @@ from knoggin_server.knowledge.services import file_rag as file_rag_module
 from knoggin_server.knowledge.services.file_rag import FileRAGService
 
 
-class FakeNode:
-    def __init__(self, text, metadata=None):
-        self._text = text
-        self.metadata = metadata or {}
-        self.embedding = None
-
-    def get_content(self):
-        return self._text
-
-
-class FakeVectorStore:
-    def __init__(self, nodes=None):
-        self.nodes = list(nodes or [])
-        self.added_nodes = []
-        self.deleted_ref_doc_ids = []
-        self.queries = []
-
-    def get_nodes(self, filters=None):
-        return list(self.nodes)
-
-    def add(self, nodes):
-        self.added_nodes.extend(nodes)
-        self.nodes.extend(nodes)
-
-    def query(self, query):
-        self.queries.append(query)
-        return type("VectorResult", (), {"nodes": list(self.nodes)})()
-
-    def delete(self, ref_doc_id):
-        self.deleted_ref_doc_ids.append(ref_doc_id)
-        self.nodes = [
-            node for node in self.nodes if node.metadata.get("file_id") != ref_doc_id
-        ]
-
-
-class FakeConnection:
+class MemoryPostgres:
     def __init__(self):
-        self.executed = []
-        self.committed = 0
+        self.rows = []
+        self.calls = []
+        self.write_error = None
 
-    def __enter__(self):
-        return self
+    async def execute_write(self, query, params=None):
+        self.calls.append(("execute_write", query, params))
+        if self.write_error:
+            raise self.write_error
+        (
+            file_id,
+            project_id,
+            session_id,
+            visibility_scope,
+            original_name,
+            relative_path,
+            extension,
+            size_bytes,
+            content_hash,
+            storage_key,
+            created_at,
+            updated_at,
+        ) = params
+        self.rows.append(
+            {
+                "file_id": file_id,
+                "project_id": project_id,
+                "session_id": session_id,
+                "visibility_scope": visibility_scope,
+                "original_name": original_name,
+                "relative_path": relative_path,
+                "extension": extension,
+                "size_bytes": size_bytes,
+                "content_hash": content_hash,
+                "storage_key": storage_key,
+                "status": "uploaded",
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "chunk_count": 0,
+            }
+        )
+        return 1
 
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def execute(self, statement):
-        self.executed.append(str(statement))
-
-    def commit(self):
-        self.committed += 1
-
-
-class FakeEngine:
-    def __init__(self):
-        self.connection = FakeConnection()
-
-    def connect(self):
-        return self.connection
-
-
-class FakeEmbedding:
-    embedding_dim = 3
-
-    async def encode(self, texts):
-        return [[float(i), 0.0, 0.0] for i, _ in enumerate(texts, start=1)]
-
-    async def encode_single(self, text):
-        return [1.0, 0.0, 0.0]
-
-    async def rerank(self, query, texts):
-        return list(reversed(range(len(texts))))
-
-
-class FakeSplitter:
-    def __init__(self, chunk_size, chunk_overlap):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-
-    def get_nodes_from_documents(self, docs):
-        text = docs[0].text
-        midpoint = max(1, len(text) // 2)
-        return [
-            FakeNode(text[:midpoint], dict(docs[0].metadata)),
-            FakeNode(text[midpoint:], dict(docs[0].metadata)),
+    async def execute_read(self, query, params=None):
+        self.calls.append(("execute_read", query, params))
+        project_id, session_id, *scope = params
+        rows = [
+            row
+            for row in self.rows
+            if row["project_id"] == project_id
+            and (
+                row["visibility_scope"] == "project"
+                or (
+                    row["visibility_scope"] == "session"
+                    and row["session_id"] == session_id
+                )
+            )
+            and (not scope or row["visibility_scope"] == scope[0])
         ]
+        return list(reversed(rows))
 
 
 @pytest.fixture
-def filerag(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    service = FileRAGService("session-1", FakeEmbedding())
-    store = FakeVectorStore()
-    service._vector_store = store
-    return service, store
+def filerag(tmp_path):
+    postgres = MemoryPostgres()
+    service = FileRAGService(
+        project_id="project-1",
+        postgres_client=postgres,
+        storage_root=tmp_path,
+    )
+    return service, postgres, tmp_path
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_file_rag_rebuilds_manifest_and_bm25_state_from_vector_store(filerag):
-    service, store = filerag
-    store.nodes = [
-        FakeNode(
-            "alpha chunk",
-            {
-                "file_id": "file_1",
-                "original_name": "notes.md",
-                "extension": ".md",
-                "size_bytes": 12,
-                "uploaded_at": "2026-01-01T00:00:00+00:00",
-            },
-        ),
-        FakeNode(
-            "beta chunk",
-            {
-                "file_id": "file_1",
-                "original_name": "notes.md",
-                "extension": ".md",
-                "size_bytes": 12,
-                "uploaded_at": "2026-01-01T00:00:00+00:00",
-            },
-        ),
-        FakeNode("orphan chunk", {"original_name": "ignored.md"}),
-    ]
+async def test_add_file_writes_managed_copy_and_persists_metadata(filerag):
+    service, postgres, storage_root = filerag
+    content = b"alpha beta gamma"
 
-    service._load_state_from_vector_store()
+    metadata = await service.add_file(
+        content=content,
+        original_name="Notes.MD",
+        relative_path=r"docs\Notes.MD",
+    )
 
-    assert service._manifest == {
-        "file_1": {
-            "file_id": "file_1",
-            "original_name": "notes.md",
-            "extension": ".md",
-            "size_bytes": 12,
-            "chunk_count": 2,
-            "uploaded_at": "2026-01-01T00:00:00+00:00",
-        }
+    assert metadata["project_id"] == "project-1"
+    assert metadata["visibility_scope"] == "project"
+    assert metadata["session_id"] is None
+    assert metadata["relative_path"] == "docs/Notes.MD"
+    assert metadata["extension"] == ".md"
+    assert metadata["size_bytes"] == len(content)
+    assert metadata["content_hash"] == hashlib.sha256(content).hexdigest()
+    assert metadata["status"] == "uploaded"
+    assert metadata["chunk_count"] == 0
+    assert "storage_key" not in metadata
+
+    stored_row = postgres.rows[0]
+    stored_path = storage_root / stored_row["storage_key"]
+    assert stored_path.read_bytes() == content
+    assert stored_path.name == "content"
+    assert stored_row["original_name"] == "Notes.MD"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_database_failure_removes_newly_written_file(filerag):
+    service, postgres, storage_root = filerag
+    postgres.write_error = RuntimeError("insert failed")
+
+    with pytest.raises(RuntimeError, match="insert failed"):
+        await service.add_file(content=b"alpha", original_name="notes.md")
+
+    assert list(storage_root.rglob("content")) == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_visibility_rules_are_applied_when_listing_files(tmp_path):
+    postgres = MemoryPostgres()
+    project_one = FileRAGService("project-1", postgres, tmp_path)
+    project_two = FileRAGService("project-2", postgres, tmp_path)
+
+    project_file = await project_one.add_file(
+        content=b"project",
+        original_name="project.md",
+    )
+    session_one = await project_one.add_file(
+        content=b"one",
+        original_name="one.md",
+        session_id="session-1",
+        visibility_scope="session",
+    )
+    await project_one.add_file(
+        content=b"two",
+        original_name="two.md",
+        session_id="session-2",
+        visibility_scope="session",
+    )
+    await project_two.add_file(
+        content=b"other project",
+        original_name="other.md",
+    )
+
+    visible_to_one = await project_one.list_files(session_id="session-1")
+    visible_to_two = await project_one.list_files(session_id="session-2")
+    project_only = await project_one.list_files(
+        session_id="session-1",
+        visibility_scope="project",
+    )
+
+    assert {row["file_id"] for row in visible_to_one} == {
+        project_file["file_id"],
+        session_one["file_id"],
     }
-    assert service._bm25_corpus == ["alpha chunk", "beta chunk"]
-    assert service._bm25_metadata == [
-        {"file_id": "file_1", "file_name": "notes.md"},
-        {"file_id": "file_1", "file_name": "notes.md"},
-    ]
-    assert service._bm25_dirty is True
-    assert service._loaded_from_store is True
+    assert {row["original_name"] for row in visible_to_two} == {
+        "project.md",
+        "two.md",
+    }
+    assert [row["original_name"] for row in project_only] == ["project.md"]
+    assert all("storage_key" not in row for row in visible_to_one)
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_file_rag_sanitizes_llamaindex_table_names(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    service = FileRAGService('session-1"; DROP TABLE x;--', FakeEmbedding())
+async def test_repeated_uploads_create_separate_records(filerag):
+    service, postgres, _ = filerag
 
-    assert service._session_table_name() == "file_chunks_session_1___DROP_TABLE_x"
+    first = await service.add_file(
+        content=b"same",
+        original_name="notes.md",
+        relative_path="docs/notes.md",
+    )
+    second = await service.add_file(
+        content=b"same",
+        original_name="notes.md",
+        relative_path="docs/notes.md",
+    )
 
-
-@pytest.mark.storage
-@pytest.mark.no_network
-def test_file_rag_cleanup_uses_sanitized_llamaindex_table_name(filerag):
-    service, store = filerag
-    service.session_id = 'session-1"; DROP TABLE x;--'
-    store._engine = FakeEngine()
-
-    service.cleanup_session()
-
-    assert store._engine.connection.executed == [
-        'DROP TABLE IF EXISTS "data_file_chunks_session_1___DROP_TABLE_x"'
-    ]
-    assert store._engine.connection.committed == 1
-    assert service._vector_store is None
+    assert first["file_id"] != second["file_id"]
+    assert first["content_hash"] == second["content_hash"]
+    assert len(postgres.rows) == 2
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_file_rag_ingest_file_chunks_embeds_and_updates_manifest(
-    monkeypatch, tmp_path, filerag
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "../secret.txt",
+        "docs/../../secret.txt",
+        "/absolute/path.txt",
+        r"C:\absolute\path.txt",
+        "\x00bad.txt",
+    ],
+)
+async def test_add_file_rejects_unsafe_relative_paths(filerag, relative_path):
+    service, postgres, _ = filerag
+
+    with pytest.raises(ValueError):
+        await service.add_file(
+            content=b"alpha",
+            original_name="notes.md",
+            relative_path=relative_path,
+        )
+
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_generated_storage_path_cannot_escape_storage_root(tmp_path):
+    service = FileRAGService(
+        project_id="../outside",
+        postgres_client=MemoryPostgres(),
+        storage_root=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="escaped"):
+        await service.add_file(content=b"alpha", original_name="notes.md")
+
+    assert list(tmp_path.rglob("content")) == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_add_file_rejects_invalid_content_scope_and_size(
+    monkeypatch, filerag
 ):
-    service, store = filerag
-    monkeypatch.setattr(file_rag_module, "SentenceSplitter", FakeSplitter)
-    file_path = tmp_path / "notes.md"
-    file_path.write_text("alpha beta gamma delta", encoding="utf-8")
+    service, postgres, _ = filerag
 
-    meta = await service.ingest_file(str(file_path), "notes.md")
+    with pytest.raises(ValueError, match="must not be empty"):
+        await service.add_file(content=b"", original_name="notes.md")
+    with pytest.raises(ValueError, match="either 'project' or 'session'"):
+        await service.add_file(
+            content=b"alpha",
+            original_name="notes.md",
+            visibility_scope="private",
+        )
+    with pytest.raises(ValueError, match="require session_id"):
+        await service.add_file(
+            content=b"alpha",
+            original_name="notes.md",
+            visibility_scope="session",
+        )
 
-    assert meta["original_name"] == "notes.md"
-    assert meta["extension"] == ".md"
-    assert meta["chunk_count"] == 2
-    assert meta["file_id"] in service._manifest
-    assert len(store.added_nodes) == 2
-    assert [node.embedding for node in store.added_nodes] == [
-        [1.0, 0.0, 0.0],
-        [2.0, 0.0, 0.0],
-    ]
+    monkeypatch.setattr(file_rag_module, "MAX_FILE_SIZE", 3)
+    with pytest.raises(ValueError, match="50 MB"):
+        await service.add_file(content=b"four", original_name="notes.md")
+
+    assert postgres.rows == []
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_file_rag_search_combines_candidates_and_applies_file_filter(filerag):
-    service, store = filerag
-    service._manifest = {
-        "file_1": {"file_id": "file_1", "original_name": "notes.md"},
-        "file_2": {"file_id": "file_2", "original_name": "other.md"},
-    }
-    service._loaded_from_store = True
-    service._bm25_dirty = False
-    service._bm25 = None
-    service._bm25_corpus = []
-    store.nodes = [
-        FakeNode("alpha", {"file_id": "file_1", "file_name": "notes.md"}),
-        FakeNode("beta", {"file_id": "file_2", "file_name": "other.md"}),
-    ]
-
-    results = await service.search("alpha", n_results=5, file_filter="file_1")
-
-    assert results == [
+async def test_list_files_normalizes_database_timestamps(filerag):
+    service, postgres, _ = filerag
+    timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
+    postgres.rows.append(
         {
-            "content": "alpha",
-            "file_name": "notes.md",
-            "file_id": "file_1",
-            "score": 0.5,
-            "raw_score": 0.0,
+            "file_id": "a785ecfe-b738-4a43-9e6d-bbdc3f831b20",
+            "project_id": "project-1",
+            "session_id": None,
+            "visibility_scope": "project",
+            "original_name": "notes.md",
+            "relative_path": "notes.md",
+            "extension": ".md",
+            "size_bytes": 5,
+            "content_hash": "hash",
+            "storage_key": "hidden",
+            "status": "uploaded",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "chunk_count": 0,
         }
-    ]
+    )
+
+    files = await service.list_files()
+
+    assert files[0]["created_at"] == timestamp.isoformat()
+    assert files[0]["updated_at"] == timestamp.isoformat()
+    assert "storage_key" not in files[0]
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_file_rag_delete_file_prunes_manifest_bm25_and_vector_store(filerag):
-    service, store = filerag
-    service._loaded_from_store = True
-    service._manifest = {
-        "file_1": {"file_id": "file_1", "original_name": "notes.md"},
-        "file_2": {"file_id": "file_2", "original_name": "other.md"},
-    }
-    service._bm25_corpus = ["alpha", "beta"]
-    service._bm25_metadata = [
-        {"file_id": "file_1", "file_name": "notes.md"},
-        {"file_id": "file_2", "file_name": "other.md"},
-    ]
+async def test_file_rag_search_remains_empty(filerag):
+    service, _, _ = filerag
 
-    assert await service.delete_file("file_1") is True
-
-    assert store.deleted_ref_doc_ids == ["file_1"]
-    assert "file_1" not in service._manifest
-    assert service._bm25_corpus == ["beta"]
-    assert service._bm25_metadata == [{"file_id": "file_2", "file_name": "other.md"}]
-    assert service._bm25_dirty is True
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_file_rag_rejects_unsupported_file_types(tmp_path, filerag):
-    service, _ = filerag
-    file_path = tmp_path / "notes.exe"
-    file_path.write_text("nope", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Unsupported file type"):
-        await service.ingest_file(str(file_path), "notes.exe")
+    assert await service.search("alpha") == []

@@ -81,20 +81,10 @@ class RecordingBatchConsumer:
         self.started += 1
 
 
-class RecordingFileRAG:
-    instances = []
-
-    def __init__(self, session_id, embedding_service):
-        self.session_id = session_id
-        self.embedding_service = embedding_service
-        self.__class__.instances.append(self)
-
-
 @pytest.fixture
 def assembler_harness(monkeypatch):
     RecordingBatchProcessor.instances = []
     RecordingBatchConsumer.instances = []
-    RecordingFileRAG.instances = []
 
     config_manager = RecordingConfigManager()
     emitter = RecordingEmitter()
@@ -122,6 +112,8 @@ def assembler_harness(monkeypatch):
         scheduler=FakeScheduler(),
         user_name="ada",
         redis_client=resources.redis,
+        postgres_client=resources.postgres,
+        file_storage_root=resources.file_storage_root,
         readable_project_ids=["project-1"],
         batch_processor=shared_processor,
     )
@@ -138,11 +130,6 @@ def assembler_harness(monkeypatch):
         "knoggin_server.session.boot.BatchConsumer",
         RecordingBatchConsumer,
     )
-    monkeypatch.setattr(
-        "knoggin_server.session.boot.FileRAGService",
-        RecordingFileRAG,
-    )
-
     return SimpleNamespace(
         assembler=SessionAssembler("ada", resources),
         config_manager=config_manager,
@@ -199,16 +186,26 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert consumer.kwargs["checkpoint_interval"] == 32
     assert consumer.kwargs["session_window"] == 24
 
-    file_rag = RecordingFileRAG.instances[0]
-    assert ctx.file_rag is file_rag
-    assert file_rag.session_id == "session-1"
-    assert file_rag.embedding_service is harness.resources.embedding
+    assert ctx.file_rag is harness.project_state.file_rag
+    assert ctx.file_rag.project_id == "project-1"
 
     assert len(ctx.config_unsubscribers) == 1
     assert harness.config_manager.subscriptions == [
         (consumer.update_settings, "developer_settings.ingestion")
     ]
     assert harness.emitter.registered_sessions == [("project-1", "session-1")]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_sessions_in_same_project_share_file_rag(assembler_harness):
+    harness = assembler_harness
+
+    first = await harness.assembler.assemble(harness.project_state, "session-1")
+    second = await harness.assembler.assemble(harness.project_state, "session-2")
+
+    assert first.file_rag is harness.project_state.file_rag
+    assert second.file_rag is harness.project_state.file_rag
 
 
 @pytest.mark.runtime

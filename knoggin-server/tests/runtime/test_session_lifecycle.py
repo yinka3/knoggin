@@ -213,11 +213,13 @@ async def test_close_session_releases_project_and_shuts_context_down(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_delete_session_data_cleans_keys_membership_and_filerag(
+async def test_delete_session_data_cleans_keys_and_membership_without_project_files(
     session_manager,
 ):
     manager, resources, project_manager, active_sessions = session_manager
     ctx = FakeContext(session_id="session-1", project_id="project-1")
+    project_file_service = object()
+    ctx.file_rag = project_file_service
     active_sessions["session-1"] = ctx
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
@@ -236,7 +238,7 @@ async def test_delete_session_data_cleans_keys_membership_and_filerag(
     deleted = await manager.delete_session_data("session-1")
 
     assert deleted >= 1
-    assert ctx.file_rag.cleanup_count == 1
+    assert ctx.file_rag is project_file_service
     assert project_manager.remove_session_calls == [("project-1", "session-1")]
     assert await resources.redis.hget(RedisKeys.sessions("ada"), "session-1") is None
     assert await resources.redis.get(memory_key) is None

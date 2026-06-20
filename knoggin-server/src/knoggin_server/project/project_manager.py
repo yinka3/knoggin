@@ -507,6 +507,8 @@ class ProjectManager:
             scheduler=scheduler,
             user_name=self.user_name,
             redis_client=self.resources.redis,
+            postgres_client=self.resources.postgres,
+            file_storage_root=self.resources.file_storage_root,
             readable_project_ids=readable_project_ids,
             batch_processor=project_processor,
         )
