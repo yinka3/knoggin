@@ -41,6 +41,7 @@ def make_candidate(primary_id=101, secondary_id=202, *, llm_score=0.8):
 
 class FakeJobEntities:
     def __init__(self, *, candidates=None, raise_detection=False):
+        self.readable_project_ids = ["project-1"]
         self.candidates = list(candidates or [])
         self.raise_detection = raise_detection
         self.detect_calls = []
@@ -91,7 +92,7 @@ class FakeJobEntities:
         return [float(entity_id), 0.1]
 
 
-class FakeMergeGraph:
+class FakeMergeKnowledgeStore:
     def __init__(self):
         self.facts_for_entities = {}
         self.entity_facts = {}
@@ -139,16 +140,22 @@ class FakeMergeGraph:
         )
         return True
 
-    async def get_facts_for_entities(self, entity_ids, active_only=True):
+    async def get_facts_for_entities(
+        self, entity_ids, *, visible_project_ids, active_only=True
+    ):
         return {
             entity_id: list(self.facts_for_entities.get(entity_id, []))
             for entity_id in entity_ids
         }
 
-    async def get_facts_for_entity(self, entity_id, active_only=True):
+    async def get_facts_for_entity(
+        self, entity_id, *, visible_project_ids, active_only=True
+    ):
         return list(self.entity_facts.get(entity_id, []))
 
-    async def get_entity_by_id(self, entity_id, visible_project_ids=None):
+    async def get_entity_by_id(
+        self, entity_id, *, visible_project_ids
+    ):
         self.entity_reads.append(
             {
                 "entity_id": entity_id,
@@ -238,7 +245,7 @@ class AutoMergeJob(MergeDetectionJob):
 
 def make_job(
     entities=None,
-    graph=None,
+    knowledge_store=None,
     redis=None,
     *,
     topic_config=None,
@@ -248,7 +255,7 @@ def make_job(
     return job_cls(
         user_name="ada",
         entities=entities or FakeJobEntities(),
-        graph_client=graph or FakeMergeGraph(),
+        knowledge_store=knowledge_store or FakeMergeKnowledgeStore(),
         llm_client=FakeLLM(),
         topic_config=topic_config or make_topic_config(),
         redis_client=redis or FakeRedis(),
@@ -343,8 +350,8 @@ async def test_execute_candidate_detection_failure_keeps_dirty_ids():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_execute_merge_db_only_merges_and_invalidates_duplicate_facts():
-    graph = FakeMergeGraph()
-    job = make_job(graph=graph)
+    knowledge_store = FakeMergeKnowledgeStore()
+    job = make_job(knowledge_store=knowledge_store)
 
     success = await job._execute_merge_db_only(
         101,
@@ -354,7 +361,7 @@ async def test_execute_merge_db_only_merges_and_invalidates_duplicate_facts():
     )
 
     assert success is True
-    assert graph.merges == [
+    assert knowledge_store.merges == [
         {
             "primary_id": 101,
             "secondary_id": 202,
@@ -362,11 +369,11 @@ async def test_execute_merge_db_only_merges_and_invalidates_duplicate_facts():
             "final_topic": None,
         }
     ]
-    assert graph.topic_strength_reads == [
+    assert knowledge_store.topic_strength_reads == [
         {"primary_id": 101, "secondary_id": 202, "project_id": "project-1"}
     ]
-    assert [item["fact_id"] for item in graph.invalidations] == ["dup-1", "dup-2"]
-    assert {item["project_id"] for item in graph.invalidations} == {"project-1"}
+    assert [item["fact_id"] for item in knowledge_store.invalidations] == ["dup-1", "dup-2"]
+    assert {item["project_id"] for item in knowledge_store.invalidations} == {"project-1"}
 
 
 @pytest.mark.storage
@@ -451,14 +458,14 @@ def test_select_merge_topic_uses_deterministic_strength_order(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_execute_merge_db_only_passes_selected_topic_to_writer():
-    graph = FakeMergeGraph()
-    graph.topic_strength[(101, 202)] = {
+    knowledge_store = FakeMergeKnowledgeStore()
+    knowledge_store.topic_strength[(101, 202)] = {
         "p_topic": "People",
         "s_topic": "Projects",
         "p_fact_count": 1,
         "s_fact_count": 2,
     }
-    job = make_job(graph=graph)
+    job = make_job(knowledge_store=knowledge_store)
 
     success = await job._execute_merge_db_only(
         101,
@@ -468,7 +475,7 @@ async def test_execute_merge_db_only_passes_selected_topic_to_writer():
     )
 
     assert success is True
-    assert graph.merges == [
+    assert knowledge_store.merges == [
         {
             "primary_id": 101,
             "secondary_id": 202,
@@ -482,18 +489,18 @@ async def test_execute_merge_db_only_passes_selected_topic_to_writer():
 @pytest.mark.no_network
 async def test_process_merges_auto_merge_uses_project_scope_and_cleans_intents():
     redis = FakeRedis()
-    graph = FakeMergeGraph()
+    knowledge_store = FakeMergeKnowledgeStore()
     entities = FakeJobEntities()
     candidate = make_candidate()
-    graph.facts_for_entities[101] = [
+    knowledge_store.facts_for_entities[101] = [
         make_fact(101, "Same fact.", fact_id="a", embedding=[1.0, 0.0])
     ]
-    graph.facts_for_entities[202] = [
+    knowledge_store.facts_for_entities[202] = [
         make_fact(202, "Same fact.", fact_id="b", embedding=[1.0, 0.0])
     ]
     job = make_job(
         entities=entities,
-        graph=graph,
+        knowledge_store=knowledge_store,
         redis=redis,
         job_cls=AutoMergeJob,
         auto=[candidate],
@@ -502,7 +509,7 @@ async def test_process_merges_auto_merge_uses_project_scope_and_cleans_intents()
     summary = await job._process_merges(JobContext("ada", "project-1"), [candidate])
 
     assert summary == "1 merged, 0 failed, 0 HITL"
-    assert graph.merges == [
+    assert knowledge_store.merges == [
         {
             "primary_id": 101,
             "secondary_id": 202,
@@ -510,7 +517,7 @@ async def test_process_merges_auto_merge_uses_project_scope_and_cleans_intents()
             "final_topic": None,
         }
     ]
-    assert [item["fact_id"] for item in graph.invalidations] == ["b"]
+    assert [item["fact_id"] for item in knowledge_store.invalidations] == ["b"]
     assert job.finalized[0]["primary_id"] == 101
     assert redis.strings == {}
     assert redis.sets[RedisKeys.merge_intents_index("ada", "project-1")] == set()
@@ -520,11 +527,11 @@ async def test_process_merges_auto_merge_uses_project_scope_and_cleans_intents()
 @pytest.mark.no_network
 async def test_process_merges_failed_graph_merge_counts_failure_and_cleans_intent():
     redis = FakeRedis()
-    graph = FakeMergeGraph()
+    knowledge_store = FakeMergeKnowledgeStore()
     candidate = make_candidate()
-    graph.merge_results[(101, 202)] = False
+    knowledge_store.merge_results[(101, 202)] = False
     job = make_job(
-        graph=graph,
+        knowledge_store=knowledge_store,
         redis=redis,
         job_cls=AutoMergeJob,
         auto=[candidate],
@@ -566,7 +573,7 @@ async def test_process_merges_stores_hitl_proposals_with_expiry():
 @pytest.mark.no_network
 async def test_finalize_merge_refreshes_primary_topic_in_runtime_cache():
     redis = FakeRedis()
-    graph = FakeMergeGraph()
+    knowledge_store = FakeMergeKnowledgeStore()
     entities = FakeJobEntities()
     entities.profiles[101] = {
         "canonical_name": "Entity 101",
@@ -578,22 +585,22 @@ async def test_finalize_merge_refreshes_primary_topic_in_runtime_cache():
         "type": "concept",
         "topic": "Projects",
     }
-    graph.entities_by_id[101] = {
+    knowledge_store.entities_by_id[101] = {
         "id": 101,
         "canonical_name": "Entity 101",
         "type": "concept",
         "topic": "Projects",
     }
-    graph.entity_facts[101] = [make_fact(101, "Merged entity fact.")]
-    job = make_job(entities=entities, graph=graph, redis=redis)
+    knowledge_store.entity_facts[101] = [make_fact(101, "Merged entity fact.")]
+    job = make_job(entities=entities, knowledge_store=knowledge_store, redis=redis)
 
     await job._finalize_merge(
         JobContext("ada", "project-1"),
         make_candidate(101, 202),
     )
 
-    assert graph.entity_reads == [
-        {"entity_id": 101, "visible_project_ids": None}
+    assert knowledge_store.entity_reads == [
+        {"entity_id": 101, "visible_project_ids": ["project-1"]}
     ]
     assert entities.merge_calls == [
         {
@@ -607,7 +614,7 @@ async def test_finalize_merge_refreshes_primary_topic_in_runtime_cache():
     assert entities.embedding_calls[0]["resolution_text"] == (
         "Entity 101 (concept). Merged entity fact."
     )
-    assert graph.updated_embeddings == [
+    assert knowledge_store.updated_embeddings == [
         {
             "entity_id": 101,
             "embedding": [101.0, 0.1],
@@ -632,7 +639,7 @@ async def test_detect_hierarchy_without_config_returns_zero_edges():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_detect_hierarchy_creates_project_scoped_edges_and_counts_successes():
-    graph = FakeMergeGraph()
+    knowledge_store = FakeMergeKnowledgeStore()
     topic_config = TopicConfig(
         {
             "Work": TopicSchema(
@@ -642,7 +649,7 @@ async def test_detect_hierarchy_creates_project_scoped_edges_and_counts_successe
             )
         }
     )
-    graph.hierarchy_candidates[
+    knowledge_store.hierarchy_candidates[
         ("project-1", "Work", "area", ("task",), 2)
     ] = [
         {
@@ -662,12 +669,12 @@ async def test_detect_hierarchy_creates_project_scoped_edges_and_counts_successe
             "child_type": "task",
         },
     ]
-    job = make_job(graph=graph, topic_config=topic_config)
+    job = make_job(knowledge_store=knowledge_store, topic_config=topic_config)
 
     summary = await job._detect_hierarchy(JobContext("ada", "project-1"))
 
     assert summary == "1 hierarchy edges"
-    assert graph.hierarchy_edges == [
+    assert knowledge_store.hierarchy_edges == [
         {"parent_id": 101, "child_id": 202, "project_id": "project-1"},
         {"parent_id": -1, "child_id": 303, "project_id": "project-1"},
     ]

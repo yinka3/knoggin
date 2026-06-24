@@ -14,11 +14,10 @@ from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
 from common.schema.settings import RedisConnectionSettings
 from common.utils.events import CommunityEventEmitter
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import AsyncRedisClient
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-from knoggin_server.knowledge.services.entity_service import EntityManager
 from log.llm_trace import get_trace_logger
 
 
@@ -40,7 +39,7 @@ class ResourceManager:
 
     def __init__(self):
 
-        self.graph: Optional[GraphInterface] = None
+        self.knowledge_store: Optional[KnowledgeStore] = None
         self.embedding: Optional[EmbeddingService] = None
         self.redis_manager: Optional[AsyncRedisClient] = None
         self.redis: Optional[aioredis.Redis] = None
@@ -48,7 +47,6 @@ class ResourceManager:
         self.executor: Optional[ThreadPoolExecutor] = None
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
-        self.active_entities: Optional[EntityManager] = None
         self.config_unsubscribers: list[Any] = []
 
     @classmethod
@@ -119,7 +117,7 @@ class ResourceManager:
                     reranker_model=reranker_model,
                     device=device,
                 )
-                instance.graph = GraphInterface(
+                instance.knowledge_store = KnowledgeStore(
                     dsn=dsn,
                     embedding_service=instance.embedding,
                 )
@@ -158,12 +156,8 @@ class ResourceManager:
                         details={"original_error": str(e)},
                     )
 
-                await instance.graph.connect()
+                await instance.knowledge_store.connect()
 
-                instance.active_entities = EntityManager(
-                    graph_client=instance.graph,
-                    embedding_service=instance.embedding,
-                )
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
                 return instance
@@ -193,9 +187,9 @@ class ResourceManager:
             self.redis_manager = None
         self.redis = None
 
-        if self.graph:
-            await self.graph.close()
-            self.graph = None
+        if self.knowledge_store:
+            await self.knowledge_store.close()
+            self.knowledge_store = None
         if self.embedding:
             self.embedding.cleanup()
         if self.llm_service:
@@ -203,7 +197,7 @@ class ResourceManager:
 
         self.gliner = None
         self.spacy = None
-        self.graph = None
+        self.knowledge_store = None
 
     async def shutdown(self):
         """Release all managed resources."""

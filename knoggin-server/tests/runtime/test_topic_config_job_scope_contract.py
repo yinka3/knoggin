@@ -6,7 +6,7 @@ from common.schema.settings import TopicSchema
 from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.jobs.topics_job import TopicConfigJob
-from tests.fixtures.fakes import FakeGraphClient, FakeRedis
+from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
 
 
 class RecordingLLM:
@@ -30,13 +30,13 @@ async def noop_update(new_config):
 @pytest.mark.no_network
 async def test_topic_config_job_uses_project_heartbeat_and_session_buffers():
     redis = FakeRedis()
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     job = TopicConfigJob(
         llm=RecordingLLM(),
         topic_config=TopicConfig({"General": TopicSchema(active=True)}),
         update_callback=noop_update,
         redis_client=redis,
-        graph_client=graph,
+        knowledge_store=knowledge_store,
         interval_msgs=2,
     )
     ctx = JobContext(user_name="ada", project_id="project-1")
@@ -56,8 +56,8 @@ async def test_topic_config_job_uses_project_heartbeat_and_session_buffers():
 @pytest.mark.no_network
 async def test_topic_config_job_reads_project_messages_from_graph():
     redis = FakeRedis()
-    graph = FakeGraphClient()
-    graph.recent_project_messages = [
+    knowledge_store = FakeKnowledgeStore()
+    knowledge_store.recent_project_messages = [
         {
             "id": 1,
             "user_name": "ada",
@@ -73,7 +73,7 @@ async def test_topic_config_job_reads_project_messages_from_graph():
         topic_config=TopicConfig({"General": TopicSchema(active=True)}),
         update_callback=noop_update,
         redis_client=redis,
-        graph_client=graph,
+        knowledge_store=knowledge_store,
         interval_msgs=1,
     )
     ctx = JobContext(user_name="ada", project_id="project-1")

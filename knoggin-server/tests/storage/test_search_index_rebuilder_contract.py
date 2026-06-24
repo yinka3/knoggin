@@ -24,7 +24,16 @@ class RecordingEmbeddingService:
 def make_client():
     valid_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
     return RecordingPostgresClient(
-        execute_read_results=[
+        fetch_one_results=[
+            {
+                "entity_id": 1,
+                "canonical_name": "ada",
+                "type": "person",
+                "user_name": "ada",
+                "project_id": "__identity__",
+            }
+        ],
+        fetch_all_results=[
             [
                 {
                     "message_id": 7,
@@ -52,15 +61,6 @@ def make_client():
                     "content": "Widget uses direct evidence.",
                     "valid_at": valid_at,
                     "invalid_at": None,
-                }
-            ],
-            [
-                {
-                    "entity_id": 1,
-                    "canonical_name": "ada",
-                    "type": "person",
-                    "user_name": "ada",
-                    "project_id": "__identity__",
                 }
             ],
             [
@@ -127,7 +127,7 @@ async def test_search_index_rebuilder_replaces_all_derived_indexes():
     assert len(entity_inserts) == 2
     assert len(json.loads(entity_inserts[0][2][4])) == 1024
     identity_fact_read = client.calls[4]
-    assert identity_fact_read[0] == "execute_read"
+    assert identity_fact_read[0] == "fetch_all"
     assert identity_fact_read[2] == (1, "ada", ["project-1", "archive-1"])
 
 
@@ -211,7 +211,7 @@ async def test_search_index_rebuilder_rejects_malformed_embedding_results(
 @pytest.mark.no_network
 async def test_search_index_rebuilder_database_failure_exits_transaction():
     client = make_client()
-    client.execute_exceptions = [
+    client.cursor_execute_exceptions = [
         None,
         None,
         None,

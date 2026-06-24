@@ -165,7 +165,7 @@ class QuietExecutor(AgentExecutor):
         self.llm_calls.append((model, reasoning, self.ctx.state.attempt_count))
 
 
-class FakeGraphClient:
+class FakeKnowledgeStore:
     def __init__(self, messages):
         self.messages = dict(messages)
         self.fts_calls = []
@@ -173,10 +173,11 @@ class FakeGraphClient:
     async def search_messages_fts(
         self,
         query,
-        limit,
+        *,
         user_name,
-        session_ids=None,
-        project_ids=None,
+        session_ids,
+        visible_project_ids,
+        limit,
     ):
         self.fts_calls.append(
             (
@@ -184,7 +185,7 @@ class FakeGraphClient:
                 limit,
                 user_name,
                 list(session_ids or []),
-                list(project_ids or []),
+                list(visible_project_ids),
             )
         )
         return [
@@ -279,10 +280,10 @@ def make_agent_messages():
     ]
 
 
-def make_search_tool(service, graph_client, messages):
+def make_search_tool(service, knowledge_store, messages):
     tool = SearchTools()
     tool.redis = FakeRedis()
-    tool.graph_client = graph_client
+    tool.knowledge_store = knowledge_store
     tool.embedding_service = service
     tool.search_cfg = {
         "fts_limit": 10,
@@ -293,7 +294,7 @@ def make_search_tool(service, graph_client, messages):
     tool.user_name = "ada"
     tool.session_id = "session-agent"
     tool.active_topics = ["Testing"]
-    tool.readable_project_ids = None
+    tool.readable_project_ids = ["project-agent"]
 
     message_by_id = dict(messages)
 
@@ -333,8 +334,8 @@ def make_search_tool(service, graph_client, messages):
 async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
     service = await load_local_embedding_service()
     messages = make_agent_messages()
-    graph = FakeGraphClient(messages)
-    tools = make_search_tool(service, graph, messages)
+    knowledge_store = FakeKnowledgeStore(messages)
+    tools = make_search_tool(service, knowledge_store, messages)
     memory = FakeMemoryManager()
     llm = ScriptedLLM()
     executor = QuietExecutor(make_agent_context(), llm, tools, memory)
@@ -361,13 +362,13 @@ async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
         service.cleanup()
 
     assert cosine(query_vector, target_vector) > cosine(query_vector, unrelated_vector)
-    assert graph.fts_calls == [
+    assert knowledge_store.fts_calls == [
         (
             query,
             10,
             "ada",
             ["session-agent"],
-            [],
+            ["project-agent"],
         )
     ]
     assert memory.calls == [["Testing"]]

@@ -39,6 +39,7 @@ def fact_record(
 
 class FakeEntities:
     def __init__(self, profiles=None, user_id=1):
+        self.readable_project_ids = ["project-1"]
         self.entity_profiles = profiles or {
             1: {"canonical_name": "ada", "type": "person", "aliases": ["ada"]},
             2: {"canonical_name": "Widget", "type": "concept"},
@@ -61,7 +62,7 @@ class FakeEntities:
         return [float(entity_id), 0.5]
 
 
-class FakeGraph:
+class FakeKnowledgeStore:
     def __init__(self):
         self.recent_project_messages = []
         self.facts_for_entities = {}
@@ -86,15 +87,21 @@ class FakeGraph:
         )
         return self.recent_project_messages
 
-    async def get_facts_for_entities(self, entity_ids, active_only):
+    async def get_facts_for_entities(
+        self, entity_ids, *, visible_project_ids, active_only
+    ):
         self.facts_for_entities_calls.append((list(entity_ids), active_only))
         return self.facts_for_entities
 
-    async def get_facts_for_entity(self, entity_id, active_only):
+    async def get_facts_for_entity(
+        self, entity_id, *, visible_project_ids, active_only
+    ):
         self.facts_for_entity_calls.append((entity_id, active_only))
         return self.facts_for_entity
 
-    async def get_entities_by_ids(self, entity_ids):
+    async def get_entities_by_ids(
+        self, entity_ids, *, visible_project_ids
+    ):
         self.entities_by_ids_calls.append(list(entity_ids))
         return [
             {
@@ -142,7 +149,7 @@ def make_job(
     *,
     redis=None,
     entities=None,
-    graph=None,
+    knowledge_store=None,
     llm=None,
     msg_window=6,
     volume_threshold=3,
@@ -152,7 +159,7 @@ def make_job(
     return ProfileRefinementJob(
         llm=llm or FakeLLM(),
         entities=entities or FakeEntities(),
-        graph_client=graph or FakeGraph(),
+        knowledge_store=knowledge_store or FakeKnowledgeStore(),
         executor=None,
         embedding_service=object(),
         redis_client=redis or FakeRedis(),
@@ -206,8 +213,8 @@ async def test_profile_refinement_should_run_uses_dirty_count_volume_and_idle(
 
 @pytest.mark.no_network
 async def test_get_conversation_context_applies_ratio_formatting_and_sorting():
-    graph = FakeGraph()
-    graph.recent_project_messages = [
+    knowledge_store = FakeKnowledgeStore()
+    knowledge_store.recent_project_messages = [
         {
             "id": 1,
             "role": "user",
@@ -244,7 +251,7 @@ async def test_get_conversation_context_applies_ratio_formatting_and_sorting():
             "session_id": "session-3",
         },
     ]
-    job = make_job(graph=graph)
+    job = make_job(knowledge_store=knowledge_store)
 
     conversation = await job._get_conversation_context(
         job_context(),
@@ -253,7 +260,7 @@ async def test_get_conversation_context_applies_ratio_formatting_and_sorting():
         up_to_msg_id=99,
     )
 
-    assert graph.recent_project_message_calls == [("ada", "project-1", 8, 99)]
+    assert knowledge_store.recent_project_message_calls == [("ada", "project-1", 8, 99)]
     assert [turn["id"] for turn in conversation] == [1, 3, 4, 5]
     assert conversation[0]["formatted"].endswith("[USER]: older user")
     assert conversation[0]["formatted"].startswith("[MSG_1] [2026-01-01 10:00]")
@@ -362,9 +369,9 @@ async def test_execute_empty_conversation_returns_failure_without_profile_comple
 
 @pytest.mark.no_network
 async def test_run_updates_clears_missing_profiles_without_fetching_facts():
-    graph = FakeGraph()
+    knowledge_store = FakeKnowledgeStore()
     entities = FakeEntities(profiles={1: {"canonical_name": "ada", "type": "person"}})
-    job = make_job(entities=entities, graph=graph)
+    job = make_job(entities=entities, knowledge_store=knowledge_store)
 
     updates, clear_ids = await job._run_updates(
         job_context(),
@@ -374,14 +381,14 @@ async def test_run_updates_clears_missing_profiles_without_fetching_facts():
 
     assert updates == []
     assert clear_ids == [2, 3]
-    assert graph.facts_for_entities_calls == []
+    assert knowledge_store.facts_for_entities_calls == []
 
 
 @pytest.mark.no_network
 async def test_run_updates_keeps_dirty_ids_when_fact_fetch_fails():
-    graph = FakeGraph()
-    graph.facts_for_entities = None
-    job = make_job(graph=graph)
+    knowledge_store = FakeKnowledgeStore()
+    knowledge_store.facts_for_entities = None
+    job = make_job(knowledge_store=knowledge_store)
 
     updates, clear_ids = await job._run_updates(
         job_context(),
@@ -391,15 +398,15 @@ async def test_run_updates_keeps_dirty_ids_when_fact_fetch_fails():
 
     assert updates == []
     assert clear_ids == []
-    assert graph.facts_for_entities_calls == [([2, 3], True)]
+    assert knowledge_store.facts_for_entities_calls == [([2, 3], True)]
 
 
 @pytest.mark.no_network
 async def test_run_updates_filters_old_conversation_by_entity_checkpoint():
-    graph = FakeGraph()
-    graph.facts_for_entities = {2: [], 3: []}
-    graph.entities_by_ids = {2: 10, 3: 0}
-    job = make_job(graph=graph)
+    knowledge_store = FakeKnowledgeStore()
+    knowledge_store.facts_for_entities = {2: [], 3: []}
+    knowledge_store.entities_by_ids = {2: 10, 3: 0}
+    job = make_job(knowledge_store=knowledge_store)
     seen_batches = []
 
     async def process_single_batch(
@@ -443,7 +450,7 @@ async def test_run_updates_filters_old_conversation_by_entity_checkpoint():
 
 @pytest.mark.no_network
 async def test_process_single_batch_checkpoints_wrong_or_empty_llm_profiles():
-    graph = FakeGraph()
+    knowledge_store = FakeKnowledgeStore()
     llm = FakeLLM(
         EntityProfilesResult(
             profiles=[
@@ -455,7 +462,7 @@ async def test_process_single_batch_checkpoints_wrong_or_empty_llm_profiles():
             ]
         )
     )
-    job = make_job(graph=graph, llm=llm)
+    job = make_job(knowledge_store=knowledge_store, llm=llm)
 
     updates = await job._process_single_batch(
         job_context(),
@@ -484,7 +491,7 @@ async def test_process_single_batch_checkpoints_wrong_or_empty_llm_profiles():
     )
 
     assert updates == []
-    assert graph.update_checkpoint_calls == [
+    assert knowledge_store.update_checkpoint_calls == [
         (2, 9, "project-1"),
         (3, 9, "project-1"),
     ]
@@ -495,7 +502,7 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
     monkeypatch,
 ):
     redis = FakeRedis()
-    graph = FakeGraph()
+    knowledge_store = FakeKnowledgeStore()
     entities = FakeEntities()
     existing_fact = fact_record("Widget used to rely on broad profile summaries")
     active_fact = fact_record(
@@ -517,7 +524,7 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
             ]
         )
     )
-    job = make_job(redis=redis, graph=graph, entities=entities, llm=llm)
+    job = make_job(redis=redis, knowledge_store=knowledge_store, entities=entities, llm=llm)
     apply_calls = []
 
     async def fake_apply_fact_changes(*args, **kwargs):
@@ -564,7 +571,7 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
     assert entities.embedding_calls == [
         (2, "Widget (concept). Widget now requires direct source evidence")
     ]
-    assert graph.update_checkpoint_calls == []
+    assert knowledge_store.update_checkpoint_calls == []
 
     args, kwargs = apply_calls[0]
     assert args[:5] == (
@@ -578,13 +585,16 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
     assert [fact.content for fact in merge_result.new_contents] == [
         "Widget now requires direct source evidence"
     ]
-    assert args[5] is graph
+    assert args[5] is knowledge_store
     assert args[6] is job.embedding_service
     assert args[7] is llm
-    assert args[8:12] == (0.25, 0.9, 2, "judge contradictions")
     assert kwargs == {
         "user_name": "ada",
         "project_id": "project-1",
+        "contradiction_sim_low": 0.25,
+        "contradiction_sim_high": 0.9,
+        "contradiction_batch_size": 2,
+        "contradiction_prompt": "judge contradictions",
         "source_session_by_msg_id": {7: "session-7"},
     }
 
@@ -646,7 +656,7 @@ async def test_maybe_refine_user_gates_and_sets_short_ttl():
     ],
 )
 async def test_refine_user_profile_skips_incomplete_or_weak_inputs(case_name):
-    graph = FakeGraph()
+    knowledge_store = FakeKnowledgeStore()
     llm_result = EntityProfilesResult(
         profiles=[
             ProfileUpdate(
@@ -657,9 +667,9 @@ async def test_refine_user_profile_skips_incomplete_or_weak_inputs(case_name):
     )
 
     if case_name == "missing_existing_facts":
-        graph.facts_for_entity = None
+        knowledge_store.facts_for_entity = None
     else:
-        graph.facts_for_entity = []
+        knowledge_store.facts_for_entity = []
 
     if case_name == "no_llm_profiles":
         llm_result = EntityProfilesResult()
@@ -677,7 +687,7 @@ async def test_refine_user_profile_skips_incomplete_or_weak_inputs(case_name):
             profiles=[ProfileUpdate(canonical_name="ada", facts=[])]
         )
 
-    job = make_job(graph=graph, llm=FakeLLM(llm_result))
+    job = make_job(knowledge_store=knowledge_store, llm=FakeLLM(llm_result))
 
     async def get_conversation_context(*_args, **_kwargs):
         if case_name == "no_conversation":
@@ -703,7 +713,7 @@ async def test_refine_user_profile_skips_incomplete_or_weak_inputs(case_name):
         )
         is False
     )
-    assert graph.update_profile_calls == []
+    assert knowledge_store.update_profile_calls == []
 
 
 @pytest.mark.no_network
@@ -712,7 +722,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
 ):
     events = patch_profile_events(monkeypatch)
     redis = FakeRedis()
-    graph = FakeGraph()
+    knowledge_store = FakeKnowledgeStore()
     entities = FakeEntities()
     old_fact = fact_record(
         "Ada previously allowed broad profile updates",
@@ -729,7 +739,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
         fact_id="active-1",
         source_entity_id=1,
     )
-    graph.facts_for_entity = [old_fact, newer_fact]
+    knowledge_store.facts_for_entity = [old_fact, newer_fact]
     llm = FakeLLM(
         EntityProfilesResult(
             profiles=[
@@ -745,7 +755,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
             ]
         )
     )
-    job = make_job(redis=redis, graph=graph, entities=entities, llm=llm)
+    job = make_job(redis=redis, knowledge_store=knowledge_store, entities=entities, llm=llm)
     job.max_facts_context = 1
     apply_calls = []
     enriched_calls = []
@@ -766,8 +776,15 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
             },
         ]
 
-    async def fake_enrich_facts_with_sources(facts, graph_client, user_name=None):
-        enriched_calls.append((list(facts), graph_client, user_name))
+    async def fake_enrich_facts_with_sources(
+        facts,
+        knowledge_store,
+        visible_project_ids,
+        user_name=None,
+    ):
+        enriched_calls.append(
+            (list(facts), knowledge_store, visible_project_ids, user_name)
+        )
         return [{"content": fact.content} for fact in facts]
 
     async def fake_apply_fact_changes(*args, **kwargs):
@@ -798,8 +815,15 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     )
 
     assert result is True
-    assert graph.facts_for_entity_calls == [(1, True)]
-    assert enriched_calls == [([old_fact, newer_fact], graph, "ada")]
+    assert knowledge_store.facts_for_entity_calls == [(1, True)]
+    assert enriched_calls == [
+        (
+            [old_fact, newer_fact],
+            knowledge_store,
+            entities.readable_project_ids,
+            "ada",
+        )
+    ]
     assert len(llm.calls) == 1
     assert "Ada Lovelace" in llm.calls[0]["user"]
     assert "Ada prefers scoped profile updates" in llm.calls[0]["user"]
@@ -817,13 +841,16 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     assert [fact.content for fact in merge_result.new_contents] == [
         "Ada requires direct evidence for profile updates"
     ]
-    assert args[5] is graph
+    assert args[5] is knowledge_store
     assert args[6] is job.embedding_service
     assert args[7] is llm
-    assert args[8:12] == (0.25, 0.9, 2, "judge contradictions")
     assert kwargs == {
         "user_name": "ada",
         "project_id": IDENTITY_SCOPE,
+        "contradiction_sim_low": 0.25,
+        "contradiction_sim_high": 0.9,
+        "contradiction_batch_size": 2,
+        "contradiction_prompt": "judge contradictions",
         "source_session_by_msg_id": {7: "session-7"},
     }
 
@@ -831,7 +858,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     assert entities.embedding_calls == [
         (1, "ada (person). Ada requires direct evidence for profile updates")
     ]
-    assert graph.update_profile_calls == [
+    assert knowledge_store.update_profile_calls == [
         {
             "entity_id": 1,
             "canonical_name": "ada",

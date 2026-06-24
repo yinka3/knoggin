@@ -3,6 +3,11 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.scoping import (
+    IDENTITY_ENTITY_ID,
+    require_scope_value,
+    require_visible_project_ids,
+)
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -44,13 +49,19 @@ class GraphReader:
         return [float(x) for x in val]
 
     async def get_message_text(
-        self, message_id: int, user_name: str, session_id: str
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        session_id: str,
+        visible_project_ids: List[str],
     ) -> str:
-        if not user_name or not session_id:
-            logger.warning(
-                "Refusing unsafe message text lookup without user/session scope"
-            )
-            return ""
+        user_name = require_scope_value(user_name, "user_name", "get_message_text")
+        session_id = require_scope_value(session_id, "session_id", "get_message_text")
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_message_text",
+        )
 
         query = """
         SELECT content
@@ -58,15 +69,16 @@ class GraphReader:
         WHERE user_name = %s
           AND session_id = %s
           AND message_id = %s
+          AND project_id = ANY(%s)
         """
         try:
-            res = await self.client.execute_read(
+            row = await self.client.fetch_one(
                 query,
-                (user_name, session_id, message_id),
+                (user_name, session_id, message_id, visible_project_ids),
             )
-            if not res:
+            if not row:
                 return ""
-            content = res[0]["content"]
+            content = row["content"]
             return self._clean_string(content)
         except Exception as e:
             logger.error(f"Failed to get message text for {message_id}: {e}")
@@ -75,13 +87,23 @@ class GraphReader:
     async def get_messages_by_ids(
         self,
         ids: List[int],
-        user_name: Optional[str] = None,
-        session_ids: Optional[List[str]] = None,
+        *,
+        user_name: str,
+        session_ids: List[str],
+        visible_project_ids: List[str],
     ) -> List[Dict]:
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "get_messages_by_ids",
+        )
+        if not session_ids:
+            raise ValueError("get_messages_by_ids requires session_ids scope")
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_messages_by_ids",
+        )
         if not ids:
-            return []
-        if not user_name or not session_ids:
-            logger.warning("Refusing unsafe message lookup without user/session scope")
             return []
 
         params = {"ids": ids, "user_name": user_name, "session_ids": session_ids}
@@ -98,12 +120,18 @@ class GraphReader:
         WHERE message_id = ANY(%s)
           AND user_name = %s
           AND session_id = ANY(%s)
+          AND project_id = ANY(%s)
         ORDER BY message_id ASC
         """
         try:
-            res = await self.client.execute_read(
+            res = await self.client.fetch_all(
                 query,
-                (params["ids"], params["user_name"], params["session_ids"]),
+                (
+                    params["ids"],
+                    params["user_name"],
+                    params["session_ids"],
+                    visible_project_ids,
+                ),
             )
             return [self._parse_message_row(row) for row in res]
         except Exception as e:
@@ -117,11 +145,16 @@ class GraphReader:
         limit: int,
         before_message_id: Optional[int] = None,
     ) -> List[Dict]:
-        if not user_name or not project_id:
-            logger.warning(
-                "Refusing unsafe project message lookup without user/project scope"
-            )
-            return []
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "get_recent_project_messages",
+        )
+        project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "get_recent_project_messages",
+        )
         if limit <= 0:
             return []
 
@@ -158,7 +191,7 @@ class GraphReader:
         )
         query_params = (*query_params, params["limit"])
         try:
-            rows = await self.client.execute_read(query, query_params)
+            rows = await self.client.fetch_all(query, query_params)
             return [self._parse_message_row(row) for row in reversed(rows)]
         except Exception as e:
             logger.error(f"Failed to fetch recent project messages: {e}")
@@ -167,16 +200,27 @@ class GraphReader:
     async def get_surrounding_messages(
         self,
         message_id: int,
+        *,
+        user_name: str,
+        session_id: str,
+        visible_project_ids: List[str],
         forward: int = 3,
         target_total: int = 10,
-        user_name: Optional[str] = None,
-        session_id: Optional[str] = None,
     ) -> List[Dict]:
-        if not user_name or not session_id:
-            logger.warning(
-                "Refusing unsafe surrounding-message lookup without user/session scope"
-            )
-            return []
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "get_surrounding_messages",
+        )
+        session_id = require_scope_value(
+            session_id,
+            "session_id",
+            "get_surrounding_messages",
+        )
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_surrounding_messages",
+        )
 
         back_limit = max(0, target_total - forward - 1)
         session_ids = [session_id]
@@ -184,7 +228,10 @@ class GraphReader:
 
         try:
             target_res = await self.get_messages_by_ids(
-                [message_id], user_name=user_name, session_ids=session_ids
+                [message_id],
+                user_name=user_name,
+                session_ids=session_ids,
+                visible_project_ids=visible_project_ids,
             )
             if not target_res:
                 return []
@@ -204,6 +251,7 @@ class GraphReader:
               AND message_id <> %s
               AND user_name = %s
               AND session_id = %s
+              AND project_id = ANY(%s)
             ORDER BY timestamp_ms DESC
             LIMIT %s
             """
@@ -221,17 +269,30 @@ class GraphReader:
               AND message_id <> %s
               AND user_name = %s
               AND session_id = %s
+              AND project_id = ANY(%s)
             ORDER BY timestamp_ms ASC
             LIMIT %s
             """
 
-            back_data = await self.client.execute_read(
+            back_data = await self.client.fetch_all(
                 back_query,
-                (target_ts, message_id, *params_base, back_limit),
+                (
+                    target_ts,
+                    message_id,
+                    *params_base,
+                    visible_project_ids,
+                    back_limit,
+                ),
             )
-            fwd_data = await self.client.execute_read(
+            fwd_data = await self.client.fetch_all(
                 fwd_query,
-                (target_ts, message_id, *params_base, forward),
+                (
+                    target_ts,
+                    message_id,
+                    *params_base,
+                    visible_project_ids,
+                    forward,
+                ),
             )
 
             prev_msgs = [self._parse_message_row(r) for r in reversed(back_data)]
@@ -242,22 +303,46 @@ class GraphReader:
             logger.error(f"Failed to fetch surrounding messages for {message_id}: {e}")
             return []
 
-    async def get_neighbor_ids(self, entity_id: int) -> set[int]:
+    async def get_neighbor_ids(
+        self, entity_id: int, *, visible_project_ids: List[str]
+    ) -> set[int]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_neighbor_ids",
+        )
         cypher = """
-        MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity)
+        MATCH (e:Entity {id: $entity_id})-[r:RELATED_TO]-(neighbor:Entity)
+        WHERE (e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
+          AND (neighbor.project_id IN $visible_project_ids OR neighbor.id = $identity_entity_id)
+          AND r.project_id IN $visible_project_ids
         RETURN neighbor.id
         """
         query = self.client.build_cypher(cypher, "neighbor_id agtype")
         try:
-            res = await self.client.execute_read(
-                query, (json.dumps({"entity_id": entity_id}),)
+            res = await self.client.fetch_all(
+                query,
+                (
+                    json.dumps(
+                        {
+                            "entity_id": entity_id,
+                            "visible_project_ids": visible_project_ids,
+                            "identity_entity_id": IDENTITY_ENTITY_ID,
+                        }
+                    ),
+                ),
             )
             return {int(row["neighbor_id"]) for row in res}
         except Exception as e:
             logger.error(f"Failed to get neighbor IDs for {entity_id}: {e}")
             return set()
 
-    async def get_parent_entities(self, entity_id: int) -> List[Dict]:
+    async def get_parent_entities(
+        self, entity_id: int, *, visible_project_ids: List[str]
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_parent_entities",
+        )
         query = """
         SELECT
             parent.entity_id AS id,
@@ -273,12 +358,24 @@ class GraphReader:
         LEFT JOIN facts f
           ON f.entity_id = parent.entity_id
          AND f.invalid_at IS NULL
+         AND f.project_id = ANY(%s)
         WHERE edge.child_id = %s
+          AND edge.project_id = ANY(%s)
+          AND (parent.project_id = ANY(%s) OR parent.entity_id = %s)
         GROUP BY parent.entity_id, parent.canonical_name, parent.type
         ORDER BY parent.canonical_name
         """
         try:
-            res = await self.client.execute_read(query, (entity_id,))
+            res = await self.client.fetch_all(
+                query,
+                (
+                    visible_project_ids,
+                    entity_id,
+                    visible_project_ids,
+                    visible_project_ids,
+                    IDENTITY_ENTITY_ID,
+                ),
+            )
             return [
                 {
                     "id": int(r["id"]),
@@ -292,24 +389,53 @@ class GraphReader:
             logger.error(f"Failed to get parents for entity {entity_id}: {e}")
             return []
 
-    async def get_neighbor_entities(self, entity_id: int, limit: int = 5) -> List[Dict]:
+    async def get_neighbor_entities(
+        self,
+        entity_id: int,
+        *,
+        visible_project_ids: List[str],
+        limit: int = 5,
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_neighbor_entities",
+        )
         cypher = """
-        MATCH (e:Entity {id: $entity_id})-[:RELATED_TO]-(neighbor:Entity)
+        MATCH (e:Entity {id: $entity_id})-[r:RELATED_TO]-(neighbor:Entity)
+        WHERE (e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
+          AND (neighbor.project_id IN $visible_project_ids OR neighbor.id = $identity_entity_id)
+          AND r.project_id IN $visible_project_ids
         RETURN neighbor.id, neighbor.canonical_name
         ORDER BY neighbor.last_mentioned DESC
         LIMIT $limit
         """
         query = self.client.build_cypher(cypher, "id agtype, name agtype")
         try:
-            res = await self.client.execute_read(
-                query, (json.dumps({"entity_id": entity_id, "limit": limit}),)
+            res = await self.client.fetch_all(
+                query,
+                (
+                    json.dumps(
+                        {
+                            "entity_id": entity_id,
+                            "limit": limit,
+                            "visible_project_ids": visible_project_ids,
+                            "identity_entity_id": IDENTITY_ENTITY_ID,
+                        }
+                    ),
+                ),
             )
             return [{"id": int(r["id"]), "name": r["name"]} for r in res]
         except Exception as e:
             logger.error(f"Failed to get neighbor entities for {entity_id}: {e}")
             return []
 
-    async def get_child_entities(self, entity_id: int) -> List[Dict]:
+    async def get_child_entities(
+        self, entity_id: int, *, visible_project_ids: List[str]
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_child_entities",
+        )
         query = """
         SELECT
             child.entity_id AS id,
@@ -325,12 +451,24 @@ class GraphReader:
         LEFT JOIN facts f
           ON f.entity_id = child.entity_id
          AND f.invalid_at IS NULL
+         AND f.project_id = ANY(%s)
         WHERE edge.parent_id = %s
+          AND edge.project_id = ANY(%s)
+          AND (child.project_id = ANY(%s) OR child.entity_id = %s)
         GROUP BY child.entity_id, child.canonical_name, child.type
         ORDER BY child.canonical_name
         """
         try:
-            res = await self.client.execute_read(query, (entity_id,))
+            res = await self.client.fetch_all(
+                query,
+                (
+                    visible_project_ids,
+                    entity_id,
+                    visible_project_ids,
+                    visible_project_ids,
+                    IDENTITY_ENTITY_ID,
+                ),
+            )
             return [
                 {
                     "id": int(r["id"]),
@@ -344,33 +482,63 @@ class GraphReader:
             logger.error(f"Failed to get children for entity {entity_id}: {e}")
             return []
 
-    async def has_direct_edge(self, id_a: int, id_b: int) -> bool:
+    async def has_direct_edge(
+        self, id_a: int, id_b: int, *, visible_project_ids: List[str]
+    ) -> bool:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "has_direct_edge",
+        )
         cypher = """
         MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b})
+        WHERE (a.project_id IN $visible_project_ids OR a.id = $identity_entity_id)
+          AND (b.project_id IN $visible_project_ids OR b.id = $identity_entity_id)
         RETURN count(r) > 0 as connected
         """
         query = self.client.build_cypher(cypher, "connected agtype")
         try:
-            res = await self.client.execute_read(
-                query, (json.dumps({"id_a": id_a, "id_b": id_b}),)
+            row = await self.client.fetch_one(
+                query,
+                (
+                    json.dumps(
+                        {
+                            "id_a": id_a,
+                            "id_b": id_b,
+                            "visible_project_ids": visible_project_ids,
+                            "identity_entity_id": IDENTITY_ENTITY_ID,
+                        }
+                    ),
+                ),
             )
-            return bool(res[0]["connected"]) if res else False
+            return bool(row["connected"]) if row else False
         except Exception as e:
             logger.error(f"Failed to check direct edge between {id_a} and {id_b}: {e}")
             return False
 
-    async def has_hierarchy_edge(self, id_a: int, id_b: int) -> bool:
+    async def has_hierarchy_edge(
+        self, id_a: int, id_b: int, *, visible_project_ids: List[str]
+    ) -> bool:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "has_hierarchy_edge",
+        )
         query = """
         SELECT EXISTS (
             SELECT 1
             FROM hierarchy_edges
-            WHERE (parent_id = %s AND child_id = %s)
-               OR (parent_id = %s AND child_id = %s)
+            WHERE project_id = ANY(%s)
+              AND (
+                  (parent_id = %s AND child_id = %s)
+                  OR (parent_id = %s AND child_id = %s)
+              )
         ) AS exists
         """
         try:
-            res = await self.client.execute_read(query, (id_a, id_b, id_b, id_a))
-            return bool(res[0]["exists"]) if res else False
+            row = await self.client.fetch_one(
+                query,
+                (visible_project_ids, id_a, id_b, id_b, id_a),
+            )
+            return bool(row["exists"]) if row else False
         except Exception as e:
             logger.error(
                 f"Failed to check hierarchy edge between {id_a} and {id_b}: {e}"
@@ -383,8 +551,11 @@ class GraphReader:
         secondary_id: int,
         project_id: str,
     ) -> Dict:
-        if not project_id:
-            raise ValueError("get_merge_topic_strength requires project_id scope")
+        project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "get_merge_topic_strength",
+        )
 
         query = """
         SELECT
@@ -454,7 +625,7 @@ class GraphReader:
           AND p.project_id = %s
         """
         try:
-            res = await self.client.execute_read(
+            row = await self.client.fetch_one(
                 query,
                 (
                     project_id,
@@ -481,7 +652,7 @@ class GraphReader:
                     project_id,
                 ),
             )
-            return dict(res[0]) if res else {}
+            return dict(row) if row else {}
         except Exception as e:
             logger.error(
                 "Failed to get merge topic strength for "
@@ -497,8 +668,11 @@ class GraphReader:
         child_types: List[str],
         min_weight: int = 2,
     ) -> List[Dict]:
-        if not project_id:
-            raise ValueError("get_hierarchy_candidates requires project_id scope")
+        project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "get_hierarchy_candidates",
+        )
 
         query = """
         SELECT
@@ -535,7 +709,7 @@ class GraphReader:
         ORDER BY rel.weight DESC, parent.canonical_name, child.canonical_name
         """
         try:
-            graph_res = await self.client.execute_read(
+            graph_res = await self.client.fetch_all(
                 query,
                 (
                     project_id,
@@ -555,7 +729,7 @@ class GraphReader:
                 {int(r["parent_id"]) for r in graph_res}
                 | {int(r["child_id"]) for r in graph_res}
             )
-            emb_res = await self.client.execute_read(
+            emb_res = await self.client.fetch_all(
                 """
                 SELECT entity_id, embedding
                 FROM entity_search
@@ -588,82 +762,88 @@ class GraphReader:
             logger.error(f"Hierarchy candidate query failed: {e}")
             return []
 
-    async def list_preferences(
-        self, session_id: str, kind: Optional[str] = None
-    ) -> List[Dict]:
-        where_kind = "AND p.kind = $kind" if kind else ""
-        cypher = f"""
-        MATCH (p:Preference {{session_id: $session_id}})
-        WHERE true {where_kind}
-        RETURN p.id, p.content, p.kind, p.created_at
-        ORDER BY p.created_at DESC
-        """
-        query = self.client.build_cypher(
-            cypher, "id agtype, content agtype, kind agtype, created_at agtype"
+    async def get_graph_stats(
+        self, *, visible_project_ids: List[str]
+    ) -> Dict[str, int]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_graph_stats",
         )
-        params = {"session_id": session_id}
-        if kind:
-            params["kind"] = kind
-
-        try:
-            res = await self.client.execute_read(query, (json.dumps(params),))
-            return [
-                {
-                    "id": r["id"].strip('"') if isinstance(r["id"], str) else r["id"],
-                    "content": r["content"].strip('"')
-                    if isinstance(r["content"], str)
-                    else r["content"],
-                    "kind": r["kind"].strip('"')
-                    if isinstance(r["kind"], str)
-                    else r["kind"],
-                    "created_at": r["created_at"],
-                }
-                for r in res
-            ]
-        except Exception as e:
-            logger.error(f"Failed to list preferences: {e}")
-            return []
-
-    async def get_graph_stats(self) -> Dict[str, int]:
         query = """
         SELECT
-            (SELECT count(*) FROM entities) AS entities,
+            (
+                SELECT count(*)
+                FROM entities
+                WHERE project_id = ANY(%s) OR entity_id = %s
+            ) AS entities,
             (
                 SELECT count(*)
                 FROM facts
                 WHERE invalid_at IS NULL
+                  AND project_id = ANY(%s)
             ) AS facts,
-            (SELECT count(*) FROM relationships) AS relationships
+            (
+                SELECT count(*)
+                FROM relationships
+                WHERE project_id = ANY(%s)
+            ) AS relationships
         """
         try:
-            res = await self.client.execute_read(query)
-            if not res:
+            row = await self.client.fetch_one(
+                query,
+                (
+                    visible_project_ids,
+                    IDENTITY_ENTITY_ID,
+                    visible_project_ids,
+                    visible_project_ids,
+                ),
+            )
+            if not row:
                 return {"entities": 0, "facts": 0, "relationships": 0}
             return {
-                "entities": int(res[0]["entities"] or 0),
-                "facts": int(res[0]["facts"] or 0),
-                "relationships": int(res[0]["relationships"] or 0),
+                "entities": int(row["entities"] or 0),
+                "facts": int(row["facts"] or 0),
+                "relationships": int(row["relationships"] or 0),
             }
         except Exception as e:
             logger.error(f"Failed to get graph stats: {e}")
             return {"entities": 0, "facts": 0, "relationships": 0}
 
     async def get_neighbor_ids_batch(
-        self, entity_ids: List[int]
+        self,
+        entity_ids: List[int],
+        *,
+        visible_project_ids: List[str],
     ) -> Dict[int, set[int]]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_neighbor_ids_batch",
+        )
         if not entity_ids:
             return {}
         cypher = """
-        MATCH (e:Entity)-[:RELATED_TO]-(neighbor:Entity)
+        MATCH (e:Entity)-[r:RELATED_TO]-(neighbor:Entity)
         WHERE e.id IN $ids
+          AND (e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
+          AND (neighbor.project_id IN $visible_project_ids OR neighbor.id = $identity_entity_id)
+          AND r.project_id IN $visible_project_ids
         RETURN e.id as entity_id, collect(neighbor.id) as neighbor_ids
         """
         query = self.client.build_cypher(
             cypher, "entity_id agtype, neighbor_ids agtype"
         )
         try:
-            res = await self.client.execute_read(
-                query, (json.dumps({"ids": entity_ids}),)
+            res = await self.client.fetch_all(
+                query,
+                (
+                    json.dumps(
+                        {
+                            "ids": entity_ids,
+                            "visible_project_ids": visible_project_ids,
+                            "identity_entity_id": IDENTITY_ENTITY_ID,
+                        }
+                    ),
+                ),
             )
             result_map = {eid: set() for eid in entity_ids}
             for row in res:

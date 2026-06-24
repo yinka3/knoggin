@@ -75,9 +75,6 @@ class SearchIndexRebuilder:
                 "Search indexes require 1024-dimensional embeddings; "
                 f"configured model reports {self.embedding_service.embedding_dim}"
             )
-        if not self.client.async_pool:
-            raise RuntimeError("PostgresClient async_pool is not initialized")
-
         messages = await self._fetch_messages(project_id, user_name)
         entities = await self._fetch_entities(project_id, user_name)
         facts = await self._fetch_facts(project_id, user_name)
@@ -122,127 +119,125 @@ class SearchIndexRebuilder:
             "fact",
         )
 
-        async with self.client.async_pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        DELETE FROM message_search
-                        WHERE project_id = %s
-                          AND user_name = %s
-                        """,
-                        (project_id, user_name),
-                    )
-                    await cur.execute(
-                        """
-                        DELETE FROM fact_search
-                        WHERE project_id = %s
-                          AND user_name = %s
-                        """,
-                        (project_id, user_name),
-                    )
-                    await cur.execute(
-                        """
-                        DELETE FROM entity_search
-                        WHERE project_id = %s
-                          AND user_name = %s
-                          AND entity_id <> %s
-                        """,
-                        (project_id, user_name, IDENTITY_ENTITY_ID),
-                    )
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                DELETE FROM message_search
+                WHERE project_id = %s
+                  AND user_name = %s
+                """,
+                (project_id, user_name),
+            )
+            await cur.execute(
+                """
+                DELETE FROM fact_search
+                WHERE project_id = %s
+                  AND user_name = %s
+                """,
+                (project_id, user_name),
+            )
+            await cur.execute(
+                """
+                DELETE FROM entity_search
+                WHERE project_id = %s
+                  AND user_name = %s
+                  AND entity_id <> %s
+                """,
+                (project_id, user_name, IDENTITY_ENTITY_ID),
+            )
 
-                    for message in messages:
-                        await cur.execute(
-                            """
-                            INSERT INTO message_search (
-                                message_id,
-                                user_name,
-                                session_id,
-                                project_id,
-                                content_tsvector
-                            )
-                            VALUES (
-                                %s, %s, %s, %s,
-                                to_tsvector('english', %s)
-                            )
-                            """,
-                            (
-                                message["message_id"],
-                                message["user_name"],
-                                message["session_id"],
-                                message["project_id"],
-                                message["content"],
-                            ),
-                        )
-
-                    for entity, embedding in zip(entities, entity_vectors):
-                        await cur.execute(
-                            """
-                            INSERT INTO entity_search (
-                                entity_id,
-                                canonical_name,
-                                user_name,
-                                project_id,
-                                embedding
-                            )
-                            VALUES (%s, %s, %s, %s, %s::vector)
-                            """,
-                            (
-                                entity["entity_id"],
-                                entity["canonical_name"],
-                                entity["user_name"],
-                                entity["project_id"],
-                                json.dumps(embedding),
-                            ),
-                        )
-
-                    for fact, embedding in zip(facts, fact_vectors):
-                        await cur.execute(
-                            """
-                            INSERT INTO fact_search (
-                                fact_id,
-                                entity_id,
-                                user_name,
-                                project_id,
-                                embedding,
-                                invalid_at
-                            )
-                            VALUES (%s, %s, %s, %s, %s::vector, %s)
-                            """,
-                            (
-                                fact["fact_id"],
-                                fact["entity_id"],
-                                fact["user_name"],
-                                fact["project_id"],
-                                json.dumps(embedding),
-                                fact["invalid_at"],
-                            ),
-                        )
-
-                    await cur.execute(
-                        """
-                        INSERT INTO entity_search (
-                            entity_id,
-                            canonical_name,
-                            user_name,
-                            project_id,
-                            embedding
-                        )
-                        VALUES (%s, %s, %s, %s, %s::vector)
-                        ON CONFLICT (entity_id) DO UPDATE SET
-                            canonical_name = EXCLUDED.canonical_name,
-                            user_name = EXCLUDED.user_name,
-                            project_id = EXCLUDED.project_id,
-                            embedding = EXCLUDED.embedding
-                        """,
-                        (
-                            identity["entity_id"],
-                            identity["canonical_name"],
-                            identity["user_name"],
-                            identity["project_id"],
-                            json.dumps(identity_vector),
-                        ),
+            for message in messages:
+                await cur.execute(
+                    """
+                    INSERT INTO message_search (
+                        message_id,
+                        user_name,
+                        session_id,
+                        project_id,
+                        content_tsvector
                     )
+                    VALUES (
+                        %s, %s, %s, %s,
+                        to_tsvector('english', %s)
+                    )
+                    """,
+                    (
+                        message["message_id"],
+                        message["user_name"],
+                        message["session_id"],
+                        message["project_id"],
+                        message["content"],
+                    ),
+                )
+
+            for entity, embedding in zip(entities, entity_vectors):
+                await cur.execute(
+                    """
+                    INSERT INTO entity_search (
+                        entity_id,
+                        canonical_name,
+                        user_name,
+                        project_id,
+                        embedding
+                    )
+                    VALUES (%s, %s, %s, %s, %s::vector)
+                    """,
+                    (
+                        entity["entity_id"],
+                        entity["canonical_name"],
+                        entity["user_name"],
+                        entity["project_id"],
+                        json.dumps(embedding),
+                    ),
+                )
+
+            for fact, embedding in zip(facts, fact_vectors):
+                await cur.execute(
+                    """
+                    INSERT INTO fact_search (
+                        fact_id,
+                        entity_id,
+                        user_name,
+                        project_id,
+                        embedding,
+                        invalid_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s::vector, %s)
+                    """,
+                    (
+                        fact["fact_id"],
+                        fact["entity_id"],
+                        fact["user_name"],
+                        fact["project_id"],
+                        json.dumps(embedding),
+                        fact["invalid_at"],
+                    ),
+                )
+
+            await cur.execute(
+                """
+                INSERT INTO entity_search (
+                    entity_id,
+                    canonical_name,
+                    user_name,
+                    project_id,
+                    embedding
+                )
+                VALUES (%s, %s, %s, %s, %s::vector)
+                ON CONFLICT (entity_id) DO UPDATE SET
+                    canonical_name = EXCLUDED.canonical_name,
+                    user_name = EXCLUDED.user_name,
+                    project_id = EXCLUDED.project_id,
+                    embedding = EXCLUDED.embedding
+                """,
+                (
+                    identity["entity_id"],
+                    identity["canonical_name"],
+                    identity["user_name"],
+                    identity["project_id"],
+                    json.dumps(identity_vector),
+                ),
+            )
 
         summary = {
             "messages": len(messages),
@@ -259,7 +254,7 @@ class SearchIndexRebuilder:
         user_name: str,
     ) -> List[Dict]:
         return list(
-            await self.client.execute_read(
+            await self.client.fetch_all(
                 """
                 SELECT message_id, user_name, session_id, project_id, content
                 FROM messages
@@ -277,7 +272,7 @@ class SearchIndexRebuilder:
         user_name: str,
     ) -> List[Dict]:
         return list(
-            await self.client.execute_read(
+            await self.client.fetch_all(
                 """
                 SELECT
                     entity_id,
@@ -301,7 +296,7 @@ class SearchIndexRebuilder:
         user_name: str,
     ) -> List[Dict]:
         return list(
-            await self.client.execute_read(
+            await self.client.fetch_all(
                 """
                 SELECT
                     fact_id,
@@ -321,7 +316,7 @@ class SearchIndexRebuilder:
         )
 
     async def _fetch_identity(self, user_name: str) -> Dict:
-        rows = await self.client.execute_read(
+        row = await self.client.fetch_one(
             """
             SELECT entity_id, canonical_name, type, user_name, project_id
             FROM entities
@@ -330,7 +325,7 @@ class SearchIndexRebuilder:
             """,
             (IDENTITY_ENTITY_ID, user_name),
         )
-        return rows[0] if rows else {}
+        return row or {}
 
     async def _fetch_identity_facts(
         self,
@@ -338,7 +333,7 @@ class SearchIndexRebuilder:
         identity_project_ids: List[str],
     ) -> List[Dict]:
         return list(
-            await self.client.execute_read(
+            await self.client.fetch_all(
                 """
                 SELECT DISTINCT
                     f.fact_id,

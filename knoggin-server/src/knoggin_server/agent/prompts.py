@@ -39,7 +39,8 @@ def get_topic_evolution_prompt(user_name: str) -> str:
 
 async def enrich_facts_with_sources(
     facts: list,
-    graph_client,
+    knowledge_store,
+    visible_project_ids: List[str],
     user_name: str = None,
     session_id: str = None,
 ) -> List[Dict]:
@@ -80,10 +81,11 @@ async def enrich_facts_with_sources(
         try:
             msg_text_map = {}
             for (fact_user, fact_session), msg_ids in by_scope.items():
-                messages = await graph_client.get_messages_by_ids(
+                messages = await knowledge_store.get_messages_by_ids(
                     list(dict.fromkeys(msg_ids)),
                     user_name=fact_user,
                     session_ids=[fact_session],
+                    visible_project_ids=visible_project_ids,
                 )
                 for message in messages:
                     msg_text_map[

@@ -38,7 +38,7 @@ def test_populate_cache_loads_profiles_names_and_aliases(entity_manager_harness)
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_get_id_uses_cache_before_graph_lookup(entity_manager_harness):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     entities._populate_cache(
         {
             "id": 101,
@@ -53,19 +53,19 @@ async def test_get_id_uses_cache_before_graph_lookup(entity_manager_harness):
     entity_id = await entities.get_id("Bob")
 
     assert entity_id == 101
-    assert graph.name_lookups == []
+    assert knowledge_store.name_lookups == []
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_get_id_fetches_unknown_name_with_project_scope(entity_manager_harness):
-    entities, graph, _ = entity_manager_harness
-    graph.add_entity(202, "Knoggin", aliases=["memory project"], entity_type="project")
+    entities, knowledge_store, _ = entity_manager_harness
+    knowledge_store.add_entity(202, "Knoggin", aliases=["memory project"], entity_type="project")
 
     entity_id = await entities.get_id("memory project")
 
     assert entity_id == 202
-    assert graph.name_lookups == [
+    assert knowledge_store.name_lookups == [
         {
             "names": ["memory project"],
             "visible_project_ids": ["project-1"],
@@ -78,8 +78,8 @@ async def test_get_id_fetches_unknown_name_with_project_scope(entity_manager_har
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_get_id_respects_readable_project_scope(entity_manager_harness):
-    entities, graph, _ = entity_manager_harness
-    graph.add_entity(
+    entities, knowledge_store, _ = entity_manager_harness
+    knowledge_store.add_entity(
         303,
         "Linear",
         entity_type="tool",
@@ -90,7 +90,7 @@ async def test_get_id_respects_readable_project_scope(entity_manager_harness):
     entity_id = await entities.get_id("Linear")
 
     assert entity_id is None
-    assert graph.name_lookups[-1]["visible_project_ids"] == ["project-1"]
+    assert knowledge_store.name_lookups[-1]["visible_project_ids"] == ["project-1"]
     assert "linear" not in entities.get_known_aliases()
 
 
@@ -99,7 +99,7 @@ async def test_get_id_respects_readable_project_scope(entity_manager_harness):
 async def test_get_profile_uses_cache_then_fetches_missing_profiles(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     entities._populate_cache(
         {
             "id": 101,
@@ -110,7 +110,7 @@ async def test_get_profile_uses_cache_then_fetches_missing_profiles(
             "project_id": "project-1",
         }
     )
-    graph.add_entity(202, "Knoggin", aliases=["memory project"], entity_type="project")
+    knowledge_store.add_entity(202, "Knoggin", aliases=["memory project"], entity_type="project")
 
     cached = await entities.get_profile(101)
     fetched = await entities.get_profile(202)
@@ -119,7 +119,7 @@ async def test_get_profile_uses_cache_then_fetches_missing_profiles(
     assert cached["canonical_name"] == "Robert Chen"
     assert fetched["canonical_name"] == "Knoggin"
     assert missing is None
-    assert graph.profile_lookups == [
+    assert knowledge_store.profile_lookups == [
         {"entity_id": 202, "visible_project_ids": ["project-1"]},
         {"entity_id": 999, "visible_project_ids": ["project-1"]},
     ]

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
-    from infrastructure.graph_interface import GraphInterface
+    from infrastructure.knowledge_store import KnowledgeStore
     from knoggin_server.knowledge.services.embedding_service import EmbeddingService
     from knoggin_server.knowledge.services.entity_service import EntityManager
     from knoggin_server.knowledge.services.file_rag import FileRAGService
@@ -28,7 +28,7 @@ except ImportError:
 
 class SearchTools:
     redis: aioredis.Redis
-    graph_client: GraphInterface
+    knowledge_store: KnowledgeStore
     embedding_service: EmbeddingService
     search_cfg: Dict
     file_rag: Optional[FileRAGService]
@@ -134,11 +134,11 @@ class SearchTools:
             Matching entities with ID, name, summary, type, and top connections.
         """
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
-        results = await self.graph_client.search_entity(
+        results = await self.knowledge_store.search_entity(
             query,
-            self.active_topics,
-            limit,
             visible_project_ids=self.readable_project_ids,
+            active_topics=self.active_topics,
+            limit=limit,
         )
 
         if not results:
@@ -261,16 +261,13 @@ class SearchTools:
 
         results = {}
 
-        project_ids = getattr(self, "readable_project_ids", None)
-        visible_session_ids = None
-        if not project_ids:
-            visible_session_ids = await self._get_visible_session_ids()
-        fts_results = await self.graph_client.search_messages_fts(
+        visible_session_ids = await self._get_visible_session_ids()
+        fts_results = await self.knowledge_store.search_messages_fts(
             query,
-            fts_limit,
             user_name=self.user_name,
             session_ids=visible_session_ids,
-            project_ids=project_ids,
+            visible_project_ids=self.readable_project_ids,
+            limit=fts_limit,
         )
 
         max_fts = max([s for _, s, _ in fts_results], default=1.0) or 1.0
@@ -451,10 +448,11 @@ class SearchTools:
                 ).append(item["message_id"])
 
         for (user_name, session_id), message_ids in missing_by_session.items():
-            fallback_msgs = await self.graph_client.get_messages_by_ids(
+            fallback_msgs = await self.knowledge_store.get_messages_by_ids(
                 message_ids,
                 user_name=user_name,
                 session_ids=[session_id],
+                visible_project_ids=self.readable_project_ids,
             )
             for message in fallback_msgs:
                 ts_iso = ""
@@ -522,12 +520,13 @@ class SearchTools:
             if is_prefixed_msg_id:
                 try:
                     numerical_msg_id = int(msg_id.split("_")[1])
-                    fallback_msgs = await self.graph_client.get_surrounding_messages(
+                    fallback_msgs = await self.knowledge_store.get_surrounding_messages(
                         numerical_msg_id,
-                        forward,
-                        target_total,
                         user_name=self.user_name,
                         session_id=target_session_id,
+                        visible_project_ids=self.readable_project_ids,
+                        forward=forward,
+                        target_total=target_total,
                     )
 
                     formatted_fallback = []

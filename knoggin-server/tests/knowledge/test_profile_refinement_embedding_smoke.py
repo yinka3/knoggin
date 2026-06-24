@@ -34,7 +34,7 @@ def profile_fact(content, *, fact_id, source_msg_id):
 async def test_real_embedding_profile_refinement_updates_profile_vector_from_facts():
     service = await load_local_embedding_service()
     entities = EntityManager(
-        graph_client=object(),
+        knowledge_store=object(),
         embedding_service=service,
         project_id="project-1",
         readable_project_ids=["project-1"],
@@ -49,7 +49,7 @@ async def test_real_embedding_profile_refinement_updates_profile_vector_from_fac
     job = ProfileRefinementJob(
         llm=object(),
         entities=entities,
-        graph_client=object(),
+        knowledge_store=object(),
         executor=None,
         embedding_service=service,
         redis_client=object(),

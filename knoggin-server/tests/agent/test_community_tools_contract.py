@@ -52,8 +52,9 @@ def make_base_tools(redis):
         topic_config=SimpleNamespace(active_topics=["General"]),
         search_cfg={},
         file_rag=None,
-        graph_client=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
         redis=redis,
+        readable_project_ids=["project-1"],
     )
 
 

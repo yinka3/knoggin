@@ -25,7 +25,7 @@ class FakeEmbeddingService:
         return [float(total % 97), float(len(text)), float(total % 13)]
 
 
-class FakeEntityGraphClient:
+class FakeEntityKnowledgeStore:
     def __init__(self, entities=None):
         self.entities = {
             entity["id"]: dict(entity) for entity in (entities or [])
@@ -99,7 +99,7 @@ class FakeEntityGraphClient:
             return None
         return dict(entity)
 
-    async def get_entity_embedding(self, entity_id):
+    async def get_entity_embedding(self, entity_id, *, visible_project_ids):
         self.embedding_lookups.append(entity_id)
         entity = self.entities.get(entity_id)
         return list(entity.get("embedding") or []) if entity else []
@@ -151,7 +151,9 @@ class FakeEntityGraphClient:
             visible_results.append((neighbor_id, score))
         return visible_results[:limit]
 
-    async def get_facts_for_entities(self, entity_ids, active_only=True):
+    async def get_facts_for_entities(
+        self, entity_ids, *, visible_project_ids, active_only=True
+    ):
         self.facts_for_entities_calls.append(
             {"entity_ids": list(entity_ids), "active_only": active_only}
         )
@@ -160,14 +162,14 @@ class FakeEntityGraphClient:
             for entity_id in entity_ids
         }
 
-    async def get_neighbor_ids(self, entity_id):
+    async def get_neighbor_ids(self, entity_id, *, visible_project_ids):
         self.neighbor_id_calls.append(entity_id)
         return set(self.neighbor_ids_by_entity.get(entity_id, set()))
 
-    async def has_direct_edge(self, id_a, id_b):
+    async def has_direct_edge(self, id_a, id_b, *, visible_project_ids):
         return tuple(sorted((id_a, id_b))) in self.direct_edges
 
-    async def has_hierarchy_edge(self, id_a, id_b):
+    async def has_hierarchy_edge(self, id_a, id_b, *, visible_project_ids):
         return tuple(sorted((id_a, id_b))) in self.hierarchy_edges
 
     def _is_visible(self, entity, visible_project_ids):
@@ -178,12 +180,12 @@ class FakeEntityGraphClient:
 
 @pytest.fixture
 def entity_manager_harness():
-    graph = FakeEntityGraphClient()
+    knowledge_store = FakeEntityKnowledgeStore()
     embedding = FakeEmbeddingService()
     entities = EntityManager(
-        graph_client=graph,
+        knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
         readable_project_ids=["project-1"],
     )
-    return entities, graph, embedding
+    return entities, knowledge_store, embedding

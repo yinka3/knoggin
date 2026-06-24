@@ -49,7 +49,7 @@ class FakeEmbeddingService:
         return [float(total % 97), float(len(text)), float(total % 13)]
 
 
-class FakeGraphClient:
+class FakeKnowledgeStore:
     def __init__(self):
         self.vector_results = {}
         self.neighbors_by_entity = {}
@@ -65,7 +65,7 @@ class FakeGraphClient:
     async def get_entities_by_names(self, names, visible_project_ids=None):
         return []
 
-    async def get_entity_embedding(self, entity_id):
+    async def get_entity_embedding(self, entity_id, *, visible_project_ids):
         return []
 
     async def search_entities_by_embedding(
@@ -85,14 +85,23 @@ class FakeGraphClient:
         )
         return list(self.vector_results.get(tuple(vector), []))
 
-    async def get_neighbor_ids_batch(self, candidate_ids):
+    async def get_neighbor_ids_batch(
+        self, candidate_ids, *, visible_project_ids
+    ):
         self.neighbor_calls.append(list(candidate_ids))
         return {
             candidate_id: set(self.neighbors_by_entity.get(candidate_id, set()))
             for candidate_id in candidate_ids
         }
 
-    async def search_relevant_facts(self, entity_id, embedding, limit=5):
+    async def search_relevant_facts(
+        self,
+        entity_id,
+        embedding,
+        *,
+        visible_project_ids,
+        limit=5,
+    ):
         self.fact_searches.append(
             {"entity_id": entity_id, "embedding": list(embedding), "limit": limit}
         )
@@ -130,9 +139,9 @@ class FakeLLM:
 
 def make_harness():
     embedding = FakeEmbeddingService()
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     entities = EntityManager(
-        graph_client=graph,
+        knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
         readable_project_ids=["project-1"],
@@ -153,7 +162,7 @@ def make_harness():
         topic_config=make_topic_config(),
         get_next_ent_id=get_next_ent_id,
     )
-    return processor, entities, graph, embedding
+    return processor, entities, knowledge_store, embedding
 
 
 async def seed_entity(
@@ -191,7 +200,7 @@ def make_fact(entity_id, content="The entity is relevant to this message."):
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_empty_input_returns_empty_scores():
-    processor, _, graph, embedding = make_harness()
+    processor, _, knowledge_store, embedding = make_harness()
 
     scores = await processor._boost_candidates(
         [],
@@ -201,15 +210,15 @@ async def test_boost_candidates_empty_input_returns_empty_scores():
 
     assert scores == {}
     assert processor.llm.calls == []
-    assert graph.neighbor_calls == []
-    assert graph.fact_searches == []
+    assert knowledge_store.neighbor_calls == []
+    assert knowledge_store.fact_searches == []
     assert embedding.batch_calls == []
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_without_facts_preserves_base_score():
-    processor, _, graph, _ = make_harness()
+    processor, _, knowledge_store, _ = make_harness()
 
     scores = await processor._boost_candidates(
         [(101, 0.8, 1)],
@@ -218,15 +227,15 @@ async def test_boost_candidates_without_facts_preserves_base_score():
     )
 
     assert scores == {101: pytest.approx(0.8)}
-    assert len(graph.fact_searches) == 1
+    assert len(knowledge_store.fact_searches) == 1
     assert processor.llm.calls == []
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_relevant_fact_adds_llm_boost():
-    processor, _, graph, _ = make_harness()
-    graph.relevant_facts_by_entity[101] = [
+    processor, _, knowledge_store, _ = make_harness()
+    knowledge_store.relevant_facts_by_entity[101] = [
         make_fact(101, "Knoggin is a memory graph project.")
     ]
 
@@ -243,9 +252,9 @@ async def test_boost_candidates_relevant_fact_adds_llm_boost():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_irrelevant_fact_keeps_base_score():
-    processor, _, graph, _ = make_harness()
+    processor, _, knowledge_store, _ = make_harness()
     processor.llm = FakeLLM(relevance=False)
-    graph.relevant_facts_by_entity[101] = [
+    knowledge_store.relevant_facts_by_entity[101] = [
         make_fact(101, "Knoggin is a memory graph project.")
     ]
 
@@ -262,9 +271,9 @@ async def test_boost_candidates_irrelevant_fact_keeps_base_score():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_llm_failure_falls_back_to_base_score():
-    processor, _, graph, _ = make_harness()
+    processor, _, knowledge_store, _ = make_harness()
     processor.llm = FakeLLM(raise_error=True)
-    graph.relevant_facts_by_entity[101] = [
+    knowledge_store.relevant_facts_by_entity[101] = [
         make_fact(101, "Knoggin is a memory graph project.")
     ]
 
@@ -281,9 +290,9 @@ async def test_boost_candidates_llm_failure_falls_back_to_base_score():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_empty_llm_response_falls_back_to_base_score():
-    processor, _, graph, _ = make_harness()
+    processor, _, knowledge_store, _ = make_harness()
     processor.llm = FakeLLM(empty_response=True)
-    graph.relevant_facts_by_entity[101] = [
+    knowledge_store.relevant_facts_by_entity[101] = [
         make_fact(101, "Knoggin is a memory graph project.")
     ]
 
@@ -300,8 +309,8 @@ async def test_boost_candidates_empty_llm_response_falls_back_to_base_score():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_graph_neighbor_overlap_adds_boost():
-    processor, _, graph, _ = make_harness()
-    graph.neighbors_by_entity[101] = {201}
+    processor, _, knowledge_store, _ = make_harness()
+    knowledge_store.neighbors_by_entity[101] = {201}
 
     scores = await processor._boost_candidates(
         [(101, 0.8, 1)],
@@ -316,8 +325,8 @@ async def test_boost_candidates_graph_neighbor_overlap_adds_boost():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_graph_neighbor_boost_caps_at_point_zero_five():
-    processor, _, graph, _ = make_harness()
-    graph.neighbors_by_entity[101] = {201, 202, 203}
+    processor, _, knowledge_store, _ = make_harness()
+    knowledge_store.neighbors_by_entity[101] = {201, 202, 203}
 
     scores = await processor._boost_candidates(
         [(101, 0.7, 1)],
@@ -331,11 +340,11 @@ async def test_boost_candidates_graph_neighbor_boost_caps_at_point_zero_five():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_fact_and_neighbor_boosts_combine():
-    processor, _, graph, _ = make_harness()
-    graph.relevant_facts_by_entity[101] = [
+    processor, _, knowledge_store, _ = make_harness()
+    knowledge_store.relevant_facts_by_entity[101] = [
         make_fact(101, "Knoggin is a memory graph project.")
     ]
-    graph.neighbors_by_entity[101] = {201}
+    knowledge_store.neighbors_by_entity[101] = {201}
 
     scores = await processor._boost_candidates(
         [(101, 0.8, 1)],
@@ -349,8 +358,8 @@ async def test_boost_candidates_fact_and_neighbor_boosts_combine():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_duplicate_candidate_rows_keep_max_score():
-    processor, _, graph, _ = make_harness()
-    reversed_processor, _, reversed_graph, _ = make_harness()
+    processor, _, knowledge_store, _ = make_harness()
+    reversed_processor, _, reversed_knowledge_store, _ = make_harness()
 
     scores = await processor._boost_candidates(
         [(101, 0.7, 1), (101, 0.9, 2)],
@@ -371,14 +380,14 @@ async def test_boost_candidates_duplicate_candidate_rows_keep_max_score():
 
     assert scores == {101: pytest.approx(0.9)}
     assert reversed_scores == {101: pytest.approx(0.9)}
-    assert graph.neighbor_calls == [[101]]
-    assert reversed_graph.neighbor_calls == [[101]]
+    assert knowledge_store.neighbor_calls == [[101]]
+    assert reversed_knowledge_store.neighbor_calls == [[101]]
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_missing_message_text_keeps_base_score():
-    processor, _, graph, embedding = make_harness()
+    processor, _, knowledge_store, embedding = make_harness()
 
     scores = await processor._boost_candidates(
         [(101, 0.8, 99)],
@@ -388,15 +397,15 @@ async def test_boost_candidates_missing_message_text_keeps_base_score():
 
     assert scores == {101: pytest.approx(0.8)}
     assert processor.llm.calls == []
-    assert graph.fact_searches == []
+    assert knowledge_store.fact_searches == []
     assert embedding.batch_calls == []
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_fact_search_failure_falls_back_to_base_score():
-    processor, _, graph, _ = make_harness()
-    graph.fact_fail_entity_ids.add(101)
+    processor, _, knowledge_store, _ = make_harness()
+    knowledge_store.fact_fail_entity_ids.add(101)
 
     scores = await processor._boost_candidates(
         [(101, 0.8, 1)],
@@ -405,20 +414,20 @@ async def test_boost_candidates_fact_search_failure_falls_back_to_base_score():
     )
 
     assert scores == {101: pytest.approx(0.8)}
-    assert len(graph.fact_searches) == 1
+    assert len(knowledge_store.fact_searches) == 1
     assert processor.llm.calls == []
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_boost_candidates_batches_large_fact_relevance_requests():
-    processor, _, graph, _ = make_harness()
+    processor, _, knowledge_store, _ = make_harness()
     processor.llm = FakeLLM(relevance=[True] * BOOST_LLM_BATCH_SIZE)
     candidate_pairs = [
         (1000 + index, 0.8, 1) for index in range(BOOST_LLM_BATCH_SIZE + 1)
     ]
     for candidate_id, _, _ in candidate_pairs:
-        graph.relevant_facts_by_entity[candidate_id] = [
+        knowledge_store.relevant_facts_by_entity[candidate_id] = [
             make_fact(candidate_id, f"Candidate {candidate_id} is relevant.")
         ]
 
@@ -429,7 +438,7 @@ async def test_boost_candidates_batches_large_fact_relevance_requests():
     )
 
     assert len(processor.llm.calls) == 2
-    assert len(graph.fact_searches) == BOOST_LLM_BATCH_SIZE + 1
+    assert len(knowledge_store.fact_searches) == BOOST_LLM_BATCH_SIZE + 1
     assert scores == {
         candidate_id: pytest.approx(0.85)
         for candidate_id, _, _ in candidate_pairs
@@ -576,9 +585,9 @@ async def test_resolve_mentions_reuses_high_confidence_fuzzy_candidate():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_resolve_mentions_uses_vector_candidate_when_cache_name_does_not_match():
-    processor, entities, graph, embedding = make_harness()
+    processor, entities, knowledge_store, embedding = make_harness()
     await seed_entity(entities, 202, "Linear", entity_type="tool", topic="General")
-    graph.vector_results[vector_for(embedding, "project planning app")] = [(202, 0.92)]
+    knowledge_store.vector_results[vector_for(embedding, "project planning app")] = [(202, 0.92)]
 
     result = await processor._resolve_mentions(
         [(2, "project planning app", "tool", "General")],
@@ -589,15 +598,15 @@ async def test_resolve_mentions_uses_vector_candidate_when_cache_name_does_not_m
     assert result.entity_ids == [202]
     assert result.new_ids == set()
     assert result.entity_msg_map == {202: [2]}
-    assert graph.vector_searches[-1]["visible_project_ids"] == ["project-1"]
+    assert knowledge_store.vector_searches[-1]["visible_project_ids"] == ["project-1"]
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_resolve_mentions_creates_new_entity_when_candidate_below_threshold():
-    processor, entities, graph, embedding = make_harness()
+    processor, entities, knowledge_store, embedding = make_harness()
     await seed_entity(entities, 202, "Linear", entity_type="tool", topic="General")
-    graph.vector_results[vector_for(embedding, "work tracker")] = [(202, 0.4)]
+    knowledge_store.vector_results[vector_for(embedding, "work tracker")] = [(202, 0.4)]
 
     result = await processor._resolve_mentions(
         [(2, "work tracker", "tool", "General")],
@@ -654,9 +663,9 @@ async def test_resolve_mentions_embeds_unique_nonblank_names_only():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_resolve_mentions_records_alias_updates_for_existing_match():
-    processor, entities, graph, embedding = make_harness()
+    processor, entities, knowledge_store, embedding = make_harness()
     await seed_entity(entities, 102, "Robert Chen", aliases=["Bob"])
-    graph.vector_results[vector_for(embedding, "Bobby")] = [(102, 0.92)]
+    knowledge_store.vector_results[vector_for(embedding, "Bobby")] = [(102, 0.92)]
 
     result = await processor._resolve_mentions(
         [(1, "Bobby", "person", "Identity")],
@@ -674,11 +683,11 @@ async def test_resolve_mentions_records_alias_updates_for_existing_match():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_resolve_mentions_graph_neighbor_boost_can_cross_threshold():
-    processor, entities, graph, embedding = make_harness()
+    processor, entities, knowledge_store, embedding = make_harness()
     await seed_entity(entities, 301, "Knoggin", entity_type="project", topic="General")
     await seed_entity(entities, 401, "Ada Lovelace")
-    graph.vector_results[vector_for(embedding, "memory graph project")] = [(301, 0.83)]
-    graph.neighbors_by_entity[301] = {401}
+    knowledge_store.vector_results[vector_for(embedding, "memory graph project")] = [(301, 0.83)]
+    knowledge_store.neighbors_by_entity[301] = {401}
 
     result = await processor._resolve_mentions(
         [
@@ -697,11 +706,11 @@ async def test_resolve_mentions_graph_neighbor_boost_can_cross_threshold():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_resolve_mentions_fact_relevance_boost_crosses_threshold_with_fake_llm():
-    processor, entities, graph, embedding = make_harness()
+    processor, entities, knowledge_store, embedding = make_harness()
     processor.llm = FakeLLM(relevance=True)
     await seed_entity(entities, 501, "Notion", entity_type="tool", topic="General")
-    graph.vector_results[vector_for(embedding, "workspace notes tool")] = [(501, 0.82)]
-    graph.relevant_facts_by_entity[501] = [
+    knowledge_store.vector_results[vector_for(embedding, "workspace notes tool")] = [(501, 0.82)]
+    knowledge_store.relevant_facts_by_entity[501] = [
         make_fact(501, "Notion is used to organize workspace notes.")
     ]
 
@@ -720,11 +729,11 @@ async def test_resolve_mentions_fact_relevance_boost_crosses_threshold_with_fake
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_resolve_mentions_irrelevant_facts_keep_weak_ambiguous_match_separate():
-    processor, entities, graph, embedding = make_harness()
+    processor, entities, knowledge_store, embedding = make_harness()
     processor.llm = FakeLLM(relevance=False)
     await seed_entity(entities, 601, "OpenAI Alice")
-    graph.vector_results[vector_for(embedding, "Design Alice")] = [(601, 0.83)]
-    graph.relevant_facts_by_entity[601] = [
+    knowledge_store.vector_results[vector_for(embedding, "Design Alice")] = [(601, 0.83)]
+    knowledge_store.relevant_facts_by_entity[601] = [
         make_fact(601, "OpenAI Alice works on research partnerships.")
     ]
     messages = [

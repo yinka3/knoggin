@@ -246,6 +246,7 @@ class CommunitySettings(BaseModel):
     max_turns: int = Field(10, ge=1)
     seeding_agent_id: Optional[str] = None
     agent_pool_ids: List[str] = Field(default_factory=list)
+    project_ids: List[str] = Field(default_factory=list)
 
 
 class DeveloperSettings(BaseModel):

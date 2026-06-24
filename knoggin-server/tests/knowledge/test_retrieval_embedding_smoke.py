@@ -123,14 +123,15 @@ async def test_real_embedding_retrieval_ranks_memory_rag_messages_over_unrelated
             cosine(query_embedding, embedding) for embedding in message_embeddings
         ]
 
-        class FakeGraphClient:
+        class FakeKnowledgeStore:
             async def search_messages_fts(
                 self,
                 query,
-                limit,
+                *,
                 user_name,
-                session_ids=None,
-                project_ids=None,
+                session_ids,
+                visible_project_ids,
+                limit,
             ):
                 return [
                     (3, 1.0, "session-1"),
@@ -146,11 +147,12 @@ async def test_real_embedding_retrieval_ranks_memory_rag_messages_over_unrelated
                 ]
 
         tool = SearchTools()
-        tool.graph_client = FakeGraphClient()
+        tool.knowledge_store = FakeKnowledgeStore()
         tool.embedding_service = service
         tool.search_cfg = {"fts_limit": 12, "rerank_candidates": 10}
         tool.user_name = "ada"
         tool.session_id = "session-1"
+        tool.readable_project_ids = ["project-1"]
 
         async def visible_session_ids():
             return ["session-1"]

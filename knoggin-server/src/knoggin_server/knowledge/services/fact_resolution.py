@@ -12,9 +12,10 @@ from common.schema.contracts import (
     FactResolutionSummary,
 )
 from common.schema.primitives import FactRecord
+from common.scoping import require_scope_value
 from common.utils.events import emit
 from common.utils.time_utils import get_now
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.llm_client import LLMService
 from knoggin_server.agent.prompts import get_contradiction_judgment_prompt
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
@@ -37,21 +38,28 @@ class FactResolutionUtils:
         existing_facts: List[FactRecord],
         valid_msg_ids: Optional[set],
         session_id: str,
-        graph_client: GraphInterface,
+        knowledge_store: KnowledgeStore,
         embedding_service: EmbeddingService,
         llm: LLMService,
+        *,
+        user_name: str,
+        project_id: str,
         contradiction_sim_low: float = 0.70,
         contradiction_sim_high: float = 0.95,
         contradiction_batch_size: int = 4,
         contradiction_prompt: Optional[str] = None,
-        user_name: Optional[str] = None,
-        project_id: Optional[str] = None,
         source_session_by_msg_id: Optional[Mapping[int, str]] = None,
     ) -> FactResolutionSummary:
         """
         Invalidate old facts and create new ones. Creates first, invalidates after.
         Returns the final set of active facts.
         """
+        require_scope_value(
+            user_name, "user_name", "FactResolutionUtils.apply_fact_changes"
+        )
+        require_scope_value(
+            project_id, "project_id", "FactResolutionUtils.apply_fact_changes"
+        )
         now = get_now()
 
         to_invalidate = set(merge_result.to_invalidate)
@@ -138,7 +146,7 @@ class FactResolutionUtils:
                 fallback_session_id = (
                     None if source_session_by_msg_id is not None else session_id
                 )
-                count = await graph_client.create_facts_batch(
+                count = await knowledge_store.create_facts_batch(
                     entity_id,
                     facts_to_create,
                     user_name=user_name,
@@ -151,7 +159,7 @@ class FactResolutionUtils:
                     to_invalidate,
                     entity_id,
                     session_id,
-                    graph_client,
+                    knowledge_store,
                     now,
                     project_id=project_id,
                 )
@@ -212,7 +220,7 @@ class FactResolutionUtils:
                 to_invalidate,
                 entity_id,
                 session_id,
-                graph_client,
+                knowledge_store,
                 now,
                 project_id=project_id,
             )
@@ -256,15 +264,19 @@ class FactResolutionUtils:
         fact_ids: set,
         entity_id: int,
         session_id: str,
-        graph_client: GraphInterface,
+        knowledge_store: KnowledgeStore,
         now: datetime,
-        project_id: Optional[str] = None,
+        *,
+        project_id: str,
     ) -> List[str]:
         """Helper to batch invalidate facts and emit failures."""
+        require_scope_value(
+            project_id, "project_id", "FactResolutionUtils._invalidate_facts"
+        )
         failed_invalidations = []
         for fact_id in fact_ids:
             try:
-                await graph_client.invalidate_fact(fact_id, now, project_id=project_id)
+                await knowledge_store.invalidate_fact(fact_id, now, project_id=project_id)
             except Exception as e:
                 logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
                 failed_invalidations.append(fact_id)

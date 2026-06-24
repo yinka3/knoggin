@@ -179,7 +179,8 @@ class AgeProjectionWriter:
         WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
           AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
         MERGE (a)-[r:RELATED_TO]->(b)
-        SET r.weight = coalesce(r.weight, 0) + 1,
+        SET r.project_id = rel.project_id,
+            r.weight = coalesce(r.weight, 0) + 1,
             r.confidence = CASE
                 WHEN r.confidence IS NULL THEN rel.confidence
                 WHEN rel.confidence > r.confidence THEN rel.confidence
@@ -227,6 +228,7 @@ class AgeProjectionWriter:
         WHERE e.id IN $entity_ids
           AND (e.project_id = $project_id OR e.id = $identity_entity_id)
           AND (target.project_id = $project_id OR target.id = $identity_entity_id)
+          AND r.project_id = $project_id
         WITH DISTINCT r
         DELETE r
         RETURN count(r)
@@ -254,7 +256,8 @@ class AgeProjectionWriter:
         WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
           AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
         MERGE (a)-[r:RELATED_TO]->(b)
-        SET r.weight = rel.weight,
+        SET r.project_id = rel.project_id,
+            r.weight = rel.weight,
             r.confidence = rel.confidence,
             r.last_seen = rel.last_seen,
             r.message_ids = rel.message_ids,
@@ -349,6 +352,7 @@ class AgeProjectionWriter:
         WHERE (child.id IN $entity_ids OR parent.id IN $entity_ids)
           AND child.project_id = $project_id
           AND parent.project_id = $project_id
+          AND r.project_id = $project_id
         WITH DISTINCT r
         DELETE r
         RETURN count(r)
@@ -375,7 +379,8 @@ class AgeProjectionWriter:
         WHERE child.project_id = edge.project_id
           AND parent.project_id = edge.project_id
         MERGE (child)-[r:PART_OF]->(parent)
-        SET r.created_at = edge.created_at
+        SET r.project_id = edge.project_id,
+            r.created_at = edge.created_at
         RETURN count(r)
         """
         await cur.execute(
@@ -549,39 +554,6 @@ class AgeProjectionWriter:
 
     async def create_hierarchy_edge(
         self,
-        parent_id: int,
-        child_id: int,
-        project_id: str,
-        now_ms: Optional[int] = None,
-    ) -> bool:
-        cypher = """
-        MATCH (child:Entity {id: $child_id})
-        MATCH (parent:Entity {id: $parent_id})
-        WHERE child.project_id = $project_id
-          AND parent.project_id = $project_id
-          AND NOT (child)-[:PART_OF]->(parent)
-        CREATE (child)-[:PART_OF {created_at: $now}]->(parent)
-        RETURN true as created
-        """
-        res = await self.client.execute_write(
-            self._build_cypher(cypher, "created agtype"),
-            (
-                json.dumps(
-                    {
-                        "child_id": child_id,
-                        "parent_id": parent_id,
-                        "project_id": project_id,
-                        "now": (
-                            now_ms if now_ms is not None else self._current_time_ms()
-                        ),
-                    }
-                ),
-            ),
-        )
-        return res > 0
-
-    async def create_hierarchy_edge_with_cursor(
-        self,
         cur,
         parent_id: int,
         child_id: int,
@@ -594,7 +566,10 @@ class AgeProjectionWriter:
         WHERE child.project_id = $project_id
           AND parent.project_id = $project_id
           AND NOT (child)-[:PART_OF]->(parent)
-        CREATE (child)-[:PART_OF {created_at: $now}]->(parent)
+        CREATE (child)-[:PART_OF {
+            project_id: $project_id,
+            created_at: $now
+        }]->(parent)
         RETURN true as created
         """
         await cur.execute(
@@ -615,34 +590,6 @@ class AgeProjectionWriter:
 
     async def delete_relationship(
         self,
-        entity_a_id: int,
-        entity_b_id: int,
-        project_id: str,
-    ) -> bool:
-        cypher = """
-        MATCH (a:Entity {id: $a_id})-[r:RELATED_TO]-(b:Entity {id: $b_id})
-        WHERE (a.project_id = $project_id OR a.id = $identity_entity_id)
-          AND (b.project_id = $project_id OR b.id = $identity_entity_id)
-        DELETE r
-        RETURN count(r)
-        """
-        res = await self.client.execute_write(
-            self._build_cypher(cypher, "deleted agtype"),
-            (
-                json.dumps(
-                    {
-                        "a_id": entity_a_id,
-                        "b_id": entity_b_id,
-                        "project_id": project_id,
-                        "identity_entity_id": IDENTITY_ENTITY_ID,
-                    }
-                ),
-            ),
-        )
-        return res > 0
-
-    async def delete_relationship_with_cursor(
-        self,
         cur,
         entity_a_id: int,
         entity_b_id: int,
@@ -652,6 +599,7 @@ class AgeProjectionWriter:
         MATCH (a:Entity {id: $a_id})-[r:RELATED_TO]-(b:Entity {id: $b_id})
         WHERE (a.project_id = $project_id OR a.id = $identity_entity_id)
           AND (b.project_id = $project_id OR b.id = $identity_entity_id)
+          AND r.project_id = $project_id
         DELETE r
         RETURN count(r) AS deleted
         """

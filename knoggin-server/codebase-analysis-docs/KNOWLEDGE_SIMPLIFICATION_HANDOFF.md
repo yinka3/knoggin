@@ -531,12 +531,12 @@ Important tests:
 It exposes:
 
 ```python
-await graph_client.rebuild_project_projection(project_id, user_name=...)
+await knowledge_store.rebuild_project_projection(project_id, user_name=...)
 ```
 
 via:
 
-- `src/infrastructure/graph_client.py`
+- `src/infrastructure/knowledge_store.py`
 
 Current rebuild behavior:
 
@@ -563,7 +563,7 @@ Reasoning:
 Important tests:
 
 - `tests/storage/test_projection_rebuilder_contract.py`
-- `tests/storage/test_graph_client_contract.py`
+- `tests/storage/test_knowledge_store_contract.py`
 
 ## What Has Not Been Done Yet
 
@@ -606,25 +606,18 @@ Reasoning:
 - It would make the source/projection boundary even clearer.
 - It would reduce repeated `build_cypher(...)` usage in domain writers.
 
-### 3. Graph `Preference` Nodes Still Exist
+### 3. Graph `Preference` Nodes Removed
 
-`GraphWriter.create_preference(...)`, `GraphWriter.delete_preference(...)`, and
-`GraphReader.list_preferences(...)` still use AGE `Preference` nodes.
+The unused AGE-backed preference API was removed:
 
-This is separate from the Redis-backed agent `Directive` simplification.
+- `GraphWriter.create_preference(...)`
+- `GraphWriter.delete_preference(...)`
+- `GraphReader.list_preferences(...)`
+- the corresponding `KnowledgeStore` methods
 
-Future decision:
-
-- Decide whether graph preferences are still needed.
-- If they are durable memory, consider moving them into SQL.
-- If they are old behavior, remove or replace them with directives/facts.
-
-Reasoning:
-
-- The current system now has both:
-  - Redis-backed agent directives,
-  - AGE-backed preferences.
-- That may still be conceptually redundant.
+Redis-backed agent directives remain the active behavioral-guidance mechanism.
+Stable user information continues to belong in the evidence-backed fact/profile
+model rather than a second graph-only preference store.
 
 ### 4. Claims vs Evidence Refs Still Needs a Design Pass
 
@@ -737,7 +730,7 @@ changes plus unrelated untracked directories/docs.
 
 Relevant changed tracked files:
 
-- `src/infrastructure/graph_client.py`
+- `src/infrastructure/knowledge_store.py`
 - `src/knoggin_server/knowledge/db/readers/entity_reader.py`
 - `src/knoggin_server/knowledge/db/readers/fact_reader.py`
 - `src/knoggin_server/knowledge/db/readers/graph_reader.py`
@@ -748,7 +741,7 @@ Relevant changed tracked files:
 - `tests/storage/test_entity_writer_contract.py`
 - `tests/storage/test_fact_reader_contract.py`
 - `tests/storage/test_fact_writer_contract.py`
-- `tests/storage/test_graph_client_contract.py`
+- `tests/storage/test_knowledge_store_contract.py`
 - `tests/storage/test_graph_reader_contract.py`
 - `tests/storage/test_graph_writer_contract.py`
 
@@ -777,7 +770,7 @@ uv run pytest tests/ingestion
 uv run pytest tests/knowledge
 uv run pytest tests/agent/test_graph_retrieval_contract.py tests/agent/test_fact_check_retrieval_contract.py
 uv run pytest tests/runtime/test_fact_resolution_scope_contract.py tests/runtime/test_job_clock_contracts.py tests/community/test_community_manager_seeding_contract.py
-uv run ruff check src/knoggin_server/knowledge/db/projection_rebuilder.py src/knoggin_server/knowledge/db/writers/age_projection_writer.py src/infrastructure/graph_client.py tests/storage/test_projection_rebuilder_contract.py tests/storage/test_graph_client_contract.py
+uv run ruff check src/knoggin_server/knowledge/db/projection_rebuilder.py src/knoggin_server/knowledge/db/writers/age_projection_writer.py src/infrastructure/knowledge_store.py tests/storage/test_projection_rebuilder_contract.py tests/storage/test_knowledge_store_contract.py
 git diff --check
 ```
 
@@ -839,21 +832,10 @@ rg -n "build_cypher|MATCH \\(|MERGE \\(|DETACH DELETE|DELETE r" \
 
 Move projection-only Cypher into `AgeProjectionWriter` where it makes sense.
 
-### Step 5: Decide Preference/Directive Boundary
+### Step 5: Decide Preference/Directive Boundary — Completed
 
-Audit:
-
-- `GraphWriter.create_preference`
-- `GraphWriter.delete_preference`
-- `GraphReader.list_preferences`
-- agent directive storage in `MemoryManager`
-
-Decide whether AGE preferences are:
-
-- still needed,
-- should become SQL-backed,
-- should become directives,
-- or should be removed.
+AGE preferences were removed. `MemoryManager` directives own behavioral
+guidance; durable user information belongs in facts and profiles.
 
 ### Step 6: Claims / Evidence Design Pass
 

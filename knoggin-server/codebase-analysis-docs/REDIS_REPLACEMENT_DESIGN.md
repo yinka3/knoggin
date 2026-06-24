@@ -700,8 +700,8 @@ class JobStateStore:
     async def fail(...): ...
 ```
 
-These can use focused repository classes behind `GraphClient`, or a renamed
-facade such as `DatabaseClient` if `GraphClient` becomes misleading as it gains
+These can use focused repository classes behind `KnowledgeStore`, or a renamed
+facade such as `DatabaseClient` if `KnowledgeStore` becomes misleading as it gains
 more non-graph application state.
 
 Do not create one giant `RuntimeStore` with arbitrary `get`, `set`, `hset`, and
@@ -968,22 +968,22 @@ Exit check:
 Current shape:
 
 ```python
-instance.graph_client = GraphClient(dsn=dsn)
+instance.knowledge_store = KnowledgeStore(dsn=dsn)
 instance.redis = await AsyncRedisClient.get_instance()
 ```
 
 Target transitional shape:
 
 ```python
-instance.graph_client = GraphClient(dsn=dsn)
-await instance.graph_client.connect()
-instance.project_store = ProjectStore(instance.graph_client.postgres)
-instance.session_store = SessionStore(instance.graph_client.postgres)
-instance.conversation_store = ConversationStore(instance.graph_client.postgres)
-instance.ingestion_queue = IngestionQueue(instance.graph_client.postgres)
-instance.job_state_store = JobStateStore(instance.graph_client.postgres)
-instance.agent_store = AgentStore(instance.graph_client.postgres)
-instance.memory_store = MemoryStore(instance.graph_client.postgres)
+instance.knowledge_store = KnowledgeStore(dsn=dsn)
+await instance.knowledge_store.connect()
+instance.project_store = ProjectStore(instance.knowledge_store.postgres)
+instance.session_store = SessionStore(instance.knowledge_store.postgres)
+instance.conversation_store = ConversationStore(instance.knowledge_store.postgres)
+instance.ingestion_queue = IngestionQueue(instance.knowledge_store.postgres)
+instance.job_state_store = JobStateStore(instance.knowledge_store.postgres)
+instance.agent_store = AgentStore(instance.knowledge_store.postgres)
+instance.memory_store = MemoryStore(instance.knowledge_store.postgres)
 ```
 
 The exact access path can differ. The key is that services receive typed stores
@@ -1183,7 +1183,7 @@ items = await ingestion_queue.claim_batch(
 if not items:
     return
 
-messages = await graph_client.get_messages_by_ids(...)
+messages = await knowledge_store.get_messages_by_ids(...)
 result = await processor.run(...)
 
 if result.success and graph_success:

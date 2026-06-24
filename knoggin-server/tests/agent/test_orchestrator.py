@@ -81,7 +81,7 @@ class FakeContext:
     def __init__(self):
         self.resources = FakeResources()
         self.redis_client = self.resources.redis
-        self.graph_client = self.resources.graph
+        self.knowledge_store = self.resources.knowledge_store
         self.llm = self.resources.llm_service
         self.user_name = "ada"
         self.session_id = "session-1"

@@ -30,7 +30,7 @@ class VectorLike:
         return list(self.values)
 
 
-class FakeGraphMutationClient:
+class FakeKnowledgeStore:
     def __init__(self, validation_result="all", fail_on_write=False):
         self.validation_result = validation_result
         self.fail_on_write = fail_on_write
@@ -39,7 +39,7 @@ class FakeGraphMutationClient:
         self.write_batch_calls = []
         self.call_order = []
 
-    async def validate_existing_ids(self, ids):
+    async def validate_existing_ids(self, ids, *, visible_project_ids):
         self.validate_calls.append(list(ids))
         if self.validation_result == "all":
             return set(ids)
@@ -140,11 +140,11 @@ def user_connection(entity_name, msg_id=8, confidence=0.7, context="user link"):
 async def test_graph_mutation_plan_uses_batch_scope_over_fallback_scope():
     batch = scoped_batch(new_entity_ids={2})
     entities = FakeEntityManagerForPlan()
-    graph = FakeGraphMutationClient()
+    knowledge_store = FakeKnowledgeStore()
 
     plan = await build_graph_mutation_plan(
         batch,
-        graph,
+        knowledge_store,
         entities,
         session_id="fallback-session",
         project_id="fallback-project",
@@ -162,11 +162,11 @@ async def test_graph_mutation_plan_uses_batch_scope_over_fallback_scope():
 async def test_graph_mutation_plan_uses_fallback_scope_when_batch_scope_absent():
     batch = BatchResult(new_entity_ids={2})
     entities = FakeEntityManagerForPlan(project_id=None)
-    graph = FakeGraphMutationClient()
+    knowledge_store = FakeKnowledgeStore()
 
     plan = await build_graph_mutation_plan(
         batch,
-        graph,
+        knowledge_store,
         entities,
         session_id="fallback-session",
         project_id="fallback-project",
@@ -189,7 +189,7 @@ async def test_graph_mutation_plan_requires_complete_scope():
     with pytest.raises(ValueError, match="Graph batch write missing required scope"):
         await build_graph_mutation_plan(
             batch,
-            FakeGraphMutationClient(),
+            FakeKnowledgeStore(),
             FakeEntityManagerForPlan(),
             session_id="session-1",
             project_id=None,
@@ -226,18 +226,18 @@ async def test_graph_mutation_plan_builds_writes_and_filters_zombies():
         ],
     )
     entities = FakeEntityManagerForPlan()
-    graph = FakeGraphMutationClient(validation_result={3, 4})
+    knowledge_store = FakeKnowledgeStore(validation_result={3, 4})
 
     plan = await build_graph_mutation_plan(
         batch,
-        graph,
+        knowledge_store,
         entities,
         session_id="fallback-session",
         project_id="fallback-project",
         user_name="fallback-user",
     )
 
-    assert set(graph.validate_calls[0]) == {3, 4, 5}
+    assert set(knowledge_store.validate_calls[0]) == {3, 4, 5}
     assert plan.safe_entity_ids == {2, 3, 4}
     assert plan.zombie_entity_ids == {5}
     assert entities.removed_entities == [[5]]
@@ -299,11 +299,11 @@ async def test_graph_mutation_plan_builds_writes_and_filters_zombies():
 async def test_graph_mutation_plan_treats_unknown_validation_as_valid():
     batch = scoped_batch(entity_ids=[3], alias_updated_ids={3})
     entities = FakeEntityManagerForPlan()
-    graph = FakeGraphMutationClient(validation_result=None)
+    knowledge_store = FakeKnowledgeStore(validation_result=None)
 
     plan = await build_graph_mutation_plan(
         batch,
-        graph,
+        knowledge_store,
         entities,
         session_id="session-1",
         project_id="project-1",
@@ -337,25 +337,25 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
             )
         ],
     )
-    graph = FakeGraphMutationClient()
+    knowledge_store = FakeKnowledgeStore()
     entities = FakeEntityManagerForPlan()
     redis = FakeRedis()
     profile_key = RedisKeys.project_profile_complete("ada", "project-1")
     await redis.set(profile_key, "done")
     plan = await build_graph_mutation_plan(
         batch,
-        graph,
+        knowledge_store,
         entities,
         session_id="session-1",
         project_id="project-1",
         user_name="ada",
     )
 
-    summary = await execute_graph_mutation_plan(plan, graph, redis)
+    summary = await execute_graph_mutation_plan(plan, knowledge_store, redis)
 
-    assert graph.call_order == ["update_entity_aliases", "write_batch"]
-    assert graph.update_alias_calls == [({3: ["Rear Admiral"]}, "project-1")]
-    entity_payloads, relationship_payloads = graph.write_batch_calls[0]
+    assert knowledge_store.call_order == ["update_entity_aliases", "write_batch"]
+    assert knowledge_store.update_alias_calls == [({3: ["Rear Admiral"]}, "project-1")]
+    entity_payloads, relationship_payloads = knowledge_store.write_batch_calls[0]
     assert [payload["id"] for payload in entity_payloads] == [2, 3]
     assert len(relationship_payloads) == 2
     assert relationship_payloads[0]["entity_a"] == "Ada Lovelace"
@@ -384,7 +384,7 @@ async def test_write_batch_to_graph_marks_skipped_work_unit_metadata():
 
     summary = await write_batch_to_graph(
         batch,
-        FakeGraphMutationClient(),
+        FakeKnowledgeStore(),
         FakeEntityManagerForPlan(),
         session_id="session-1",
         project_id="project-1",
@@ -416,11 +416,11 @@ async def test_write_batch_to_graph_marks_success_and_attaches_summary_metadata(
         scope=scope,
         new_entity_ids={2},
     )
-    graph = FakeGraphMutationClient()
+    knowledge_store = FakeKnowledgeStore()
 
     summary = await write_batch_to_graph(
         batch,
-        graph,
+        knowledge_store,
         FakeEntityManagerForPlan(),
         session_id="fallback-session",
         project_id="fallback-project",
@@ -428,7 +428,7 @@ async def test_write_batch_to_graph_marks_success_and_attaches_summary_metadata(
     )
 
     assert summary.entities_written == 1
-    assert graph.write_batch_calls
+    assert knowledge_store.write_batch_calls
     graph_work = batch.work_unit.metadata["graph_write_work_unit"]
     assert graph_work["status"] == "succeeded"
     assert graph_work["metadata"]["batch_work_unit_id"] == batch.work_unit.id
@@ -472,7 +472,7 @@ async def test_write_batch_to_graph_marks_failed_plan_when_execution_raises(monk
     with pytest.raises(RuntimeError, match="execute failed"):
         await write_graph_db.write_batch_to_graph(
             batch,
-            FakeGraphMutationClient(),
+            FakeKnowledgeStore(),
             FakeEntityManagerForPlan(),
             session_id="session-1",
             project_id="project-1",
@@ -486,17 +486,17 @@ async def test_write_batch_to_graph_marks_failed_plan_when_execution_raises(monk
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_write_batch_callback_returns_success_for_no_graph_writes():
-    graph = FakeGraphMutationClient()
+    knowledge_store = FakeKnowledgeStore()
 
     assert await write_batch_callback(
         BatchResult(),
-        graph,
+        knowledge_store,
         FakeEntityManagerForPlan(),
         session_id="session-1",
         project_id="project-1",
         user_name="ada",
     ) == (True, None)
-    assert graph.write_batch_calls == []
+    assert knowledge_store.write_batch_calls == []
 
 
 @pytest.mark.storage
@@ -504,11 +504,11 @@ async def test_write_batch_callback_returns_success_for_no_graph_writes():
 async def test_write_batch_callback_removes_phantom_new_entities_on_failure():
     batch = scoped_batch(new_entity_ids={2})
     entities = FakeEntityManagerForPlan()
-    graph = FakeGraphMutationClient(fail_on_write=True)
+    knowledge_store = FakeKnowledgeStore(fail_on_write=True)
 
     success, error = await write_batch_callback(
         batch,
-        graph,
+        knowledge_store,
         entities,
         session_id="session-1",
         project_id="project-1",

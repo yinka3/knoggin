@@ -1,9 +1,13 @@
-from typing import Any, Dict, List, Optional
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
+from typing import Any, Optional, TypeAlias
 
 import psycopg
 from loguru import logger
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+
+QueryParams: TypeAlias = Mapping[str, Any] | Sequence[Any]
 
 
 async def _configure_async_conn(conn: psycopg.AsyncConnection):
@@ -39,10 +43,13 @@ class PostgresClient:
         self.min_size = min_size
         self.max_size = max_size
         self.startup_timeout = startup_timeout
-        self.async_pool: Optional[AsyncConnectionPool] = None
+        self._pool: Optional[AsyncConnectionPool] = None
 
     async def connect(self):
         """Open the pool after its minimum connections are ready for use."""
+        if self._pool is not None:
+            raise RuntimeError("PostgresClient is already connected")
+
         pool: Optional[AsyncConnectionPool] = None
 
         try:
@@ -54,7 +61,7 @@ class PostgresClient:
                 configure=_configure_async_conn,
                 open=False,
             )
-            self.async_pool = pool
+            self._pool = pool
             await pool.open(wait=True, timeout=self.startup_timeout)
             logger.info("Connected to Postgres (async pool ready with AGE loaded)")
         except Exception as e:
@@ -67,41 +74,49 @@ class PostgresClient:
                         "Failed to close partially initialized Postgres pool: "
                         f"{cleanup_error}"
                     )
-            self.async_pool = None
+            self._pool = None
             raise
 
     async def close(self):
         """Close the asynchronous connection pool."""
-        if self.async_pool:
-            await self.async_pool.close()
+        pool = self._pool
+        self._pool = None
+        if pool is not None:
+            await pool.close()
 
-    # --- Query Helpers ---
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[psycopg.AsyncCursor]:
+        """Yield a cursor inside a managed connection and transaction."""
+        if self._pool is None:
+            raise RuntimeError("PostgresClient is not connected")
 
-    async def execute_read(
-        self, query: str, params: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """Execute a read-only SQL or AGE query asynchronously."""
-        if not self.async_pool:
-            raise RuntimeError("PostgresClient async_pool is not initialized")
-
-        async with self.async_pool.connection() as conn:
+        async with self._pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    await cur.execute(query, params or {})
-                    return await cur.fetchall()
+                    yield cur
 
-    async def execute_write(
-        self, query: str, params: Optional[Dict[str, Any]] = None
-    ) -> int:
-        """Execute a write SQL or AGE query asynchronously. Returns rowcount."""
-        if not self.async_pool:
-            raise RuntimeError("PostgresClient async_pool is not initialized")
+    async def fetch_all(
+        self, query: str, params: Optional[QueryParams] = None
+    ) -> list[dict[str, Any]]:
+        """Execute a statement and return all result rows."""
+        async with self.transaction() as cur:
+            await cur.execute(query, params)
+            return await cur.fetchall()
 
-        async with self.async_pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(query, params or {})
-                    return cur.rowcount
+    async def fetch_one(
+        self, query: str, params: Optional[QueryParams] = None
+    ) -> Optional[dict[str, Any]]:
+        """Execute a statement and return its first row, if present."""
+        async with self.transaction() as cur:
+            await cur.execute(query, params)
+            return await cur.fetchone()
+
+    async def execute(
+        self, query: str, params: Optional[QueryParams] = None
+    ) -> None:
+        """Execute a statement whose result is intentionally ignored."""
+        async with self.transaction() as cur:
+            await cur.execute(query, params)
 
     # --- Cypher Helpers ---
 

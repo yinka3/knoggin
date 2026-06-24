@@ -2,6 +2,7 @@ import fnmatch
 import json
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -376,7 +377,7 @@ class FakeRedis:
         return removed
 
 
-class FakeGraphClient:
+class FakeKnowledgeStore:
     def __init__(self):
         self.saved_message_logs = []
         self.recent_project_messages = []
@@ -408,9 +409,6 @@ class FakeGraphClient:
         }
         self.search_rebuild_calls.append(call)
         return {"messages": 0, "entities": 0, "facts": 0, "identity": 1}
-
-    async def get_max_entity_id(self):
-        return 0
 
     async def ensure_identity_entity(self, user_name, aliases=None):
         self.identity_calls.append((user_name, list(aliases or [])))
@@ -468,7 +466,7 @@ class FakeRedisManager(AsyncRedisClient):
 class FakeResources:
     redis: FakeRedis = field(default_factory=FakeRedis)
     redis_manager: Any = None
-    graph: FakeGraphClient = field(default_factory=FakeGraphClient)
+    knowledge_store: FakeKnowledgeStore = field(default_factory=FakeKnowledgeStore)
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None
@@ -590,101 +588,46 @@ class RecordingCursor:
     def __init__(self, client):
         self.client = client
 
-    async def __aenter__(self):
-        self.client.cursor_enters += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.client.cursor_exits += 1
-        return False
-
     async def execute(self, query, params=None):
         self.client.calls.append(("execute", query, params))
-        self.client._raise_next("execute_exceptions")
+        self.client._raise_next("cursor_execute_exceptions")
 
     async def fetchone(self):
-        self.client._raise_next("fetchone_exceptions")
-        if not self.client.fetchone_results:
+        self.client._raise_next("fetch_one_exceptions")
+        if not self.client.fetch_one_results:
             return None
-        return self.client.fetchone_results.pop(0)
+        return self.client.fetch_one_results.pop(0)
 
     async def fetchall(self):
-        self.client._raise_next("fetchall_exceptions")
-        if not self.client.fetchall_results:
+        self.client._raise_next("fetch_all_exceptions")
+        if not self.client.fetch_all_results:
             return []
-        return self.client.fetchall_results.pop(0)
-
-
-class RecordingTransaction:
-    def __init__(self, client):
-        self.client = client
-
-    async def __aenter__(self):
-        self.client.transaction_enters += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.client.transaction_exits += 1
-        return False
-
-
-class RecordingConnection:
-    def __init__(self, client):
-        self.client = client
-
-    async def __aenter__(self):
-        self.client.connection_enters += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.client.connection_exits += 1
-        return False
-
-    def transaction(self):
-        return RecordingTransaction(self.client)
-
-    def cursor(self):
-        return RecordingCursor(self.client)
-
-
-class RecordingAsyncPool:
-    def __init__(self, client):
-        self.client = client
-
-    def connection(self):
-        return RecordingConnection(self.client)
+        return self.client.fetch_all_results.pop(0)
 
 
 class RecordingPostgresClient:
     def __init__(
         self,
-        fetchone_results=None,
-        fetchall_results=None,
-        execute_read_results=None,
-        execute_write_results=None,
+        fetch_one_results=None,
+        fetch_all_results=None,
+        transaction_exceptions=None,
+        cursor_execute_exceptions=None,
         execute_exceptions=None,
-        fetchone_exceptions=None,
-        fetchall_exceptions=None,
-        execute_read_exceptions=None,
-        execute_write_exceptions=None,
+        fetch_one_exceptions=None,
+        fetch_all_exceptions=None,
     ):
         self.calls = []
-        self.fetchone_results = list(fetchone_results or [])
-        self.fetchall_results = list(fetchall_results or [])
-        self.execute_read_results = list(execute_read_results or [])
-        self.execute_write_results = list(execute_write_results or [])
+        self.fetch_one_results = list(fetch_one_results or [])
+        self.fetch_all_results = list(fetch_all_results or [])
+        self.transaction_exceptions = list(transaction_exceptions or [])
+        self.cursor_execute_exceptions = list(cursor_execute_exceptions or [])
         self.execute_exceptions = list(execute_exceptions or [])
-        self.fetchone_exceptions = list(fetchone_exceptions or [])
-        self.fetchall_exceptions = list(fetchall_exceptions or [])
-        self.execute_read_exceptions = list(execute_read_exceptions or [])
-        self.execute_write_exceptions = list(execute_write_exceptions or [])
-        self.connection_enters = 0
-        self.connection_exits = 0
+        self.fetch_one_exceptions = list(fetch_one_exceptions or [])
+        self.fetch_all_exceptions = list(fetch_all_exceptions or [])
         self.transaction_enters = 0
         self.transaction_exits = 0
         self.cursor_enters = 0
         self.cursor_exits = 0
-        self.async_pool = RecordingAsyncPool(self)
 
     def _raise_next(self, attr):
         exceptions = getattr(self, attr)
@@ -702,16 +645,34 @@ class RecordingPostgresClient:
     ):
         return f"cypher<{graph_name}|{return_types}>:{cypher_query}"
 
-    async def execute_read(self, query, params=None):
-        self.calls.append(("execute_read", query, params))
-        self._raise_next("execute_read_exceptions")
-        if not self.execute_read_results:
-            return []
-        return self.execute_read_results.pop(0)
+    @asynccontextmanager
+    async def transaction(self):
+        self.transaction_enters += 1
+        cursor_entered = False
+        try:
+            self._raise_next("transaction_exceptions")
+            self.cursor_enters += 1
+            cursor_entered = True
+            yield RecordingCursor(self)
+        finally:
+            if cursor_entered:
+                self.cursor_exits += 1
+            self.transaction_exits += 1
 
-    async def execute_write(self, query, params=None):
-        self.calls.append(("execute_write", query, params))
-        self._raise_next("execute_write_exceptions")
-        if not self.execute_write_results:
-            return 1
-        return self.execute_write_results.pop(0)
+    async def fetch_one(self, query, params=None):
+        self.calls.append(("fetch_one", query, params))
+        self._raise_next("fetch_one_exceptions")
+        if not self.fetch_one_results:
+            return None
+        return self.fetch_one_results.pop(0)
+
+    async def fetch_all(self, query, params=None):
+        self.calls.append(("fetch_all", query, params))
+        self._raise_next("fetch_all_exceptions")
+        if not self.fetch_all_results:
+            return []
+        return self.fetch_all_results.pop(0)
+
+    async def execute(self, query, params=None):
+        self.calls.append(("execute_command", query, params))
+        self._raise_next("execute_exceptions")

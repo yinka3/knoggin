@@ -151,7 +151,7 @@ async def test_search_repair_uses_retained_projects_for_identity():
     summary = await manager.rebuild_project_search_indexes(active["id"])
 
     assert summary["identity"] == 1
-    assert resources.graph.search_rebuild_calls == [
+    assert resources.knowledge_store.search_rebuild_calls == [
         {
             "project_id": active["id"],
             "user_name": "ada",
@@ -176,7 +176,7 @@ async def test_search_repair_allows_archived_and_deleted_targets():
     assert archived_summary["identity"] == 1
     assert deleted_summary["identity"] == 1
     assert [
-        call["project_id"] for call in resources.graph.search_rebuild_calls
+        call["project_id"] for call in resources.knowledge_store.search_rebuild_calls
     ] == [archived["id"], deleted["id"]]
 
 
@@ -195,7 +195,7 @@ async def test_search_repair_rejects_any_active_project_runtime():
     with pytest.raises(RuntimeError, match="all project runtimes"):
         await manager.rebuild_project_search_indexes(project["id"])
 
-    assert resources.graph.search_rebuild_calls == []
+    assert resources.knowledge_store.search_rebuild_calls == []
 
 
 @pytest.mark.runtime
@@ -217,7 +217,7 @@ async def test_search_repair_blocks_session_acquisition(monkeypatch):
         return acquired
 
     monkeypatch.setattr(
-        resources.graph,
+        resources.knowledge_store,
         "rebuild_project_search_indexes",
         slow_rebuild,
     )
@@ -307,7 +307,7 @@ async def test_archived_project_rejects_session_acquisition():
         await manager.acquire_project_for_session(project["id"], "session-1")
 
     assert await manager.get_session_ids(project["id"]) == []
-    assert resources.graph.identity_calls == []
+    assert resources.knowledge_store.identity_calls == []
 
 
 @pytest.mark.runtime
@@ -638,7 +638,7 @@ async def test_acquire_project_for_session_records_durable_membership(monkeypatc
     assert await resources.redis.smembers(
         RedisKeys.project_sessions("ada", project["id"])
     ) == {"session-1"}
-    assert resources.graph.identity_calls == [("ada", [])]
+    assert resources.knowledge_store.identity_calls == [("ada", [])]
     assert resources.redis.evals == []
 
 
@@ -657,7 +657,7 @@ async def test_acquire_project_initializes_identity_only_once(monkeypatch):
     await manager.acquire_project_for_session(project["id"], "session-1")
     await manager.acquire_project_for_session(project["id"], "session-2")
 
-    assert resources.graph.identity_calls == [("ada", [])]
+    assert resources.knowledge_store.identity_calls == [("ada", [])]
     assert resources.redis.evals == []
 
 
@@ -674,7 +674,7 @@ async def test_acquire_project_for_session_rejects_unknown_project():
         RedisKeys.project_sessions("ada", "missing-project")
     ) == set()
     assert manager.active_projects == {}
-    assert resources.graph.identity_calls == []
+    assert resources.knowledge_store.identity_calls == []
 
 
 @pytest.mark.runtime
@@ -872,7 +872,7 @@ async def test_get_or_start_project_caches_state_and_registers_project_jobs(
         (
             batch_result,
             {
-                "graph_client": resources.graph,
+                "knowledge_store": resources.knowledge_store,
                 "entities": project_state.entities,
                 "session_id": "session-1",
                 "project_id": "project-1",

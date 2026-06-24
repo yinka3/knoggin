@@ -19,7 +19,7 @@ class FakePostgresReaderClient:
     ):
         return f"{graph_name}:{return_types}:{cypher_query}"
 
-    async def execute_read(self, query, params=None):
+    async def fetch_all(self, query, params=None):
         self.read_calls.append((query, params))
         return self.rows
 
@@ -38,11 +38,20 @@ async def test_graph_reader_refuses_message_lookup_without_scope():
     client = FakePostgresReaderClient()
     reader = GraphReader(client)
 
-    assert (
-        await reader.get_messages_by_ids([1], user_name=None, session_ids=["s"])
-        == []
-    )
-    assert await reader.get_message_text(1, user_name="ada", session_id="") == ""
+    with pytest.raises(ValueError, match="requires user_name scope"):
+        await reader.get_messages_by_ids(
+            [1],
+            user_name=None,
+            session_ids=["s"],
+            visible_project_ids=["project-1"],
+        )
+    with pytest.raises(ValueError, match="requires session_id scope"):
+        await reader.get_message_text(
+            1,
+            user_name="ada",
+            session_id="",
+            visible_project_ids=["project-1"],
+        )
     assert client.read_calls == []
 
 
@@ -50,7 +59,7 @@ async def test_graph_reader_refuses_message_lookup_without_scope():
 @pytest.mark.no_network
 async def test_graph_reader_get_message_text_uses_user_session_scope():
     client = RecordingPostgresClient(
-        execute_read_results=[[{"content": "hello graph"}]]
+        fetch_one_results=[{"content": "hello graph"}]
     )
     reader = GraphReader(client)
 
@@ -58,10 +67,11 @@ async def test_graph_reader_get_message_text_uses_user_session_scope():
         7,
         user_name="ada",
         session_id="session-1",
+        visible_project_ids=["project-1"],
     ) == "hello graph"
 
     assert "FROM messages" in client.calls[0][1]
-    assert client.calls[0][2] == ("ada", "session-1", 7)
+    assert client.calls[0][2] == ("ada", "session-1", 7, ["project-1"])
 
 
 @pytest.mark.storage
@@ -71,7 +81,12 @@ async def test_graph_reader_get_messages_by_ids_empty_list_skips_db():
     reader = GraphReader(client)
 
     assert (
-        await reader.get_messages_by_ids([], user_name="ada", session_ids=["s"])
+        await reader.get_messages_by_ids(
+            [],
+            user_name="ada",
+            session_ids=["s"],
+            visible_project_ids=["project-1"],
+        )
         == []
     )
     assert client.calls == []
@@ -95,7 +110,10 @@ async def test_graph_reader_message_lookup_uses_structured_scope_params():
     reader = GraphReader(client)
 
     rows = await reader.get_messages_by_ids(
-        [1], user_name="ada", session_ids=["session-1"]
+        [1],
+        user_name="ada",
+        session_ids=["session-1"],
+        visible_project_ids=["project-1"],
     )
 
     assert rows == [
@@ -110,7 +128,7 @@ async def test_graph_reader_message_lookup_uses_structured_scope_params():
     ]
     query, params = client.read_calls[0]
     assert "FROM messages" in query
-    assert params == ([1], "ada", ["session-1"])
+    assert params == ([1], "ada", ["session-1"], ["project-1"])
 
 
 @pytest.mark.storage
@@ -170,7 +188,7 @@ async def test_graph_reader_recent_project_messages_use_project_scope():
 @pytest.mark.no_network
 async def test_graph_reader_surrounding_messages_uses_scoped_lookups():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [
                 {
                     "id": "2",
@@ -211,6 +229,7 @@ async def test_graph_reader_surrounding_messages_uses_scoped_lookups():
         target_total=3,
         user_name="ada",
         session_id="session-1",
+        visible_project_ids=["project-1"],
     )
 
     assert [message["content"] for message in messages] == [
@@ -219,9 +238,28 @@ async def test_graph_reader_surrounding_messages_uses_scoped_lookups():
         "after",
     ]
     assert len(client.calls) == 3
-    assert client.calls[0][2] == ([2], "ada", ["session-1"])
-    assert client.calls[1][2] == (200, 2, "ada", "session-1", 1)
-    assert client.calls[2][2] == (200, 2, "ada", "session-1", 1)
+    assert client.calls[0][2] == (
+        [2],
+        "ada",
+        ["session-1"],
+        ["project-1"],
+    )
+    assert client.calls[1][2] == (
+        200,
+        2,
+        "ada",
+        "session-1",
+        ["project-1"],
+        1,
+    )
+    assert client.calls[2][2] == (
+        200,
+        2,
+        "ada",
+        "session-1",
+        ["project-1"],
+        1,
+    )
 
 
 @pytest.mark.storage
@@ -230,7 +268,9 @@ async def test_graph_reader_neighbor_ids_batch_empty_list_skips_db():
     client = RecordingPostgresClient()
     reader = GraphReader(client)
 
-    assert await reader.get_neighbor_ids_batch([]) == {}
+    assert await reader.get_neighbor_ids_batch(
+        [], visible_project_ids=["project-1"]
+    ) == {}
     assert client.calls == []
 
 
@@ -238,7 +278,7 @@ async def test_graph_reader_neighbor_ids_batch_empty_list_skips_db():
 @pytest.mark.no_network
 async def test_graph_reader_parent_child_and_neighbor_entities_use_params():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [
                 {
                     "id": "10",
@@ -260,7 +300,9 @@ async def test_graph_reader_parent_child_and_neighbor_entities_use_params():
     )
     reader = GraphReader(client)
 
-    assert await reader.get_parent_entities(2) == [
+    assert await reader.get_parent_entities(
+        2, visible_project_ids=["project-1"]
+    ) == [
         {
             "id": 10,
             "canonical_name": "Parent",
@@ -268,10 +310,14 @@ async def test_graph_reader_parent_child_and_neighbor_entities_use_params():
             "facts": ["parent fact"],
         }
     ]
-    assert await reader.get_neighbor_entities(2, limit=3) == [
+    assert await reader.get_neighbor_entities(
+        2, visible_project_ids=["project-1"], limit=3
+    ) == [
         {"id": 11, "name": "Neighbor"}
     ]
-    assert await reader.get_child_entities(2) == [
+    assert await reader.get_child_entities(
+        2, visible_project_ids=["project-1"]
+    ) == [
         {
             "id": 12,
             "canonical_name": "Child",
@@ -280,17 +326,36 @@ async def test_graph_reader_parent_child_and_neighbor_entities_use_params():
         }
     ]
     assert "FROM hierarchy_edges edge" in client.calls[0][1]
-    assert client.calls[0][2] == (2,)
-    assert json.loads(client.calls[1][2][0]) == {"entity_id": 2, "limit": 3}
+    assert "f.project_id = ANY(%s)" in client.calls[0][1]
+    assert client.calls[0][2] == (
+        ["project-1"],
+        2,
+        ["project-1"],
+        ["project-1"],
+        1,
+    )
+    assert json.loads(client.calls[1][2][0]) == {
+        "entity_id": 2,
+        "limit": 3,
+        "visible_project_ids": ["project-1"],
+        "identity_entity_id": 1,
+    }
     assert "FROM hierarchy_edges edge" in client.calls[2][1]
-    assert client.calls[2][2] == (2,)
+    assert "f.project_id = ANY(%s)" in client.calls[2][1]
+    assert client.calls[2][2] == (
+        ["project-1"],
+        2,
+        ["project-1"],
+        ["project-1"],
+        1,
+    )
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_reader_hierarchy_candidates_attach_embeddings():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [
                 {
                     "parent_id": "2",
@@ -349,7 +414,7 @@ async def test_graph_reader_hierarchy_candidates_attach_embeddings():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_reader_hierarchy_candidates_skip_embedding_query_when_empty():
-    client = RecordingPostgresClient(execute_read_results=[[]])
+    client = RecordingPostgresClient(fetch_all_results=[[]])
     reader = GraphReader(client)
 
     assert (
@@ -388,7 +453,7 @@ async def test_graph_reader_get_merge_topic_strength_reads_canonical_sql():
         "p_relationship_count": "3",
         "s_relationship_count": "4",
     }
-    client = RecordingPostgresClient(execute_read_results=[[row]])
+    client = RecordingPostgresClient(fetch_one_results=[row])
     reader = GraphReader(client)
 
     strength = await reader.get_merge_topic_strength(2, 3, "project-1")
@@ -442,14 +507,16 @@ async def test_graph_reader_get_merge_topic_strength_requires_project_scope():
 @pytest.mark.no_network
 async def test_graph_reader_get_graph_stats_hydrates_counts_and_defaults_empty():
     client = RecordingPostgresClient(
-        execute_read_results=[
-            [{"entities": "2", "facts": "3", "relationships": "4"}],
-            [],
+        fetch_one_results=[
+            {"entities": "2", "facts": "3", "relationships": "4"},
+            None,
         ]
     )
     reader = GraphReader(client)
 
-    assert await reader.get_graph_stats() == {
+    assert await reader.get_graph_stats(
+        visible_project_ids=["project-1"]
+    ) == {
         "entities": 2,
         "facts": 3,
         "relationships": 4,
@@ -457,8 +524,15 @@ async def test_graph_reader_get_graph_stats_hydrates_counts_and_defaults_empty()
     assert "FROM entities" in client.calls[0][1]
     assert "FROM facts" in client.calls[0][1]
     assert "FROM relationships" in client.calls[0][1]
-    assert client.calls[0][2] is None
-    assert await reader.get_graph_stats() == {
+    assert client.calls[0][2] == (
+        ["project-1"],
+        1,
+        ["project-1"],
+        ["project-1"],
+    )
+    assert await reader.get_graph_stats(
+        visible_project_ids=["project-1"]
+    ) == {
         "entities": 0,
         "facts": 0,
         "relationships": 0,
@@ -469,7 +543,7 @@ async def test_graph_reader_get_graph_stats_hydrates_counts_and_defaults_empty()
 @pytest.mark.no_network
 async def test_graph_reader_neighbor_ids_batch_hydrates_sets_for_all_requested_ids():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [
                 {"entity_id": "2", "neighbor_ids": ["3", "4"]},
                 {"entity_id": "5", "neighbor_ids": []},
@@ -478,9 +552,27 @@ async def test_graph_reader_neighbor_ids_batch_hydrates_sets_for_all_requested_i
     )
     reader = GraphReader(client)
 
-    assert await reader.get_neighbor_ids_batch([2, 5, 9]) == {
+    assert await reader.get_neighbor_ids_batch(
+        [2, 5, 9], visible_project_ids=["project-1"]
+    ) == {
         2: {3, 4},
         5: set(),
         9: set(),
     }
-    assert json.loads(client.calls[0][2][0]) == {"ids": [2, 5, 9]}
+    assert json.loads(client.calls[0][2][0]) == {
+        "ids": [2, 5, 9],
+        "visible_project_ids": ["project-1"],
+        "identity_entity_id": 1,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_reader_rejects_empty_visibility_before_empty_input():
+    client = RecordingPostgresClient()
+    reader = GraphReader(client)
+
+    with pytest.raises(ValueError, match="requires visible_project_ids scope"):
+        await reader.get_neighbor_ids_batch([], visible_project_ids=[])
+
+    assert client.calls == []

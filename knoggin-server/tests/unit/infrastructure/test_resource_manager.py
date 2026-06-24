@@ -38,7 +38,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
 
             return unsubscribe
 
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self, dsn, embedding_service):
             self.dsn = dsn
             self.embedding_service = embedding_service
@@ -115,10 +115,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
         def from_pretrained(name):
             return FakeGlinerModel()
 
-    class FakeEntityManager:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
@@ -131,7 +127,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
     )
     load_dotenv = MagicMock()
     monkeypatch.setattr(resources_module, "load_dotenv", load_dotenv)
-    monkeypatch.setattr(resources_module, "GraphInterface", FakeGraphClient)
+    monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(
         resources_module.CommunityEventEmitter,
@@ -140,7 +136,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
     )
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
-    monkeypatch.setattr(resources_module, "EntityManager", FakeEntityManager)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
     resources_module.ResourceManager._instance = None
@@ -187,7 +182,7 @@ async def test_resource_manager_raises_if_database_url_missing(monkeypatch):
 async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatch):
     redis_client = object()
     event_calls = []
-    graph_instances = []
+    knowledge_store_instances = []
     redis_instances = []
     embedding_instances = []
     llm_instances = []
@@ -208,10 +203,10 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         def subscribe(self, callback, path=None):
             return lambda: None
 
-    class FailingGraphClient:
+    class FailingKnowledgeStore:
         def __init__(self, dsn, embedding_service):
             self.closed = False
-            graph_instances.append(self)
+            knowledge_store_instances.append(self)
 
         async def connect(self):
             raise ConnectionError("Postgres unavailable")
@@ -297,7 +292,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         "get",
         staticmethod(lambda: fake_config),
     )
-    monkeypatch.setattr(resources_module, "GraphInterface", FailingGraphClient)
+    monkeypatch.setattr(resources_module, "KnowledgeStore", FailingKnowledgeStore)
     monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(
         resources_module.CommunityEventEmitter,
@@ -316,7 +311,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         await resources_module.ResourceManager.initialize()
 
     assert resources_module.ResourceManager._instance is None
-    assert graph_instances[0].closed is True
+    assert knowledge_store_instances[0].closed is True
     assert redis_instances[0].closed is True
     assert embedding_instances[0].cleaned_up is True
     assert llm_instances[0].closed is True
@@ -329,7 +324,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
 @pytest.mark.no_network
 async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self, dsn, embedding_service):
             pass
 
@@ -388,11 +383,10 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
-    monkeypatch.setattr(resources_module, "GraphInterface", FakeGraphClient)
+    monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
-    monkeypatch.setattr(resources_module, "EntityManager", MagicMock)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
 
@@ -407,7 +401,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
 @pytest.mark.no_network
 async def test_resource_manager_resolves_gpu_mps(monkeypatch):
     # Same mocks as cuda
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self, dsn, embedding_service):
             pass
 
@@ -484,11 +478,10 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch):
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
     monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
-    monkeypatch.setattr(resources_module, "GraphInterface", FakeGraphClient)
+    monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
-    monkeypatch.setattr(resources_module, "EntityManager", MagicMock)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
 
@@ -502,7 +495,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch):
 
 @pytest.mark.no_network
 async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch):
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self, dsn, embedding_service):
             pass
 
@@ -561,11 +554,10 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 
     monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
-    monkeypatch.setattr(resources_module, "GraphInterface", FakeGraphClient)
+    monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
-    monkeypatch.setattr(resources_module, "EntityManager", MagicMock)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
 

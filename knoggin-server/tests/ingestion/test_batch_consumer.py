@@ -6,7 +6,7 @@ import pytest
 from common.schema.contracts import BatchResult
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
-from tests.fixtures.fakes import FakeGraphClient, FakeRedis
+from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
 
 
 class FakeProcessor:
@@ -40,7 +40,7 @@ class RecordingContext:
         return self.turns
 
 
-class RecordingGraphClient(FakeGraphClient):
+class RecordingKnowledgeStore(FakeKnowledgeStore):
     def __init__(self, events=None, *, raise_on_save=False):
         super().__init__()
         self.events = events if events is not None else []
@@ -111,7 +111,7 @@ def failed_result(error="boom"):
 def make_consumer(
     redis=None,
     processor=None,
-    graph_client=None,
+    knowledge_store=None,
     get_session_context=None,
     write_to_graph=None,
     batch_size=8,
@@ -121,11 +121,11 @@ def make_consumer(
 ):
     redis = redis or FakeRedis()
     processor = processor or FakeProcessor()
-    graph_client = graph_client or FakeGraphClient()
+    knowledge_store = knowledge_store or FakeKnowledgeStore()
     consumer = BatchConsumer(
         user_name="ada",
         session_id="session-1",
-        graph_client=graph_client,
+        knowledge_store=knowledge_store,
         processor=processor,
         redis=redis,
         get_session_context=get_session_context or empty_context,
@@ -135,13 +135,13 @@ def make_consumer(
         batch_timeout=batch_timeout,
         session_window=session_window,
     )
-    return consumer, redis, processor, graph_client
+    return consumer, redis, processor, knowledge_store
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_batch_consumer_skips_corrupt_entries_and_processes_valid_messages():
-    consumer, redis, processor, graph_client = make_consumer()
+    consumer, redis, processor, knowledge_store = make_consumer()
     await redis.rpush(consumer._buffer_key, "not-json")
     await redis.rpush(
         consumer._buffer_key,
@@ -172,7 +172,7 @@ async def test_batch_consumer_skips_corrupt_entries_and_processes_valid_messages
             "session-1",
         )
     ]
-    assert graph_client.saved_message_logs == [
+    assert knowledge_store.saved_message_logs == [
         [
             {
                 "id": 1,
@@ -193,7 +193,7 @@ async def test_batch_consumer_skips_corrupt_entries_and_processes_valid_messages
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_batch_consumer_trims_invalid_only_buffer_without_stalling():
-    consumer, redis, processor, graph_client = make_consumer()
+    consumer, redis, processor, knowledge_store = make_consumer()
     await redis.rpush(consumer._buffer_key, "not-json")
     await redis.rpush(consumer._buffer_key, json.dumps({"id": 1}))
 
@@ -201,17 +201,17 @@ async def test_batch_consumer_trims_invalid_only_buffer_without_stalling():
 
     assert await redis.llen(consumer._buffer_key) == 0
     assert processor.run_calls == []
-    assert graph_client.saved_message_logs == []
+    assert knowledge_store.saved_message_logs == []
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_batch_consumer_dlqs_message_log_failures_and_drains_processed_batch():
-    class FailingGraphClient(FakeGraphClient):
+    class FailingKnowledgeStore(FakeKnowledgeStore):
         async def save_message_logs(self, messages):
             raise RuntimeError("graph down")
 
-    consumer, redis, processor, _ = make_consumer(graph_client=FailingGraphClient())
+    consumer, redis, processor, _ = make_consumer(knowledge_store=FailingKnowledgeStore())
     await redis.rpush(
         consumer._buffer_key,
         json.dumps({"id": 1, "message": "hello", "timestamp": "ts", "role": "user"}),
@@ -262,7 +262,7 @@ async def test_batch_consumer_formats_session_context_and_calls_processor():
 @pytest.mark.no_network
 async def test_batch_consumer_success_without_graph_writes_skips_write_to_graph():
     write_to_graph = RecordingWriteToGraph()
-    consumer, redis, processor, graph_client = make_consumer(
+    consumer, redis, processor, knowledge_store = make_consumer(
         write_to_graph=write_to_graph
     )
     message = make_message(1, "hello")
@@ -270,7 +270,7 @@ async def test_batch_consumer_success_without_graph_writes_skips_write_to_graph(
 
     await consumer._drain_buffer(flush_partial=True)
 
-    assert graph_client.saved_message_logs
+    assert knowledge_store.saved_message_logs
     assert write_to_graph.calls == []
     assert await redis.get(consumer._checkpoint_key) == "1"
     assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "1"
@@ -282,11 +282,11 @@ async def test_batch_consumer_success_without_graph_writes_skips_write_to_graph(
 async def test_batch_consumer_success_with_graph_writes_calls_write_to_graph():
     events = []
     write_to_graph = RecordingWriteToGraph(events)
-    graph_client = RecordingGraphClient(events)
+    knowledge_store = RecordingKnowledgeStore(events)
     processor = FakeProcessor(graph_write_result())
     consumer, redis, _, _ = make_consumer(
         processor=processor,
-        graph_client=graph_client,
+        knowledge_store=knowledge_store,
         write_to_graph=write_to_graph,
     )
     await push_messages(redis, consumer._buffer_key, make_message(1))
@@ -412,10 +412,10 @@ async def test_batch_consumer_dlq_failure_leaves_buffer_for_retry():
 @pytest.mark.no_network
 async def test_batch_consumer_message_log_dlq_failure_leaves_buffer_for_retry():
     processor = FakeProcessor(dlq_success=False)
-    graph_client = RecordingGraphClient(raise_on_save=True)
+    knowledge_store = RecordingKnowledgeStore(raise_on_save=True)
     consumer, redis, _, _ = make_consumer(
         processor=processor,
-        graph_client=graph_client,
+        knowledge_store=knowledge_store,
     )
     message = make_message(1)
     await push_messages(redis, consumer._buffer_key, message)
@@ -475,7 +475,7 @@ async def test_batch_consumer_processes_multiple_batches_in_one_drain():
 @pytest.mark.no_network
 async def test_batch_consumer_invalid_only_buffer_does_not_call_context_or_processor():
     context = RecordingContext()
-    consumer, redis, processor, graph_client = make_consumer(
+    consumer, redis, processor, knowledge_store = make_consumer(
         get_session_context=context
     )
     await redis.rpush(consumer._buffer_key, "not-json")
@@ -486,4 +486,4 @@ async def test_batch_consumer_invalid_only_buffer_does_not_call_context_or_proce
     assert await redis.llen(consumer._buffer_key) == 0
     assert context.calls == []
     assert processor.run_calls == []
-    assert graph_client.saved_message_logs == []
+    assert knowledge_store.saved_message_logs == []

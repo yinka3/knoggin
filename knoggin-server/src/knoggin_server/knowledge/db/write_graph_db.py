@@ -16,7 +16,7 @@ from common.schema.contracts import (
     UserRelationshipWrite,
 )
 from common.scoping import IDENTITY_ENTITY_ID
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
@@ -50,7 +50,7 @@ def _normalize_embedding(value) -> Optional[list[float]]:
 
 async def build_graph_mutation_plan(
     batch: BatchResult,
-    graph_client: GraphInterface,
+    knowledge_store: KnowledgeStore,
     entities: EntityManager,
     session_id: str,
     project_id: str,
@@ -71,8 +71,9 @@ async def build_graph_mutation_plan(
     )
 
     if existing_candidates:
-        validation_result = await graph_client.validate_existing_ids(
-            existing_candidates
+        validation_result = await knowledge_store.validate_existing_ids(
+            existing_candidates,
+            visible_project_ids=[scope.project_id],
         )
 
         if validation_result is None:
@@ -299,10 +300,10 @@ def _attach_graph_work_summary(
 
 async def execute_graph_mutation_plan(
     plan: GraphMutationPlan,
-    graph_client: GraphInterface,
+    knowledge_store: KnowledgeStore,
     redis_client: aioredis.Redis = None,
 ) -> GraphWriteSummary:
-    """Execute a typed graph mutation plan using existing graph-client APIs."""
+    """Execute a typed graph mutation plan through the knowledge store."""
 
     alias_update_map = {
         update.entity_id: update.aliases
@@ -310,13 +311,13 @@ async def execute_graph_mutation_plan(
         if update.aliases
     }
     if alias_update_map:
-        await graph_client.update_entity_aliases(
+        await knowledge_store.update_entity_aliases(
             alias_update_map, project_id=plan.scope.project_id
         )
 
     entity_payloads, relationship_payloads = plan.to_graph_payloads()
     if entity_payloads or relationship_payloads:
-        await graph_client.write_batch(entity_payloads, relationship_payloads)
+        await knowledge_store.write_batch(entity_payloads, relationship_payloads)
 
     dirty_count = 0
     if redis_client and plan.scope.user_name and plan.dirty_entity_ids:
@@ -346,7 +347,7 @@ async def execute_graph_mutation_plan(
 
 async def write_batch_to_graph(
     batch: BatchResult,
-    graph_client: GraphInterface,
+    knowledge_store: KnowledgeStore,
     entities: EntityManager,
     session_id: str,
     project_id: str,
@@ -357,7 +358,7 @@ async def write_batch_to_graph(
 
     plan = await build_graph_mutation_plan(
         batch,
-        graph_client,
+        knowledge_store,
         entities,
         session_id=session_id,
         project_id=project_id,
@@ -372,7 +373,7 @@ async def write_batch_to_graph(
 
     plan.work_unit.mark_running()
     try:
-        summary = await execute_graph_mutation_plan(plan, graph_client, redis_client)
+        summary = await execute_graph_mutation_plan(plan, knowledge_store, redis_client)
     except Exception as e:
         plan.work_unit.mark_failed(str(e))
         raise
@@ -394,7 +395,7 @@ async def write_batch_to_graph(
 
 async def write_batch_callback(
     batch: BatchResult,
-    graph_client: GraphInterface,
+    knowledge_store: KnowledgeStore,
     entities: EntityManager,
     session_id: str,
     project_id: str,
@@ -412,7 +413,7 @@ async def write_batch_callback(
     try:
         await write_batch_to_graph(
             batch,
-            graph_client,
+            knowledge_store,
             entities,
             session_id=session_id,
             project_id=project_id,

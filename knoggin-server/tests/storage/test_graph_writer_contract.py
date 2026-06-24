@@ -91,7 +91,7 @@ def test_graph_writer_merges_evidence_refs_without_duplicates():
 async def test_graph_writer_save_message_logs_writes_graph_and_search_rows(
     monkeypatch,
 ):
-    client = RecordingPostgresClient(fetchone_results=[{"message_id": 7}])
+    client = RecordingPostgresClient(fetch_one_results=[{"message_id": 7}])
     writer = GraphWriter(client)
     monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
 
@@ -146,8 +146,6 @@ async def test_graph_writer_save_message_logs_writes_graph_and_search_rows(
         "project-1",
         "hello graph",
     )
-    assert client.connection_enters == 1
-    assert client.connection_exits == 1
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1
     assert client.cursor_enters == 1
@@ -178,7 +176,7 @@ async def test_graph_writer_save_message_logs_persists_canonical_messages(
         ]
     )
 
-    rows = await real_postgres_client.execute_read(
+    rows = await real_postgres_client.fetch_all(
         """
         SELECT
             user_name,
@@ -208,7 +206,12 @@ async def test_graph_writer_save_message_logs_persists_canonical_messages(
             "timestamp_ms": 123456,
         }
     ]
-    assert await reader.get_message_text(7, "ada", "session-1") == (
+    assert await reader.get_message_text(
+        7,
+        user_name="ada",
+        session_id="session-1",
+        visible_project_ids=["project-1"],
+    ) == (
         "hello canonical message"
     )
 
@@ -221,31 +224,7 @@ async def test_graph_writer_save_message_logs_empty_list_skips_db():
 
     assert await writer.save_message_logs([]) is True
     assert client.calls == []
-    assert client.connection_enters == 0
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_writer_save_message_logs_requires_async_pool():
-    client = RecordingPostgresClient()
-    client.async_pool = None
-    writer = GraphWriter(client)
-
-    with pytest.raises(RuntimeError, match="async_pool is not initialized"):
-        await writer.save_message_logs(
-            [
-                {
-                    "id": 7,
-                    "content": "hello graph",
-                    "role": "user",
-                    "user_name": "ada",
-                    "session_id": "session-1",
-                    "project_id": "project-1",
-                }
-            ]
-        )
-
-    assert client.calls == []
+    assert client.transaction_enters == 0
 
 
 @pytest.mark.storage
@@ -274,7 +253,7 @@ async def test_graph_writer_save_message_logs_rejects_missing_scope_without_exec
 @pytest.mark.no_network
 async def test_graph_writer_create_hierarchy_edge_uses_project_scope(monkeypatch):
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             {"parent_id": 2},
             {"created": True},
         ],
@@ -312,6 +291,7 @@ async def test_graph_writer_create_hierarchy_edge_uses_project_scope(monkeypatch
     )
     assert projection_call[0] == "execute"
     assert "CREATE (child)-[:PART_OF" in projection_call[1]
+    assert "project_id: $project_id" in projection_call[1]
     assert json.loads(projection_call[2][0]) == {
         "child_id": 3,
         "parent_id": 2,
@@ -340,7 +320,7 @@ async def test_graph_writer_create_hierarchy_edge_rejects_self_without_db_access
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_writer_create_hierarchy_edge_rejects_cycle_candidate():
-    client = RecordingPostgresClient(fetchone_results=[None])
+    client = RecordingPostgresClient(fetch_one_results=[None])
     writer = GraphWriter(client)
 
     assert (
@@ -361,7 +341,7 @@ async def test_graph_writer_create_hierarchy_edge_rejects_cycle_candidate():
 @pytest.mark.no_network
 async def test_graph_writer_create_hierarchy_edge_returns_false_on_db_failure():
     client = RecordingPostgresClient(
-        execute_exceptions=[RuntimeError("graph down")]
+        cursor_execute_exceptions=[RuntimeError("graph down")]
     )
     writer = GraphWriter(client)
 
@@ -377,7 +357,7 @@ async def test_graph_writer_create_hierarchy_edge_returns_false_on_db_failure():
 @pytest.mark.no_network
 async def test_graph_writer_delete_relationship_uses_project_and_identity_scope():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             {"relationship_id": "project-1:2:3"},
             {"deleted": "1"},
         ],
@@ -412,7 +392,7 @@ async def test_graph_writer_delete_relationship_uses_project_and_identity_scope(
 @pytest.mark.no_network
 async def test_graph_writer_delete_relationship_returns_false_on_zero_rows():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             None,
             {"deleted": "0"},
         ],
@@ -424,48 +404,6 @@ async def test_graph_writer_delete_relationship_returns_false_on_zero_rows():
         3,
         project_id="project-1",
     ) is False
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_writer_create_preference_writes_scoped_preference(monkeypatch):
-    client = RecordingPostgresClient(execute_write_results=[1])
-    writer = GraphWriter(client)
-    monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
-
-    assert await writer.create_preference(
-        "pref-1",
-        "Use concise answers",
-        "style",
-        "session-1",
-    ) is True
-
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call[0] == "execute_write"
-    assert "CREATE (p:Preference" in call[1]
-    assert json.loads(call[2][0]) == {
-        "id": "pref-1",
-        "content": "Use concise answers",
-        "kind": "style",
-        "session_id": "session-1",
-        "now": 123456,
-    }
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_writer_delete_preference_deletes_by_id():
-    client = RecordingPostgresClient(execute_write_results=[1])
-    writer = GraphWriter(client)
-
-    assert await writer.delete_preference("pref-1") is True
-
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call[0] == "execute_write"
-    assert "MATCH (p:Preference {id: $id})" in call[1]
-    assert json.loads(call[2][0]) == {"id": "pref-1"}
 
 
 @pytest.mark.storage
@@ -486,7 +424,7 @@ async def test_graph_writer_scoped_operations_require_project_without_db_access(
     writer = GraphWriter(client)
 
     with pytest.raises(ValueError, match=f"{method_name} requires project_id scope"):
-        await getattr(writer, method_name)(*args)
+        await getattr(writer, method_name)(*args, project_id="")
 
     assert client.calls == []
 
@@ -516,7 +454,7 @@ async def test_graph_writer_merge_entities_rejects_guardrails_without_db_access(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_writer_merge_entities_returns_false_when_validation_misses():
-    client = RecordingPostgresClient(fetchone_results=[None])
+    client = RecordingPostgresClient(fetch_one_results=[None])
     writer = GraphWriter(client)
 
     assert await writer.merge_entities(2, 3, project_id="project-1") is False
@@ -534,7 +472,7 @@ async def test_graph_writer_merge_entities_returns_false_when_validation_misses(
 @pytest.mark.no_network
 async def test_graph_writer_merge_entities_rejects_hierarchy_contraction_cycle():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             {
                 "p_name": "Parent",
                 "p_topic": "Projects",
@@ -567,7 +505,7 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     monkeypatch,
 ):
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             merge_validation_row(),
             {"creates_cycle": False},
             {
@@ -577,7 +515,7 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
             },
             {"entity_id": 3},
         ],
-        fetchall_results=[
+        fetch_all_results=[
             [
                 {
                     "relationship_id": "project-1:3:9",
@@ -703,7 +641,8 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         call
         for call in client.calls
         if "UNWIND $batch AS rel" in call[1]
-        and "SET r.weight = rel.weight" in call[1]
+        and "r.project_id = rel.project_id" in call[1]
+        and "r.weight = rel.weight" in call[1]
     )
     rel_params = json.loads(relationship_projection_call[2][0])
     assert set(rel_params["batch"][0]) == MERGE_RELATIONSHIP_PROJECTION_FIELDS
@@ -824,8 +763,6 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         and call[2] == (3, "project-1")
         for call in client.calls
     )
-    assert client.connection_enters == 1
-    assert client.connection_exits == 1
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1
     assert client.cursor_enters == 1
@@ -835,7 +772,7 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_writer_rejects_conflicting_canonical_message_payload():
-    client = RecordingPostgresClient(fetchone_results=[None])
+    client = RecordingPostgresClient(fetch_one_results=[None])
     writer = GraphWriter(client)
 
     with pytest.raises(RuntimeError, match="Canonical message ID collision"):
@@ -860,7 +797,7 @@ async def test_graph_writer_rejects_conflicting_canonical_message_payload():
 @pytest.mark.no_network
 async def test_graph_writer_merge_aborts_when_secondary_dependencies_remain():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             merge_validation_row(
                 p_conf=0.8,
                 p_last=100,
@@ -874,7 +811,7 @@ async def test_graph_writer_merge_aborts_when_secondary_dependencies_remain():
                 "hierarchy_count": 0,
             },
         ],
-        fetchall_results=[[], [], []],
+        fetch_all_results=[[], [], []],
     )
     writer = GraphWriter(client)
 
@@ -887,22 +824,9 @@ async def test_graph_writer_merge_aborts_when_secondary_dependencies_remain():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_merge_entities_requires_async_pool():
-    client = RecordingPostgresClient()
-    client.async_pool = None
-    writer = GraphWriter(client)
-
-    with pytest.raises(RuntimeError, match="async_pool is not initialized"):
-        await writer.merge_entities(2, 3, project_id="project-1")
-
-    assert client.calls == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 async def test_graph_writer_merge_entities_returns_false_on_transaction_error():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             merge_validation_row(
                 p_conf="0.4",
                 p_last="100",
@@ -911,7 +835,7 @@ async def test_graph_writer_merge_entities_returns_false_on_transaction_error():
             ),
             {"creates_cycle": False},
         ],
-        execute_exceptions=[
+        cursor_execute_exceptions=[
             None,
             None,
             None,
@@ -927,7 +851,5 @@ async def test_graph_writer_merge_entities_returns_false_on_transaction_error():
     assert "FROM entities p" in client.calls[1][1]
     assert "primary_ancestors" in client.calls[2][1]
     assert "UPDATE entities" in client.calls[3][1]
-    assert client.connection_enters == 1
-    assert client.connection_exits == 1
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1

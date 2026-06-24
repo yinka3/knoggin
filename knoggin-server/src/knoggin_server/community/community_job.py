@@ -40,8 +40,8 @@ class AACJob(BaseJob):
         try:
             await manager.trigger_discussion()
 
-            if self.resources.graph and self.resources.graph.community:
-                await self.resources.graph.community.delete_old_discussions(30)
+            if self.resources.knowledge_store and self.resources.knowledge_store.community:
+                await self.resources.knowledge_store.community.delete_old_discussions(30)
 
             return JobResult(success=True, summary="Discussion triggered")
         except Exception as e:

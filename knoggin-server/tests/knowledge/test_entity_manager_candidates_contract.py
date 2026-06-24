@@ -79,15 +79,15 @@ async def test_short_names_avoid_accidental_high_confidence_reuse(
 async def test_vector_candidate_is_included_when_similarity_finds_it(
     entity_manager_harness,
 ):
-    entities, graph, embedding = entity_manager_harness
+    entities, knowledge_store, embedding = entity_manager_harness
     await seed_entity(entities, 404, "Linear", entity_type="tool", topic="General")
     vector = embedding.vector_for("project planning app")
-    graph.vector_results[tuple(vector)] = [(404, 0.91)]
+    knowledge_store.vector_results[tuple(vector)] = [(404, 0.91)]
 
     candidates = await entities.get_candidate_ids("project planning app")
 
     assert candidates == [(404, 0.91)]
-    assert graph.vector_searches[-1]["vector"] == vector
+    assert knowledge_store.vector_searches[-1]["vector"] == vector
 
 
 @pytest.mark.storage
@@ -95,10 +95,10 @@ async def test_vector_candidate_is_included_when_similarity_finds_it(
 async def test_duplicate_exact_and_vector_candidates_keep_max_score(
     entity_manager_harness,
 ):
-    entities, graph, embedding = entity_manager_harness
+    entities, knowledge_store, embedding = entity_manager_harness
     await seed_entity(entities, 404, "Linear", aliases=["planning app"])
     vector = embedding.vector_for("planning app")
-    graph.vector_results[tuple(vector)] = [(404, 0.88)]
+    knowledge_store.vector_results[tuple(vector)] = [(404, 0.88)]
 
     candidates = await entities.get_candidate_ids("planning app")
 
@@ -108,9 +108,9 @@ async def test_duplicate_exact_and_vector_candidates_keep_max_score(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_unhydrated_vector_candidate_ids_are_dropped(entity_manager_harness):
-    entities, graph, embedding = entity_manager_harness
+    entities, knowledge_store, embedding = entity_manager_harness
     vector = embedding.vector_for("unknown but similar")
-    graph.vector_results[tuple(vector)] = [(999, 0.95)]
+    knowledge_store.vector_results[tuple(vector)] = [(999, 0.95)]
 
     candidates = await entities.get_candidate_ids("unknown but similar")
 
@@ -120,10 +120,10 @@ async def test_unhydrated_vector_candidate_ids_are_dropped(entity_manager_harnes
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_precomputed_mention_embedding_is_reused(entity_manager_harness):
-    entities, graph, embedding = entity_manager_harness
+    entities, knowledge_store, embedding = entity_manager_harness
     await seed_entity(entities, 505, "Notion", entity_type="tool", topic="General")
     precomputed = [9.0, 8.0, 7.0]
-    graph.vector_results[tuple(precomputed)] = [(505, 0.93)]
+    knowledge_store.vector_results[tuple(precomputed)] = [(505, 0.93)]
 
     candidates = await entities.get_candidate_ids(
         "workspace notes tool",
@@ -132,7 +132,7 @@ async def test_precomputed_mention_embedding_is_reused(entity_manager_harness):
 
     assert candidates == [(505, 0.93)]
     assert embedding.single_calls == []
-    assert graph.vector_searches[-1]["vector"] == precomputed
+    assert knowledge_store.vector_searches[-1]["vector"] == precomputed
 
 
 @pytest.mark.storage
@@ -154,11 +154,11 @@ async def test_embedding_failure_falls_back_to_cache_and_fuzzy_candidates(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_candidates_are_sorted_strongest_first(entity_manager_harness):
-    entities, graph, embedding = entity_manager_harness
+    entities, knowledge_store, embedding = entity_manager_harness
     await seed_entity(entities, 101, "Knoggin", aliases=["memory project"])
     await seed_entity(entities, 202, "Linear", entity_type="tool", topic="General")
     vector = embedding.vector_for("memory project")
-    graph.vector_results[tuple(vector)] = [(202, 0.92)]
+    knowledge_store.vector_results[tuple(vector)] = [(202, 0.92)]
 
     candidates = await entities.get_candidate_ids("memory project")
 
@@ -170,12 +170,12 @@ async def test_candidates_are_sorted_strongest_first(entity_manager_harness):
 async def test_readable_project_ids_are_passed_to_vector_search(
     entity_manager_harness,
 ):
-    entities, graph, embedding = entity_manager_harness
+    entities, knowledge_store, embedding = entity_manager_harness
     vector = embedding.vector_for("project planning app")
 
     await entities.get_candidate_ids("project planning app")
 
-    assert graph.vector_searches[-1] == {
+    assert knowledge_store.vector_searches[-1] == {
         "vector": vector,
         "limit": 5,
         "score_threshold": 0.85,

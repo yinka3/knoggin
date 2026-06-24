@@ -137,7 +137,7 @@ async def test_startup_check_recovers_merge_work_from_durable_queue(monkeypatch)
     job = MergeDetectionJob(
         user_name="ada",
         entities=object(),
-        graph_client=object(),
+        knowledge_store=object(),
         llm_client=object(),
         topic_config=object(),
         redis_client=redis,

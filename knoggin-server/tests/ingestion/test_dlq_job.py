@@ -6,20 +6,20 @@ from common.schema.contracts import BatchResult
 from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.jobs.dlq_job import DLQReplayJob
-from tests.fixtures.fakes import FakeGraphClient, FakeRedis
+from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
 
 
-class ProcessorWithoutGraphClient:
-    graph_client = None
+class ProcessorWithoutKnowledgeStore:
+    knowledge_store = None
 
 
-class ProcessorWithGraphClient:
-    graph_client = object()
+class ProcessorWithKnowledgeStore:
+    knowledge_store = object()
 
 
 class RecordingProcessor:
     def __init__(self):
-        self.graph_client = FakeGraphClient()
+        self.knowledge_store = FakeKnowledgeStore()
         self.run_calls = []
 
     async def run(self, messages, session_text, *, session_id):
@@ -35,11 +35,11 @@ async def successful_write_to_graph(result):
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-def test_dlq_job_requires_processor_graph_client():
-    with pytest.raises(ValueError, match="requires a BatchProcessor with graph_client"):
+def test_dlq_job_requires_processor_knowledge_store():
+    with pytest.raises(ValueError, match="requires a BatchProcessor with knowledge_store"):
         DLQReplayJob(
             entities=object(),
-            processor=ProcessorWithoutGraphClient(),
+            processor=ProcessorWithoutKnowledgeStore(),
             write_to_graph=lambda result: (True, None),
             redis_client=FakeRedis(),
         )
@@ -47,10 +47,10 @@ def test_dlq_job_requires_processor_graph_client():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-def test_dlq_job_accepts_processor_with_graph_client():
+def test_dlq_job_accepts_processor_with_knowledge_store():
     job = DLQReplayJob(
         entities=object(),
-        processor=ProcessorWithGraphClient(),
+        processor=ProcessorWithKnowledgeStore(),
         write_to_graph=lambda result: (True, None),
         redis_client=FakeRedis(),
     )

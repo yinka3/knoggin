@@ -24,6 +24,6 @@ async def test_postgres_client_async_pool_executes_real_reads():
 
     await client.connect()
     try:
-        assert await client.execute_read("SELECT 1 AS ok") == [{"ok": 1}]
+        assert await client.fetch_all("SELECT 1 AS ok") == [{"ok": 1}]
     finally:
         await client.close()

@@ -26,7 +26,7 @@ class GraphRetrievalTool(GraphTools):
 
 @pytest.mark.no_network
 async def test_recent_activity_uses_default_window_scope_and_hydrates_evidence():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
 
@@ -42,14 +42,14 @@ async def test_recent_activity_uses_default_window_scope_and_hydrates_evidence()
                 }
             ]
 
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     tool = GraphRetrievalTool()
-    tool.graph_client = graph
+    tool.knowledge_store = knowledge_store
     tool.resolved = {"Ada": "Ada Lovelace"}
 
     result = await tool.get_recent_activity("Ada", hours=0)
 
-    assert graph.calls == [("Ada Lovelace", ["Identity"], 72, ["project-1"])]
+    assert knowledge_store.calls == [("Ada Lovelace", ["Identity"], 72, ["project-1"])]
     assert tool.hydrated_refs == [[{"message_id": 7}]]
     assert result == [
         {
@@ -62,12 +62,12 @@ async def test_recent_activity_uses_default_window_scope_and_hydrates_evidence()
 
 @pytest.mark.no_network
 async def test_recent_activity_unknown_entity_returns_clean_error_without_graph_call():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         async def get_recent_activity(self, *args, **kwargs):
             raise AssertionError("graph should not be queried for unknown entity")
 
     tool = GraphRetrievalTool()
-    tool.graph_client = FakeGraphClient()
+    tool.knowledge_store = FakeKnowledgeStore()
 
     assert await tool.get_recent_activity("Missing") == [
         {"error": "Entity not found: 'Missing'"}
@@ -76,7 +76,7 @@ async def test_recent_activity_unknown_entity_returns_clean_error_without_graph_
 
 @pytest.mark.no_network
 async def test_get_connections_reports_hidden_inactive_topics_without_evidence_leak():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
 
@@ -99,14 +99,14 @@ async def test_get_connections_reports_hidden_inactive_topics_without_evidence_l
                 },
             ]
 
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     tool = GraphRetrievalTool()
-    tool.graph_client = graph
+    tool.knowledge_store = knowledge_store
     tool.resolved = {"Ada": "Ada Lovelace"}
 
     result = await tool.get_connections("Ada")
 
-    assert graph.calls == [
+    assert knowledge_store.calls == [
         (["Ada Lovelace"], ["Identity"], 50, ["project-1"]),
         (["Ada Lovelace"], None, 25, ["project-1"]),
     ]
@@ -122,7 +122,7 @@ async def test_get_connections_reports_hidden_inactive_topics_without_evidence_l
 
 @pytest.mark.no_network
 async def test_find_path_locks_inactive_shortcut_steps_and_strips_evidence():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
 
@@ -161,14 +161,14 @@ async def test_find_path_locks_inactive_shortcut_steps_and_strips_evidence():
                 False,
             )
 
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     tool = GraphRetrievalTool()
-    tool.graph_client = graph
+    tool.knowledge_store = knowledge_store
     tool.resolved = {"Ada": "Ada", "Grace": "Grace"}
 
     result = await tool.find_path("Ada", "Grace")
 
-    assert graph.calls == [
+    assert knowledge_store.calls == [
         ("Ada", "Grace", ["Identity"], 4, ["project-1"]),
         ("Ada", "Grace", None, 4, ["project-1"]),
     ]
@@ -199,7 +199,7 @@ async def test_find_path_locks_inactive_shortcut_steps_and_strips_evidence():
 
 @pytest.mark.no_network
 async def test_hot_topic_context_hydrates_messages_and_removes_raw_refs():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
 
@@ -214,13 +214,13 @@ async def test_hot_topic_context_hydrates_messages_and_removes_raw_refs():
                 }
             }
 
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     tool = GraphRetrievalTool()
-    tool.graph_client = graph
+    tool.knowledge_store = knowledge_store
 
     result = await tool.get_hot_topic_context(["Identity"], slim=True)
 
-    assert graph.calls == [(["Identity"], 10, True, ["project-1"])]
+    assert knowledge_store.calls == [(["Identity"], 10, True, ["project-1"])]
     assert tool.hydrated_refs == [[{"message_id": 7}]]
     assert result == {
         "Identity": {

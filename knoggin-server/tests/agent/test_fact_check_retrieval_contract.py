@@ -52,11 +52,13 @@ async def test_fact_check_exact_entity_returns_all_facts_with_canonical_name():
             assert entity_id == 2
             return {"canonical_name": "Ada Lovelace"}
 
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
 
-        async def get_facts_for_entity(self, entity_id, active_only=True):
+        async def get_facts_for_entity(
+            self, entity_id, *, visible_project_ids, active_only=True
+        ):
             self.calls.append((entity_id, active_only))
             return [
                 fact("fact-active", "Ada writes algorithms", entity_id=entity_id),
@@ -68,14 +70,14 @@ async def test_fact_check_exact_entity_returns_all_facts_with_canonical_name():
                 ),
             ]
 
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     tool = FactCheckTool()
     tool.entities = FakeEntities()
-    tool.graph_client = graph
+    tool.knowledge_store = knowledge_store
 
     result = await tool.fact_check("Ada", "what does Ada know?")
 
-    assert graph.calls == [(2, False)]
+    assert knowledge_store.calls == [(2, False)]
     assert result["resolution"] == "exact"
     assert result["results"][0]["entity_name"] == "Ada Lovelace"
     assert [f["id"] for f in result["results"][0]["facts"]] == [
@@ -102,7 +104,7 @@ async def test_fact_check_vector_candidates_use_visible_projects_and_profiles():
             self.calls.append(text)
             return [0.1, 0.2]
 
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.search_calls = []
 
@@ -114,22 +116,24 @@ async def test_fact_check_vector_candidates_use_visible_projects_and_profiles():
             )
             return [(3, 0.87)]
 
-        async def get_facts_for_entities(self, entity_ids, active_only=True):
+        async def get_facts_for_entities(
+            self, entity_ids, *, visible_project_ids, active_only=True
+        ):
             assert entity_ids == [3]
             assert active_only is False
             return {3: [fact("fact-3", "Vector fact", entity_id=3)]}
 
     embedding = FakeEmbeddingService()
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     tool = FactCheckTool()
     tool.entities = FakeEntities()
     tool.embedding_service = embedding
-    tool.graph_client = graph
+    tool.knowledge_store = knowledge_store
 
     result = await tool.fact_check("Unknown entity", "what matters?")
 
     assert embedding.calls == ["Unknown entity"]
-    assert graph.search_calls == [([0.1, 0.2], 5, 0.69, ["project-1"])]
+    assert knowledge_store.search_calls == [([0.1, 0.2], 5, 0.69, ["project-1"])]
     assert result == {
         "resolution": "vector",
         "results": [
@@ -152,7 +156,7 @@ async def test_fact_check_falls_back_to_message_search_when_no_entity_candidates
         async def encode_single(self, text):
             return [0.1, 0.2]
 
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         async def search_entities_by_embedding(
             self, embedding, limit, score_threshold, visible_project_ids
         ):
@@ -161,7 +165,7 @@ async def test_fact_check_falls_back_to_message_search_when_no_entity_candidates
     tool = FactCheckTool()
     tool.entities = FakeEntities()
     tool.embedding_service = FakeEmbeddingService()
-    tool.graph_client = FakeGraphClient()
+    tool.knowledge_store = FakeKnowledgeStore()
 
     result = await tool.fact_check("Unknown", "fallback query")
 
@@ -191,13 +195,15 @@ async def test_fact_check_trims_large_vector_fact_sets_by_query_similarity():
                 return [0.0, 1.0]
             return [1.0, 0.0]
 
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         async def search_entities_by_embedding(
             self, embedding, limit, score_threshold, visible_project_ids
         ):
             return [(4, 0.91)]
 
-        async def get_facts_for_entities(self, entity_ids, active_only=True):
+        async def get_facts_for_entities(
+            self, entity_ids, *, visible_project_ids, active_only=True
+        ):
             facts = []
             for index in range(1001):
                 facts.append(
@@ -215,7 +221,7 @@ async def test_fact_check_trims_large_vector_fact_sets_by_query_similarity():
     tool = FactCheckTool()
     tool.entities = FakeEntities()
     tool.embedding_service = embedding
-    tool.graph_client = FakeGraphClient()
+    tool.knowledge_store = FakeKnowledgeStore()
 
     result = await tool.fact_check("Large Entity", "query for strongest facts")
 

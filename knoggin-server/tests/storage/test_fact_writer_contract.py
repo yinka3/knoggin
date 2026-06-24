@@ -48,7 +48,12 @@ async def test_fact_writer_create_facts_batch_empty_list_skips_db():
     client = RecordingPostgresClient()
     writer = FactWriter(client)
 
-    assert await writer.create_facts_batch(2, [], user_name="ada") == 0
+    assert await writer.create_facts_batch(
+        2,
+        [],
+        user_name="ada",
+        project_id="project-1",
+    ) == 0
     assert client.calls == []
 
 
@@ -58,11 +63,11 @@ async def test_fact_writer_create_facts_batch_requires_user_and_project_scope():
     client = RecordingPostgresClient()
     writer = FactWriter(client)
 
-    with pytest.raises(ValueError, match="requires user_name and project_id"):
-        await writer.create_facts_batch(2, [make_fact()], project_id="project-1")
+    with pytest.raises(ValueError, match="requires user_name scope"):
+        await writer.create_facts_batch(2, [], user_name="", project_id="project-1")
 
-    with pytest.raises(ValueError, match="requires user_name and project_id"):
-        await writer.create_facts_batch(2, [make_fact()], user_name="ada")
+    with pytest.raises(ValueError, match="requires project_id scope"):
+        await writer.create_facts_batch(2, [], user_name="ada", project_id="")
 
     assert client.calls == []
 
@@ -88,7 +93,7 @@ async def test_fact_writer_create_facts_batch_requires_source_message_scope():
 @pytest.mark.no_network
 async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             {"fact_id": "fact-1"},
             {"projected_count": 1},
         ]
@@ -171,7 +176,7 @@ async def test_fact_writer_create_facts_batch_writes_graph_and_fact_search():
 @pytest.mark.no_network
 async def test_fact_writer_create_facts_batch_without_embedding_skips_fact_search():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             {"fact_id": "fact-1"},
             {"projected_count": 1},
         ]
@@ -195,7 +200,7 @@ async def test_fact_writer_create_facts_batch_without_embedding_skips_fact_searc
 @pytest.mark.no_network
 async def test_fact_writer_create_facts_batch_prefers_explicit_source_scope():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             {"fact_id": "fact-1"},
             {"projected_count": 1},
         ]
@@ -226,26 +231,8 @@ async def test_fact_writer_create_facts_batch_prefers_explicit_source_scope():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_fact_writer_create_facts_batch_requires_async_pool():
-    client = RecordingPostgresClient()
-    client.async_pool = None
-    writer = FactWriter(client)
-
-    with pytest.raises(RuntimeError, match="async_pool is not initialized"):
-        await writer.create_facts_batch(
-            2,
-            [make_fact()],
-            user_name="ada",
-            project_id="project-1",
-        )
-
-    assert client.calls == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 async def test_fact_writer_create_facts_batch_zero_created_raises():
-    client = RecordingPostgresClient(fetchone_results=[None])
+    client = RecordingPostgresClient(fetch_one_results=[None])
     writer = FactWriter(client)
 
     with pytest.raises(Exception, match="parent may not exist"):
@@ -264,7 +251,7 @@ async def test_fact_writer_create_facts_batch_zero_created_raises():
 @pytest.mark.no_network
 async def test_fact_writer_invalidate_fact_updates_search_when_fact_exists():
     invalid_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
-    client = RecordingPostgresClient(fetchone_results=[{"fact_id": "fact-1"}])
+    client = RecordingPostgresClient(fetch_one_results=[{"fact_id": "fact-1"}])
     writer = FactWriter(client)
 
     assert (
@@ -291,7 +278,7 @@ async def test_fact_writer_invalidate_fact_updates_search_when_fact_exists():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_fact_writer_invalidate_fact_missing_graph_fact_skips_search_update():
-    client = RecordingPostgresClient(fetchone_results=[None])
+    client = RecordingPostgresClient(fetch_one_results=[None])
     writer = FactWriter(client)
 
     assert (
@@ -315,6 +302,7 @@ async def test_fact_writer_invalidate_fact_requires_project_scope():
         await writer.invalidate_fact(
             "fact-1",
             datetime(2026, 1, 2, tzinfo=timezone.utc),
+            project_id="",
         )
 
     assert client.calls == []
@@ -325,7 +313,7 @@ async def test_fact_writer_invalidate_fact_requires_project_scope():
 async def test_fact_writer_delete_old_invalidated_facts_relies_on_search_cascade():
     cutoff = datetime(2026, 1, 3, tzinfo=timezone.utc)
     client = RecordingPostgresClient(
-        fetchall_results=[[{"fact_id": '"fact-1"'}, {"fact_id": "fact-2"}]]
+        fetch_all_results=[[{"fact_id": '"fact-1"'}, {"fact_id": "fact-2"}]]
     )
     writer = FactWriter(client)
 
@@ -351,7 +339,7 @@ async def test_fact_writer_delete_old_invalidated_facts_relies_on_search_cascade
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_fact_writer_delete_old_invalidated_facts_empty_rows_skip_search_delete():
-    client = RecordingPostgresClient(fetchall_results=[[]])
+    client = RecordingPostgresClient(fetch_all_results=[[]])
     writer = FactWriter(client)
 
     assert (
@@ -373,7 +361,8 @@ async def test_fact_writer_delete_old_invalidated_facts_requires_project_scope()
 
     with pytest.raises(ValueError, match="requires project_id scope"):
         await writer.delete_old_invalidated_facts(
-            datetime(2026, 1, 3, tzinfo=timezone.utc)
+            datetime(2026, 1, 3, tzinfo=timezone.utc),
+            project_id="",
         )
 
     assert client.calls == []

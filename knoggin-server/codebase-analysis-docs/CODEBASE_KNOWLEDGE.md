@@ -50,7 +50,7 @@ Business purposes by feature:
 - Session lifecycle: gives each conversation a durable Redis metadata record, isolated message buffer, conversation history, and session-scoped file RAG workspace. See `src/knoggin_server/session/session_manager.py`.
 - Project lifecycle: groups sessions under project scopes, supports cross-project readable scopes, and hosts shared project-level runtime state. See `src/knoggin_server/project/project_manager.py`.
 - Message ingestion: turns raw user messages into persisted `Message` graph nodes, search rows, entity nodes, relationship edges, and dirty queues for later refinement. See `src/knoggin_server/session/context.py`, `src/knoggin_server/ingestion/services/batch_consumer.py`, and `src/knoggin_server/ingestion/services/pipeline_service.py`.
-- Knowledge graph: stores entities, relationships, facts, messages, preferences, topics, hierarchy edges, and AAC discussion nodes in Apache AGE, with pgvector/FTS helper tables. See `src/infrastructure/schema.sql`, `src/infrastructure/graph_client.py`, and `src/knoggin_server/knowledge/db/*`.
+- Knowledge graph: stores entities, relationships, facts, messages, topics, hierarchy edges, and AAC discussion nodes in Apache AGE, with pgvector/FTS helper tables. See `src/infrastructure/schema.sql`, `src/infrastructure/knowledge_store.py`, and `src/knoggin_server/knowledge/db/*`.
 - Profile/fact refinement: converts recently touched entities and conversation windows into stable facts, invalidates contradicted facts, and updates embeddings. See `src/knoggin_server/knowledge/jobs/profile_job.py` and `src/knoggin_server/knowledge/services/fact_resolution.py`.
 - Merge detection: finds duplicate entities and hierarchy candidates, using fuzzy/vector candidates plus LLM judgment. See `src/knoggin_server/knowledge/jobs/merge_job.py`.
 - Agent execution: answers user queries using a bounded multi-step tool loop over graph, messages, files, web search, and memory. See `src/knoggin_server/agent/executor.py`, `src/knoggin_server/agent/tools/registry.py`, and `src/common/schema/tool_schema.py`.
@@ -63,7 +63,7 @@ Business purposes by feature:
 
 1. `SessionManager.create_session` acquires a `ProjectState` from `ProjectManager`, builds a `Context`, stores session metadata in Redis, and tracks the active session.
 2. `Context.add` persists a user turn in Redis, writes message-id mappings, pushes the message to the Redis ingestion buffer, records project activity, and signals `BatchConsumer`.
-3. `BatchConsumer` drains buffered messages, obtains conversation context, calls `BatchProcessor.run`, persists message logs through `GraphClient.save_message_logs`, writes entities/relationships through `write_batch_callback`, and dead-letters failed batches.
+3. `BatchConsumer` drains buffered messages, obtains conversation context, calls `BatchProcessor.run`, persists message logs through `KnowledgeStore.save_message_logs`, writes entities/relationships through `write_batch_callback`, and dead-letters failed batches.
 4. `BatchProcessor` runs known-alias matching, GLiNER, optional LLM NER, deterministic entity resolution, graph-boosted candidate scoring, message embedding, and LLM connection extraction.
 5. Graph writes mark dirty entities in Redis. The project scheduler later runs profile refinement, merge detection, topic evolution, DLQ replay, cleanup, archival, and optionally AAC.
 6. `Orchestrator.run_stream` builds tools and prompt memory from the active `Context`, then delegates a reasoning loop to `AgentExecutor`.
@@ -76,7 +76,7 @@ INDEX_VERSION: phase-1
 FILE_MAP_SUMMARY: Python package under src/ with common schemas/utils, infrastructure clients/jobs, knoggin_server session/project/ingestion/knowledge/agent/community modules, and tests grouped by runtime, ingestion, storage, knowledge, agent, integration, smoke.
 OPEN_QUESTIONS: No HTTP/FastAPI entry point exists inside target root despite FastAPI dependency. It may be outside scope or not yet implemented.
 KNOWN_RISKS: The package is an engine/library in this root; callers must wire API boundaries externally.
-GLOSSARY_DELTA: Context, ProjectState, BatchProcessor, BatchConsumer, EntityManager, GraphClient, AAC.
+GLOSSARY_DELTA: Context, ProjectState, BatchProcessor, BatchConsumer, EntityManager, KnowledgeStore, AAC.
 ```
 
 ## 2. File Index And Prioritization
@@ -94,7 +94,7 @@ Generated from in-scope files only. `__pycache__`, `.pytest_cache`, `.ruff_cache
 | P0       |                        `src/knoggin_server/project/state.py` | runtime       |      55 | c61d7d32 | Project-level shared state                                |
 | P0       |                         `src/infrastructure/redis_client.py` | infra         |     331 | 37793b9c | Redis singleton and key taxonomy                          |
 | P0       |                      `src/infrastructure/postgres_client.py` | infra         |     117 | b04a3702 | AGE/pgvector pool wrapper                                 |
-| P0       |                         `src/infrastructure/graph_client.py` | infra         |     363 | c4635338 | Storage facade                                            |
+| P0       |                         `src/infrastructure/knowledge_store.py` | infra         |     363 | c4635338 | Storage facade                                            |
 | P0       |                              `src/infrastructure/schema.sql` | db schema     |      56 | 8dd1ff31 | pgvector and FTS tables                                   |
 | P0       |    `src/knoggin_server/ingestion/services/batch_consumer.py` | ingestion     |     335 | e05f9377 | Redis buffer draining and DLQ                             |
 | P0       |  `src/knoggin_server/ingestion/services/pipeline_service.py` | ingestion     |     800 | e8b027da | Batch extraction and resolution                           |
@@ -162,13 +162,13 @@ flowchart TD
     Ctx --> BP["BatchProcessor"]
     Ctx --> FileRAG["FileRAGService"]
     BP --> EntityMgr["EntityManager"]
-    BP --> GraphClient["GraphClient"]
-    GraphClient --> DBModules["Readers / Writers / ToolQueries / CommunityStore"]
+    BP --> KnowledgeStore["KnowledgeStore"]
+    KnowledgeStore --> DBModules["Readers / Writers / ToolQueries / CommunityStore"]
 
     Caller --> Orch["Orchestrator.run_stream"]
     Orch --> Executor["AgentExecutor"]
     Executor --> Tools["Tools"]
-    Tools --> GraphClient
+    Tools --> KnowledgeStore
     Tools --> FileRAG
     Tools --> Redis
 ```
@@ -182,7 +182,7 @@ sequenceDiagram
     participant Redis
     participant Consumer as BatchConsumer
     participant Processor as BatchProcessor
-    participant Graph as GraphClient
+    participant Graph as KnowledgeStore
     participant Jobs as Scheduler Jobs
 
     Caller->>Context: add(Message)
@@ -252,14 +252,14 @@ erDiagram
 
 Storage is hybrid:
 
-- PostgreSQL stores canonical knowledge; Apache AGE projects nodes and edges for traversal: `Entity`, `Message`, `Fact`, `Topic`, `Preference`, `AAC_Discussion`, `AAC_Message`, `AAC_Agent`, `RELATED_TO`, `HAS_FACT`, `EXTRACTED_FROM`, `BELONGS_TO`, `PART_OF`, `SPAWNED`. Each entity projects one canonical topic.
+- PostgreSQL stores canonical knowledge; Apache AGE projects nodes and edges for traversal: `Entity`, `Message`, `Fact`, `Topic`, `AAC_Discussion`, `AAC_Message`, `AAC_Agent`, `RELATED_TO`, `HAS_FACT`, `EXTRACTED_FROM`, `BELONGS_TO`, `PART_OF`, `SPAWNED`. Each entity projects one canonical topic.
 - Postgres relational helper tables store vectors and FTS:
   - `entity_search(entity_id, canonical_name, user_name, project_id, embedding vector(1024))`
   - `message_search(message_id, user_name, session_id, project_id, content_tsvector)`
   - `fact_search(fact_id, entity_id, user_name, project_id, embedding vector(1024), invalid_at)`
 - Schema and indexes are in `src/infrastructure/schema.sql`.
 - `PostgresClient.build_cypher` wraps AGE Cypher in SQL in `src/infrastructure/postgres_client.py`.
-- `GraphClient` delegates to focused DB readers/writers in `src/infrastructure/graph_client.py`.
+- `KnowledgeStore` delegates to focused DB readers/writers in `src/infrastructure/knowledge_store.py`.
 
 ### Cross-Cutting Concerns
 
@@ -308,7 +308,7 @@ Caching and performance:
 
 ```text
 INDEX_VERSION: phase-2
-FILE_MAP_SUMMARY: Backbone read: resources, Redis, Postgres, GraphClient, sessions, context, project manager/state, scheduler, ingestion, graph-write planner, schemas, config, agent executor/orchestrator/tools, jobs, memory, file RAG, AAC.
+FILE_MAP_SUMMARY: Backbone read: resources, Redis, Postgres, KnowledgeStore, sessions, context, project manager/state, scheduler, ingestion, graph-write planner, schemas, config, agent executor/orchestrator/tools, jobs, memory, file RAG, AAC.
 OPEN_QUESTIONS: The caller/API layer that invokes ResourceManager, SessionManager, ProjectManager, and Orchestrator is not present in this target root.
 KNOWN_RISKS: Project-level schedulers pass the project id through `Scheduler.scope_id` and `JobContext.scope_id`; old `session_id` compatibility aliases still exist and can obscure the intended scope naming.
 GLOSSARY_DELTA: Dirty entity, DLQ, GraphMutationPlan, EvidenceRef, Architect mode, Librarian mode, Working memory, Topic evolution.
@@ -322,7 +322,7 @@ Purpose: create one shared runtime with all heavy dependencies initialized once.
 
 Technical flow:
 
-- `ResourceManager.initialize` in `src/infrastructure/resources.py` selects CPU/CUDA/MPS using `KNOGGIN_GPU`, creates a `ThreadPoolExecutor`, requires `DATABASE_URL`, validates Redis settings, owns an `AsyncRedisClient` instance and its stable raw client, creates `GraphInterface`, reads LLM config from `ConfigManager`, creates `LLMService` and `EmbeddingService`, loads the ML resources, then connects the graph interface.
+- `ResourceManager.initialize` in `src/infrastructure/resources.py` selects CPU/CUDA/MPS using `KNOGGIN_GPU`, creates a `ThreadPoolExecutor`, requires `DATABASE_URL`, validates Redis settings, owns an `AsyncRedisClient` instance and its stable raw client, creates `KnowledgeStore`, reads LLM config from `ConfigManager`, creates `LLMService` and `EmbeddingService`, loads the ML resources, then connects the knowledge store.
 - `ResourceManager.shutdown` closes Redis, Postgres pools, embedding models, LLM HTTP clients, and executor resources.
 
 Business value: this hides heavyweight ML and storage setup from feature code and allows session/project managers to share resources.
@@ -772,7 +772,7 @@ Ingestion:
 Storage:
 
 - `PostgresClient.build_cypher` in `src/infrastructure/postgres_client.py`: AGE query wrapper.
-- `GraphClient` in `src/infrastructure/graph_client.py`: facade over storage modules.
+- `KnowledgeStore` in `src/infrastructure/knowledge_store.py`: facade over storage modules.
 - `EntityWriter.write_batch` in `src/knoggin_server/knowledge/db/writers/entity_writer.py`: entity and relationship writes.
 - `GraphWriter.save_message_logs`, `merge_entities` in `src/knoggin_server/knowledge/db/writers/graph_writer.py`: message persistence and entity merge.
 - `FactWriter.create_facts_batch`, `invalidate_fact`, `delete_old_invalidated_facts` in `src/knoggin_server/knowledge/db/writers/fact_writer.py`: fact lifecycle.
@@ -930,7 +930,7 @@ Test groups:
 - `tests/runtime/`: session lifecycle, session assembler wiring, project membership/project boot, context add.
 - `tests/integration/`: fake engine flow and real infra smoke contracts.
 - `tests/ingestion/`: message mapping, batch consumer, DLQ, engine contracts, extraction fallbacks.
-- `tests/storage/`: storage readers/writers, Postgres client, graph client facade, tool queries.
+- `tests/storage/`: storage readers/writers, Postgres client, knowledge-store facade, tool queries.
 - `tests/knowledge/`: memory service and file RAG behavior.
 - `tests/agent/`: orchestrator and agent manager.
 - `tests/unit/`: common utils including the central clock, Redis keys, project state, session metadata.
@@ -961,7 +961,7 @@ When adding a feature:
 
 When refactoring:
 
-1. Preserve `GraphClient` method names unless all callers and tests are updated.
+1. Preserve `KnowledgeStore` method names unless all callers and tests are updated.
 2. Preserve `BatchResult` serialization fields because DLQ replay depends on them.
 3. Preserve session cleanup coverage in `SessionManager.delete_session_data`.
 4. Preserve `ConfigManager.subscribe` callback behavior; many services depend on immediate callback invocation.

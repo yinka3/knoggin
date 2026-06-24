@@ -218,7 +218,7 @@ class Orchestrator:
             search_config=search_cfg,
             file_rag=context.file_rag,
             memory=memory_mgr,
-            graph_client=context.graph_client,
+            knowledge_store=context.knowledge_store,
             redis=context.redis_client,
         )
 

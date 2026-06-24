@@ -10,7 +10,7 @@ from common.conf.topics_config import TopicConfig
 from common.schema.contracts import TopicConfigResult
 from common.schema.settings import TopicConfigSettings
 from common.utils.events import emit
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
@@ -30,14 +30,14 @@ class TopicConfigJob(BaseJob):
         topic_config: TopicConfig,
         update_callback: Callable[[dict], Awaitable[None]],
         redis_client: aioredis.Redis,
-        graph_client: GraphInterface,
+        knowledge_store: KnowledgeStore,
         interval_msgs: int = 40,
         conversation_window: int = 50,
     ):
         self.llm = llm
         self.topic_config = topic_config
         self.redis = redis_client
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.update_callback = update_callback
         self.interval_msgs = interval_msgs
         self.conversation_window = conversation_window
@@ -87,7 +87,7 @@ class TopicConfigJob(BaseJob):
     async def execute(self, ctx: JobContext) -> JobResult:
         count_key = RedisKeys.project_heartbeat_counter(ctx.user_name, ctx.project_id)
 
-        messages = await self.graph_client.get_recent_project_messages(
+        messages = await self.knowledge_store.get_recent_project_messages(
             ctx.user_name,
             ctx.project_id,
             self.conversation_window,

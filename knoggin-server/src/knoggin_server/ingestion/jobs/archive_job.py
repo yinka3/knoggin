@@ -6,7 +6,7 @@ from loguru import logger
 from common.schema.settings import ArchivalSettings
 from common.utils.events import emit
 from common.utils.time_utils import get_now
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 
@@ -27,14 +27,14 @@ class FactArchivalJob(BaseJob):
     def __init__(
         self,
         user_name: str,
-        graph_client: GraphInterface,
+        knowledge_store: KnowledgeStore,
         redis_client: aioredis.Redis,
         retention_days: int = 14,
         fallback_interval_hours: float = 24,
     ):
         self.user_name = user_name
         self.redis = redis_client
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.retention_days = retention_days
         self._fallback_interval_seconds = fallback_interval_hours * 3600
 
@@ -66,7 +66,7 @@ class FactArchivalJob(BaseJob):
             )
             profile_trigger = await self.redis.get(profile_complete_key)
 
-            deleted_count = await self.graph_client.delete_old_invalidated_facts(
+            deleted_count = await self.knowledge_store.delete_old_invalidated_facts(
                 cutoff, project_id=project_id
             )
 

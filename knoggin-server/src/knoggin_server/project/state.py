@@ -4,6 +4,7 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.conf.topics_config import TopicConfig
+from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.job.scheduler import Scheduler
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.services.entity_service import EntityManager
@@ -23,11 +24,18 @@ class ProjectState:
         scheduler: Scheduler,
         user_name: str,
         redis_client: aioredis.Redis,
-        readable_project_ids: Optional[list[str]] = None,
+        readable_project_ids: list[str],
         batch_processor: Optional[Any] = None,
     ):
-        self.project_id = project_id
-        self.readable_project_ids = readable_project_ids or [project_id]
+        self.project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "ProjectState",
+        )
+        self.readable_project_ids = require_visible_project_ids(
+            readable_project_ids,
+            "ProjectState",
+        )
         self.topic_config = topic_config
         self.entities = entities
         self.pipeline = pipeline

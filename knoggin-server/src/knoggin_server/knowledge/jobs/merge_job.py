@@ -18,7 +18,7 @@ from common.utils.data_utils import (
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now, get_now_iso
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
@@ -41,7 +41,7 @@ class MergeDetectionJob(BaseJob):
         self,
         user_name: str,
         entities: EntityManager,
-        graph_client: GraphInterface,
+        knowledge_store: KnowledgeStore,
         llm_client: LLMService,
         topic_config: TopicConfig,
         redis_client: aioredis.Redis,
@@ -53,7 +53,7 @@ class MergeDetectionJob(BaseJob):
 
         self.user_name = user_name
         self.entities = entities
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.redis = redis_client
         self.llm = llm_client
         self.topic_config = topic_config
@@ -130,12 +130,14 @@ class MergeDetectionJob(BaseJob):
 
         enriched_facts_a = await enrich_facts_with_sources(
             candidate.get("facts_a", []),
-            self.graph_client,
+            self.knowledge_store,
+            self.entities.readable_project_ids,
             user_name=self.user_name,
         )
         enriched_facts_b = await enrich_facts_with_sources(
             candidate.get("facts_b", []),
-            self.graph_client,
+            self.knowledge_store,
+            self.entities.readable_project_ids,
             user_name=self.user_name,
         )
 
@@ -247,13 +249,13 @@ class MergeDetectionJob(BaseJob):
 
         for attempt in range(1, max_retries + 1):
             try:
-                topic_strength = await self.graph_client.get_merge_topic_strength(
+                topic_strength = await self.knowledge_store.get_merge_topic_strength(
                     primary_id,
                     secondary_id,
                     project_id,
                 )
                 final_topic = self._select_merge_topic(topic_strength)
-                success = await self.graph_client.merge_entities(
+                success = await self.knowledge_store.merge_entities(
                     primary_id,
                     secondary_id,
                     project_id=project_id,
@@ -264,7 +266,7 @@ class MergeDetectionJob(BaseJob):
                     now = get_now()
                     for fact_id in duplicate_fact_ids:
                         try:
-                            await self.graph_client.invalidate_fact(
+                            await self.knowledge_store.invalidate_fact(
                                 fact_id, now, project_id=project_id
                             )
                         except Exception as e:
@@ -277,7 +279,7 @@ class MergeDetectionJob(BaseJob):
                     logger.warning(
                         f"Merge attempt {attempt}/{max_retries} "
                         f"({primary_id}, {secondary_id}): "
-                        "graph_client returned False"
+                        "knowledge_store returned False"
                     )
 
             except Exception as e:
@@ -365,13 +367,9 @@ class MergeDetectionJob(BaseJob):
             suggested_name = merge_info.get("suggested_name")
 
             try:
-                refreshed_primary = await self.graph_client.get_entity_by_id(
+                refreshed_primary = await self.knowledge_store.get_entity_by_id(
                     p_id,
-                    visible_project_ids=getattr(
-                        self.entities,
-                        "readable_project_ids",
-                        None,
-                    ),
+                    visible_project_ids=self.entities.readable_project_ids,
                 )
                 profile_updates = {}
                 if refreshed_primary and refreshed_primary.get("topic"):
@@ -383,12 +381,16 @@ class MergeDetectionJob(BaseJob):
                     logger.info(
                         f"Renaming merged entity {p_id}: {p_name} -> {suggested_name}"
                     )
-                    await self.graph_client.update_entity_canonical_name(
+                    await self.knowledge_store.update_entity_canonical_name(
                         p_id, suggested_name, project_id=project_id
                     )
                     p_name = suggested_name
 
-                all_facts = await self.graph_client.get_facts_for_entity(p_id, True)
+                all_facts = await self.knowledge_store.get_facts_for_entity(
+                    p_id,
+                    visible_project_ids=self.entities.readable_project_ids,
+                    active_only=True,
+                )
                 primary_profile = await self.entities.get_profile(p_id)
                 primary_type = (
                     primary_profile.get("type", "unknown")
@@ -404,7 +406,7 @@ class MergeDetectionJob(BaseJob):
                 new_embedding = await self.entities.compute_embedding(
                     p_id, resolution_text
                 )
-                await self.graph_client.update_entity_embedding(
+                await self.knowledge_store.update_entity_embedding(
                     p_id, new_embedding, project_id=project_id
                 )
 
@@ -643,8 +645,10 @@ class MergeDetectionJob(BaseJob):
         all_merge_ids = []
         for c in clean_batch:
             all_merge_ids.extend([c["primary_id"], c["secondary_id"]])
-        all_merge_facts = await self.graph_client.get_facts_for_entities(
-            list(set(all_merge_ids)), active_only=False
+        all_merge_facts = await self.knowledge_store.get_facts_for_entities(
+            list(set(all_merge_ids)),
+            visible_project_ids=self.entities.readable_project_ids,
+            active_only=False,
         )
 
         sem = asyncio.Semaphore(2)
@@ -722,7 +726,7 @@ class MergeDetectionJob(BaseJob):
                 continue
 
             for parent_type, child_types in type_rules.items():
-                candidates = await self.graph_client.get_hierarchy_candidates(
+                candidates = await self.knowledge_store.get_hierarchy_candidates(
                     project_id,
                     topic,
                     parent_type,
@@ -731,7 +735,7 @@ class MergeDetectionJob(BaseJob):
                 )
 
                 for c in candidates:
-                    success = await self.graph_client.create_hierarchy_edge(
+                    success = await self.knowledge_store.create_hierarchy_edge(
                         c["parent_id"], c["child_id"], project_id=project_id
                     )
 

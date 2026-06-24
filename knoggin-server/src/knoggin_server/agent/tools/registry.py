@@ -43,14 +43,14 @@ class Tools(SearchTools, GraphTools, MemoryTools):
         search_config: Optional[dict] = None,
         file_rag: Optional[FileRAGService] = None,
         memory: Optional[MemoryManager] = None,
-        graph_client=None,
+        knowledge_store=None,
         redis=None,
     ):
-        if graph_client is None or redis is None:
-            raise ValueError("Tools requires explicit graph_client and redis")
+        if knowledge_store is None or redis is None:
+            raise ValueError("Tools requires explicit knowledge_store and redis")
 
         self.session_id = session_id
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.entities = entities
         self.user_name = user_name
         self.redis = redis

@@ -13,7 +13,7 @@ from tests.fixtures.fakes import FakeRedis
 
 def seed_entity(
     entities,
-    graph,
+    knowledge_store,
     entity_id,
     canonical_name,
     *,
@@ -22,7 +22,7 @@ def seed_entity(
     topic="Identity",
     embedding=None,
 ):
-    entity = graph.add_entity(
+    entity = knowledge_store.add_entity(
         entity_id,
         canonical_name,
         aliases=aliases,
@@ -92,7 +92,7 @@ class FakeMergeLLM:
         )
 
 
-class FakeMergeGraph:
+class FakeMergeKnowledgeStore:
     def __init__(self):
         self.facts_for_entities = {}
         self.entity_facts = {}
@@ -138,13 +138,17 @@ class FakeMergeGraph:
         )
         return True
 
-    async def get_facts_for_entities(self, entity_ids, active_only=True):
+    async def get_facts_for_entities(
+        self, entity_ids, *, visible_project_ids, active_only=True
+    ):
         return {
             entity_id: list(self.facts_for_entities.get(entity_id, []))
             for entity_id in entity_ids
         }
 
-    async def get_facts_for_entity(self, entity_id, active_only=True):
+    async def get_facts_for_entity(
+        self, entity_id, *, visible_project_ids, active_only=True
+    ):
         return list(self.entity_facts.get(entity_id, []))
 
     async def update_entity_embedding(self, entity_id, embedding, project_id=None):
@@ -169,7 +173,14 @@ class FakeMergeGraph:
         )
         return True
 
-    async def get_messages_by_ids(self, message_ids, user_name=None, session_ids=None):
+    async def get_messages_by_ids(
+        self,
+        message_ids,
+        *,
+        user_name,
+        session_ids,
+        visible_project_ids,
+    ):
         self.messages_by_ids_calls.append(
             {
                 "message_ids": list(message_ids),
@@ -180,11 +191,11 @@ class FakeMergeGraph:
         return []
 
 
-def make_job(entities, graph_client, *, llm=None, redis=None, topic_config=None):
+def make_job(entities, knowledge_store, *, llm=None, redis=None, topic_config=None):
     return MergeDetectionJob(
         user_name="ada",
         entities=entities,
-        graph_client=graph_client,
+        knowledge_store=knowledge_store,
         llm_client=llm or FakeMergeLLM(),
         topic_config=topic_config or make_topic_config(),
         redis_client=redis or FakeRedis(),
@@ -196,14 +207,14 @@ def make_job(entities, graph_client, *, llm=None, redis=None, topic_config=None)
 async def test_classify_pair_suppresses_direct_and_hierarchy_edges(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
-    seed_entity(entities, graph, 101, "OpenAI", entity_type="org", topic="General")
-    seed_entity(entities, graph, 202, "ChatGPT", entity_type="tool", topic="General")
-    graph.direct_edges.add((101, 202))
+    entities, knowledge_store, _ = entity_manager_harness
+    seed_entity(entities, knowledge_store, 101, "OpenAI", entity_type="org", topic="General")
+    seed_entity(entities, knowledge_store, 202, "ChatGPT", entity_type="tool", topic="General")
+    knowledge_store.direct_edges.add((101, 202))
 
     direct = await entities._classify_pair(101, 202, 95, {})
-    graph.direct_edges.clear()
-    graph.hierarchy_edges.add((101, 202))
+    knowledge_store.direct_edges.clear()
+    knowledge_store.hierarchy_edges.add((101, 202))
     hierarchy = await entities._classify_pair(101, 202, 95, {})
 
     assert direct is None
@@ -213,8 +224,8 @@ async def test_classify_pair_suppresses_direct_and_hierarchy_edges(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_classify_pair_rejects_missing_profile(entity_manager_harness):
-    entities, graph, _ = entity_manager_harness
-    seed_entity(entities, graph, 101, "Alice")
+    entities, knowledge_store, _ = entity_manager_harness
+    seed_entity(entities, knowledge_store, 101, "Alice")
 
     result = await entities._classify_pair(101, 999, 95, {})
 
@@ -226,9 +237,9 @@ async def test_classify_pair_rejects_missing_profile(entity_manager_harness):
 async def test_classify_pair_cross_topic_requires_high_fuzzy_same_type(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
-    seed_entity(entities, graph, 101, "Alice Chen", topic="Identity")
-    seed_entity(entities, graph, 202, "Alice Chen", topic="General")
+    entities, knowledge_store, _ = entity_manager_harness
+    seed_entity(entities, knowledge_store, 101, "Alice Chen", topic="Identity")
+    seed_entity(entities, knowledge_store, 202, "Alice Chen", topic="General")
 
     weak = await entities._classify_pair(101, 202, 80, {})
     strong = await entities._classify_pair(101, 202, 90, {})
@@ -243,11 +254,11 @@ async def test_classify_pair_cross_topic_requires_high_fuzzy_same_type(
 async def test_classify_pair_shared_neighbors_require_very_high_confidence(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
-    seed_entity(entities, graph, 101, "Robert Chen", embedding=[1.0, 0.0])
-    seed_entity(entities, graph, 202, "Robert Chen Jr", embedding=[1.0, 0.1])
-    graph.neighbor_ids_by_entity[101] = {303}
-    graph.neighbor_ids_by_entity[202] = {303}
+    entities, knowledge_store, _ = entity_manager_harness
+    seed_entity(entities, knowledge_store, 101, "Robert Chen", embedding=[1.0, 0.0])
+    seed_entity(entities, knowledge_store, 202, "Robert Chen Jr", embedding=[1.0, 0.1])
+    knowledge_store.neighbor_ids_by_entity[101] = {303}
+    knowledge_store.neighbor_ids_by_entity[202] = {303}
 
     weak = await entities._classify_pair(101, 202, 94, {})
     strong = await entities._classify_pair(101, 202, 96, {})
@@ -261,13 +272,13 @@ async def test_classify_pair_shared_neighbors_require_very_high_confidence(
 async def test_classify_pair_ignores_user_root_neighbor_and_includes_facts(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     fact_a = make_fact(101, "Alice works on design systems.")
     fact_b = make_fact(202, "Alicia works on design systems.")
-    seed_entity(entities, graph, 101, "Alice")
-    seed_entity(entities, graph, 202, "Alicia")
-    graph.neighbor_ids_by_entity[101] = {1}
-    graph.neighbor_ids_by_entity[202] = {1}
+    seed_entity(entities, knowledge_store, 101, "Alice")
+    seed_entity(entities, knowledge_store, 202, "Alicia")
+    knowledge_store.neighbor_ids_by_entity[101] = {1}
+    knowledge_store.neighbor_ids_by_entity[202] = {1}
 
     result = await entities._classify_pair(
         101,
@@ -286,11 +297,11 @@ async def test_classify_pair_ignores_user_root_neighbor_and_includes_facts(
 async def test_judgement_alias_collision_same_topic_auto_merges_without_llm(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     llm = FakeMergeLLM()
-    job = make_job(entities, graph, llm=llm)
-    seed_entity(entities, graph, 101, "Robert Chen", aliases=["Bob"])
-    seed_entity(entities, graph, 202, "Bob Smith")
+    job = make_job(entities, knowledge_store, llm=llm)
+    seed_entity(entities, knowledge_store, 101, "Robert Chen", aliases=["Bob"])
+    seed_entity(entities, knowledge_store, 202, "Bob Smith")
     entities._id_to_names[202].add("bob")
 
     auto, hitl = await job._judgement([make_candidate()], JobContext("ada", "p1"))
@@ -305,7 +316,7 @@ async def test_judgement_alias_collision_same_topic_auto_merges_without_llm(
 async def test_judgement_alias_collision_cross_topic_uses_fake_llm(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     llm = FakeMergeLLM(
         [
             MergeJudgment(
@@ -316,9 +327,9 @@ async def test_judgement_alias_collision_cross_topic_uses_fake_llm(
             )
         ]
     )
-    job = make_job(entities, graph, llm=llm)
-    seed_entity(entities, graph, 101, "Robert Chen", aliases=["Bob"])
-    seed_entity(entities, graph, 202, "Bob Smith")
+    job = make_job(entities, knowledge_store, llm=llm)
+    seed_entity(entities, knowledge_store, 101, "Robert Chen", aliases=["Bob"])
+    seed_entity(entities, knowledge_store, 202, "Bob Smith")
     entities._id_to_names[202].add("bob")
     candidate = make_candidate(topic_a="Identity", topic_b="General")
 
@@ -334,13 +345,13 @@ async def test_judgement_alias_collision_cross_topic_uses_fake_llm(
 async def test_judgement_rejects_type_mismatch_before_cosine_or_llm(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     llm = FakeMergeLLM()
-    job = make_job(entities, graph, llm=llm)
-    seed_entity(entities, graph, 101, "Alice", entity_type="person", embedding=[1, 0])
+    job = make_job(entities, knowledge_store, llm=llm)
+    seed_entity(entities, knowledge_store, 101, "Alice", entity_type="person", embedding=[1, 0])
     seed_entity(
         entities,
-        graph,
+        knowledge_store,
         202,
         "Alice Project",
         entity_type="project",
@@ -360,9 +371,9 @@ async def test_judgement_rejects_type_mismatch_before_cosine_or_llm(
 async def test_judgement_rejects_insufficient_facts_without_llm(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     llm = FakeMergeLLM()
-    job = make_job(entities, graph, llm=llm)
+    job = make_job(entities, knowledge_store, llm=llm)
 
     auto, hitl = await job._judgement(
         [make_candidate(facts=False)],
@@ -377,11 +388,11 @@ async def test_judgement_rejects_insufficient_facts_without_llm(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_judgement_routes_by_cosine_and_topic(entity_manager_harness):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     llm = FakeMergeLLM()
-    job = make_job(entities, graph, llm=llm)
-    seed_entity(entities, graph, 101, "Robert Chen", embedding=[1.0, 0.0])
-    seed_entity(entities, graph, 202, "Rob Chen", embedding=[0.95, 0.05])
+    job = make_job(entities, knowledge_store, llm=llm)
+    seed_entity(entities, knowledge_store, 101, "Robert Chen", embedding=[1.0, 0.0])
+    seed_entity(entities, knowledge_store, 202, "Rob Chen", embedding=[0.95, 0.05])
 
     auto, hitl = await job._judgement([make_candidate()], JobContext("ada", "p1"))
 
@@ -400,11 +411,11 @@ async def test_judgement_routes_by_cosine_and_topic(entity_manager_harness):
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_judgement_low_cosine_rejects_candidate(entity_manager_harness):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     llm = FakeMergeLLM()
-    job = make_job(entities, graph, llm=llm)
-    seed_entity(entities, graph, 101, "Alice", embedding=[1.0, 0.0])
-    seed_entity(entities, graph, 202, "Bob", embedding=[0.0, 1.0])
+    job = make_job(entities, knowledge_store, llm=llm)
+    seed_entity(entities, knowledge_store, 101, "Alice", embedding=[1.0, 0.0])
+    seed_entity(entities, knowledge_store, 202, "Bob", embedding=[0.0, 1.0])
 
     auto, hitl = await job._judgement([make_candidate()], JobContext("ada", "p1"))
 
@@ -418,7 +429,7 @@ async def test_judgement_low_cosine_rejects_candidate(entity_manager_harness):
 async def test_judgement_fake_llm_score_routes_auto_hitl_and_reject(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     llm = FakeMergeLLM(
         [
             MergeJudgment(
@@ -441,13 +452,13 @@ async def test_judgement_fake_llm_score_routes_auto_hitl_and_reject(
             ),
         ]
     )
-    job = make_job(entities, graph, llm=llm)
-    seed_entity(entities, graph, 101, "Alice", embedding=[0.8, 0.2])
-    seed_entity(entities, graph, 202, "Alicia", embedding=[0.8, 0.7])
-    seed_entity(entities, graph, 303, "Bob", embedding=[0.8, 0.2])
-    seed_entity(entities, graph, 404, "Bobby", embedding=[0.8, 0.7])
-    seed_entity(entities, graph, 505, "Chris", embedding=[0.8, 0.2])
-    seed_entity(entities, graph, 606, "Christine", embedding=[0.8, 0.7])
+    job = make_job(entities, knowledge_store, llm=llm)
+    seed_entity(entities, knowledge_store, 101, "Alice", embedding=[0.8, 0.2])
+    seed_entity(entities, knowledge_store, 202, "Alicia", embedding=[0.8, 0.7])
+    seed_entity(entities, knowledge_store, 303, "Bob", embedding=[0.8, 0.2])
+    seed_entity(entities, knowledge_store, 404, "Bobby", embedding=[0.8, 0.7])
+    seed_entity(entities, knowledge_store, 505, "Chris", embedding=[0.8, 0.2])
+    seed_entity(entities, knowledge_store, 606, "Christine", embedding=[0.8, 0.7])
     candidates = [
         make_candidate(101, 202),
         make_candidate(303, 404),
@@ -464,8 +475,8 @@ async def test_judgement_fake_llm_score_routes_auto_hitl_and_reject(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_judge_with_sem_handles_fake_llm_failure(entity_manager_harness):
-    entities, graph, _ = entity_manager_harness
-    job = make_job(entities, graph, llm=FakeMergeLLM(raise_error=True))
+    entities, knowledge_store, _ = entity_manager_harness
+    job = make_job(entities, knowledge_store, llm=FakeMergeLLM(raise_error=True))
 
     result = await job._judge_with_sem(
         make_candidate(),
@@ -481,11 +492,11 @@ async def test_judge_with_sem_handles_fake_llm_failure(entity_manager_harness):
 async def test_get_merge_judgment_payload_includes_aliases_types_and_facts(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
+    entities, knowledge_store, _ = entity_manager_harness
     llm = FakeMergeLLM()
-    job = make_job(entities, graph, llm=llm)
-    seed_entity(entities, graph, 101, "Robert Chen", aliases=["Bob"])
-    seed_entity(entities, graph, 202, "Rob Chen", aliases=["Robbie"])
+    job = make_job(entities, knowledge_store, llm=llm)
+    seed_entity(entities, knowledge_store, 101, "Robert Chen", aliases=["Bob"])
+    seed_entity(entities, knowledge_store, 202, "Rob Chen", aliases=["Robbie"])
     candidate = make_candidate()
     candidate["primary_name"] = "Robert Chen"
     candidate["secondary_name"] = "Rob Chen"
@@ -510,16 +521,16 @@ async def test_get_merge_judgment_payload_includes_aliases_types_and_facts(
 async def test_process_merges_flips_secondary_user_root_before_merge(
     entity_manager_harness,
 ):
-    entities, entity_graph, _ = entity_manager_harness
-    merge_graph = FakeMergeGraph()
+    entities, entity_knowledge_store, _ = entity_manager_harness
+    merge_knowledge_store = FakeMergeKnowledgeStore()
     redis = FakeRedis()
-    job = make_job(entities, merge_graph, redis=redis)
-    seed_entity(entities, entity_graph, 1, "ada", embedding=[1.0, 0.0])
-    seed_entity(entities, entity_graph, 202, "Ada Lovelace", embedding=[1.0, 0.0])
+    job = make_job(entities, merge_knowledge_store, redis=redis)
+    seed_entity(entities, entity_knowledge_store, 1, "ada", embedding=[1.0, 0.0])
+    seed_entity(entities, entity_knowledge_store, 202, "Ada Lovelace", embedding=[1.0, 0.0])
     fact_a = make_fact(202, "Ada Lovelace is the user.", embedding=[1.0, 0.0])
     fact_b = make_fact(1, "Ada is the user.", embedding=[1.0, 0.0])
-    merge_graph.facts_for_entities[1] = [fact_b]
-    merge_graph.facts_for_entities[202] = [fact_a]
+    merge_knowledge_store.facts_for_entities[1] = [fact_b]
+    merge_knowledge_store.facts_for_entities[202] = [fact_a]
     candidate = make_candidate(202, 1)
     candidate["primary_name"] = "Ada Lovelace"
     candidate["secondary_name"] = "ada"
@@ -530,8 +541,8 @@ async def test_process_merges_flips_secondary_user_root_before_merge(
     )
 
     assert summary.startswith("1 merged")
-    assert merge_graph.merges[0]["primary_id"] == 1
-    assert merge_graph.merges[0]["secondary_id"] == 202
+    assert merge_knowledge_store.merges[0]["primary_id"] == 1
+    assert merge_knowledge_store.merges[0]["secondary_id"] == 202
 
 
 @pytest.mark.storage
@@ -539,10 +550,10 @@ async def test_process_merges_flips_secondary_user_root_before_merge(
 async def test_execute_merge_db_only_refuses_to_delete_user_root(
     entity_manager_harness,
 ):
-    entities, graph, _ = entity_manager_harness
-    merge_graph = FakeMergeGraph()
-    job = make_job(entities, merge_graph)
-    seed_entity(entities, graph, 1, "ada")
+    entities, knowledge_store, _ = entity_manager_harness
+    merge_knowledge_store = FakeMergeKnowledgeStore()
+    job = make_job(entities, merge_knowledge_store)
+    seed_entity(entities, knowledge_store, 1, "ada")
 
     success = await job._execute_merge_db_only(
         202,
@@ -552,4 +563,4 @@ async def test_execute_merge_db_only_refuses_to_delete_user_root(
     )
 
     assert success is False
-    assert merge_graph.merges == []
+    assert merge_knowledge_store.merges == []

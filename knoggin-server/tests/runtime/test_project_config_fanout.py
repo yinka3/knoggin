@@ -147,7 +147,7 @@ class FanoutBatchProcessor:
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
-        self.graph_client = kwargs["graph_client"]
+        self.knowledge_store = kwargs["knowledge_store"]
         self.updated_settings = []
         self.refresh_count = 0
         self.__class__.instances.append(self)

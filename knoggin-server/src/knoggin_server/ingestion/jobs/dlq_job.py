@@ -41,7 +41,7 @@ class DLQReplayJob(BaseJob):
         "BusyLoadingError",
         # OpenRouter
         "overloaded",
-        # GraphClient
+        # KnowledgeStore
         "serialization error",
         "conflicting transactions",
         "Cannot get shared access",
@@ -64,8 +64,8 @@ class DLQReplayJob(BaseJob):
     ):
         self.entities = entities
         self.processor = processor
-        if self.processor.graph_client is None:
-            raise ValueError("DLQReplayJob requires a BatchProcessor with graph_client")
+        if self.processor.knowledge_store is None:
+            raise ValueError("DLQReplayJob requires a BatchProcessor with knowledge_store")
         self.write_to_graph = write_to_graph
         self.redis = redis_client
         self.interval = interval
@@ -268,7 +268,7 @@ class DLQReplayJob(BaseJob):
             ]
 
             await asyncio.wait_for(
-                self.processor.graph_client.save_message_logs(batch), timeout=30.0
+                self.processor.knowledge_store.save_message_logs(batch), timeout=30.0
             )
             logger.info(
                 f"DLQ: Message log retry succeeded for {len(messages)} messages"

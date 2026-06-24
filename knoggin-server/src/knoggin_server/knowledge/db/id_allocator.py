@@ -17,7 +17,7 @@ class IdAllocator:
         return await self._next_value(self._MESSAGE_ID_QUERY, "public.message_id_seq")
 
     async def _next_value(self, query: str, sequence_name: str) -> int:
-        rows = await self.client.execute_read(query)
-        if len(rows) != 1 or rows[0].get("id") is None:
+        row = await self.client.fetch_one(query)
+        if not row or row.get("id") is None:
             raise RuntimeError(f"Failed to allocate ID from {sequence_name}")
-        return int(rows[0]["id"])
+        return int(row["id"])

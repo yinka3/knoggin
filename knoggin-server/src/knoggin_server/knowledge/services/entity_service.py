@@ -11,10 +11,11 @@ from rapidfuzz import fuzz, process
 
 from common.schema.primitives import FactRecord
 from common.schema.settings import EntityResolutionSettings
+from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.core_utils import is_substring_match
 from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 from knoggin_server.knowledge.services.entity_embedding import (
     build_entity_embedding_text,
@@ -24,10 +25,10 @@ from knoggin_server.knowledge.services.entity_embedding import (
 class EntityManager:
     def __init__(
         self,
-        graph_client: "GraphInterface",
+        knowledge_store: "KnowledgeStore",
         embedding_service: EmbeddingService,
-        project_id: Optional[str] = None,
-        readable_project_ids: Optional[List[str]] = None,
+        project_id: str,
+        readable_project_ids: List[str],
         hierarchy_config: Optional[dict] = None,
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
@@ -36,11 +37,16 @@ class EntityManager:
         candidate_vector_threshold: float = 0.85,
     ):
 
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.hierarchy_config = hierarchy_config or {}
-        self.project_id = project_id
-        self.readable_project_ids = readable_project_ids or (
-            [project_id] if project_id else None
+        self.project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "EntityManager",
+        )
+        self.readable_project_ids = require_visible_project_ids(
+            readable_project_ids,
+            "EntityManager",
         )
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
@@ -75,7 +81,7 @@ class EntityManager:
         )
 
     def _populate_cache(self, entity: dict) -> dict:
-        """Hydrate internal indexes from a GraphClient entity record."""
+        """Hydrate internal indexes from a KnowledgeStore entity record."""
         eid = entity["id"]
         canonical = entity.get("canonical_name")
 
@@ -117,7 +123,7 @@ class EntityManager:
             stored_id = self._name_to_id.get(lower_name)
             if stored_id is not None:
                 return stored_id
-        found = await self.graph_client.get_entities_by_names(
+        found = await self.knowledge_store.get_entities_by_names(
             [name], visible_project_ids=self.readable_project_ids
         )
         if found:
@@ -132,8 +138,8 @@ class EntityManager:
             if profile:
                 return profile
 
-        # Cache miss: fetch from graph_client
-        entity = await self.graph_client.get_entity_by_id(
+        # Cache miss: fetch from knowledge_store
+        entity = await self.knowledge_store.get_entity_by_id(
             entity_id, visible_project_ids=self.readable_project_ids
         )
         if entity:
@@ -158,7 +164,10 @@ class EntityManager:
             profile = self.entity_profiles.get(entity_id)
             if profile and profile.get("embedding"):
                 return profile["embedding"]
-        return await self.graph_client.get_entity_embedding(entity_id)
+        return await self.knowledge_store.get_entity_embedding(
+            entity_id,
+            visible_project_ids=self.readable_project_ids,
+        )
 
     async def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -173,14 +182,20 @@ class EntityManager:
         self, candidate_ids: List[int]
     ) -> Dict[int, set[int]]:
         """Fetch neighbors for a batch of candidates."""
-        return await self.graph_client.get_neighbor_ids_batch(candidate_ids)
+        return await self.knowledge_store.get_neighbor_ids_batch(
+            candidate_ids,
+            visible_project_ids=self.readable_project_ids,
+        )
 
     async def search_relevant_facts(
         self, entity_id: int, embedding: List[float], limit: int = 5
     ) -> List[FactRecord]:
         """Search relevant facts for a specific entity."""
-        return await self.graph_client.search_relevant_facts(
-            entity_id, embedding, limit
+        return await self.knowledge_store.search_relevant_facts(
+            entity_id,
+            embedding,
+            visible_project_ids=self.readable_project_ids,
+            limit=limit,
         )
 
     def validate_existing(
@@ -301,7 +316,7 @@ class EntityManager:
         vector_results = []
         if vector:
             try:
-                vector_results = await self.graph_client.search_entities_by_embedding(
+                vector_results = await self.knowledge_store.search_entities_by_embedding(
                     vector,
                     limit=5,
                     score_threshold=self.candidate_vector_threshold,
@@ -500,8 +515,10 @@ class EntityManager:
             entity_ids.add(id_a)
             entity_ids.add(id_b)
 
-        facts_by_entity = await self.graph_client.get_facts_for_entities(
-            sorted(entity_ids), active_only=True
+        facts_by_entity = await self.knowledge_store.get_facts_for_entities(
+            sorted(entity_ids),
+            visible_project_ids=self.readable_project_ids,
+            active_only=True,
         )
 
         candidates = []
@@ -516,7 +533,7 @@ class EntityManager:
         return candidates
 
     def remove_entities(self, entity_ids: List[int]) -> int:
-        """Remove entities from entities indexes. Call after GraphClient deletion."""
+        """Remove entities from entities indexes. Call after KnowledgeStore deletion."""
         if not entity_ids:
             return 0
 
@@ -559,8 +576,10 @@ class EntityManager:
 
             primary_name = primary_profile["canonical_name"]
 
-            neighbors = await self.graph_client.search_similar_entities(
-                primary_id, limit=50, visible_project_ids=self.readable_project_ids
+            neighbors = await self.knowledge_store.search_similar_entities(
+                primary_id,
+                visible_project_ids=self.readable_project_ids,
+                limit=50,
             )
 
             for neighbor_id, _ in neighbors:
@@ -643,10 +662,18 @@ class EntityManager:
         Evaluate one pair for merge or hierarchy relationship.
         Returns candidate dict or None to skip.
         """
-        direct_edge = await self.graph_client.has_direct_edge(id_a, id_b)
+        direct_edge = await self.knowledge_store.has_direct_edge(
+            id_a,
+            id_b,
+            visible_project_ids=self.readable_project_ids,
+        )
         if direct_edge:
             return None
-        hierarchy_edge = await self.graph_client.has_hierarchy_edge(id_a, id_b)
+        hierarchy_edge = await self.knowledge_store.has_hierarchy_edge(
+            id_a,
+            id_b,
+            visible_project_ids=self.readable_project_ids,
+        )
         if hierarchy_edge:
             return None
 
@@ -666,8 +693,14 @@ class EntityManager:
             if not (fuzz_score >= 85 and type_a == type_b):
                 return None
 
-        neighbors_a = await self.graph_client.get_neighbor_ids(id_a)
-        neighbors_b = await self.graph_client.get_neighbor_ids(id_b)
+        neighbors_a = await self.knowledge_store.get_neighbor_ids(
+            id_a,
+            visible_project_ids=self.readable_project_ids,
+        )
+        neighbors_b = await self.knowledge_store.get_neighbor_ids(
+            id_b,
+            visible_project_ids=self.readable_project_ids,
+        )
         neighbors_a.discard(1)  # ignore user node
         neighbors_b.discard(1)
 

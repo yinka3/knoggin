@@ -7,20 +7,27 @@ from tests.fixtures.fakes import FakeRedis
 
 @pytest.mark.no_network
 async def test_search_messages_uses_fts_candidates_and_reranks_without_vectors():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.fts_calls = []
 
         async def search_messages_fts(
             self,
             query,
-            limit,
+            *,
             user_name,
-            session_ids=None,
-            project_ids=None,
+            session_ids,
+            visible_project_ids,
+            limit,
         ):
             self.fts_calls.append(
-                (query, limit, user_name, session_ids, project_ids)
+                (
+                    query,
+                    limit,
+                    user_name,
+                    session_ids,
+                    visible_project_ids,
+                )
             )
             return [
                 (1, 0.5, "session-1"),
@@ -35,13 +42,14 @@ async def test_search_messages_uses_fts_candidates_and_reranks_without_vectors()
             assert texts == ["second message", "first message"]
             return [0.9, 0.1]
 
-    graph_client = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     tool = SearchTools()
-    tool.graph_client = graph_client
+    tool.knowledge_store = knowledge_store
     tool.embedding_service = FakeEmbeddingService()
     tool.search_cfg = {"fts_limit": 10, "rerank_candidates": 10}
     tool.user_name = "ada"
     tool.session_id = "session-1"
+    tool.readable_project_ids = ["project-1"]
 
     async def visible_session_ids():
         return ["session-1"]
@@ -65,8 +73,8 @@ async def test_search_messages_uses_fts_candidates_and_reranks_without_vectors()
 
     results = await tool._search_messages("query", 2)
 
-    assert graph_client.fts_calls == [
-        ("query", 10, "ada", ["session-1"], None)
+    assert knowledge_store.fts_calls == [
+        ("query", 10, "ada", ["session-1"], ["project-1"])
     ]
     assert results == [
         ("msg_2", 0.9, "session-1"),
@@ -76,14 +84,15 @@ async def test_search_messages_uses_fts_candidates_and_reranks_without_vectors()
 
 @pytest.mark.no_network
 async def test_search_messages_empty_fts_skips_rerank():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         async def search_messages_fts(
             self,
             query,
-            limit,
+            *,
             user_name,
-            session_ids=None,
-            project_ids=None,
+            session_ids,
+            visible_project_ids,
+            limit,
         ):
             return []
 
@@ -92,26 +101,32 @@ async def test_search_messages_empty_fts_skips_rerank():
             raise AssertionError("rerank should not run without FTS candidates")
 
     tool = SearchTools()
-    tool.graph_client = FakeGraphClient()
+    tool.knowledge_store = FakeKnowledgeStore()
     tool.embedding_service = FakeEmbeddingService()
     tool.search_cfg = {"fts_limit": 10}
     tool.user_name = "ada"
     tool.session_id = "session-1"
-    tool.readable_project_ids = None
+    tool.readable_project_ids = ["project-1"]
+
+    async def visible_session_ids():
+        return ["session-1"]
+
+    tool._get_visible_session_ids = visible_session_ids
 
     assert await tool._search_messages("query", 5) == []
 
 
 @pytest.mark.no_network
 async def test_search_messages_rerank_failure_falls_back_to_normalized_fts_scores():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         async def search_messages_fts(
             self,
             query,
-            limit,
+            *,
             user_name,
-            session_ids=None,
-            project_ids=None,
+            session_ids,
+            visible_project_ids,
+            limit,
         ):
             return [
                 (1, 5.0, "session-1"),
@@ -124,12 +139,12 @@ async def test_search_messages_rerank_failure_falls_back_to_normalized_fts_score
             raise RuntimeError("reranker unavailable")
 
     tool = SearchTools()
-    tool.graph_client = FakeGraphClient()
+    tool.knowledge_store = FakeKnowledgeStore()
     tool.embedding_service = FakeEmbeddingService()
     tool.search_cfg = {"fts_limit": 10, "rerank_candidates": 10}
     tool.user_name = "ada"
     tool.session_id = "session-1"
-    tool.readable_project_ids = None
+    tool.readable_project_ids = ["project-1", "project-2"]
 
     async def visible_session_ids():
         return ["session-1", "session-2"]
@@ -157,24 +172,31 @@ async def test_search_messages_rerank_failure_falls_back_to_normalized_fts_score
 
 @pytest.mark.no_network
 async def test_search_messages_uses_readable_project_scope_directly():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
 
         async def search_messages_fts(
             self,
             query,
-            limit,
+            *,
             user_name,
-            session_ids=None,
-            project_ids=None,
+            session_ids,
+            visible_project_ids,
+            limit,
         ):
             self.calls.append(
-                (query, limit, user_name, session_ids, project_ids)
+                (
+                    query,
+                    limit,
+                    user_name,
+                    session_ids,
+                    visible_project_ids,
+                )
             )
             return []
 
-    graph_client = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     redis = FakeRedis()
     await redis.sadd(RedisKeys.project_sessions("ada", "project-1"), "session-2")
     await redis.sadd(RedisKeys.project_sessions("ada", "project-1"), "session-3")
@@ -182,7 +204,7 @@ async def test_search_messages_uses_readable_project_scope_directly():
 
     tool = SearchTools()
     tool.redis = redis
-    tool.graph_client = graph_client
+    tool.knowledge_store = knowledge_store
     tool.embedding_service = object()
     tool.search_cfg = {"fts_limit": 10}
     tool.user_name = "ada"
@@ -191,9 +213,14 @@ async def test_search_messages_uses_readable_project_scope_directly():
 
     assert await tool._search_messages("query", 5) == []
 
-    _, _, user_name, session_ids, project_ids = graph_client.calls[0]
+    _, _, user_name, session_ids, project_ids = knowledge_store.calls[0]
     assert user_name == "ada"
-    assert session_ids is None
+    assert set(session_ids) == {
+        "session-1",
+        "session-2",
+        "session-3",
+        "session-4",
+    }
     assert project_ids == ["project-1", "project-2"]
 
 

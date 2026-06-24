@@ -81,7 +81,7 @@ class FakeEmbeddingService:
         return [float(total % 97), float(len(text)), float(total % 13)]
 
 
-class IntegratedGraphClient:
+class IntegratedKnowledgeStore:
     def __init__(self, events=None):
         self.events = events if events is not None else []
         self.saved_message_logs = []
@@ -100,7 +100,7 @@ class IntegratedGraphClient:
     async def get_entities_by_names(self, names, visible_project_ids=None):
         return []
 
-    async def get_entity_embedding(self, entity_id):
+    async def get_entity_embedding(self, entity_id, *, visible_project_ids):
         return []
 
     async def search_entities_by_embedding(
@@ -112,13 +112,22 @@ class IntegratedGraphClient:
     ):
         return list(self.vector_results.get(tuple(vector), []))
 
-    async def get_neighbor_ids_batch(self, candidate_ids):
+    async def get_neighbor_ids_batch(
+        self, candidate_ids, *, visible_project_ids
+    ):
         return {
             candidate_id: set(self.neighbors_by_entity.get(candidate_id, set()))
             for candidate_id in candidate_ids
         }
 
-    async def search_relevant_facts(self, entity_id, embedding, limit=5):
+    async def search_relevant_facts(
+        self,
+        entity_id,
+        embedding,
+        *,
+        visible_project_ids,
+        limit=5,
+    ):
         return list(self.relevant_facts_by_entity.get(entity_id, []))
 
 
@@ -250,10 +259,10 @@ async def make_harness(
     message = message or BASE_MESSAGE
     redis = FakeRedis()
     events = []
-    graph_client = IntegratedGraphClient(events)
+    knowledge_store = IntegratedKnowledgeStore(events)
     embedding = FakeEmbeddingService()
     entities = EntityManager(
-        graph_client=graph_client,
+        knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
         readable_project_ids=["project-1"],
@@ -292,7 +301,7 @@ async def make_harness(
         user_name="ada",
         topic_config=make_topic_config(),
         get_next_ent_id=get_next_ent_id,
-        graph_client=graph_client,
+        knowledge_store=knowledge_store,
     )
     batch_processor.dlq_calls = []
 
@@ -305,7 +314,7 @@ async def make_harness(
     consumer = BatchConsumer(
         user_name="ada",
         session_id="session-1",
-        graph_client=graph_client,
+        knowledge_store=knowledge_store,
         processor=batch_processor,
         redis=redis,
         get_session_context=empty_context,
@@ -313,7 +322,7 @@ async def make_harness(
         batch_size=8,
         checkpoint_interval=4,
     )
-    return consumer, redis, batch_processor, graph_client, write_to_graph, entities
+    return consumer, redis, batch_processor, knowledge_store, write_to_graph, entities
 
 
 @pytest.mark.ingestion
@@ -322,7 +331,7 @@ async def test_ingestion_subsystem_happy_path_drains_buffer_to_graph_write():
     ner_result = NERResult(
         mentions=[make_entity("Linear", msg_id=1, typ="tool", topic="General")]
     )
-    consumer, redis, processor, graph_client, write_to_graph, entities = (
+    consumer, redis, processor, knowledge_store, write_to_graph, entities = (
         await make_harness(
             known_matches={BASE_MESSAGE["message"]: ["Bob"]},
             gliner_matches={
@@ -338,7 +347,7 @@ async def test_ingestion_subsystem_happy_path_drains_buffer_to_graph_write():
     await consumer._drain_buffer(flush_partial=True)
 
     assert await redis.llen(consumer._buffer_key) == 0
-    assert graph_client.saved_message_logs[0][0]["id"] == 1
+    assert knowledge_store.saved_message_logs[0][0]["id"] == 1
     assert await redis.get(consumer._checkpoint_key) == "1"
     assert len(write_to_graph.calls) == 1
     result = write_to_graph.calls[0]
@@ -376,7 +385,7 @@ async def test_ingestion_subsystem_alias_resolution_survives_connection_validati
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_ingestion_subsystem_no_mentions_saves_logs_and_skips_graph_write():
-    consumer, redis, _, graph_client, write_to_graph, _ = await make_harness(
+    consumer, redis, _, knowledge_store, write_to_graph, _ = await make_harness(
         ner_result=NERResult(),
     )
     await push_messages(redis, consumer._buffer_key, BASE_MESSAGE)
@@ -384,7 +393,7 @@ async def test_ingestion_subsystem_no_mentions_saves_logs_and_skips_graph_write(
     await consumer._drain_buffer(flush_partial=True)
 
     assert await redis.llen(consumer._buffer_key) == 0
-    assert graph_client.saved_message_logs[0][0]["id"] == 1
+    assert knowledge_store.saved_message_logs[0][0]["id"] == 1
     assert write_to_graph.calls == []
     assert await redis.get(consumer._checkpoint_key) == "1"
     assert await redis.get(RedisKeys.last_processed("ada", "session-1")) == "1"
@@ -416,7 +425,7 @@ async def test_ingestion_subsystem_connection_fallback_succeeds_without_dlq():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_ingestion_subsystem_graph_write_failure_dlqs_complete_batch_result():
-    consumer, redis, processor, graph_client, _, _ = await make_harness(
+    consumer, redis, processor, knowledge_store, _, _ = await make_harness(
         gliner_matches={BASE_MESSAGE["message"]: [("Alice", "person")]},
         connections_result=ConnectionsResult(),
         write_response=(False, "graph failed"),
@@ -425,7 +434,7 @@ async def test_ingestion_subsystem_graph_write_failure_dlqs_complete_batch_resul
 
     await consumer._drain_buffer(flush_partial=True)
 
-    assert graph_client.events == ["save_message_logs", "write_to_graph"]
+    assert knowledge_store.events == ["save_message_logs", "write_to_graph"]
     assert await redis.llen(consumer._buffer_key) == 0
     messages, error, kwargs = processor.dlq_calls[0]
     assert messages == [BASE_MESSAGE]
@@ -438,7 +447,7 @@ async def test_ingestion_subsystem_graph_write_failure_dlqs_complete_batch_resul
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_ingestion_subsystem_processing_failure_goes_to_processing_dlq():
-    consumer, redis, processor, graph_client, write_to_graph, _ = await make_harness()
+    consumer, redis, processor, knowledge_store, write_to_graph, _ = await make_harness()
 
     async def failing_extract_mentions(*args, **kwargs):
         raise RuntimeError("extract boom")
@@ -448,7 +457,7 @@ async def test_ingestion_subsystem_processing_failure_goes_to_processing_dlq():
 
     await consumer._drain_buffer(flush_partial=True)
 
-    assert graph_client.saved_message_logs == []
+    assert knowledge_store.saved_message_logs == []
     assert write_to_graph.calls == []
     assert await redis.llen(consumer._buffer_key) == 0
     messages, error, kwargs = processor.dlq_calls[0]

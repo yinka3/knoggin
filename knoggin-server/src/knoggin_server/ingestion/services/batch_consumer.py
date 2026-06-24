@@ -8,7 +8,7 @@ from common.schema.contracts import BatchResult
 from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
 from common.utils.json_utils import safe_json_loads
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
 
@@ -18,7 +18,7 @@ class BatchConsumer:
         self,
         user_name: str,
         session_id: str,
-        graph_client: GraphInterface,
+        knowledge_store: KnowledgeStore,
         processor: BatchProcessor,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
@@ -31,7 +31,7 @@ class BatchConsumer:
 
         self.user_name = user_name
         self.session_id = session_id
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.processor = processor
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
@@ -280,7 +280,7 @@ class BatchConsumer:
                     ]
                     try:
                         await asyncio.wait_for(
-                            self.graph_client.save_message_logs(batch), timeout=30.0
+                            self.knowledge_store.save_message_logs(batch), timeout=30.0
                         )
                     except Exception as e:
                         logger.error(f"Failed to save message logs: {e}")

@@ -35,17 +35,19 @@ class RecordingCommunityGraph:
         return self.insights
 
 
-class RecordingGraphClient:
+class RecordingKnowledgeStore:
     def __init__(self):
         self.community = RecordingCommunityGraph()
         self.raise_context = False
 
-    async def get_graph_stats(self):
+    async def get_graph_stats(self, *, visible_project_ids):
+        assert visible_project_ids == ["__identity__", "project-1"]
         if self.raise_context:
             raise RuntimeError("graph unavailable")
         return {"entities": 4, "facts": 7, "relationships": 2}
 
-    async def get_notable_entities(self, limit):
+    async def get_notable_entities(self, *, visible_project_ids, limit):
+        assert visible_project_ids == ["__identity__", "project-1"]
         assert limit == 8
         return [
             {
@@ -57,11 +59,15 @@ class RecordingGraphClient:
             }
         ]
 
-    async def get_recently_active_entities(self, days, limit):
+    async def get_recently_active_entities(
+        self, *, visible_project_ids, days, limit
+    ):
+        assert visible_project_ids == ["__identity__", "project-1"]
         assert (days, limit) == (7, 5)
         return [{"name": "Profile Refinement", "type": "concept", "recent_facts": 4}]
 
-    async def get_recent_facts(self, days, limit):
+    async def get_recent_facts(self, *, visible_project_ids, days, limit):
+        assert visible_project_ids == ["__identity__", "project-1"]
         assert (days, limit) == (7, 10)
         return [
             {
@@ -100,7 +106,7 @@ def root_config(**community_overrides):
 def make_resources(*, redis=None, llm_response="{}"):
     return SimpleNamespace(
         redis=redis or FakeRedis(),
-        graph=RecordingGraphClient(),
+        knowledge_store=RecordingKnowledgeStore(),
         llm_service=RecordingLLM(llm_response),
     )
 
@@ -119,6 +125,14 @@ async def save_agent(redis, agent_id, *, name=None, persona=None, **overrides):
     )
     await redis.hset(RedisKeys.agents("ada"), agent_id, json.dumps(agent.to_dict()))
     return agent
+
+
+async def save_project(redis, project_id, status="active"):
+    await redis.hset(
+        RedisKeys.projects("ada"),
+        project_id,
+        json.dumps({"status": status}),
+    )
 
 
 def patch_manager_config(monkeypatch, root):
@@ -185,6 +199,7 @@ async def test_build_agent_pool_context_filters_pool_and_marks_spawned(monkeypat
 @pytest.mark.no_network
 async def test_build_seeding_context_includes_graph_and_community_sections():
     resources = make_resources()
+    await save_project(resources.redis, "project-1")
     manager = CommunityManager(make_project_state(), "ada", resources)
 
     context = await manager._build_seeding_context()
@@ -206,12 +221,71 @@ async def test_build_seeding_context_includes_graph_and_community_sections():
 @pytest.mark.no_network
 async def test_build_seeding_context_falls_back_when_graph_collection_fails():
     resources = make_resources()
-    resources.graph.raise_context = True
+    await save_project(resources.redis, "project-1")
+    resources.knowledge_store.raise_context = True
     manager = CommunityManager(make_project_state(), "ada", resources)
 
     assert (
         await manager._build_seeding_context()
         == "Knowledge graph is available for exploration."
+    )
+
+
+@pytest.mark.no_network
+async def test_community_scope_defaults_to_active_and_archived_projects(monkeypatch):
+    redis = FakeRedis()
+    await save_project(redis, "active-project", "active")
+    await save_project(redis, "archived-project", "archived")
+    await save_project(redis, "deleted-project", "deleted")
+    patch_manager_config(monkeypatch, root_config())
+    manager = CommunityManager(
+        make_project_state(),
+        "ada",
+        make_resources(redis=redis),
+    )
+
+    assert await manager._resolve_project_scope() == [
+        "__identity__",
+        "active-project",
+        "archived-project",
+    ]
+
+
+@pytest.mark.no_network
+async def test_community_scope_configuration_is_exact_and_filters_invalid_ids(
+    monkeypatch,
+):
+    redis = FakeRedis()
+    await save_project(redis, "project-1", "active")
+    await save_project(redis, "project-2", "archived")
+    await save_project(redis, "deleted-project", "deleted")
+    patch_manager_config(
+        monkeypatch,
+        root_config(
+            project_ids=["project-2", "missing", "deleted-project"]
+        ),
+    )
+    manager = CommunityManager(
+        make_project_state(),
+        "ada",
+        make_resources(redis=redis),
+    )
+
+    assert await manager._resolve_project_scope() == [
+        "__identity__",
+        "project-2",
+    ]
+
+
+@pytest.mark.no_network
+async def test_community_seeding_skips_storage_when_scope_is_empty(monkeypatch):
+    patch_manager_config(monkeypatch, root_config())
+    resources = make_resources()
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    assert (
+        await manager._build_seeding_context()
+        == "No community project scope is configured."
     )
 
 

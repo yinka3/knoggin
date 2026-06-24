@@ -77,6 +77,6 @@ PostgreSQL knowledge and must stay synchronized with graph writes.
 - Message graph/search writes: `src/knoggin_server/knowledge/db/writers/graph_writer.py`
 - Entity, topic, and relationship writes: `src/knoggin_server/knowledge/db/writers/entity_writer.py`
 - Fact writes and evidence links: `src/knoggin_server/knowledge/db/writers/fact_writer.py`
-- Graph facade: `src/infrastructure/graph_client.py`
+- Knowledge persistence facade: `src/infrastructure/knowledge_store.py`
 - Reader/search helpers: `src/knoggin_server/knowledge/db/readers/`
 - Relational helper schema: `src/infrastructure/schema.sql`

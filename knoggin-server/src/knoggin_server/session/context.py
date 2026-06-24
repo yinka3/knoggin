@@ -79,8 +79,8 @@ class Context:
         return self.resources.redis
 
     @property
-    def graph_client(self):
-        return self.resources.graph
+    def knowledge_store(self):
+        return self.resources.knowledge_store
 
     @property
     def llm(self):
@@ -135,7 +135,7 @@ class Context:
             msg.id = int(existing_id)
             return msg
 
-        new_id = await self.graph_client.allocate_message_id()
+        new_id = await self.knowledge_store.allocate_message_id()
         was_set = await self.redis_client.set(dedup_key, str(new_id), ex=300, nx=True)
 
         if not was_set:
@@ -272,7 +272,7 @@ class Context:
             metadata = {}
 
         timestamp = self._normalize_timestamp(timestamp)
-        message_id = await self.graph_client.allocate_message_id()
+        message_id = await self.knowledge_store.allocate_message_id()
         await self._record_conversation_message(
             message_id=message_id,
             role="assistant",
@@ -417,7 +417,7 @@ class Context:
             total_count = 0
             for eid, facts_to_write in facts_by_entity.items():
                 try:
-                    c = await self.graph_client.create_facts_batch(
+                    c = await self.knowledge_store.create_facts_batch(
                         eid,
                         facts_to_write,
                         user_name=self.user_name,
@@ -465,7 +465,7 @@ class Context:
                     }
                 ]
 
-                await self.graph_client.save_message_logs(agent_msg_batch)
+                await self.knowledge_store.save_message_logs(agent_msg_batch)
                 return
 
             except Exception as e:
@@ -528,7 +528,7 @@ class Context:
         batch.set_scope(self.user_name, self.session_id, self.project_id)
         await write_batch_to_graph(
             batch,
-            graph_client=self.graph_client,
+            knowledge_store=self.knowledge_store,
             entities=self.project.entities,
             session_id=self.session_id,
             project_id=self.project_id,
@@ -541,7 +541,7 @@ class Context:
     ) -> tuple[bool, str | None]:
         return await write_batch_callback(
             result,
-            graph_client=self.graph_client,
+            knowledge_store=self.knowledge_store,
             entities=self.project.entities,
             session_id=self.session_id,
             project_id=self.project_id,

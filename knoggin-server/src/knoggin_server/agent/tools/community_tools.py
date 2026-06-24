@@ -43,9 +43,10 @@ class CommunityTools(Tools):
             search_config=base_tools.search_cfg,
             file_rag=base_tools.file_rag,
             memory=memory_mgr,
-            graph_client=base_tools.graph_client,
+            knowledge_store=base_tools.knowledge_store,
             redis=base_tools.redis,
         )
+        self.readable_project_ids = list(base_tools.readable_project_ids)
         self.community_store = community_store
         self.discussion_id = discussion_id
         self.agent_id = agent_id

@@ -7,7 +7,7 @@ from knoggin_server.project.state import ProjectState
 from knoggin_server.session.boot import SessionAssembler
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import (
-    FakeGraphClient,
+    FakeKnowledgeStore,
     FakePipeline,
     FakeResources,
     FakeScheduler,
@@ -34,17 +34,6 @@ class RecordingEmitter:
 
     def register_session(self, project_id, session_id):
         self.registered_sessions.append((project_id, session_id))
-
-
-class RecordingGraphClient(FakeGraphClient):
-    def __init__(self, max_entity_id=41):
-        super().__init__()
-        self.max_entity_id = max_entity_id
-        self.max_entity_id_calls = 0
-
-    async def get_max_entity_id(self):
-        self.max_entity_id_calls += 1
-        return self.max_entity_id
 
 
 class RecordingBatchProcessor:
@@ -98,7 +87,7 @@ def assembler_harness(monkeypatch):
 
     config_manager = RecordingConfigManager()
     emitter = RecordingEmitter()
-    resources = FakeResources(graph=RecordingGraphClient())
+    resources = FakeResources(knowledge_store=FakeKnowledgeStore())
     entities = object()
     pipeline = FakePipeline()
 
@@ -174,7 +163,6 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.model == "model-a"
     assert ctx.active_topics == ["General", "Identity"]
 
-    assert harness.resources.graph.max_entity_id_calls == 0
     assert harness.resources.redis.evals == []
 
     assert RecordingBatchProcessor.instances == [harness.batch_processor]
@@ -190,7 +178,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
 
     consumer = RecordingBatchConsumer.instances[0]
     assert ctx.consumer is consumer
-    assert consumer.kwargs["graph_client"] is harness.resources.graph
+    assert consumer.kwargs["knowledge_store"] is harness.resources.knowledge_store
     assert consumer.kwargs["redis"] is harness.resources.redis
     assert consumer.kwargs["processor"] is processor
     assert consumer.get_session_context == ctx.get_conversation_context

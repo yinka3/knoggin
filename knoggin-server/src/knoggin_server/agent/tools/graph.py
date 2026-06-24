@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from infrastructure.graph_interface import GraphInterface
+    from infrastructure.knowledge_store import KnowledgeStore
     from knoggin_server.knowledge.services.embedding_service import EmbeddingService
     from knoggin_server.knowledge.services.entity_service import EntityManager
 
@@ -12,7 +12,7 @@ from common.utils.data_utils import cosine_similarity
 
 class GraphTools:
     # Attributes provided by the composed Tools class
-    graph_client: GraphInterface
+    knowledge_store: KnowledgeStore
     entities: EntityManager
     embedding_service: EmbeddingService
     active_topics: Optional[List[str]]
@@ -37,7 +37,7 @@ class GraphTools:
         if not canonical:
             return [{"error": f"Entity not found: '{entity_name}'"}]
 
-        results = await self.graph_client.get_related_entities(
+        results = await self.knowledge_store.get_related_entities(
             [canonical],
             active_topics=self.active_topics,
             limit=50,
@@ -51,7 +51,7 @@ class GraphTools:
             return results
 
         # Try looking without topic filtering to see if it's "hidden"
-        hidden_results = await self.graph_client.get_related_entities(
+        hidden_results = await self.knowledge_store.get_related_entities(
             [canonical], active_topics=None, visible_project_ids=self.readable_project_ids
         )
 
@@ -85,7 +85,7 @@ class GraphTools:
             return [{"error": f"Entity not found: '{entity_name}'"}]
 
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
-        results = await self.graph_client.get_recent_activity(
+        results = await self.knowledge_store.get_recent_activity(
             canonical,
             active_topics=self.active_topics,
             hours=hours,
@@ -113,8 +113,10 @@ class GraphTools:
         entity_id = await self.entities.get_id(entity_name)
 
         if entity_id is not None:
-            facts = await self.graph_client.get_facts_for_entity(
-                entity_id, active_only=False
+            facts = await self.knowledge_store.get_facts_for_entity(
+                entity_id,
+                visible_project_ids=self.readable_project_ids,
+                active_only=False,
             )
 
             profile = await self.entities.get_profile(entity_id)
@@ -133,7 +135,7 @@ class GraphTools:
 
         embedding = await self.embedding_service.encode_single(entity_name)
 
-        candidates = await self.graph_client.search_entities_by_embedding(
+        candidates = await self.knowledge_store.search_entities_by_embedding(
             embedding,
             limit=5,
             score_threshold=0.69,
@@ -144,8 +146,10 @@ class GraphTools:
             candidate_ids = [eid for eid, _ in candidates]
             similarity_map = {eid: sim for eid, sim in candidates}
 
-            facts_by_entity = await self.graph_client.get_facts_for_entities(
-                candidate_ids, active_only=False
+            facts_by_entity = await self.knowledge_store.get_facts_for_entities(
+                candidate_ids,
+                visible_project_ids=self.readable_project_ids,
+                active_only=False,
             )
 
             total_facts = sum(len(facts) for facts in facts_by_entity.values())
@@ -208,7 +212,7 @@ class GraphTools:
             return [{"error": f"Entity not found: '{entity_b}'"}]
 
         # Trace path
-        path, has_inactive_shortcut = await self.graph_client.find_path_filtered(
+        path, has_inactive_shortcut = await self.knowledge_store.find_path_filtered(
             canonical_a,
             canonical_b,
             active_topics=self.active_topics,
@@ -227,7 +231,7 @@ class GraphTools:
             return path
 
         if has_inactive_shortcut:
-            full_path, _ = await self.graph_client.find_path_filtered(
+            full_path, _ = await self.knowledge_store.find_path_filtered(
                 canonical_a,
                 canonical_b,
                 active_topics=None,
@@ -301,7 +305,10 @@ class GraphTools:
         result = {"entity": canonical, "entity_id": entity_id}
 
         if direction in ("up", "both"):
-            parents = await self.graph_client.get_parent_entities(entity_id)
+            parents = await self.knowledge_store.get_parent_entities(
+                entity_id,
+                visible_project_ids=self.readable_project_ids,
+            )
             result["parents"] = parents
 
             if parents:
@@ -310,8 +317,9 @@ class GraphTools:
                 visited = {current_id}
 
                 while True:
-                    parent_list = await self.graph_client.get_parent_entities(
-                        current_id
+                    parent_list = await self.knowledge_store.get_parent_entities(
+                        current_id,
+                        visible_project_ids=self.readable_project_ids,
                     )
                     if not parent_list:
                         break
@@ -325,7 +333,10 @@ class GraphTools:
                 result["ancestry"] = ancestry
 
         if direction in ("down", "both"):
-            children = await self.graph_client.get_child_entities(entity_id)
+            children = await self.knowledge_store.get_child_entities(
+                entity_id,
+                visible_project_ids=self.readable_project_ids,
+            )
             result["children"] = children
 
         return [result]
@@ -348,7 +359,7 @@ class GraphTools:
             return {}
 
         # Fetch context
-        raw = await self.graph_client.get_hot_topic_context_with_messages(
+        raw = await self.knowledge_store.get_hot_topic_context_with_messages(
             hot_topics,
             msg_limit=10,
             slim=slim,

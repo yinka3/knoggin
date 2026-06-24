@@ -5,6 +5,7 @@ from typing import Dict, List
 from loguru import logger
 
 from common.schema.primitives import FactRecord
+from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.time_utils import get_now
 from infrastructure.postgres_client import PostgresClient
 
@@ -72,7 +73,17 @@ class FactReader:
             return value
         return datetime.fromisoformat(value)
 
-    async def get_facts_for_entity(self, entity_id: int, active_only: bool = True):
+    async def get_facts_for_entity(
+        self,
+        entity_id: int,
+        *,
+        visible_project_ids: List[str],
+        active_only: bool = True,
+    ):
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_facts_for_entity",
+        )
         active_sql = "AND invalid_at IS NULL" if active_only else ""
         query = f"""
         SELECT
@@ -88,20 +99,32 @@ class FactReader:
             source_session_id
         FROM facts
         WHERE entity_id = %s
+          AND project_id = ANY(%s)
         {active_sql}
         ORDER BY valid_at DESC, fact_id
         """
 
         try:
-            res = await self.client.execute_read(query, (entity_id,))
+            res = await self.client.fetch_all(
+                query,
+                (entity_id, visible_project_ids),
+            )
             return [self._hydrate_fact(row) for row in res]
         except Exception as e:
             logger.error(f"Failed to get facts for entity {entity_id}: {e}")
             return []
 
     async def get_facts_for_entities(
-        self, entity_ids: List[int], active_only: bool = True
+        self,
+        entity_ids: List[int],
+        *,
+        visible_project_ids: List[str],
+        active_only: bool = True,
     ) -> Dict[int, List[FactRecord]]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_facts_for_entities",
+        )
         if not entity_ids:
             return {}
 
@@ -127,6 +150,7 @@ class FactReader:
                 ) AS rank
             FROM facts
             WHERE entity_id = ANY(%s)
+              AND project_id = ANY(%s)
             {active_sql}
         ) ranked
         WHERE rank <= 5
@@ -134,7 +158,10 @@ class FactReader:
         """
 
         try:
-            res = await self.client.execute_read(query, (entity_ids,))
+            res = await self.client.fetch_all(
+                query,
+                (entity_ids, visible_project_ids),
+            )
             facts_by_entity: Dict[int, List[FactRecord]] = {
                 eid: [] for eid in entity_ids
             }
@@ -150,20 +177,32 @@ class FactReader:
             return {eid: [] for eid in entity_ids}
 
     async def search_relevant_facts(
-        self, entity_id: int, query_embedding: List[float], limit: int = 5
+        self,
+        entity_id: int,
+        query_embedding: List[float],
+        *,
+        visible_project_ids: List[str],
+        limit: int = 5,
     ) -> List[FactRecord]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "search_relevant_facts",
+        )
         """Search facts using native pgvector cosine similarity."""
         # 1. Search vector table for top N fact_ids
         search_query = """
         SELECT fact_id, embedding
         FROM fact_search
-        WHERE entity_id = %s AND invalid_at IS NULL
+        WHERE entity_id = %s
+          AND project_id = ANY(%s)
+          AND invalid_at IS NULL
         ORDER BY embedding <=> %s::vector
         LIMIT %s
         """
         try:
-            search_res = await self.client.execute_read(
-                search_query, (entity_id, query_embedding, limit)
+            search_res = await self.client.fetch_all(
+                search_query,
+                (entity_id, visible_project_ids, query_embedding, limit),
             )
             if not search_res:
                 return []
@@ -188,8 +227,12 @@ class FactReader:
                 source_session_id
             FROM facts
             WHERE fact_id = ANY(%s)
+              AND project_id = ANY(%s)
             """
-            fact_res = await self.client.execute_read(facts_query, (fact_ids,))
+            fact_res = await self.client.fetch_all(
+                facts_query,
+                (fact_ids, visible_project_ids),
+            )
             facts_by_id = {
                 str(self._clean_string(row["id"])): row
                 for row in fact_res
@@ -214,13 +257,27 @@ class FactReader:
             return []
 
     async def get_facts_from_message(
-        self, msg_id: int, user_name: str = None, session_id: str = None
+        self,
+        msg_id: int,
+        *,
+        user_name: str,
+        session_id: str,
+        visible_project_ids: List[str],
     ) -> List[FactRecord]:
-        if not user_name or not session_id:
-            logger.warning(
-                "Refusing unsafe fact source lookup without user/session scope"
-            )
-            return []
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "get_facts_from_message",
+        )
+        session_id = require_scope_value(
+            session_id,
+            "session_id",
+            "get_facts_from_message",
+        )
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_facts_from_message",
+        )
 
         query = """
         SELECT
@@ -238,19 +295,30 @@ class FactReader:
         WHERE source_msg_id = %s
           AND source_user_name = %s
           AND source_session_id = %s
+          AND project_id = ANY(%s)
         ORDER BY valid_at DESC, fact_id
         """
         try:
-            res = await self.client.execute_read(
+            res = await self.client.fetch_all(
                 query,
-                (msg_id, user_name, session_id),
+                (msg_id, user_name, session_id, visible_project_ids),
             )
             return [self._hydrate_fact(row) for row in res]
         except Exception as e:
             logger.error(f"Failed to get facts from message {msg_id}: {e}")
             return []
 
-    async def get_recent_facts(self, days: int = 7, limit: int = 20) -> List[Dict]:
+    async def get_recent_facts(
+        self,
+        *,
+        visible_project_ids: List[str],
+        days: int = 7,
+        limit: int = 20,
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_recent_facts",
+        )
         cutoff = get_now() - timedelta(days=days)
         query = """
         SELECT
@@ -263,11 +331,15 @@ class FactReader:
         JOIN entities e ON e.entity_id = f.entity_id
         WHERE f.valid_at > %s
           AND f.invalid_at IS NULL
+          AND f.project_id = ANY(%s)
         ORDER BY f.valid_at DESC
         LIMIT %s
         """
         try:
-            res = await self.client.execute_read(query, (cutoff, limit))
+            res = await self.client.fetch_all(
+                query,
+                (cutoff, visible_project_ids, limit),
+            )
             return [
                 {
                     "id": str(self._clean_string(row["id"])),

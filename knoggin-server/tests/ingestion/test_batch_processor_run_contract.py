@@ -17,7 +17,7 @@ from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import FakeRedis
 from tests.ingestion.test_batch_processor_entity_resolution_contract import (
     FakeEmbeddingService,
-    FakeGraphClient,
+    FakeKnowledgeStore,
     FakeLLM,
     seed_entity,
 )
@@ -148,9 +148,9 @@ def fail_if_called(*args, **kwargs):
 
 def make_processor_with_real_resolution():
     embedding = FakeEmbeddingService()
-    graph = FakeGraphClient()
+    knowledge_store = FakeKnowledgeStore()
     entities = EntityManager(
-        graph_client=graph,
+        knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
         readable_project_ids=["project-1"],

@@ -27,7 +27,7 @@ class FakeEmbeddingService:
         return [float(total % 97), float(len(text)), float(total % 13)]
 
 
-class FakeScenarioGraph:
+class FakeScenarioKnowledgeStore:
     def __init__(self):
         self.entities = {}
         self.vector_results = {}
@@ -82,7 +82,7 @@ class FakeScenarioGraph:
             return None
         return dict(entity)
 
-    async def get_entity_embedding(self, entity_id):
+    async def get_entity_embedding(self, entity_id, *, visible_project_ids):
         entity = self.entities.get(entity_id)
         return list(entity.get("embedding") or []) if entity else []
 
@@ -109,26 +109,35 @@ class FakeScenarioGraph:
             visible_results.append((entity_id, score))
         return visible_results[:limit]
 
-    async def get_neighbor_ids_batch(self, candidate_ids):
+    async def get_neighbor_ids_batch(
+        self, candidate_ids, *, visible_project_ids
+    ):
         self.neighbor_calls.append(list(candidate_ids))
         return {
             candidate_id: set(self.neighbors_by_entity.get(candidate_id, set()))
             for candidate_id in candidate_ids
         }
 
-    async def search_relevant_facts(self, entity_id, embedding, limit=5):
+    async def search_relevant_facts(
+        self,
+        entity_id,
+        embedding,
+        *,
+        visible_project_ids,
+        limit=5,
+    ):
         self.fact_searches.append(
             {"entity_id": entity_id, "embedding": list(embedding), "limit": limit}
         )
         return list(self.relevant_facts_by_entity.get(entity_id, []))
 
-    async def has_direct_edge(self, id_a, id_b):
+    async def has_direct_edge(self, id_a, id_b, *, visible_project_ids):
         return tuple(sorted((id_a, id_b))) in self.direct_edges
 
-    async def has_hierarchy_edge(self, id_a, id_b):
+    async def has_hierarchy_edge(self, id_a, id_b, *, visible_project_ids):
         return tuple(sorted((id_a, id_b))) in self.hierarchy_edges
 
-    async def get_neighbor_ids(self, entity_id):
+    async def get_neighbor_ids(self, entity_id, *, visible_project_ids):
         return set(self.neighbors_by_entity.get(entity_id, set()))
 
     def _is_visible(self, entity, visible_project_ids):
@@ -160,9 +169,9 @@ class FakeLLM:
 
 def make_harness(*, llm=None, topic_config=None):
     embedding = FakeEmbeddingService()
-    graph = FakeScenarioGraph()
+    knowledge_store = FakeScenarioKnowledgeStore()
     entities = EntityManager(
-        graph_client=graph,
+        knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
         readable_project_ids=["project-1"],
@@ -183,7 +192,7 @@ def make_harness(*, llm=None, topic_config=None):
         topic_config=topic_config or make_topic_config(),
         get_next_ent_id=get_next_ent_id,
     )
-    return processor, entities, graph, embedding
+    return processor, entities, knowledge_store, embedding
 
 
 def make_schema_topic_config():
@@ -214,7 +223,7 @@ def make_schema_topic_config():
 
 async def seed_entity(
     entities,
-    graph,
+    knowledge_store,
     entity_id,
     canonical_name,
     *,
@@ -223,7 +232,7 @@ async def seed_entity(
     topic="Identity",
     project_id="project-1",
 ):
-    graph.add_entity(
+    knowledge_store.add_entity(
         entity_id,
         canonical_name,
         aliases=aliases,
@@ -267,10 +276,10 @@ def make_fact(entity_id, content):
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_alice_openai_and_design_alice_stay_separate_with_irrelevant_facts():
-    processor, entities, graph, embedding = make_harness(llm=FakeLLM(relevance=False))
-    await seed_entity(entities, graph, 601, "OpenAI Alice")
-    graph.vector_results[vector_for(embedding, "Design Alice")] = [(601, 0.83)]
-    graph.relevant_facts_by_entity[601] = [
+    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM(relevance=False))
+    await seed_entity(entities, knowledge_store, 601, "OpenAI Alice")
+    knowledge_store.vector_results[vector_for(embedding, "Design Alice")] = [(601, 0.83)]
+    knowledge_store.relevant_facts_by_entity[601] = [
         make_fact(601, "OpenAI Alice works on research model evaluations.")
     ]
     messages = [
@@ -292,10 +301,10 @@ async def test_alice_openai_and_design_alice_stay_separate_with_irrelevant_facts
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_bobby_chen_reuses_robert_chen_when_context_supports_nickname_drift():
-    processor, entities, graph, embedding = make_harness(llm=FakeLLM(relevance=True))
-    await seed_entity(entities, graph, 102, "Robert Chen", aliases=["Bob"])
-    graph.vector_results[vector_for(embedding, "Bobby Chen")] = [(102, 0.82)]
-    graph.relevant_facts_by_entity[102] = [
+    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM(relevance=True))
+    await seed_entity(entities, knowledge_store, 102, "Robert Chen", aliases=["Bob"])
+    knowledge_store.vector_results[vector_for(embedding, "Bobby Chen")] = [(102, 0.82)]
+    knowledge_store.relevant_facts_by_entity[102] = [
         make_fact(102, "Robert Chen leads backend ingestion work.")
     ]
     messages = [
@@ -318,8 +327,8 @@ async def test_bobby_chen_reuses_robert_chen_when_context_supports_nickname_drif
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_sparse_bob_does_not_reuse_known_alias_without_supporting_context():
-    processor, entities, graph, _ = make_harness(llm=FakeLLM(relevance=False))
-    await seed_entity(entities, graph, 102, "Robert Chen", aliases=["Bob"])
+    processor, entities, knowledge_store, _ = make_harness(llm=FakeLLM(relevance=False))
+    await seed_entity(entities, knowledge_store, 102, "Robert Chen", aliases=["Bob"])
     messages = [make_message(5, "Bob said yes.")]
 
     result = await processor._resolve_mentions(
@@ -335,19 +344,19 @@ async def test_sparse_bob_does_not_reuse_known_alias_without_supporting_context(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_descriptive_knoggin_mentions_reuse_project_with_supporting_context():
-    processor, entities, graph, embedding = make_harness(llm=FakeLLM(relevance=True))
+    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM(relevance=True))
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         301,
         "Knoggin",
         aliases=["memory project"],
         entity_type="project",
         topic="General",
     )
-    graph.vector_results[vector_for(embedding, "the memory project")] = [(301, 0.82)]
-    graph.vector_results[vector_for(embedding, "that graph thing")] = [(301, 0.82)]
-    graph.relevant_facts_by_entity[301] = [
+    knowledge_store.vector_results[vector_for(embedding, "the memory project")] = [(301, 0.82)]
+    knowledge_store.vector_results[vector_for(embedding, "that graph thing")] = [(301, 0.82)]
+    knowledge_store.relevant_facts_by_entity[301] = [
         make_fact(301, "Knoggin is a personal memory graph project.")
     ]
     messages = [
@@ -373,10 +382,10 @@ async def test_descriptive_knoggin_mentions_reuse_project_with_supporting_contex
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_product_name_positive_context_reuses_linear_tool():
-    processor, entities, graph, _ = make_harness()
+    processor, entities, knowledge_store, _ = make_harness()
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         404,
         "Linear",
         entity_type="tool",
@@ -397,10 +406,10 @@ async def test_product_name_positive_context_reuses_linear_tool():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_common_word_notion_context_does_not_reuse_product_entity():
-    processor, entities, graph, _ = make_harness()
+    processor, entities, knowledge_store, _ = make_harness()
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         501,
         "Notion",
         entity_type="tool",
@@ -421,10 +430,10 @@ async def test_common_word_notion_context_does_not_reuse_product_entity():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_common_word_cursor_context_does_not_reuse_product_entity():
-    processor, entities, graph, _ = make_harness()
+    processor, entities, knowledge_store, _ = make_harness()
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         502,
         "Cursor",
         entity_type="tool",
@@ -445,10 +454,10 @@ async def test_common_word_cursor_context_does_not_reuse_product_entity():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_openai_and_chatgpt_are_related_not_duplicate_entities():
-    _, entities, graph, _ = make_harness()
+    _, entities, knowledge_store, _ = make_harness()
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         701,
         "OpenAI",
         entity_type="organization",
@@ -456,13 +465,13 @@ async def test_openai_and_chatgpt_are_related_not_duplicate_entities():
     )
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         702,
         "ChatGPT",
         entity_type="tool",
         topic="General",
     )
-    graph.hierarchy_edges.add((701, 702))
+    knowledge_store.hierarchy_edges.add((701, 702))
 
     result = await entities._classify_pair(701, 702, 98, {})
 
@@ -472,15 +481,15 @@ async def test_openai_and_chatgpt_are_related_not_duplicate_entities():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_same_name_in_inaccessible_project_is_not_reused():
-    processor, entities, graph, embedding = make_harness()
-    graph.add_entity(
+    processor, entities, knowledge_store, embedding = make_harness()
+    knowledge_store.add_entity(
         777,
         "Alice",
         entity_type="person",
         topic="Identity",
         project_id="private-project",
     )
-    graph.vector_results[vector_for(embedding, "Alice")] = [(777, 0.95)]
+    knowledge_store.vector_results[vector_for(embedding, "Alice")] = [(777, 0.95)]
     messages = [make_message(11, "Alice from this project reviewed the doc.")]
 
     result = await processor._resolve_mentions(
@@ -491,16 +500,16 @@ async def test_same_name_in_inaccessible_project_is_not_reused():
 
     assert result.entity_ids == [1001]
     assert result.new_ids == {1001}
-    assert graph.vector_searches[-1]["visible_project_ids"] == ["project-1"]
+    assert knowledge_store.vector_searches[-1]["visible_project_ids"] == ["project-1"]
     assert await entities.get_profile(777) is None
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_sparse_chris_does_not_pick_between_multiple_existing_people():
-    processor, entities, graph, _ = make_harness()
-    await seed_entity(entities, graph, 801, "Chris Walker")
-    await seed_entity(entities, graph, 802, "Chris Lee")
+    processor, entities, knowledge_store, _ = make_harness()
+    await seed_entity(entities, knowledge_store, 801, "Chris Walker")
+    await seed_entity(entities, knowledge_store, 802, "Chris Lee")
     messages = [make_message(12, "Chris said yes.")]
 
     result = await processor._resolve_mentions(
@@ -516,10 +525,10 @@ async def test_sparse_chris_does_not_pick_between_multiple_existing_people():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_ibm_and_international_business_machines_reuse_one_entity():
-    processor, entities, graph, _ = make_harness()
+    processor, entities, knowledge_store, _ = make_harness()
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         901,
         "International Business Machines",
         aliases=["IBM"],
@@ -548,12 +557,12 @@ async def test_ibm_and_international_business_machines_reuse_one_entity():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_schema_labels_under_same_topic_are_compatible_for_reuse():
-    processor, entities, graph, _ = make_harness(
+    processor, entities, knowledge_store, _ = make_harness(
         topic_config=make_schema_topic_config()
     )
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         100,
         "Linear",
         entity_type="tool",
@@ -574,12 +583,12 @@ async def test_schema_labels_under_same_topic_are_compatible_for_reuse():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_topic_aliases_normalize_for_schema_compatibility():
-    processor, entities, graph, _ = make_harness(
+    processor, entities, knowledge_store, _ = make_harness(
         topic_config=make_schema_topic_config()
     )
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         101,
         "Linear",
         entity_type="tool",
@@ -600,12 +609,12 @@ async def test_topic_aliases_normalize_for_schema_compatibility():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_known_labels_from_different_topics_block_auto_reuse():
-    processor, entities, graph, _ = make_harness(
+    processor, entities, knowledge_store, _ = make_harness(
         topic_config=make_schema_topic_config()
     )
     await seed_entity(
         entities,
-        graph,
+        knowledge_store,
         102,
         "Notion",
         entity_type="tool",

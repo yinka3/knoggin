@@ -204,7 +204,7 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
     assert json.loads(resources.redis.hashes[conv_key]["1"])["message_id"] == 1
     assert resources.redis.zsets[recent_key]["1"] == timestamp.timestamp()
     assert json.loads(resources.redis.hashes[content_key]["msg_1"])["id"] == 1
-    assert resources.graph.saved_message_logs == [
+    assert resources.knowledge_store.saved_message_logs == [
         [
             {
                 "id": 1,
@@ -237,7 +237,7 @@ async def test_context_assistant_turn_failure_rolls_back_redis_and_raises(
     async def skip_retry_delay(delay):
         return None
 
-    monkeypatch.setattr(resources.graph, "save_message_logs", fail_save)
+    monkeypatch.setattr(resources.knowledge_store, "save_message_logs", fail_save)
     monkeypatch.setattr(
         "knoggin_server.session.context.asyncio.sleep",
         skip_retry_delay,

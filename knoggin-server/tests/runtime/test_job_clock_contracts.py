@@ -27,8 +27,8 @@ def job_context() -> JobContext:
     return JobContext(user_name="ada", project_id="project-1")
 
 
-class ProcessorWithGraphClient:
-    graph_client = object()
+class ProcessorWithKnowledgeStore:
+    knowledge_store = object()
 
     async def run(self, messages, session_text, *, session_id):
         raise AssertionError("processor.run should not be reached in clock tests")
@@ -45,7 +45,7 @@ class FakeSchedulerJob:
         return JobResult(success=True, summary="done")
 
 
-class CleanupGraph:
+class CleanupKnowledgeStore:
     def __init__(
         self,
         orphan_ids=None,
@@ -92,7 +92,7 @@ class CleanupEntities:
         self.removed.extend(entity_ids)
 
 
-class ArchivalGraph:
+class ArchivalKnowledgeStore:
     def __init__(self, deleted_count=0):
         self.deleted_count = deleted_count
         self.calls = []
@@ -144,7 +144,7 @@ async def test_dlq_job_exposes_cadence_and_leaves_clock_to_scheduler():
     redis = FakeRedis()
     job = DLQReplayJob(
         entities=object(),
-        processor=ProcessorWithGraphClient(),
+        processor=ProcessorWithKnowledgeStore(),
         write_to_graph=lambda result: (True, None),
         redis_client=redis,
         interval=60,
@@ -166,11 +166,11 @@ async def test_dlq_job_exposes_cadence_and_leaves_clock_to_scheduler():
 @pytest.mark.no_network
 async def test_entity_cleanup_uses_frozen_cutoffs_without_owning_cadence():
     redis = FakeRedis()
-    graph = CleanupGraph()
+    knowledge_store = CleanupKnowledgeStore()
     entities = CleanupEntities(user_id=1)
     job = EntityCleanupJob(
         user_name="ada",
-        graph_client=graph,
+        knowledge_store=knowledge_store,
         entities=entities,
         redis_client=redis,
         interval_hours=1,
@@ -188,8 +188,8 @@ async def test_entity_cleanup_uses_frozen_cutoffs_without_owning_cadence():
         assert result.summary == "No orphans found"
         expected_orphan_cutoff = get_now_ms() - (2 * 3600 * 1000)
         expected_junk_cutoff = get_now_ms() - (3 * 24 * 3600 * 1000)
-        assert graph.cleanup_calls == ["project-1"]
-        assert graph.orphan_calls == [
+        assert knowledge_store.cleanup_calls == ["project-1"]
+        assert knowledge_store.orphan_calls == [
             (1, expected_orphan_cutoff, expected_junk_cutoff, "project-1")
         ]
         assert await redis.get(
@@ -201,16 +201,16 @@ async def test_entity_cleanup_uses_frozen_cutoffs_without_owning_cadence():
 @pytest.mark.no_network
 async def test_entity_cleanup_user_missing_returns_success_without_clock_write():
     redis = FakeRedis()
-    graph = CleanupGraph()
+    knowledge_store = CleanupKnowledgeStore()
     entities = CleanupEntities(user_id=None)
-    job = EntityCleanupJob("ada", graph, entities, redis)
+    job = EntityCleanupJob("ada", knowledge_store, entities, redis)
     ctx = job_context()
     with frozen_time(FROZEN_AT):
         result = await job.execute(ctx)
 
         assert result.summary == "User entity not initialized"
-        assert graph.cleanup_calls == ["project-1"]
-        assert graph.orphan_calls == []
+        assert knowledge_store.cleanup_calls == ["project-1"]
+        assert knowledge_store.orphan_calls == []
         assert await redis.get(
             RedisKeys.job_last_run(job.name, "ada", "project-1")
         ) is None
@@ -220,18 +220,18 @@ async def test_entity_cleanup_user_missing_returns_success_without_clock_write()
 @pytest.mark.no_network
 async def test_entity_cleanup_evicts_only_ids_confirmed_deleted():
     redis = FakeRedis()
-    graph = CleanupGraph(
+    knowledge_store = CleanupKnowledgeStore(
         orphan_ids=[2, 3, 4],
         null_deleted_ids=[5],
         bulk_deleted_ids=[2, 4],
     )
     entities = CleanupEntities(user_id=1)
-    job = EntityCleanupJob("ada", graph, entities, redis)
+    job = EntityCleanupJob("ada", knowledge_store, entities, redis)
 
     result = await job.execute(job_context())
 
     assert result.summary == "Cleaned 3 entities"
-    assert graph.bulk_delete_calls == [([2, 3, 4], "project-1")]
+    assert knowledge_store.bulk_delete_calls == [([2, 3, 4], "project-1")]
     assert entities.removed == [5, 2, 4]
 
 
@@ -239,10 +239,10 @@ async def test_entity_cleanup_evicts_only_ids_confirmed_deleted():
 @pytest.mark.no_network
 async def test_fact_archival_exposes_fallback_cadence_and_consumes_marker_on_success():
     redis = FakeRedis()
-    graph = ArchivalGraph(deleted_count=2)
+    knowledge_store = ArchivalKnowledgeStore(deleted_count=2)
     job = FactArchivalJob(
         user_name="ada",
-        graph_client=graph,
+        knowledge_store=knowledge_store,
         redis_client=redis,
         retention_days=14,
         fallback_interval_hours=1,
@@ -262,7 +262,7 @@ async def test_fact_archival_exposes_fallback_cadence_and_consumes_marker_on_suc
 
         assert result.summary == "Archived 2 invalidated facts"
         expected_cutoff = get_now() - timedelta(days=14)
-        assert graph.calls == [(expected_cutoff, "project-1")]
+        assert knowledge_store.calls == [(expected_cutoff, "project-1")]
         assert await redis.get(profile_complete_key) is None
         assert await redis.get(
             RedisKeys.job_last_run(job.name, "ada", "project-1")
@@ -273,8 +273,8 @@ async def test_fact_archival_exposes_fallback_cadence_and_consumes_marker_on_suc
 @pytest.mark.no_network
 async def test_fact_archival_preserves_profile_marker_when_execution_fails():
     redis = FakeRedis()
-    graph = ArchivalGraph()
-    job = FactArchivalJob("ada", graph, redis)
+    knowledge_store = ArchivalKnowledgeStore()
+    job = FactArchivalJob("ada", knowledge_store, redis)
     ctx = job_context()
     profile_complete_key = RedisKeys.project_profile_complete("ada", "project-1")
     await redis.set(profile_complete_key, "profile-run-1")
@@ -282,7 +282,7 @@ async def test_fact_archival_preserves_profile_marker_when_execution_fails():
     async def fail_archival(cutoff, project_id=None):
         raise RuntimeError("database unavailable")
 
-    graph.delete_old_invalidated_facts = fail_archival
+    knowledge_store.delete_old_invalidated_facts = fail_archival
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         await job.execute(ctx)
@@ -324,7 +324,7 @@ async def test_aac_job_exposes_live_cadence_and_leaves_clock_to_scheduler(monkey
 
     resources = FakeResources()
     resources.triggered_discussions = 0
-    resources.graph.community = FakeCommunityGraph()
+    resources.knowledge_store.community = FakeCommunityGraph()
     project_state = SimpleNamespace(project_id="project-1")
     job = AACJob(project_state, resources)
     ctx = job_context()
@@ -354,7 +354,7 @@ async def test_profile_refinement_targeted_recency_and_markers_use_frozen_unix(
     job = ProfileRefinementJob(
         llm=object(),
         entities=ProfileEntities(),
-        graph_client=object(),
+        knowledge_store=object(),
         executor=None,
         embedding_service=object(),
         redis_client=redis,

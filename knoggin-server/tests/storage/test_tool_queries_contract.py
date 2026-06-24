@@ -13,7 +13,7 @@ class FakeToolClient:
         self.rows = rows or []
         self.read_calls = []
 
-    async def execute_read(self, query, params=None):
+    async def fetch_all(self, query, params=None):
         self.read_calls.append((query, params))
         return self.rows
 
@@ -35,7 +35,7 @@ def test_tool_queries_sanitizes_fts_queries():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_search_messages_fts_adds_user_session_scope_when_provided():
+async def test_search_messages_fts_applies_user_session_and_project_scope():
     client = FakeToolClient(
         rows=[{"message_id": "4", "score": "0.5", "session_id": "s1"}]
     )
@@ -46,40 +46,39 @@ async def test_search_messages_fts_adds_user_session_scope_when_provided():
         limit=7,
         user_name="ada",
         session_ids=["s1", "s2"],
+        visible_project_ids=["project-1", "archive-1"],
     )
 
     assert result == [(4, 0.5, "s1")]
     sql, params = client.read_calls[0]
-    assert "AND user_name = %s AND session_id = ANY(%s)" in sql
-    assert params == ("alpha | beta", "alpha | beta", "ada", ["s1", "s2"], 7)
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_search_messages_fts_prefers_project_scope_when_provided():
-    client = FakeToolClient(
-        rows=[{"message_id": "4", "score": "0.5", "session_id": "s1"}]
-    )
-    queries = ToolQueries(client)
-
-    result = await queries.search_messages_fts(
-        "alpha beta",
-        limit=7,
-        user_name="ada",
-        session_ids=["s1"],
-        project_ids=["project-1", "archive-1"],
-    )
-
-    assert result == [(4, 0.5, "s1")]
-    sql, params = client.read_calls[0]
-    assert "AND user_name = %s AND project_id = ANY(%s)" in sql
+    assert "AND user_name = %s" in sql
+    assert "AND session_id = ANY(%s)" in sql
+    assert "AND project_id = ANY(%s)" in sql
     assert params == (
         "alpha | beta",
         "alpha | beta",
         "ada",
+        ["s1", "s2"],
         ["project-1", "archive-1"],
         7,
     )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_search_messages_fts_empty_session_scope_returns_no_results():
+    client = FakeToolClient()
+    queries = ToolQueries(client)
+
+    result = await queries.search_messages_fts(
+        "alpha beta",
+        user_name="ada",
+        session_ids=[],
+        visible_project_ids=["project-1"],
+    )
+
+    assert result == []
+    assert client.read_calls == []
 
 
 @pytest.mark.storage
@@ -88,7 +87,12 @@ async def test_search_messages_fts_ignores_empty_queries():
     client = FakeToolClient()
     queries = ToolQueries(client)
 
-    assert await queries.search_messages_fts("?!") == []
+    assert await queries.search_messages_fts(
+        "?!",
+        user_name="ada",
+        session_ids=["s1"],
+        visible_project_ids=["project-1"],
+    ) == []
     assert client.read_calls == []
 
 
@@ -98,7 +102,9 @@ async def test_search_entity_ignores_empty_clean_query_without_db_access():
     client = RecordingPostgresClient()
     queries = ToolQueries(client)
 
-    assert await queries.search_entity("?!") == []
+    assert await queries.search_entity(
+        "?!", visible_project_ids=["project-1"]
+    ) == []
     assert client.calls == []
 
 
@@ -108,35 +114,49 @@ async def test_tool_queries_skip_empty_inputs_without_db_access():
     client = RecordingPostgresClient()
     queries = ToolQueries(client)
 
-    assert await queries.get_hot_topic_context_with_messages([]) == {}
-    assert await queries.get_related_entities([]) == []
-    assert await queries.get_recent_activity(" ") == []
-    assert await queries.find_path_filtered("", "Grace") == ([], False)
-    assert await queries.find_path_filtered("Ada", "") == ([], False)
+    scope = ["project-1"]
+    assert await queries.get_hot_topic_context_with_messages(
+        [], visible_project_ids=scope
+    ) == {}
+    assert await queries.get_related_entities(
+        [], visible_project_ids=scope
+    ) == []
+    assert await queries.get_recent_activity(
+        " ", visible_project_ids=scope
+    ) == []
+    assert await queries.find_path_filtered(
+        "", "Grace", visible_project_ids=scope
+    ) == ([], False)
+    assert await queries.find_path_filtered(
+        "Ada", "", visible_project_ids=scope
+    ) == ([], False)
     assert client.calls == []
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_search_messages_fts_runs_without_optional_scope_when_absent():
-    client = FakeToolClient(
-        rows=[{"message_id": "4", "score": "0.5", "session_id": "s1"}]
-    )
+async def test_tool_queries_reject_empty_visibility_before_empty_inputs():
+    client = FakeToolClient()
     queries = ToolQueries(client)
 
-    result = await queries.search_messages_fts("alpha beta", limit=7)
+    with pytest.raises(ValueError, match="requires visible_project_ids scope"):
+        await queries.search_messages_fts(
+            "alpha beta",
+            user_name="ada",
+            session_ids=["s1"],
+            visible_project_ids=[],
+        )
+    with pytest.raises(ValueError, match="requires visible_project_ids scope"):
+        await queries.get_related_entities([], visible_project_ids=[])
 
-    assert result == [(4, 0.5, "s1")]
-    sql, params = client.read_calls[0]
-    assert "AND user_name = %s AND session_id = ANY(%s)" not in sql
-    assert params == ("alpha | beta", "alpha | beta", 7)
+    assert client.read_calls == []
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_search_entity_applies_sql_and_cypher_visible_project_scope():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [{"entity_id": "2"}],
             [
                 {
@@ -174,6 +194,10 @@ async def test_search_entity_applies_sql_and_cypher_visible_project_scope():
     assert "AND (project_id = ANY(%s) OR entity_id = %s)" in sql_call[1]
     assert sql_call[2] == ("%Ada%", ["project-1"], IDENTITY_ENTITY_ID, 2)
     graph_params = json.loads(graph_call[2][0])
+    assert "parent_rel.project_id IN $visible_project_ids" in graph_call[1]
+    assert "child_rel.project_id IN $visible_project_ids" in graph_call[1]
+    assert "r.project_id IN $visible_project_ids" in graph_call[1]
+    assert "f.project_id IN $visible_project_ids" in graph_call[1]
     assert graph_params["ids"] == [2]
     assert graph_params["filter_projects"] is True
     assert graph_params["visible_project_ids"] == ["project-1"]
@@ -186,7 +210,7 @@ async def test_search_entity_applies_sql_and_cypher_visible_project_scope():
 @pytest.mark.no_network
 async def test_get_hot_topic_context_with_messages_groups_dedupes_and_scopes():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [
                 {
                     "topic": '"Work"',
@@ -262,7 +286,7 @@ async def test_get_hot_topic_context_with_messages_groups_dedupes_and_scopes():
 @pytest.mark.no_network
 async def test_get_hot_topic_context_slim_omits_facts():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [
                 {
                     "topic": '"Work"',
@@ -276,7 +300,11 @@ async def test_get_hot_topic_context_slim_omits_facts():
     )
     queries = ToolQueries(client)
 
-    result = await queries.get_hot_topic_context_with_messages(["Work"], slim=True)
+    result = await queries.get_hot_topic_context_with_messages(
+        ["Work"],
+        visible_project_ids=["project-1"],
+        slim=True,
+    )
 
     assert result == {
         "Work": {
@@ -290,7 +318,7 @@ async def test_get_hot_topic_context_slim_omits_facts():
 @pytest.mark.no_network
 async def test_get_related_entities_applies_topic_and_project_scope():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [
                 {
                     "source": '"Ada"',
@@ -342,7 +370,7 @@ async def test_get_related_entities_applies_topic_and_project_scope():
 @pytest.mark.no_network
 async def test_get_recent_activity_applies_filters_and_hydrates_rows():
     client = RecordingPostgresClient(
-        execute_read_results=[
+        fetch_all_results=[
             [
                 {
                     "entity": '"Grace"',
@@ -388,22 +416,18 @@ async def test_get_recent_activity_applies_filters_and_hydrates_rows():
 @pytest.mark.no_network
 async def test_find_path_filtered_falls_back_to_active_only_path():
     client = RecordingPostgresClient(
-        execute_read_results=[
-            [
-                {
-                    "names": ["Ada", "Dormant", "Grace"],
-                    "node_topics": ["Identity", "Archive", "Identity"],
-                    "evidence_refs": [["m1"], ["m2"]],
-                    "has_inactive": True,
-                }
-            ],
-            [
-                {
-                    "names": ["Ada", "Grace"],
-                    "node_topics": ["Identity", "Identity"],
-                    "evidence_refs": [["m3"]],
-                }
-            ],
+        fetch_one_results=[
+            {
+                "names": ["Ada", "Dormant", "Grace"],
+                "node_topics": ["Identity", "Archive", "Identity"],
+                "evidence_refs": [["m1"], ["m2"]],
+                "has_inactive": True,
+            },
+            {
+                "names": ["Ada", "Grace"],
+                "node_topics": ["Identity", "Identity"],
+                "evidence_refs": [["m3"]],
+            },
         ]
     )
     queries = ToolQueries(client)
@@ -438,15 +462,13 @@ async def test_find_path_filtered_falls_back_to_active_only_path():
 @pytest.mark.no_network
 async def test_find_path_filtered_returns_shortest_path_when_no_inactive_topics():
     client = RecordingPostgresClient(
-        execute_read_results=[
-            [
-                {
-                    "names": ["Ada", "Grace"],
-                    "node_topics": ["Identity", "Identity"],
-                    "evidence_refs": [["m1"]],
-                    "has_inactive": False,
-                }
-            ]
+        fetch_one_results=[
+            {
+                "names": ["Ada", "Grace"],
+                "node_topics": ["Identity", "Identity"],
+                "evidence_refs": [["m1"]],
+                "has_inactive": False,
+            }
         ]
     )
     queries = ToolQueries(client)
@@ -480,8 +502,12 @@ async def test_find_path_filtered_returns_shortest_path_when_no_inactive_topics(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_find_path_filtered_returns_empty_when_no_path():
-    client = RecordingPostgresClient(execute_read_results=[[]])
+    client = RecordingPostgresClient(fetch_one_results=[None])
     queries = ToolQueries(client)
 
-    assert await queries.find_path_filtered("Ada", "Grace") == ([], False)
+    assert await queries.find_path_filtered(
+        "Ada",
+        "Grace",
+        visible_project_ids=["project-1"],
+    ) == ([], False)
     assert len(client.calls) == 1

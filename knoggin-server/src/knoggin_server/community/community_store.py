@@ -24,7 +24,7 @@ class CommunityStore:
         RETURN d.id
         """
         try:
-            await self.client.execute_write(
+            await self.client.execute(
                 self.client.build_cypher(cypher, "id agtype"),
                 (
                     json.dumps(
@@ -51,7 +51,7 @@ class CommunityStore:
         RETURN m.agent_id
         """
         try:
-            await self.client.execute_write(
+            await self.client.execute(
                 self.client.build_cypher(cypher, "agent_id agtype"),
                 (
                     json.dumps(
@@ -76,7 +76,7 @@ class CommunityStore:
         RETURN d.id
         """
         try:
-            await self.client.execute_write(
+            await self.client.execute(
                 self.client.build_cypher(cypher, "id agtype"),
                 (
                     json.dumps(
@@ -101,7 +101,7 @@ class CommunityStore:
         RETURN c.id
         """
         try:
-            await self.client.execute_write(
+            await self.client.execute(
                 self.client.build_cypher(cypher, "id agtype"),
                 (
                     json.dumps(
@@ -127,7 +127,7 @@ class CommunityStore:
         ORDER BY d.created_at DESC
         """
         try:
-            data = await self.client.execute_read(
+            data = await self.client.fetch_all(
                 self.client.build_cypher(
                     cypher,
                     "id agtype, topic agtype, status agtype, created_at agtype, closed_at agtype, agent_ids agtype",
@@ -153,7 +153,7 @@ class CommunityStore:
         ORDER BY m.timestamp ASC
         """
         try:
-            data = await self.client.execute_read(
+            data = await self.client.fetch_all(
                 self.client.build_cypher(
                     cypher,
                     "agent_id agtype, content agtype, role agtype, timestamp agtype",
@@ -178,7 +178,7 @@ class CommunityStore:
         RETURN p.id as parent, c.id as child, r.detail as detail, r.ts as timestamp
         """
         try:
-            data = await self.client.execute_read(
+            data = await self.client.fetch_all(
                 self.client.build_cypher(
                     cypher,
                     "parent agtype, child agtype, detail agtype, timestamp agtype",
@@ -212,7 +212,7 @@ class CommunityStore:
         LIMIT $limit
         """
         try:
-            data = await self.client.execute_read(
+            data = await self.client.fetch_all(
                 self.client.build_cypher(
                     cypher,
                     "id agtype, topic agtype, status agtype, created_at agtype, closed_at agtype, message_count agtype",
@@ -242,7 +242,7 @@ class CommunityStore:
         LIMIT $limit
         """
         try:
-            data = await self.client.execute_read(
+            data = await self.client.fetch_all(
                 self.client.build_cypher(
                     cypher, "content agtype, timestamp agtype, discussion_topic agtype"
                 ),
@@ -271,23 +271,19 @@ class CommunityStore:
         RETURN count(DISTINCT d) as deleted_discussions
         """
         try:
-            if not self.client.async_pool:
-                raise RuntimeError("PostgresClient async_pool is not initialized")
-            async with self.client.async_pool.connection() as conn:
-                async with conn.transaction():
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            self.client.build_cypher(
-                                cypher, "deleted_discussions agtype"
-                            ),
-                            (json.dumps({"cutoff": cutoff}),),
-                        )
-                        record = await cur.fetchone()
-                        count = int(record["deleted_discussions"]) if record else 0
+            async with self.client.transaction() as cur:
+                await cur.execute(
+                    self.client.build_cypher(
+                        cypher, "deleted_discussions agtype"
+                    ),
+                    (json.dumps({"cutoff": cutoff}),),
+                )
+                record = await cur.fetchone()
+                count = int(record["deleted_discussions"]) if record else 0
 
-                        if count > 0:
-                            logger.info(f"Cleaned up {count} old AAC discussions")
-                        return count
+                if count > 0:
+                    logger.info(f"Cleaned up {count} old AAC discussions")
+                return count
         except Exception as e:
             logger.error(f"Failed to delete_old_discussions: {e}")
             return 0

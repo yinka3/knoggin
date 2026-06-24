@@ -8,6 +8,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.schema.aac_schema import AAC_READ_TOOL_NAMES, AAC_SPECIFIC_SCHEMAS
 from common.schema.agent_contracts import AgentConfig
+from common.scoping import IDENTITY_SCOPE
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now
@@ -22,6 +23,7 @@ from knoggin_server.agent.types import (
     RetrievedEvidence,
 )
 from knoggin_server.knowledge.services.memory_service import MemoryManager
+from knoggin_server.project.lifecycle import ProjectStatus
 from knoggin_server.project.state import ProjectState
 from knoggin_server.session.boot import SessionAssembler
 from knoggin_server.session.context import Context
@@ -76,6 +78,33 @@ class CommunityManager:
             self.user_name,
             self.project_state.project_id,
         )
+
+    async def _resolve_project_scope(self) -> List[str]:
+        raw_projects = await self.resources.redis.hgetall(
+            RedisKeys.projects(self.user_name)
+        )
+        readable_statuses = {
+            ProjectStatus.ACTIVE.value,
+            ProjectStatus.ARCHIVED.value,
+        }
+        readable = {}
+        for project_id, raw in raw_projects.items():
+            metadata = safe_json_loads(raw, {}) if raw else {}
+            if metadata.get("status") in readable_statuses:
+                readable[project_id] = metadata
+
+        configured = (
+            ConfigManager.get().config.developer_settings.community.project_ids
+        )
+        if configured:
+            projects = [
+                project_id
+                for project_id in dict.fromkeys(configured)
+                if project_id in readable
+            ]
+        else:
+            projects = sorted(readable)
+        return [IDENTITY_SCOPE, *projects] if projects else []
 
     async def _agent_exists(self, agent_id: str) -> bool:
         return bool(
@@ -142,7 +171,7 @@ class CommunityManager:
         await self.resources.redis.set(
             self._active_discussion_key(), discussion_id
         )
-        await self.resources.graph.community.create_discussion(
+        await self.resources.knowledge_store.community.create_discussion(
             discussion_id, topic, valid_agent_ids
         )
 
@@ -164,7 +193,7 @@ class CommunityManager:
                 )
                 self._active_discussion_id = None
                 try:
-                    await self.resources.graph.community.close_discussion(
+                    await self.resources.knowledge_store.community.close_discussion(
                         discussion_id
                     )
                 except Exception as e:
@@ -243,7 +272,7 @@ class CommunityManager:
                 }
             )
 
-            await self.resources.graph.community.add_message(
+            await self.resources.knowledge_store.community.add_message(
                 discussion_id, agent_id, message, "assistant"
             )
 
@@ -285,6 +314,7 @@ class CommunityManager:
             agent_id=agent.id,
             topic_config=ctx.project.topic_config,
         )
+        readable_project_ids = await self._resolve_project_scope()
 
         base_tools = SimpleNamespace(
             entities=ctx.project.entities,
@@ -292,14 +322,15 @@ class CommunityManager:
             topic_config=ctx.project.topic_config,
             search_cfg={},
             file_rag=ctx.file_rag,
-            graph_client=self.resources.graph,
+            knowledge_store=self.resources.knowledge_store,
             redis=self.resources.redis,
+            readable_project_ids=readable_project_ids,
         )
 
         comm_tools = CommunityTools(
             self.user_name,
             base_tools,
-            self.resources.graph.community,
+            self.resources.knowledge_store.community,
             discussion_id,
             agent.id,
             comm_memory,
@@ -559,17 +590,33 @@ class CommunityManager:
         lines = []
 
         try:
-            stats = await self.resources.graph.get_graph_stats()
-            notable = await self.resources.graph.get_notable_entities(8)
-            recent_entities = (
-                await self.resources.graph.get_recently_active_entities(7, 5)
+            visible_project_ids = await self._resolve_project_scope()
+            if not visible_project_ids:
+                return "No community project scope is configured."
+            stats = await self.resources.knowledge_store.get_graph_stats(
+                visible_project_ids=visible_project_ids
             )
-            recent_facts = await self.resources.graph.get_recent_facts(7, 10)
+            notable = await self.resources.knowledge_store.get_notable_entities(
+                visible_project_ids=visible_project_ids,
+                limit=8,
+            )
+            recent_entities = (
+                await self.resources.knowledge_store.get_recently_active_entities(
+                    visible_project_ids=visible_project_ids,
+                    days=7,
+                    limit=5,
+                )
+            )
+            recent_facts = await self.resources.knowledge_store.get_recent_facts(
+                visible_project_ids=visible_project_ids,
+                days=7,
+                limit=10,
+            )
             past_discussions = (
-                await self.resources.graph.community.get_recent_discussions(5)
+                await self.resources.knowledge_store.community.get_recent_discussions(5)
             )
             insights = (
-                await self.resources.graph.community.get_discussion_insights(5)
+                await self.resources.knowledge_store.community.get_discussion_insights(5)
             )
         except Exception as e:
             logger.warning(f"Failed to gather seeding context: {e}")

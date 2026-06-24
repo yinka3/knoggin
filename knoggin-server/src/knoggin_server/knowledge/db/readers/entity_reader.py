@@ -4,7 +4,11 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from common.scoping import IDENTITY_ENTITY_ID
+from common.scoping import (
+    IDENTITY_ENTITY_ID,
+    require_scope_value,
+    require_visible_project_ids,
+)
 from common.utils.time_utils import get_now
 from infrastructure.postgres_client import PostgresClient
 
@@ -42,13 +46,27 @@ class EntityReader:
             return [cleaned] if cleaned else []
         return [self._clean_string(alias) for alias in aliases if alias]
 
-    async def _fetch_embeddings(self, entity_ids: List[int]) -> Dict[int, List[float]]:
+    async def _fetch_embeddings(
+        self,
+        entity_ids: List[int],
+        visible_project_ids: List[str],
+    ) -> Dict[int, List[float]]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "_fetch_embeddings",
+        )
         if not entity_ids:
             return {}
-        emb_query = (
-            "SELECT entity_id, embedding FROM entity_search WHERE entity_id = ANY(%s)"
+        emb_query = """
+        SELECT entity_id, embedding
+        FROM entity_search
+        WHERE entity_id = ANY(%s)
+          AND (project_id = ANY(%s) OR entity_id = %s)
+        """
+        emb_res = await self.client.fetch_all(
+            emb_query,
+            (entity_ids, visible_project_ids, IDENTITY_ENTITY_ID),
         )
-        emb_res = await self.client.execute_read(emb_query, (entity_ids,))
         return {
             int(row["entity_id"]): self._parse_vector(row["embedding"])
             for row in emb_res
@@ -93,29 +111,40 @@ class EntityReader:
             return [float(x) for x in parsed if str(x).strip()]
         return [float(x) for x in val]
 
-    def _scope_params(self, visible_project_ids: Optional[List[str]] = None) -> Dict:
+    def _scope_params(self, visible_project_ids: List[str]) -> Dict:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "entity query",
+        )
         return {
-            "filter_projects": bool(visible_project_ids),
-            "visible_project_ids": visible_project_ids or [],
+            "filter_projects": True,
+            "visible_project_ids": visible_project_ids,
             "identity_entity_id": IDENTITY_ENTITY_ID,
         }
 
-    async def get_max_entity_id(self) -> int:
-        """Returns the highest entity ID currently in the DB."""
-        query = "SELECT COALESCE(MAX(entity_id), 0) as max_id FROM entities"
+    async def get_entity_embedding(
+        self,
+        entity_id: int,
+        *,
+        visible_project_ids: List[str],
+    ) -> List[float]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_entity_embedding",
+        )
+        query = """
+        SELECT embedding
+        FROM entity_search
+        WHERE entity_id = %s
+          AND (project_id = ANY(%s) OR entity_id = %s)
+        """
         try:
-            result = await self.client.execute_read(query)
-            return result[0]["max_id"] if result else 0
-        except Exception as e:
-            logger.error(f"Failed to get max entity ID: {e}")
-            raise
-
-    async def get_entity_embedding(self, entity_id: int) -> List[float]:
-        query = "SELECT embedding FROM entity_search WHERE entity_id = %s"
-        try:
-            result = await self.client.execute_read(query, (entity_id,))
-            if result and result[0]["embedding"]:
-                return self._parse_vector(result[0]["embedding"])
+            row = await self.client.fetch_one(
+                query,
+                (entity_id, visible_project_ids, IDENTITY_ENTITY_ID),
+            )
+            if row and row["embedding"]:
+                return self._parse_vector(row["embedding"])
             return []
         except Exception as e:
             logger.error(f"Failed to get embedding for entity {entity_id}: {e}")
@@ -125,13 +154,21 @@ class EntityReader:
         self,
         limit: int = 20,
         offset: int = 0,
+        *,
+        visible_project_ids: List[str],
         topic: Optional[str] = None,
         entity_type: Optional[str] = None,
         search: Optional[str] = None,
     ) -> Tuple[List[Dict], int]:
         """Paginated entity listing with optional filters."""
-        where_clauses = []
-        params = []
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "list_entities",
+        )
+        where_clauses = [
+            "(e.project_id = ANY(%s) OR e.entity_id = %s)"
+        ]
+        params = [visible_project_ids, IDENTITY_ENTITY_ID]
 
         if entity_type:
             where_clauses.append("e.type = %s")
@@ -164,6 +201,7 @@ class EntityReader:
         LEFT JOIN facts f
           ON f.entity_id = e.entity_id
          AND f.invalid_at IS NULL
+         AND f.project_id = ANY(%s)
         {where_str}
         GROUP BY e.entity_id
         ORDER BY e.last_mentioned_ms DESC NULLS LAST
@@ -172,17 +210,15 @@ class EntityReader:
         """
 
         try:
-            count_res = await self.client.execute_read(count_query, tuple(params))
-            total = (
-                int(count_res[0]["total"]) if count_res and count_res[0]["total"] else 0
-            )
+            count_row = await self.client.fetch_one(count_query, tuple(params))
+            total = int(count_row["total"]) if count_row and count_row["total"] else 0
 
             if total == 0:
                 return [], 0
 
-            entities_res = await self.client.execute_read(
+            entities_res = await self.client.fetch_all(
                 data_query,
-                (*params, offset, limit),
+                (visible_project_ids, *params, offset, limit),
             )
             entities = []
             for row in entities_res:
@@ -208,13 +244,16 @@ class EntityReader:
             return [], 0
 
     async def get_entity_by_id(
-        self, entity_id: int, visible_project_ids: Optional[List[str]] = None
+        self,
+        entity_id: int,
+        *,
+        visible_project_ids: List[str],
     ) -> Optional[Dict]:
-        scope_sql = ""
-        params = [entity_id]
-        if visible_project_ids:
-            scope_sql = "AND (e.project_id = ANY(%s) OR e.entity_id = %s)"
-            params.extend([visible_project_ids, IDENTITY_ENTITY_ID])
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_entity_by_id",
+        )
+        params = [entity_id, visible_project_ids, IDENTITY_ENTITY_ID]
 
         query = f"""
         SELECT
@@ -235,21 +274,32 @@ class EntityReader:
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE e.entity_id = %s
-        {scope_sql}
+          AND (e.project_id = ANY(%s) OR e.entity_id = %s)
         GROUP BY e.entity_id
         """
         try:
-            res = await self.client.execute_read(query, tuple(params))
-            if not res:
+            row = await self.client.fetch_one(query, tuple(params))
+            if not row:
                 return None
-            row = res[0]
-            embedding = await self.get_entity_embedding(entity_id)
+            embedding = await self.get_entity_embedding(
+                entity_id,
+                visible_project_ids=visible_project_ids,
+            )
             return self._hydrate_entity_row(row, embedding=embedding)
         except Exception as e:
             logger.error(f"Failed to get entity {entity_id}: {e}")
             return None
 
-    async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:
+    async def get_entities_by_ids(
+        self,
+        entity_ids: List[int],
+        *,
+        visible_project_ids: List[str],
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_entities_by_ids",
+        )
         if not entity_ids:
             return []
 
@@ -257,6 +307,7 @@ class EntityReader:
         SELECT
             e.entity_id AS id,
             e.session_id,
+            e.project_id,
             e.canonical_name,
             COALESCE(
                 array_agg(a.alias ORDER BY a.alias)
@@ -271,13 +322,20 @@ class EntityReader:
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE e.entity_id = ANY(%s)
+          AND (e.project_id = ANY(%s) OR e.entity_id = %s)
         GROUP BY e.entity_id
         ORDER BY e.entity_id
         """
 
         try:
-            res = await self.client.execute_read(query, (entity_ids,))
-            embeddings_map = await self._fetch_embeddings(entity_ids)
+            res = await self.client.fetch_all(
+                query,
+                (entity_ids, visible_project_ids, IDENTITY_ENTITY_ID),
+            )
+            embeddings_map = await self._fetch_embeddings(
+                entity_ids,
+                visible_project_ids,
+            )
 
             entities = []
             for row in res:
@@ -286,7 +344,7 @@ class EntityReader:
                     self._hydrate_entity_row(
                         row,
                         embedding=embeddings_map.get(eid, []),
-                        include_project_id=False,
+                        include_project_id=True,
                     )
                 )
             return entities
@@ -294,43 +352,26 @@ class EntityReader:
             logger.error(f"Failed to fetch entities by ids: {e}")
             return []
 
-    async def find_alias_collisions(self) -> List[Tuple[int, int]]:
-        query = """
-        WITH names AS (
-            SELECT entity_id, lower(canonical_name) AS normalized_name
-            FROM entities
-            WHERE canonical_name IS NOT NULL
-            UNION ALL
-            SELECT entity_id, lower(alias) AS normalized_name
-            FROM entity_aliases
-            WHERE alias IS NOT NULL
-        )
-        SELECT DISTINCT left_name.entity_id AS id_a, right_name.entity_id AS id_b
-        FROM names left_name
-        JOIN names right_name
-          ON left_name.normalized_name = right_name.normalized_name
-         AND left_name.entity_id < right_name.entity_id
-        ORDER BY id_a, id_b
-        """
-        try:
-            res = await self.client.execute_read(query)
-            return [(int(r["id_a"]), int(r["id_b"])) for r in res]
-        except Exception as e:
-            logger.error(f"Failed to find alias collisions: {e}")
-            return []
-
     async def get_entities_by_names(
-        self, names: List[str], visible_project_ids: Optional[List[str]] = None
+        self,
+        names: List[str],
+        *,
+        visible_project_ids: List[str],
     ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_entities_by_names",
+        )
         if not names:
             return []
 
         lower_names = [n.lower() for n in names]
-        scope_sql = ""
-        params = [lower_names, lower_names]
-        if visible_project_ids:
-            scope_sql = "AND (e.project_id = ANY(%s) OR e.entity_id = %s)"
-            params.extend([visible_project_ids, IDENTITY_ENTITY_ID])
+        params = [
+            lower_names,
+            lower_names,
+            visible_project_ids,
+            IDENTITY_ENTITY_ID,
+        ]
 
         query = f"""
         SELECT
@@ -353,6 +394,7 @@ class EntityReader:
         LEFT JOIN facts f
           ON f.entity_id = e.entity_id
          AND f.invalid_at IS NULL
+         AND f.project_id = ANY(%s)
         WHERE (
             lower(e.canonical_name) = ANY(%s)
             OR EXISTS (
@@ -362,11 +404,14 @@ class EntityReader:
                   AND lower(ea.alias) = ANY(%s)
             )
         )
-        {scope_sql}
+        AND (e.project_id = ANY(%s) OR e.entity_id = %s)
         GROUP BY e.entity_id
         """
         try:
-            res = await self.client.execute_read(query, tuple(params))
+            res = await self.client.fetch_all(
+                query,
+                (visible_project_ids, *params),
+            )
             return [
                 {
                     "id": int(row["id"]),
@@ -385,33 +430,42 @@ class EntityReader:
     async def search_similar_entities(
         self,
         entity_id: int,
+        *,
+        visible_project_ids: List[str],
         limit: int = 50,
-        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Tuple[int, float]]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "search_similar_entities",
+        )
         """Find similar entities using Postgres pgvector."""
         # 1. Get the source vector
-        emb = await self.get_entity_embedding(entity_id)
+        emb = await self.get_entity_embedding(
+            entity_id,
+            visible_project_ids=visible_project_ids,
+        )
         if not emb:
             return []
 
         # 2. Search using pgvector cosine distance `<=>`
         # `<=>` returns distance, so we do 1 - distance for similarity
-        scope_sql = ""
-        params = [emb, entity_id]
-        if visible_project_ids:
-            scope_sql = "AND (project_id = ANY(%s) OR entity_id = %s)"
-            params.extend([visible_project_ids, IDENTITY_ENTITY_ID])
+        params = [
+            emb,
+            entity_id,
+            visible_project_ids,
+            IDENTITY_ENTITY_ID,
+        ]
         query = f"""
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entity_search
         WHERE entity_id != %s
-        {scope_sql}
+          AND (project_id = ANY(%s) OR entity_id = %s)
         ORDER BY embedding <=> %s::vector
         LIMIT %s
         """
         try:
             params.extend([emb, limit])
-            res = await self.client.execute_read(query, tuple(params))
+            res = await self.client.fetch_all(query, tuple(params))
             return [(r["entity_id"], r["similarity"]) for r in res]
         except Exception as e:
             logger.error(f"Failed to search similar entities for {entity_id}: {e}")
@@ -420,105 +474,79 @@ class EntityReader:
     async def search_entities_by_embedding(
         self,
         embedding: List[float],
+        *,
+        visible_project_ids: List[str],
         limit: int = 10,
         score_threshold: float = 0.8,
-        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Tuple[int, float]]:
-        scope_sql = ""
-        params = [embedding, embedding, score_threshold]
-        if visible_project_ids:
-            scope_sql = "AND (project_id = ANY(%s) OR entity_id = %s)"
-            params.extend([visible_project_ids, IDENTITY_ENTITY_ID])
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "search_entities_by_embedding",
+        )
+        params = [
+            embedding,
+            embedding,
+            score_threshold,
+            visible_project_ids,
+            IDENTITY_ENTITY_ID,
+        ]
         query = f"""
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entity_search
         WHERE 1 - (embedding <=> %s::vector) >= %s
-        {scope_sql}
+          AND (project_id = ANY(%s) OR entity_id = %s)
         ORDER BY embedding <=> %s::vector
         LIMIT %s
         """
         try:
             params.extend([embedding, limit])
-            res = await self.client.execute_read(query, tuple(params))
+            res = await self.client.fetch_all(query, tuple(params))
             return [(r["entity_id"], r["similarity"]) for r in res]
         except Exception as e:
             logger.error(f"Entity vector search failed: {e}")
             return []
 
-    async def validate_existing_ids(self, ids: List[int]) -> Optional[Set[int]]:
+    async def validate_existing_ids(
+        self,
+        ids: List[int],
+        *,
+        visible_project_ids: List[str],
+    ) -> Optional[Set[int]]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "validate_existing_ids",
+        )
         if not ids:
             return set()
         query = """
         SELECT entity_id AS id
         FROM entities
         WHERE entity_id = ANY(%s)
+          AND (project_id = ANY(%s) OR entity_id = %s)
         """
         try:
-            res = await self.client.execute_read(query, (ids,))
+            res = await self.client.fetch_all(
+                query,
+                (ids, visible_project_ids, IDENTITY_ENTITY_ID),
+            )
             return {int(r["id"]) for r in res}
         except Exception as e:
             logger.error(f"Liveness check failed: {e}")
             return None
-
-    async def get_all_entities_for_hydration(self) -> list[dict]:
-        query = """
-        SELECT
-            e.entity_id AS id,
-            e.canonical_name,
-            COALESCE(
-                array_agg(a.alias ORDER BY a.alias)
-                    FILTER (WHERE a.alias IS NOT NULL),
-                '{}'
-            ) AS aliases,
-            e.type,
-            e.topic,
-            e.session_id
-        FROM entities e
-        LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
-        WHERE e.entity_id IS NOT NULL
-        GROUP BY e.entity_id
-        ORDER BY e.entity_id
-        """
-        emb_query = "SELECT entity_id, embedding FROM entity_search"
-        try:
-            res = await self.client.execute_read(query)
-            emb_res = await self.client.execute_read(emb_query)
-            embeddings_map = {
-                row["entity_id"]: self._parse_vector(row["embedding"])
-                for row in emb_res
-            }
-
-            entities = []
-            for row in res:
-                eid = int(row["id"])
-                entities.append(
-                    {
-                        "id": eid,
-                        "canonical_name": self._clean_string(
-                            row["canonical_name"]
-                        ),
-                        "aliases": self._parse_aliases(row["aliases"]),
-                        "type": self._clean_string(row["type"]),
-                        "topic": self._clean_string(row["topic"]),
-                        "session_id": self._clean_string(row["session_id"]),
-                        "embedding": embeddings_map.get(eid, []),
-                    }
-                )
-            return entities
-        except Exception as e:
-            logger.error(f"Failed to hydrate entities: {e}")
-            return []
 
     async def get_orphan_entities(
         self,
         protected_id: int = 1,
         orphan_cutoff_ms: int = 0,
         stale_junk_cutoff_ms: int = 0,
-        project_id: Optional[str] = None,
+        *,
+        project_id: str,
     ) -> List[int]:
-        if not project_id:
-            logger.warning("Refusing unsafe orphan lookup without project scope")
-            return []
+        project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "get_orphan_entities",
+        )
 
         query = """
         SELECT e.entity_id AS id
@@ -579,7 +607,7 @@ class EntityReader:
         ORDER BY e.entity_id
         """
         try:
-            res = await self.client.execute_read(
+            res = await self.client.fetch_all(
                 query,
                 (
                     protected_id,
@@ -597,16 +625,26 @@ class EntityReader:
             logger.error(f"Failed to fetch orphans: {e}")
             return []
 
-    async def get_entity_count_by_type(self) -> List[Dict]:
+    async def get_entity_count_by_type(
+        self, *, visible_project_ids: List[str]
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_entity_count_by_type",
+        )
         query = """
         SELECT type, count(*) AS count
         FROM entities
         WHERE type IS NOT NULL
+          AND (project_id = ANY(%s) OR entity_id = %s)
         GROUP BY type
         ORDER BY count DESC
         """
         try:
-            res = await self.client.execute_read(query)
+            res = await self.client.fetch_all(
+                query,
+                (visible_project_ids, IDENTITY_ENTITY_ID),
+            )
             return [
                 {
                     "type": self._clean_string(r["type"]),
@@ -618,16 +656,26 @@ class EntityReader:
             logger.error(f"Failed to get entity count by type: {e}")
             return []
 
-    async def get_entity_count_by_topic(self) -> List[Dict]:
+    async def get_entity_count_by_topic(
+        self, *, visible_project_ids: List[str]
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_entity_count_by_topic",
+        )
         query = """
         SELECT topic, count(*) AS count
         FROM entities
         WHERE topic IS NOT NULL
+          AND (project_id = ANY(%s) OR entity_id = %s)
         GROUP BY topic
         ORDER BY count DESC
         """
         try:
-            res = await self.client.execute_read(query)
+            res = await self.client.fetch_all(
+                query,
+                (visible_project_ids, IDENTITY_ENTITY_ID),
+            )
             return [
                 {
                     "topic": self._clean_string(r["topic"]),
@@ -639,14 +687,22 @@ class EntityReader:
             logger.error(f"Failed to get entity count by topic: {e}")
             return []
 
-    async def get_top_connected_entities(self, limit: int = 10) -> List[Dict]:
+    async def get_top_connected_entities(
+        self, *, visible_project_ids: List[str], limit: int = 10
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_top_connected_entities",
+        )
         query = """
         WITH edge_ends AS (
             SELECT entity_a_id AS entity_id
             FROM relationships
+            WHERE project_id = ANY(%s)
             UNION ALL
             SELECT entity_b_id AS entity_id
             FROM relationships
+            WHERE project_id = ANY(%s)
         )
         SELECT
             e.canonical_name AS name,
@@ -659,7 +715,10 @@ class EntityReader:
         LIMIT %s
         """
         try:
-            res = await self.client.execute_read(query, (limit,))
+            res = await self.client.fetch_all(
+                query,
+                (visible_project_ids, visible_project_ids, limit),
+            )
             return [
                 {
                     "name": self._clean_string(r["name"]),
@@ -672,7 +731,16 @@ class EntityReader:
             logger.error(f"Failed to get top connected entities: {e}")
             return []
 
-    async def get_entity_relationships(self, entity_id: int) -> List[Dict]:
+    async def get_entity_relationships(
+        self,
+        entity_id: int,
+        *,
+        visible_project_ids: List[str],
+    ) -> List[Dict]:
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_entity_relationships",
+        )
         query = """
         SELECT
             CASE
@@ -703,6 +771,8 @@ class EntityReader:
         LEFT JOIN relationship_evidence_refs ref
           ON ref.relationship_id = r.relationship_id
         WHERE %s IN (r.entity_a_id, r.entity_b_id)
+          AND r.project_id = ANY(%s)
+          AND (neighbor.project_id = ANY(%s) OR neighbor.entity_id = %s)
         GROUP BY
             r.relationship_id,
             r.entity_a_id,
@@ -715,9 +785,16 @@ class EntityReader:
         ORDER BY r.last_seen_ms DESC NULLS LAST
         """
         try:
-            res = await self.client.execute_read(
+            res = await self.client.fetch_all(
                 query,
-                (entity_id, entity_id, entity_id),
+                (
+                    entity_id,
+                    entity_id,
+                    entity_id,
+                    visible_project_ids,
+                    visible_project_ids,
+                    IDENTITY_ENTITY_ID,
+                ),
             )
             return [
                 {
@@ -735,12 +812,19 @@ class EntityReader:
             return []
 
     async def get_recently_active_entities(
-        self, days: int = 7, limit: int = 10
+        self,
+        *,
+        visible_project_ids: List[str],
+        days: int = 7,
+        limit: int = 10,
     ) -> List[Dict]:
+        scope = self._scope_params(visible_project_ids)
         cutoff = (get_now() - timedelta(days=days)).isoformat()
         cypher = """
         MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
-        WHERE f.valid_at > $cutoff
+        WHERE ($filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
+        AND f.project_id IN $visible_project_ids
+        AND f.valid_at > $cutoff
         AND f.invalid_at IS NULL
         WITH e, count(f) as recent_facts, max(f.valid_at) as last_activity
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
@@ -759,8 +843,9 @@ class EntityReader:
             "recent_facts agtype, last_activity agtype",
         )
         try:
-            res = await self.client.execute_read(
-                query, (json.dumps({"cutoff": cutoff, "limit": limit}),)
+            res = await self.client.fetch_all(
+                query,
+                (json.dumps({"cutoff": cutoff, "limit": limit, **scope}),),
             )
             return [
                 {
@@ -785,14 +870,20 @@ class EntityReader:
             logger.error(f"Failed to get recently active entities: {e}")
             return []
 
-    async def get_notable_entities(self, limit: int = 10) -> List[Dict]:
+    async def get_notable_entities(
+        self, *, visible_project_ids: List[str], limit: int = 10
+    ) -> List[Dict]:
+        scope = self._scope_params(visible_project_ids)
         cypher = """
         MATCH (e:Entity)
         WHERE e.canonical_name IS NOT NULL
+        AND ($filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
         OPTIONAL MATCH (e)-[r]-()
+        WHERE r IS NULL OR r.project_id IN $visible_project_ids
         WITH e, count(DISTINCT r) as connection_count
         OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
         WHERE f.invalid_at IS NULL
+          AND f.project_id IN $visible_project_ids
         WITH e, connection_count, count(f) as fact_count
         OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
         RETURN e.id as id,
@@ -810,7 +901,10 @@ class EntityReader:
             "connection_count agtype, fact_count agtype",
         )
         try:
-            res = await self.client.execute_read(query, (json.dumps({"limit": limit}),))
+            res = await self.client.fetch_all(
+                query,
+                (json.dumps({"limit": limit, **scope}),),
+            )
             return [
                 {
                     "id": int(r["id"]),

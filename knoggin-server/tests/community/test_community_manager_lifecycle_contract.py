@@ -40,7 +40,7 @@ class RecordingCommunityGraph:
         )
 
 
-class RecordingGraphClient:
+class RecordingKnowledgeStore:
     def __init__(self):
         self.community = RecordingCommunityGraph()
 
@@ -79,7 +79,7 @@ def patch_events(monkeypatch):
 def make_resources(*, redis=None):
     return SimpleNamespace(
         redis=redis or FakeRedis(),
-        graph=RecordingGraphClient(),
+        knowledge_store=RecordingKnowledgeStore(),
         llm_service=object(),
     )
 
@@ -123,7 +123,7 @@ async def test_trigger_discussion_skips_when_active_discussion_exists(monkeypatc
 
     await manager.trigger_discussion()
 
-    assert resources.graph.community.created == []
+    assert resources.knowledge_store.community.created == []
     assert manager._discussion_task is None
 
 
@@ -156,12 +156,12 @@ async def test_trigger_discussion_creates_discussion_and_cleans_up_after_error(
     await manager.trigger_discussion()
     await manager._discussion_task
 
-    created = resources.graph.community.created
+    created = resources.knowledge_store.community.created
     assert len(created) == 1
     discussion_id = created[0]["discussion_id"]
     assert created[0]["topic"] == "Profile stability"
     assert created[0]["agent_ids"] == ["agent-1"]
-    assert resources.graph.community.closed == [discussion_id]
+    assert resources.knowledge_store.community.closed == [discussion_id]
     assert await redis.get(manager._active_discussion_key()) is None
     assert manager._active_discussion_id is None
     assert [event[2] for event in events] == [
@@ -229,7 +229,7 @@ async def test_run_loop_rotates_participants_persists_messages_and_stops_on_end(
     assert [turn["agent_id"] for turn in seen_turns] == ["agent-1", "agent-2"]
     assert seen_turns[1]["history"][0]["content"] == "First contribution"
     assert seen_turns[1]["participants"] == ["agent-1", "agent-2"]
-    assert resources.graph.community.messages == [
+    assert resources.knowledge_store.community.messages == [
         {
             "discussion_id": "disc-1",
             "agent_id": "agent-1",
@@ -290,7 +290,7 @@ async def test_run_loop_stops_when_active_discussion_key_changes(monkeypatch):
     await manager._run_loop("disc-1", "Profile stability", ["agent-1"])
 
     assert turns == 1
-    assert len(resources.graph.community.messages) == 1
+    assert len(resources.knowledge_store.community.messages) == 1
 
 
 @pytest.mark.no_network

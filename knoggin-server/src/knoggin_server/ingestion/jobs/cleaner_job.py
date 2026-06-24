@@ -6,7 +6,7 @@ from loguru import logger
 from common.schema.settings import CleanerSettings
 from common.utils.events import emit
 from common.utils.time_utils import get_now_ms
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.services.entity_service import EntityManager
@@ -24,7 +24,7 @@ class EntityCleanupJob(BaseJob):
     def __init__(
         self,
         user_name: str,
-        graph_client: GraphInterface,
+        knowledge_store: KnowledgeStore,
         entities: EntityManager,
         redis_client: aioredis.Redis,
         interval_hours: int = 24,
@@ -32,7 +32,7 @@ class EntityCleanupJob(BaseJob):
         stale_junk_days: int = 30,
     ):
         self.user_name = user_name
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.redis = redis_client
         self.entities = entities
 
@@ -58,7 +58,7 @@ class EntityCleanupJob(BaseJob):
             user=ctx.user_name, job=self.name, project=ctx.project_id
         ):
             project_id = ctx.project_id
-            null_deleted_ids = await self.graph_client.cleanup_null_entities(
+            null_deleted_ids = await self.knowledge_store.cleanup_null_entities(
                 project_id=project_id
             )
             if null_deleted_ids:
@@ -72,7 +72,7 @@ class EntityCleanupJob(BaseJob):
             if user_id is None:
                 return JobResult(success=True, summary="User entity not initialized")
 
-            orphan_ids = await self.graph_client.get_orphan_entities(
+            orphan_ids = await self.knowledge_store.get_orphan_entities(
                 user_id, orphan_cutoff, junk_cutoff, project_id=project_id
             )
 
@@ -108,7 +108,7 @@ class EntityCleanupJob(BaseJob):
             deleted_ids = list(null_deleted_ids)
             for i in range(0, len(orphan_ids), batch_size):
                 batch = orphan_ids[i : i + batch_size]
-                batch_deleted_ids = await self.graph_client.bulk_delete_entities(
+                batch_deleted_ids = await self.knowledge_store.bulk_delete_entities(
                     batch, project_id=project_id
                 )
                 deleted_ids.extend(batch_deleted_ids)

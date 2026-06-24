@@ -15,7 +15,7 @@ from common.utils.data_utils import (
 )
 from common.utils.events import emit
 from common.utils.time_utils import get_now_unix, parse_iso_time_or_now
-from infrastructure.graph_interface import GraphInterface
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
@@ -45,7 +45,7 @@ class ProfileRefinementJob(BaseJob):
         self,
         llm: LLMService,
         entities: EntityManager,
-        graph_client: GraphInterface,
+        knowledge_store: KnowledgeStore,
         executor: ThreadPoolExecutor,
         embedding_service: EmbeddingService,
         redis_client: aioredis.Redis,
@@ -63,7 +63,7 @@ class ProfileRefinementJob(BaseJob):
 
         self.llm = llm
         self.entities = entities
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.redis = redis_client
         self.executor = executor
         self.embedding_service = embedding_service
@@ -203,7 +203,7 @@ class ProfileRefinementJob(BaseJob):
     ) -> List[Dict[str, Any]]:
         """Fetch recent conversation with user/assistant ratio splitting."""
         fetch_count = int(num_turns * 2)
-        turns = await self.graph_client.get_recent_project_messages(
+        turns = await self.knowledge_store.get_recent_project_messages(
             ctx.user_name,
             ctx.project_id,
             fetch_count,
@@ -448,9 +448,10 @@ class ProfileRefinementJob(BaseJob):
         current_msg_id = curr_msg_id
 
         # Fetch existing facts from DB
-        existing_facts = await self.graph_client.get_facts_for_entity(
+        existing_facts = await self.knowledge_store.get_facts_for_entity(
             user_id,
-            True,  # active_only
+            visible_project_ids=self.entities.readable_project_ids,
+            active_only=True,
         )
 
         if existing_facts is None:
@@ -464,7 +465,8 @@ class ProfileRefinementJob(BaseJob):
 
         enriched_facts = await enrich_facts_with_sources(
             existing_facts,
-            self.graph_client,
+            self.knowledge_store,
+            self.entities.readable_project_ids,
             user_name=ctx.user_name,
         )
         if len(enriched_facts) > self.max_facts_context:
@@ -530,15 +532,15 @@ class ProfileRefinementJob(BaseJob):
             existing_facts,
             valid_msg_ids,
             ctx.project_id,
-            self.graph_client,
+            self.knowledge_store,
             self.embedding_service,
             self.llm,
-            self.contradiction_sim_low,
-            self.contradiction_sim_high,
-            self.contradiction_batch_size,
-            self.contradiction_prompt,
             user_name=ctx.user_name,
             project_id=IDENTITY_SCOPE,
+            contradiction_sim_low=self.contradiction_sim_low,
+            contradiction_sim_high=self.contradiction_sim_high,
+            contradiction_batch_size=self.contradiction_batch_size,
+            contradiction_prompt=self.contradiction_prompt,
             source_session_by_msg_id=source_session_by_msg_id,
         )
         if fact_summary.failed_invalidations:
@@ -555,7 +557,7 @@ class ProfileRefinementJob(BaseJob):
             fact_summary.active_facts,
         )
 
-        await self.graph_client.update_entity_profile(
+        await self.knowledge_store.update_entity_profile(
             entity_id=user_id,
             canonical_name=ctx.user_name,
             embedding=embedding,
@@ -593,7 +595,8 @@ class ProfileRefinementJob(BaseJob):
             for e in batch:
                 enriched_facts = await enrich_facts_with_sources(
                     e["existing_facts"],
-                    self.graph_client,
+                    self.knowledge_store,
+                    self.entities.readable_project_ids,
                     user_name=ctx.user_name,
                 )
                 if len(enriched_facts) > self.max_facts_context:
@@ -674,15 +677,15 @@ class ProfileRefinementJob(BaseJob):
                     existing_facts,
                     valid_msg_ids,
                     ctx.project_id,
-                    self.graph_client,
+                    self.knowledge_store,
                     self.embedding_service,
                     self.llm,
-                    self.contradiction_sim_low,
-                    self.contradiction_sim_high,
-                    self.contradiction_batch_size,
-                    self.contradiction_prompt,
                     user_name=ctx.user_name,
                     project_id=project_id,
+                    contradiction_sim_low=self.contradiction_sim_low,
+                    contradiction_sim_high=self.contradiction_sim_high,
+                    contradiction_batch_size=self.contradiction_batch_size,
+                    contradiction_prompt=self.contradiction_prompt,
                     source_session_by_msg_id=source_session_by_msg_id,
                 )
                 if fact_summary.failed_invalidations:
@@ -715,7 +718,7 @@ class ProfileRefinementJob(BaseJob):
             ]
 
             for orig in no_update_ents:
-                await self.graph_client.update_entity_checkpoint(
+                await self.knowledge_store.update_entity_checkpoint(
                     orig["ent_id"], current_msg_id, project_id=project_id
                 )
 
@@ -741,8 +744,10 @@ class ProfileRefinementJob(BaseJob):
                 entity_ids,
             )  # if invalid, we should clear them from dirty queue too
 
-        ents_to_facts = await self.graph_client.get_facts_for_entities(
-            [ent_id for ent_id, _ in valid_entities], True
+        ents_to_facts = await self.knowledge_store.get_facts_for_entities(
+            [ent_id for ent_id, _ in valid_entities],
+            visible_project_ids=self.entities.readable_project_ids,
+            active_only=True,
         )
 
         if ents_to_facts is None:
@@ -752,8 +757,9 @@ class ProfileRefinementJob(BaseJob):
             return [], []
 
         # Batch fetch last_profiled_msg_id for all entities to avoid N+1
-        entities_data = await self.graph_client.get_entities_by_ids(
-            [ent_id for ent_id, _ in valid_entities]
+        entities_data = await self.knowledge_store.get_entities_by_ids(
+            [ent_id for ent_id, _ in valid_entities],
+            visible_project_ids=self.entities.readable_project_ids,
         )
         profiled_checkpoints = {
             e["id"]: e.get("last_profiled_msg_id", 0) for e in entities_data
@@ -847,7 +853,11 @@ class ProfileRefinementJob(BaseJob):
     ) -> List[float]:
         """Recompute entity embedding from current active facts."""
         if active_facts is None:
-            active_facts = await self.graph_client.get_facts_for_entity(entity_id, True)
+            active_facts = await self.knowledge_store.get_facts_for_entity(
+                entity_id,
+                visible_project_ids=self.entities.readable_project_ids,
+                active_only=True,
+            )
             if active_facts is None:
                 logger.warning(
                     "Could not fetch facts for embedding update, using name only"
@@ -864,10 +874,10 @@ class ProfileRefinementJob(BaseJob):
         return new_emb
 
     async def _write_updates(self, updates: List[Dict], project_id: str):
-        """Write profile updates to GraphClient sequentially."""
+        """Write profile updates to KnowledgeStore sequentially."""
 
         for update in updates:
-            await self.graph_client.update_entity_profile(
+            await self.knowledge_store.update_entity_profile(
                 entity_id=update["id"],
                 canonical_name=update["canonical_name"],
                 embedding=update["embedding"],

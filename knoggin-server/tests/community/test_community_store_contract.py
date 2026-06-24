@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -12,59 +13,11 @@ class RecordingCursor:
     def __init__(self, client):
         self.client = client
 
-    async def __aenter__(self):
-        self.client.cursor_enters += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.client.cursor_exits += 1
-        return False
-
     async def execute(self, query, params=None):
         self.client.cursor_execute_calls.append((query, params))
 
     async def fetchone(self):
         return self.client.fetchone_result
-
-
-class RecordingTransaction:
-    def __init__(self, client):
-        self.client = client
-
-    async def __aenter__(self):
-        self.client.transaction_enters += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.client.transaction_exits += 1
-        return False
-
-
-class RecordingConnection:
-    def __init__(self, client):
-        self.client = client
-
-    async def __aenter__(self):
-        self.client.connection_enters += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.client.connection_exits += 1
-        return False
-
-    def transaction(self):
-        return RecordingTransaction(self.client)
-
-    def cursor(self):
-        return RecordingCursor(self.client)
-
-
-class RecordingAsyncPool:
-    def __init__(self, client):
-        self.client = client
-
-    def connection(self):
-        return RecordingConnection(self.client)
 
 
 class RecordingPostgresClient:
@@ -75,7 +28,6 @@ class RecordingPostgresClient:
         read_exception=None,
         write_exception=None,
         fetchone_result=None,
-        async_pool=True,
     ):
         self.build_calls = []
         self.read_calls = []
@@ -85,9 +37,6 @@ class RecordingPostgresClient:
         self.read_exception = read_exception
         self.write_exception = write_exception
         self.fetchone_result = fetchone_result
-        self.async_pool = RecordingAsyncPool(self) if async_pool else None
-        self.connection_enters = 0
-        self.connection_exits = 0
         self.transaction_enters = 0
         self.transaction_exits = 0
         self.cursor_enters = 0
@@ -102,19 +51,28 @@ class RecordingPostgresClient:
         self.build_calls.append((cypher_query, return_types, graph_name))
         return f"cypher<{graph_name}|{return_types}>:{cypher_query}"
 
-    async def execute_write(self, query, params=None):
+    async def execute(self, query, params=None):
         self.write_calls.append((query, params))
         if self.write_exception:
             raise self.write_exception
-        return 1
 
-    async def execute_read(self, query, params=None):
+    async def fetch_all(self, query, params=None):
         self.read_calls.append((query, params))
         if self.read_exception:
             raise self.read_exception
         if not self.read_results:
             return []
         return self.read_results.pop(0)
+
+    @asynccontextmanager
+    async def transaction(self):
+        self.transaction_enters += 1
+        self.cursor_enters += 1
+        try:
+            yield RecordingCursor(self)
+        finally:
+            self.cursor_exits += 1
+            self.transaction_exits += 1
 
 
 def only_payload(call):
@@ -378,19 +336,8 @@ async def test_community_store_delete_old_discussions_uses_pool_and_returns_coun
         deleted = await store.delete_old_discussions(retention_days=7)
 
     assert deleted == 2
-    assert client.connection_enters == 1
     assert client.transaction_enters == 1
     assert client.cursor_enters == 1
     query, params = client.cursor_execute_calls[0]
     assert "DETACH DELETE d, m" in query
     assert json.loads(params[0]) == {"cutoff": "2026-02-03T04:05:06+00:00"}
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_community_store_delete_old_discussions_without_pool_returns_zero():
-    client = RecordingPostgresClient(async_pool=False)
-    store = CommunityStore(client)
-
-    assert await store.delete_old_discussions(retention_days=7) == 0
-    assert client.cursor_execute_calls == []

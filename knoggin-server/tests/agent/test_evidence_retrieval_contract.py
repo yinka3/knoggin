@@ -8,12 +8,13 @@ from knoggin_server.agent.tools.search import SearchTools
 from tests.fixtures.fakes import FakeRedis
 
 
-def make_search_tool(redis=None, graph_client=None):
+def make_search_tool(redis=None, knowledge_store=None):
     tool = SearchTools()
     tool.redis = redis or FakeRedis()
-    tool.graph_client = graph_client or object()
+    tool.knowledge_store = knowledge_store or object()
     tool.user_name = "ada"
     tool.session_id = "session-1"
+    tool.readable_project_ids = ["project-1"]
     return tool
 
 
@@ -98,14 +99,30 @@ async def test_surrounding_context_uses_message_ids_and_skips_malformed_entries(
 
 @pytest.mark.no_network
 async def test_surrounding_context_falls_back_to_graph_when_redis_rank_is_missing():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
 
         async def get_surrounding_messages(
-            self, msg_id, forward, target_total, user_name, session_id
+            self,
+            msg_id,
+            *,
+            user_name,
+            session_id,
+            visible_project_ids,
+            forward,
+            target_total,
         ):
-            self.calls.append((msg_id, forward, target_total, user_name, session_id))
+            self.calls.append(
+                (
+                    msg_id,
+                    forward,
+                    target_total,
+                    user_name,
+                    session_id,
+                    visible_project_ids,
+                )
+            )
             return [
                 {
                     "id": 4,
@@ -121,14 +138,16 @@ async def test_surrounding_context_falls_back_to_graph_when_redis_rank_is_missin
                 },
             ]
 
-    graph = FakeGraphClient()
-    tool = make_search_tool(redis=FakeRedis(), graph_client=graph)
+    knowledge_store = FakeKnowledgeStore()
+    tool = make_search_tool(redis=FakeRedis(), knowledge_store=knowledge_store)
 
     context = await tool._get_surrounding_context(
         "msg_5", forward=1, target_total=3, session_id="session-2"
     )
 
-    assert graph.calls == [(5, 1, 3, "ada", "session-2")]
+    assert knowledge_store.calls == [
+        (5, 1, 3, "ada", "session-2", ["project-1"])
+    ]
     assert [item["id"] for item in context] == ["msg_4", "msg_5"]
     assert context[1]["is_hit"] is True
 
@@ -204,12 +223,21 @@ async def test_hydrate_evidence_uses_explicit_and_default_scope():
 
 @pytest.mark.no_network
 async def test_hydrate_evidence_falls_back_to_scoped_graph_lookup_on_redis_miss():
-    class FakeGraphClient:
+    class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
 
-        async def get_messages_by_ids(self, message_ids, user_name, session_ids):
-            self.calls.append((message_ids, user_name, session_ids))
+        async def get_messages_by_ids(
+            self,
+            message_ids,
+            *,
+            user_name,
+            session_ids,
+            visible_project_ids,
+        ):
+            self.calls.append(
+                (message_ids, user_name, session_ids, visible_project_ids)
+            )
             return [
                 {
                     "id": 11,
@@ -220,14 +248,16 @@ async def test_hydrate_evidence_falls_back_to_scoped_graph_lookup_on_redis_miss(
                 }
             ]
 
-    graph = FakeGraphClient()
-    tool = make_search_tool(redis=FakeRedis(), graph_client=graph)
+    knowledge_store = FakeKnowledgeStore()
+    tool = make_search_tool(redis=FakeRedis(), knowledge_store=knowledge_store)
 
     evidence = await tool._hydrate_evidence(
         [{"user_name": "ada", "session_id": "session-2", "message_id": 11}]
     )
 
-    assert graph.calls == [([11], "ada", ["session-2"])]
+    assert knowledge_store.calls == [
+        ([11], "ada", ["session-2"], ["project-1"])
+    ]
     assert evidence == [
         {
             "id": "msg_11",

@@ -75,19 +75,6 @@ def make_relationship(**overrides):
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_entity_writer_write_batch_requires_async_pool():
-    client = RecordingPostgresClient()
-    client.async_pool = None
-    writer = EntityWriter(client)
-
-    with pytest.raises(RuntimeError, match="async_pool is not initialized"):
-        await writer.write_batch([make_entity()], [])
-
-    assert client.calls == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 async def test_entity_writer_write_batch_rejects_unscoped_entities_without_execute():
     client = RecordingPostgresClient()
     writer = EntityWriter(client)
@@ -145,7 +132,7 @@ async def test_entity_writer_new_entity_uses_strict_insert():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_entity_writer_existing_entity_must_exist_in_scope():
-    client = RecordingPostgresClient(fetchone_results=[None])
+    client = RecordingPostgresClient(fetch_one_results=[None])
     writer = EntityWriter(client)
 
     with pytest.raises(RuntimeError, match="Existing entity 2 was not found"):
@@ -159,7 +146,7 @@ async def test_entity_writer_existing_entity_must_exist_in_scope():
 @pytest.mark.no_network
 async def test_entity_writer_existing_entity_replaces_age_topic():
     client = RecordingPostgresClient(
-        fetchone_results=[{"entity_id": 2}],
+        fetch_one_results=[{"entity_id": 2}],
     )
     writer = EntityWriter(client)
 
@@ -190,7 +177,7 @@ async def test_entity_writer_existing_entity_replaces_age_topic():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_entity_writer_ensures_reserved_identity_in_sql_and_age(monkeypatch):
-    client = RecordingPostgresClient(fetchone_results=[None])
+    client = RecordingPostgresClient(fetch_one_results=[None])
     writer = EntityWriter(client)
     monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
 
@@ -226,7 +213,7 @@ async def test_entity_writer_ensures_reserved_identity_in_sql_and_age(monkeypatc
 @pytest.mark.no_network
 async def test_entity_writer_rejects_non_identity_occupant_at_reserved_id():
     client = RecordingPostgresClient(
-        fetchone_results=[
+        fetch_one_results=[
             {
                 "entity_id": IDENTITY_ENTITY_ID,
                 "user_name": "grace",
@@ -279,7 +266,9 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
 
     # 1. Verify entity_search table
     entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
-    embedding = await reader.get_entity_embedding(2)
+    embedding = await reader.get_entity_embedding(
+        2, visible_project_ids=["project-1"]
+    )
     assert entity is not None
     assert entity["canonical_name"] == "Ada Lovelace"
     assert embedding == [0.1] * 1024
@@ -289,7 +278,7 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
         "MATCH (e:Entity {id: 2}) RETURN e.canonical_name",
         "name agtype",
     )
-    res = await real_postgres_client.execute_read(node_query, ("{}",))
+    res = await real_postgres_client.fetch_all(node_query, ("{}",))
     assert len(res) == 1
     assert "Ada Lovelace" in str(res[0]["name"])
 
@@ -298,13 +287,13 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
         "MATCH (a)-[r:RELATED_TO]->(b) RETURN r.context, r.message_ids",
         "ctx agtype, msg_ids agtype",
     )
-    edges = await real_postgres_client.execute_read(edge_query, ("{}",))
+    edges = await real_postgres_client.fetch_all(edge_query, ("{}",))
     assert len(edges) == 2
     edges_str = str(edges)
     assert "125" in edges_str
     assert "123" in edges_str
 
-    rel_rows = await real_postgres_client.execute_read(
+    rel_rows = await real_postgres_client.fetch_all(
         """
         SELECT relationship_id, entity_a_id, entity_b_id, weight, confidence, context
         FROM relationships
@@ -332,7 +321,7 @@ async def test_entity_writer_write_batch_dual_writes_entities_and_relationships(
         },
     ]
 
-    evidence_rows = await real_postgres_client.execute_read(
+    evidence_rows = await real_postgres_client.fetch_all(
         """
         SELECT relationship_id, user_name, session_id, message_id
         FROM relationship_evidence_refs
@@ -379,7 +368,9 @@ async def test_entity_writer_update_entity_profile_updates_graph_and_search(
 
     # Verify search table
     entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
-    embedding = await reader.get_entity_embedding(2)
+    embedding = await reader.get_entity_embedding(
+        2, visible_project_ids=["project-1"]
+    )
     assert entity["canonical_name"] == "Ada Byron"
     assert embedding == [0.3] * 1024
 
@@ -389,7 +380,7 @@ async def test_entity_writer_update_entity_profile_updates_graph_and_search(
         "RETURN e.canonical_name, e.last_profiled_msg_id",
         "name agtype, msg_id agtype",
     )
-    res = await real_postgres_client.execute_read(node_query, ("{}",))
+    res = await real_postgres_client.fetch_all(node_query, ("{}",))
     assert "Ada Byron" in str(res[0]["name"])
     assert "77" in str(res[0]["msg_id"])
 
@@ -420,7 +411,7 @@ async def test_entity_writer_update_entity_canonical_name_updates_graph_and_sear
         "MATCH (e:Entity {id: 2}) RETURN e.canonical_name",
         "name agtype",
     )
-    res = await real_postgres_client.execute_read(node_query, ("{}",))
+    res = await real_postgres_client.fetch_all(node_query, ("{}",))
     assert "Ada Byron" in str(res[0]["name"])
 
 
@@ -450,14 +441,14 @@ async def test_entity_writer_update_entity_embedding_updates_graph_and_search(
         "MATCH (e:Entity {id: 2}) RETURN e.last_updated",
         "now agtype",
     )
-    res = await real_postgres_client.execute_read(node_query, ("{}",))
+    res = await real_postgres_client.fetch_all(node_query, ("{}",))
     assert "123456" in str(res[0]["now"])
 
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-async def test_entity_writer_update_entity_checkpoint_uses_execute_write_scope(
+async def test_entity_writer_update_entity_checkpoint_preserves_project_scope(
     real_postgres_client
 ):
     writer = EntityWriter(real_postgres_client)
@@ -471,11 +462,8 @@ async def test_entity_writer_update_entity_checkpoint_uses_execute_write_scope(
         "MATCH (e:Entity {id: 2}) RETURN e.last_profiled_msg_id",
         "msg_id agtype",
     )
-    res = await real_postgres_client.execute_read(node_query, ("{}",))
+    res = await real_postgres_client.fetch_all(node_query, ("{}",))
     assert "77" in str(res[0]["msg_id"])
-
-
-
 @pytest.mark.storage
 @pytest.mark.no_network
 @pytest.mark.parametrize(
@@ -485,7 +473,7 @@ async def test_entity_writer_update_entity_checkpoint_uses_execute_write_scope(
         ("update_entity_canonical_name", (2, "Ada Byron")),
         ("update_entity_embedding", (2, [0.1])),
         ("update_entity_checkpoint", (2, 7)),
-
+        ("update_entity_aliases", ({2: ["Ada"]},)),
         ("cleanup_null_entities", ()),
         ("delete_entity", (2,)),
         ("bulk_delete_entities", ([2],)),
@@ -499,10 +487,10 @@ async def test_entity_writer_scoped_operations_require_project_without_db_access
     writer = EntityWriter(client)
 
     with pytest.raises(ValueError, match=f"{method_name} requires project_id scope"):
-        await getattr(writer, method_name)(*args)
+        await getattr(writer, method_name)(*args, project_id="")
 
     assert client.calls == []
-    assert client.connection_enters == 0
+    assert client.transaction_enters == 0
 
 
 @pytest.mark.storage
@@ -537,7 +525,7 @@ async def test_entity_writer_delete_entity_deletes_graph_and_search_row(
 
     entity = await reader.get_entity_by_id(2, visible_project_ids=["project-1"])
     assert entity is None
-    sql_counts = await real_postgres_client.execute_read(
+    sql_counts = await real_postgres_client.fetch_all(
         """
         SELECT
             (SELECT count(*) FROM facts WHERE fact_id = 'delete-fact') AS facts,
@@ -558,7 +546,7 @@ async def test_entity_writer_delete_entity_deletes_graph_and_search_row(
         """,
         "entity_count agtype, fact_count agtype",
     )
-    res = await real_postgres_client.execute_read(node_query, ("{}",))
+    res = await real_postgres_client.fetch_all(node_query, ("{}",))
     assert int(res[0]["entity_count"]) == 0
     assert int(res[0]["fact_count"]) == 0
 
@@ -571,14 +559,14 @@ async def test_entity_writer_bulk_delete_entities_empty_list_skips_db():
 
     assert await writer.bulk_delete_entities([], project_id="project-1") == []
     assert client.calls == []
-    assert client.connection_enters == 0
+    assert client.transaction_enters == 0
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_entity_writer_bulk_delete_returns_exact_scoped_ids():
     client = RecordingPostgresClient(
-        fetchall_results=[[{"entity_id": 2}, {"entity_id": 4}]]
+        fetch_all_results=[[{"entity_id": 2}, {"entity_id": 4}]]
     )
     writer = EntityWriter(client)
 
@@ -607,7 +595,7 @@ async def test_entity_writer_bulk_delete_returns_exact_scoped_ids():
 @pytest.mark.no_network
 async def test_entity_writer_null_cleanup_uses_aggregate_deletion():
     client = RecordingPostgresClient(
-        fetchall_results=[
+        fetch_all_results=[
             [{"entity_id": 4}, {"entity_id": 2}],
             [{"entity_id": 2}, {"entity_id": 4}],
         ]
@@ -634,7 +622,7 @@ async def test_entity_writer_null_cleanup_uses_aggregate_deletion():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_entity_writer_delete_returns_false_when_scope_does_not_match():
-    client = RecordingPostgresClient(fetchall_results=[[]])
+    client = RecordingPostgresClient(fetch_all_results=[[]])
     writer = EntityWriter(client)
 
     assert await writer.delete_entity(2, project_id="wrong-project") is False
@@ -662,7 +650,7 @@ async def test_entity_writer_rejects_identity_deletion_without_db_access():
         == []
     )
     assert client.calls == []
-    assert client.connection_enters == 0
+    assert client.transaction_enters == 0
 
 
 @pytest.mark.storage

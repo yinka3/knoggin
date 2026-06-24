@@ -69,12 +69,12 @@ class BatchProcessor:
         context_support_epsilon: Optional[float] = None,
         sparse_context_verbs: Optional[List[str]] = None,
         connection_prompt: str = None,
-        graph_client=None,
+        knowledge_store=None,
     ):
         if not project_id:
             raise ValueError("BatchProcessor requires project_id")
         self.project_id = project_id
-        self.graph_client = graph_client
+        self.knowledge_store = knowledge_store
         self.redis = redis_client
         self.llm = llm
         self.entities = entities

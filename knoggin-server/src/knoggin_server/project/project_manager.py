@@ -449,7 +449,7 @@ class ProjectManager:
         entities = EntityManager(
             project_id=project_id,
             readable_project_ids=readable_project_ids,
-            graph_client=self.resources.graph,
+            knowledge_store=self.resources.knowledge_store,
             embedding_service=self.resources.embedding,
             hierarchy_config=t_config.hierarchy,
             fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
@@ -482,11 +482,11 @@ class ProjectManager:
             llm=self.resources.llm_service,
             entities=entities,
             processor=pipeline,
-            graph_client=self.resources.graph,
+            knowledge_store=self.resources.knowledge_store,
             cpu_executor=self.resources.executor,
             user_name=self.user_name,
             topic_config=t_config,
-            get_next_ent_id=self.resources.graph.allocate_entity_id,
+            get_next_ent_id=self.resources.knowledge_store.allocate_entity_id,
             resolution_threshold=er_cfg.resolution_threshold,
             common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
             context_support_epsilon=er_cfg.context_support_epsilon,
@@ -550,7 +550,7 @@ class ProjectManager:
                 for stored_id, raw in stored_projects.items()
                 if safe_json_loads(raw, {}).get("status") in retained_statuses
             )
-            return await self.resources.graph.rebuild_project_search_indexes(
+            return await self.resources.knowledge_store.rebuild_project_search_indexes(
                 project_id,
                 self.user_name,
                 identity_project_ids,
@@ -585,7 +585,7 @@ class ProjectManager:
         if self._identity_initialized:
             return
 
-        await self.resources.graph.ensure_identity_entity(
+        await self.resources.knowledge_store.ensure_identity_entity(
             self.user_name,
             getattr(self.config, "user_aliases", []),
         )
@@ -599,7 +599,7 @@ class ProjectManager:
         return ProfileRefinementJob(
             llm=self.resources.llm_service,
             entities=entities,
-            graph_client=self.resources.graph,
+            knowledge_store=self.resources.knowledge_store,
             executor=self.resources.executor,
             embedding_service=self.resources.embedding,
             redis_client=self.resources.redis,
@@ -624,7 +624,7 @@ class ProjectManager:
         return MergeDetectionJob(
             user_name=self.user_name,
             entities=entities,
-            graph_client=self.resources.graph,
+            knowledge_store=self.resources.knowledge_store,
             llm_client=self.resources.llm_service,
             topic_config=topic_config,
             redis_client=self.resources.redis,
@@ -654,7 +654,7 @@ class ProjectManager:
                 return False, "DLQ graph replay missing source session_id"
             return await write_batch_callback(
                 result,
-                graph_client=self.resources.graph,
+                knowledge_store=self.resources.knowledge_store,
                 entities=entities,
                 session_id=result.scope.session_id,
                 project_id=project_id,
@@ -726,7 +726,7 @@ class ProjectManager:
         clean_cfg = jobs_cfg.cleaner
         cleaner_job = EntityCleanupJob(
             user_name=self.user_name,
-            graph_client=self.resources.graph,
+            knowledge_store=self.resources.knowledge_store,
             entities=entities,
             redis_client=self.resources.redis,
             interval_hours=clean_cfg.interval_hours,
@@ -743,7 +743,7 @@ class ProjectManager:
         arch_cfg = jobs_cfg.archival
         archival_job = FactArchivalJob(
             user_name=self.user_name,
-            graph_client=self.resources.graph,
+            knowledge_store=self.resources.knowledge_store,
             redis_client=self.resources.redis,
             retention_days=arch_cfg.retention_days,
             fallback_interval_hours=arch_cfg.fallback_interval_hours,
@@ -761,7 +761,7 @@ class ProjectManager:
             topic_config=topic_config,
             update_callback=_update_topics_callback,
             redis_client=self.resources.redis,
-            graph_client=self.resources.graph,
+            knowledge_store=self.resources.knowledge_store,
             interval_msgs=topic_cfg.interval_msgs,
             conversation_window=topic_cfg.conversation_window,
         )

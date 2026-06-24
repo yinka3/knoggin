@@ -15,20 +15,13 @@ async def test_projection_rebuilder_requires_project_scope_without_db_access():
     rebuilder = ProjectionRebuilder(client)
 
     with pytest.raises(ValueError, match="requires project_id scope"):
-        await rebuilder.rebuild_project_projection("")
+        await rebuilder.rebuild_project_projection("", user_name="ada")
 
-    assert client.calls == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_projection_rebuilder_requires_async_pool():
-    client = RecordingPostgresClient()
-    client.async_pool = None
-    rebuilder = ProjectionRebuilder(client)
-
-    with pytest.raises(RuntimeError, match="async_pool is not initialized"):
-        await rebuilder.rebuild_project_projection("project-1")
+    with pytest.raises(ValueError, match="requires user_name scope"):
+        await rebuilder.rebuild_project_projection(
+            "project-1",
+            user_name="",
+        )
 
     assert client.calls == []
 
@@ -38,8 +31,8 @@ async def test_projection_rebuilder_requires_async_pool():
 async def test_projection_rebuilder_replays_canonical_rows_into_age_projection():
     timestamp = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
     client = RecordingPostgresClient(
-        fetchone_results=[{"projected_count": "1"}],
-        fetchall_results=[
+        fetch_one_results=[{"projected_count": "1"}],
+        fetch_all_results=[
             [
                 {
                     "id": 7,
@@ -189,7 +182,9 @@ async def test_projection_rebuilder_replays_canonical_rows_into_age_projection()
     relationship_projection = next(
         call
         for call in client.calls
-        if "UNWIND $batch AS rel" in call[1] and "SET r.weight = rel.weight" in call[1]
+        if "UNWIND $batch AS rel" in call[1]
+        and "r.project_id = rel.project_id" in call[1]
+        and "r.weight = rel.weight" in call[1]
     )
     assert json.loads(relationship_projection[2][0])["batch"] == [
         {

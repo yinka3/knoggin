@@ -30,7 +30,7 @@ flowchart TD
 
     RES --> R1{"Which dependency?"}
     R1 -->|Redis and fast state| REDIS["infrastructure/redis_client.py"]
-    R1 -->|Postgres, AGE, pgvector| GRAPH["infrastructure/graph_client.py<br/>postgres_client.py<br/>schema.sql"]
+    R1 -->|Postgres, AGE, pgvector| GRAPH["infrastructure/knowledge_store.py<br/>postgres_client.py<br/>schema.sql"]
     R1 -->|LLM calls| LLM["infrastructure/llm_client.py"]
     R1 -->|Embeddings and reranking| EMB["knowledge/services/embedding_service.py"]
 
@@ -58,7 +58,7 @@ flowchart TD
     GPU --> INIT
     CPU --> INIT
 
-    INIT["Create executor, GraphClient, Redis, LLM, embeddings"] --> LOAD["Load tokenizer, embedding models, spaCy, and GLiNER concurrently"]
+    INIT["Create executor, KnowledgeStore, Redis, LLM, embeddings"] --> LOAD["Load tokenizer, embedding models, spaCy, and GLiNER concurrently"]
     LOAD --> OK{"All critical models loaded?"}
     OK -->|No| TEARDOWN["Tear down partial resources<br/>raise DependencyError"]
     OK -->|Yes| CONNECT["Connect Postgres pools and load AGE"]
@@ -404,7 +404,7 @@ repairable knowledge index.
 - [`src/knoggin_server/ingestion/services/pipeline_service.py`](../src/knoggin_server/ingestion/services/pipeline_service.py)
 - [`src/knoggin_server/ingestion/services/processor.py`](../src/knoggin_server/ingestion/services/processor.py)
 - [`src/knoggin_server/knowledge/db/write_graph_db.py`](../src/knoggin_server/knowledge/db/write_graph_db.py)
-- [`src/infrastructure/graph_client.py`](../src/infrastructure/graph_client.py)
+- [`src/infrastructure/knowledge_store.py`](../src/infrastructure/knowledge_store.py)
 - [`src/infrastructure/schema.sql`](../src/infrastructure/schema.sql)
 - [`src/knoggin_server/agent/orchestrator.py`](../src/knoggin_server/agent/orchestrator.py)
 - [`src/knoggin_server/agent/executor.py`](../src/knoggin_server/agent/executor.py)

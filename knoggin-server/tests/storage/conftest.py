@@ -24,7 +24,7 @@ async def real_postgres_client():
 @pytest.fixture(autouse=True)
 async def clean_db(real_postgres_client):
     """Wipes relational tables and the AGE graph before every test."""
-    await real_postgres_client.execute_write(
+    await real_postgres_client.execute(
         """
         TRUNCATE TABLE
             relationship_evidence_refs,
@@ -41,12 +41,12 @@ async def clean_db(real_postgres_client):
     )
     # Ensure the AGE graph exists before trying to wipe it
     graph_name = "knoggin_graph"
-    res = await real_postgres_client.execute_read(
+    row = await real_postgres_client.fetch_one(
         "SELECT count(*) FROM ag_graph WHERE name = %s;",
         (graph_name,),
     )
-    if res[0]["count"] == 0:
-        await real_postgres_client.execute_write(
+    if row["count"] == 0:
+        await real_postgres_client.execute(
             f"SELECT create_graph('{graph_name}');"
         )
 
@@ -56,6 +56,6 @@ async def clean_db(real_postgres_client):
         "$$ MATCH (n) DETACH DELETE n RETURN n $$"
         ") AS (n agtype);"
     )
-    await real_postgres_client.execute_write(
+    await real_postgres_client.execute(
         wipe_graph_sql
     )
