@@ -6,15 +6,18 @@ from tests.fixtures.fakes import FakeScheduler
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_project_state_owns_distinct_file_rag_service():
+def test_project_state_owns_distinct_document_services():
     first = make_project_state(project_id="project-1")
     second = make_project_state(project_id="project-2")
 
-    assert first.file_rag.project_id == "project-1"
-    assert second.file_rag.project_id == "project-2"
-    assert first.file_rag is not second.file_rag
-    assert first.file_rag._postgres is first.postgres_client
-    assert first.file_rag._storage_root == first.file_storage_root.resolve()
+    assert first.document_service.project_id == "project-1"
+    assert second.document_service.project_id == "project-2"
+    assert first.document_service is not second.document_service
+    assert first.document_service._postgres is first.postgres_client
+    assert (
+        first.document_service._storage_root
+        == first.document_storage_root.resolve()
+    )
 
 
 @pytest.mark.unit

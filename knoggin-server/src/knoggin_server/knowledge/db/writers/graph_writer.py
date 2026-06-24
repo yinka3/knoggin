@@ -386,54 +386,7 @@ class GraphWriter:
             )
             return False
 
-    async def create_preference(
-        self, id: str, content: str, kind: str, session_id: str
-    ) -> bool:
-        cypher = """
-        CREATE (p:Preference {
-            id: $id,
-            content: $content,
-            kind: $kind,
-            session_id: $session_id,
-            created_at: $now
-        })
-        RETURN p.id
-        """
-        try:
-            res = await self.client.execute_write(
-                self.client.build_cypher(cypher, "id agtype"),
-                (
-                    json.dumps(
-                        {
-                            "id": id,
-                            "content": content,
-                            "kind": kind,
-                            "session_id": session_id,
-                            "now": self._current_time_ms(),
-                        }
-                    ),
-                ),
-            )
-            return res > 0
-        except Exception as e:
-            logger.error(f"Failed to create preference: {e}")
-            return False
 
-    async def delete_preference(self, pref_id: str) -> bool:
-        cypher = """
-        MATCH (p:Preference {id: $id})
-        DELETE p
-        RETURN count(p)
-        """
-        try:
-            res = await self.client.execute_write(
-                self.client.build_cypher(cypher, "deleted agtype"),
-                (json.dumps({"id": pref_id}),),
-            )
-            return res > 0
-        except Exception as e:
-            logger.error(f"Failed to delete preference: {e}")
-            return False
 
     async def merge_entities(
         self,

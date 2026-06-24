@@ -588,41 +588,7 @@ class GraphReader:
             logger.error(f"Hierarchy candidate query failed: {e}")
             return []
 
-    async def list_preferences(
-        self, session_id: str, kind: Optional[str] = None
-    ) -> List[Dict]:
-        where_kind = "AND p.kind = $kind" if kind else ""
-        cypher = f"""
-        MATCH (p:Preference {{session_id: $session_id}})
-        WHERE true {where_kind}
-        RETURN p.id, p.content, p.kind, p.created_at
-        ORDER BY p.created_at DESC
-        """
-        query = self.client.build_cypher(
-            cypher, "id agtype, content agtype, kind agtype, created_at agtype"
-        )
-        params = {"session_id": session_id}
-        if kind:
-            params["kind"] = kind
 
-        try:
-            res = await self.client.execute_read(query, (json.dumps(params),))
-            return [
-                {
-                    "id": r["id"].strip('"') if isinstance(r["id"], str) else r["id"],
-                    "content": r["content"].strip('"')
-                    if isinstance(r["content"], str)
-                    else r["content"],
-                    "kind": r["kind"].strip('"')
-                    if isinstance(r["kind"], str)
-                    else r["kind"],
-                    "created_at": r["created_at"],
-                }
-                for r in res
-            ]
-        except Exception as e:
-            logger.error(f"Failed to list preferences: {e}")
-            return []
 
     async def get_graph_stats(self) -> Dict[str, int]:
         query = """

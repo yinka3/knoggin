@@ -426,47 +426,6 @@ async def test_graph_writer_delete_relationship_returns_false_on_zero_rows():
     ) is False
 
 
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_writer_create_preference_writes_scoped_preference(monkeypatch):
-    client = RecordingPostgresClient(execute_write_results=[1])
-    writer = GraphWriter(client)
-    monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
-
-    assert await writer.create_preference(
-        "pref-1",
-        "Use concise answers",
-        "style",
-        "session-1",
-    ) is True
-
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call[0] == "execute_write"
-    assert "CREATE (p:Preference" in call[1]
-    assert json.loads(call[2][0]) == {
-        "id": "pref-1",
-        "content": "Use concise answers",
-        "kind": "style",
-        "session_id": "session-1",
-        "now": 123456,
-    }
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_writer_delete_preference_deletes_by_id():
-    client = RecordingPostgresClient(execute_write_results=[1])
-    writer = GraphWriter(client)
-
-    assert await writer.delete_preference("pref-1") is True
-
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call[0] == "execute_write"
-    assert "MATCH (p:Preference {id: $id})" in call[1]
-    assert json.loads(call[2][0]) == {"id": "pref-1"}
-
 
 @pytest.mark.storage
 @pytest.mark.no_network

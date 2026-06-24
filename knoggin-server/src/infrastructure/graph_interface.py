@@ -181,13 +181,7 @@ class GraphInterface:
             cutoff, project_id=project_id
         )
 
-    async def create_preference(
-        self, id: str, content: str, kind: str, session_id: str
-    ) -> bool:
-        return await self._graph_writer.create_preference(id, content, kind, session_id)
 
-    async def delete_preference(self, pref_id: str) -> bool:
-        return await self._graph_writer.delete_preference(pref_id)
 
     async def delete_relationship(
         self, entity_a_id: int, entity_b_id: int, project_id: Optional[str] = None
@@ -404,8 +398,7 @@ class GraphInterface:
     async def get_entities_by_ids(self, entity_ids: List[int]) -> List[Dict]:
         return await self._entity_reader.get_entities_by_ids(entity_ids)
 
-    async def list_preferences(self, session_id: str, kind: str = None) -> List[Dict]:
-        return await self._graph_reader.list_preferences(session_id, kind)
+
 
     async def get_graph_stats(self) -> Dict[str, int]:
         return await self._graph_reader.get_graph_stats()

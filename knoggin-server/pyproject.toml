@@ -10,6 +10,7 @@ dependencies = [
     "loguru>=0.7.3",
     "numpy>=2.3.5",
     "openai>=2.13.0",
+    "pathspec>=1.0.0",
     "python-dotenv>=1.2.1",
     "rapidfuzz>=3.14.3",
     "redis>=7.1.0",

@@ -27,10 +27,10 @@ class FakeMemoryManager:
 
 class FakeTools:
     def __init__(self, *, files=None):
-        self.file_rag = object() if files is not None else None
+        self.document_service = object() if files is not None else None
         self.files = files or []
 
-    async def get_file_manifest(self):
+    async def get_document_manifest(self):
         return self.files
 
 
@@ -77,7 +77,8 @@ class ScriptedExecutor(AgentExecutor):
         current_mode,
         enabled_tools,
         memory_context,
-        files_context,
+        documents_context,
+        document_focus_context,
         directives,
         temp,
         agent_instructions,
@@ -92,7 +93,8 @@ class ScriptedExecutor(AgentExecutor):
                 "current_mode": current_mode,
                 "enabled_tools": enabled_tools,
                 "memory_context": memory_context,
-                "files_context": files_context,
+                "documents_context": documents_context,
+                "document_focus_context": document_focus_context,
                 "directives": directives,
                 "temp": temp,
                 "agent_instructions": agent_instructions,
@@ -279,7 +281,7 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
     assert first_call["memory_context"] == (
         "[Identity]\n- remembers stable profile preferences"
     )
-    assert first_call["files_context"] == "- profile-plan.md (2KB, 3 chunks)"
+    assert first_call["documents_context"] == "- profile-plan.md (2KB, 3 chunks)"
     assert first_call["directives"] == "Required:\n- override directive"
     assert first_call["temp"] == 0.2
     assert first_call["agent_instructions"] == "Use citations"

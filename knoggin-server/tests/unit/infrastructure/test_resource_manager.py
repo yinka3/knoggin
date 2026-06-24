@@ -132,7 +132,10 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
-    monkeypatch.setenv("KNOGGIN_FILE_STORAGE_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv(
+        "KNOGGIN_DOCUMENT_STORAGE_DIR",
+        str(tmp_path / "documents"),
+    )
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", "custom/embedder")
     monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", "custom/reranker")
@@ -173,8 +176,8 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     assert manager.postgres is FakePostgresClient.instances[0]
     assert manager.postgres.connected is True
     assert manager.graph.postgres_client is manager.postgres
-    assert manager.file_storage_root == (tmp_path / "files").resolve()
-    assert manager.file_storage_root.is_dir()
+    assert manager.document_storage_root == (tmp_path / "documents").resolve()
+    assert manager.document_storage_root.is_dir()
     assert subscribe_calls == [(manager.llm_service.update_settings, "llm")]
     assert manager.llm_service.updated_settings == [fake_config.config.llm]
 
@@ -291,7 +294,10 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
-    monkeypatch.setenv("KNOGGIN_FILE_STORAGE_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv(
+        "KNOGGIN_DOCUMENT_STORAGE_DIR",
+        str(tmp_path / "documents"),
+    )
     monkeypatch.setenv("KNOGGIN_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
@@ -365,7 +371,10 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
-    monkeypatch.setenv("KNOGGIN_FILE_STORAGE_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv(
+        "KNOGGIN_DOCUMENT_STORAGE_DIR",
+        str(tmp_path / "documents"),
+    )
     monkeypatch.setenv("KNOGGIN_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
@@ -456,7 +465,10 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
-    monkeypatch.setenv("KNOGGIN_FILE_STORAGE_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv(
+        "KNOGGIN_DOCUMENT_STORAGE_DIR",
+        str(tmp_path / "documents"),
+    )
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 

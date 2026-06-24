@@ -488,7 +488,9 @@ class FakeResources:
     redis_manager: Any = None
     graph: FakeGraphClient = field(default_factory=FakeGraphClient)
     postgres: FakePostgresClient = field(default_factory=FakePostgresClient)
-    file_storage_root: Path = field(default_factory=lambda: Path("data/files"))
+    document_storage_root: Path = field(
+        default_factory=lambda: Path("data/documents")
+    )
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None
@@ -536,7 +538,7 @@ class FakeContext:
         self.session_id = session_id
         self.project_id = project_id
         self.shutdown_count = 0
-        self.file_rag = None
+        self.document_service = None
 
     async def shutdown(self):
         self.shutdown_count += 1

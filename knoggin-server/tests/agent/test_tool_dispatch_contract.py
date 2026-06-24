@@ -25,6 +25,46 @@ class DispatchTools:
         self.calls.append(("fact_check", entity_name, query))
         return {"resolution": "exact"}
 
+    async def read_document(
+        self,
+        document_id=None,
+        relative_path=None,
+        start_line=1,
+        end_line=None,
+    ):
+        self.calls.append(
+            ("read_document", document_id, relative_path, start_line, end_line)
+        )
+        return [{"document_id": document_id, "content": "lines"}]
+
+    async def list_folder_uploads(self, visibility_scope=None, limit=25):
+        self.calls.append(
+            ("list_folder_uploads", visibility_scope, limit)
+        )
+        return [{"folder_root_id": "folder-1"}]
+
+    async def get_folder_upload_summary(self, folder_root_id):
+        self.calls.append(("get_folder_upload_summary", folder_root_id))
+        return {"folder_root_id": folder_root_id}
+
+    async def list_folder_tree(
+        self,
+        folder_root_id,
+        path_prefix=None,
+        max_depth=3,
+        use_focus=True,
+    ):
+        self.calls.append(
+            (
+                "list_folder_tree",
+                folder_root_id,
+                path_prefix,
+                max_depth,
+                use_focus,
+            )
+        )
+        return [{"name": "src", "type": "directory"}]
+
     async def broken(self):
         raise RuntimeError("method exploded")
 
@@ -48,14 +88,49 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         "search_entity",
         {"query": 99, "limit": "2"},
     )
+    file_content = await execute_tool(
+        tools,
+        "read_document",
+        {"document_id": "file-1", "start_line": "2", "end_line": "4"},
+    )
+    uploads = await execute_tool(
+        tools,
+        "list_folder_uploads",
+        {"visibility_scope": "project", "limit": "7"},
+    )
+    summary = await execute_tool(
+        tools,
+        "get_folder_upload_summary",
+        {"folder_root_id": "folder-1"},
+    )
+    tree = await execute_tool(
+        tools,
+        "list_folder_tree",
+        {
+            "folder_root_id": "folder-1",
+            "path_prefix": "src",
+            "max_depth": "4",
+            "use_focus": "false",
+        },
+    )
 
     assert result == {"data": [{"id": "msg_1"}]}
     assert activity == {"data": [{"entity": "Knoggin"}]}
     assert entity == {"data": [{"id": 1, "query": "99"}]}
+    assert file_content == {
+        "data": [{"document_id": "file-1", "content": "lines"}]
+    }
+    assert uploads == {"data": [{"folder_root_id": "folder-1"}]}
+    assert summary == {"data": {"folder_root_id": "folder-1"}}
+    assert tree == {"data": [{"name": "src", "type": "directory"}]}
     assert tools.calls == [
         ("search_messages", "1234", 5),
         ("get_recent_activity", "Knoggin", 48),
         ("search_entity", "99", 2),
+        ("read_document", "file-1", None, 2, 4),
+        ("list_folder_uploads", "project", 7),
+        ("get_folder_upload_summary", "folder-1"),
+        ("list_folder_tree", "folder-1", "src", 4, False),
     ]
 
 

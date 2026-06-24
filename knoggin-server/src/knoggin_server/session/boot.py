@@ -85,8 +85,8 @@ class SessionAssembler:
             )
         )
 
-        # Sessions share the project-owned File RAG boundary.
-        ctx.file_rag = project_state.file_rag
+        # Sessions share the project-owned document boundary.
+        ctx.document_service = project_state.document_service
 
         # Register session to emitter for project event propagation
         DebugEventEmitter.get().register_session(project_state.project_id, session_id)

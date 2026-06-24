@@ -113,7 +113,8 @@ def assembler_harness(monkeypatch):
         user_name="ada",
         redis_client=resources.redis,
         postgres_client=resources.postgres,
-        file_storage_root=resources.file_storage_root,
+        document_storage_root=resources.document_storage_root,
+        embedding_service=resources.embedding,
         readable_project_ids=["project-1"],
         batch_processor=shared_processor,
     )
@@ -186,8 +187,9 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert consumer.kwargs["checkpoint_interval"] == 32
     assert consumer.kwargs["session_window"] == 24
 
-    assert ctx.file_rag is harness.project_state.file_rag
-    assert ctx.file_rag.project_id == "project-1"
+    assert ctx.document_service is harness.project_state.document_service
+    assert ctx.document_service.project_id == "project-1"
+    assert ctx.document_service._embedding is harness.resources.embedding
 
     assert len(ctx.config_unsubscribers) == 1
     assert harness.config_manager.subscriptions == [
@@ -198,14 +200,16 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_sessions_in_same_project_share_file_rag(assembler_harness):
+async def test_sessions_in_same_project_share_document_service(
+    assembler_harness,
+):
     harness = assembler_harness
 
     first = await harness.assembler.assemble(harness.project_state, "session-1")
     second = await harness.assembler.assemble(harness.project_state, "session-2")
 
-    assert first.file_rag is harness.project_state.file_rag
-    assert second.file_rag is harness.project_state.file_rag
+    assert first.document_service is harness.project_state.document_service
+    assert second.document_service is harness.project_state.document_service
 
 
 @pytest.mark.runtime

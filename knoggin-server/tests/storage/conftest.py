@@ -40,8 +40,10 @@ async def clean_db(real_postgres_client):
     await real_postgres_client.execute_write(
         """
         TRUNCATE TABLE
-            file_chunks,
-            project_files,
+            document_chunks,
+            project_documents,
+            document_folder_uploads,
+            project_document_scan_settings,
             relationship_evidence_refs,
             relationships,
             hierarchy_edges,

@@ -51,7 +51,7 @@ def make_base_tools(redis):
         session_id="session-1",
         topic_config=SimpleNamespace(active_topics=["General"]),
         search_cfg={},
-        file_rag=None,
+        document_service=None,
         graph_client=SimpleNamespace(),
         redis=redis,
     )

@@ -44,7 +44,7 @@ class ResourceManager:
 
         self.graph: Optional[GraphInterface] = None
         self.postgres: Optional[PostgresClient] = None
-        self.file_storage_root: Optional[Path] = None
+        self.document_storage_root: Optional[Path] = None
         self.embedding: Optional[EmbeddingService] = None
         self.redis_manager: Optional[AsyncRedisClient] = None
         self.redis: Optional[aioredis.Redis] = None
@@ -89,11 +89,11 @@ class ResourceManager:
                     )
                 instance.postgres = PostgresClient(dsn=dsn)
                 await instance.postgres.connect()
-                instance.file_storage_root = Path(
-                    os.getenv("KNOGGIN_FILE_STORAGE_DIR", "./data/files")
+                instance.document_storage_root = Path(
+                    os.getenv("KNOGGIN_DOCUMENT_STORAGE_DIR", "./data/documents")
                 ).expanduser().resolve()
                 await asyncio.to_thread(
-                    instance.file_storage_root.mkdir,
+                    instance.document_storage_root.mkdir,
                     parents=True,
                     exist_ok=True,
                 )
@@ -217,7 +217,7 @@ class ResourceManager:
         self.gliner = None
         self.spacy = None
         self.graph = None
-        self.file_storage_root = None
+        self.document_storage_root = None
 
     async def shutdown(self):
         """Release all managed resources."""

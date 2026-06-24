@@ -46,46 +46,61 @@ class ToolQueries:
         if not hot_topic_names:
             return {}
 
-        # In AGE, list comprehensions like `[(e)-[:HAS_FACT]->(f) ... | f.content]` work if formatted carefully,
-        # but subquery limitations can trigger. A safer fallback is multiple queries, but let's try standard standard Cypher first.
+        filter_projects = bool(visible_project_ids)
+        visible_project_ids = visible_project_ids or []
 
-        # It's better to fetch entities and relationships, then group in python to avoid complex AGE reduce failures.
-        cypher = """
-        MATCH (t:Topic) WHERE t.name IN $hot_topics
-        MATCH (e:Entity)-[:BELONGS_TO]->(t)
-        WHERE $filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id
-        OPTIONAL MATCH (e)-[r:RELATED_TO]-()
-        WITH t, e, r
-        ORDER BY e.last_mentioned DESC
-        RETURN t.name as topic, e.canonical_name as name, e.aliases as aliases,
-               [(e)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as facts,
-               r.message_ids as msg_ids
+        query = """
+        SELECT
+            e.topic,
+            e.canonical_name as name,
+            COALESCE(
+                (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = e.entity_id),
+                '{}'::text[]
+            ) as aliases,
+            CASE WHEN %s THEN '{}'::text[] ELSE COALESCE(
+                (SELECT array_agg(content) FROM facts f WHERE f.entity_id = e.entity_id AND f.invalid_at IS NULL),
+                '{}'::text[]
+            ) END as facts,
+            COALESCE(
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'user_name', rer.user_name,
+                            'session_id', rer.session_id,
+                            'message_id', rer.message_id
+                        )
+                    )
+                    FROM (
+                        SELECT r.relationship_id
+                        FROM relationships r
+                        WHERE r.entity_a_id = e.entity_id OR r.entity_b_id = e.entity_id
+                        LIMIT 10
+                    ) rels
+                    JOIN relationship_evidence_refs rer ON rer.relationship_id = rels.relationship_id
+                ),
+                '[]'::jsonb
+            ) as msg_ids
+        FROM entities e
+        WHERE e.topic = ANY(%s)
+          AND (%s = false OR e.project_id = ANY(%s) OR e.entity_id = %s)
+        ORDER BY e.last_mentioned_ms DESC
         """
-        query = self.client.build_cypher(
-            cypher,
-            "topic agtype, name agtype, aliases agtype, facts agtype, msg_ids agtype",
-        )
 
         try:
             data = await self.client.execute_read(
                 query,
                 (
-                    json.dumps(
-                        {
-                            "hot_topics": hot_topic_names,
-                            **self._scope_params(visible_project_ids),
-                        }
-                    ),
+                    slim,
+                    hot_topic_names,
+                    filter_projects,
+                    visible_project_ids,
+                    IDENTITY_ENTITY_ID,
                 ),
             )
 
             topics_map = {}
             for row in data:
-                t_name = (
-                    row["topic"].strip('"')
-                    if isinstance(row["topic"], str)
-                    else row["topic"]
-                )
+                t_name = row["topic"]
                 if t_name not in topics_map:
                     topics_map[t_name] = {
                         "entities": [],
@@ -94,12 +109,7 @@ class ToolQueries:
                         "_entity_names": set(),
                     }
 
-                e_name = (
-                    row["name"].strip('"')
-                    if isinstance(row["name"], str)
-                    else row["name"]
-                )
-
+                e_name = row["name"]
                 if (
                     e_name not in topics_map[t_name]["_entity_names"]
                     and len(topics_map[t_name]["entities"]) < 3
@@ -116,7 +126,7 @@ class ToolQueries:
                             msg_ref.get("user_name"),
                             msg_ref.get("session_id"),
                             msg_ref.get("message_id"),
-                        ) if isinstance(msg_ref, dict) else msg_ref
+                        )
                         if (
                             ref_key not in topics_map[t_name]["_message_ref_keys"]
                             and len(topics_map[t_name]["message_refs"]) < msg_limit
@@ -124,7 +134,6 @@ class ToolQueries:
                             topics_map[t_name]["_message_ref_keys"].add(ref_key)
                             topics_map[t_name]["message_refs"].append(msg_ref)
 
-            # Convert sets to lists
             result = {}
             for t, val in topics_map.items():
                 result[t] = {
@@ -218,111 +227,130 @@ class ToolQueries:
                 return []
             entity_ids = [int(r["entity_id"]) for r in id_res]
 
-            # 2. Fetch Graph data for those IDs
-            cypher = """
-            MATCH (e:Entity) WHERE e.id IN $ids
-            WITH e
-            WHERE $filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id
-            OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
-            WITH e, t
-            WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
-            
-            OPTIONAL MATCH (e)-[:PART_OF]->(parent:Entity)
-            OPTIONAL MATCH (child:Entity)-[:PART_OF]->(e)
-            OPTIONAL MATCH (e)-[r:RELATED_TO]-(conn:Entity)
-            
-            WITH e, t, parent, count(DISTINCT child) as children_count, r, conn
-            ORDER BY r.weight DESC
-            
-            RETURN e.id AS id,
-                e.canonical_name AS canonical_name,
-                e.aliases AS aliases,
-                e.type AS type,
-                t.name AS topic,
-                e.last_mentioned AS last_mentioned,
-                e.last_updated AS last_updated,
-                [(e)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] AS facts,
-                conn.canonical_name AS conn_name,
-                conn.aliases AS conn_aliases,
-                r.weight AS conn_weight,
-                r.message_ids AS evidence_refs,
-                r.context AS conn_context,
-                [(conn)-[:HAS_FACT]->(cf) WHERE cf.invalid_at IS NULL | cf.content] AS conn_facts,
-                parent.canonical_name AS parent_name,
-                children_count
+            # 2. Fetch basic entity data from Postgres
+            entity_sql = """
+            SELECT
+                e.entity_id as id,
+                e.canonical_name,
+                e.type,
+                e.topic,
+                e.last_mentioned_ms as last_mentioned,
+                e.last_updated_ms as last_updated,
+                COALESCE(
+                    (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = e.entity_id),
+                    '{}'::text[]
+                ) as aliases,
+                COALESCE(
+                    (SELECT array_agg(content) FROM facts f WHERE f.entity_id = e.entity_id AND f.invalid_at IS NULL),
+                    '{}'::text[]
+                ) as facts,
+                (SELECT canonical_name FROM entities p JOIN hierarchy_edges he ON he.parent_id = p.entity_id WHERE he.child_id = e.entity_id LIMIT 1) as parent_name,
+                (SELECT count(*) FROM hierarchy_edges WHERE parent_id = e.entity_id) as children_count
+            FROM entities e
+            WHERE e.entity_id = ANY(%s)
             """
+            if active_topics:
+                entity_sql += " AND e.topic = ANY(%s)"
+                params = (entity_ids, active_topics)
+            else:
+                params = (entity_ids,)
 
-            q = self.client.build_cypher(
-                cypher,
-                "id agtype, canonical_name agtype, aliases agtype, type agtype, topic agtype, last_mentioned agtype, last_updated agtype, facts agtype, conn_name agtype, conn_aliases agtype, conn_weight agtype, evidence_refs agtype, conn_context agtype, conn_facts agtype, parent_name agtype, children_count agtype",
-            )
-
-            data = await self.client.execute_read(
-                q,
-                (
-                    json.dumps(
-                        {
-                            "ids": entity_ids,
-                            "filter_topics": active_topics is not None,
-                            "active_topics": active_topics
-                            if active_topics is not None
-                            else [],
-                            **self._scope_params(visible_project_ids),
-                        }
-                    ),
-                ),
-            )
+            entity_data = await self.client.execute_read(entity_sql, params)
 
             entities: Dict[int, Any] = {}
-            for row in data:
+            for row in entity_data:
                 eid = int(row["id"])
+                entities[eid] = {
+                    "id": eid,
+                    "canonical_name": row["canonical_name"],
+                    "aliases": row["aliases"] or [],
+                    "type": row["type"],
+                    "facts": row["facts"] or [],
+                    "topic": row["topic"],
+                    "last_mentioned": row["last_mentioned"],
+                    "last_updated": row["last_updated"],
+                    "hierarchy": {
+                        "parent": row["parent_name"],
+                        "children_count": row["children_count"],
+                    },
+                    "top_connections": [],
+                    "_conn_names": set(),
+                }
 
+            if not entities:
+                return []
+
+            # 3. Fetch relationships
+            rel_sql = """
+            SELECT
+                CASE WHEN r.entity_a_id = ANY(%s) THEN r.entity_a_id ELSE r.entity_b_id END as source_id,
+                conn.canonical_name as conn_name,
+                r.weight as conn_weight,
+                r.context as conn_context,
+                COALESCE(
+                    (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = conn.entity_id),
+                    '{}'::text[]
+                ) as conn_aliases,
+                COALESCE(
+                    (SELECT array_agg(content) FROM facts f WHERE f.entity_id = conn.entity_id AND f.invalid_at IS NULL),
+                    '{}'::text[]
+                ) as conn_facts,
+                COALESCE(
+                    (
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'user_name', rer.user_name,
+                                'session_id', rer.session_id,
+                                'message_id', rer.message_id
+                            )
+                        )
+                        FROM relationship_evidence_refs rer 
+                        WHERE rer.relationship_id = r.relationship_id
+                    ),
+                    '[]'::jsonb
+                ) as evidence_refs
+            FROM relationships r
+            JOIN entities conn ON (
+                CASE WHEN r.entity_a_id = ANY(%s) THEN r.entity_b_id ELSE r.entity_a_id END
+            ) = conn.entity_id
+            WHERE r.entity_a_id = ANY(%s) OR r.entity_b_id = ANY(%s)
+            ORDER BY r.weight DESC
+            """
+            
+            valid_ids = list(entities.keys())
+            rel_data = await self.client.execute_read(rel_sql, (valid_ids, valid_ids, valid_ids, valid_ids))
+
+            for row in rel_data:
+                eid = int(row["source_id"])
                 if eid not in entities:
-                    entities[eid] = {
-                        "id": eid,
-                        "canonical_name": row["canonical_name"].strip('"')
-                        if isinstance(row["canonical_name"], str)
-                        else row["canonical_name"],
-                        "aliases": row["aliases"] or [],
-                        "type": row["type"].strip('"')
-                        if isinstance(row["type"], str)
-                        else row["type"],
-                        "facts": row["facts"] or [],
-                        "topic": row["topic"].strip('"')
-                        if isinstance(row["topic"], str)
-                        else row["topic"],
-                        "last_mentioned": row["last_mentioned"],
-                        "last_updated": row["last_updated"],
-                        "top_connections": [],
-                        "hierarchy": {
-                            "parent": row["parent_name"].strip('"')
-                            if isinstance(row["parent_name"], str)
-                            else row["parent_name"],
-                            "children_count": int(row["children_count"] or 0),
-                        },
-                    }
-
-                if (
-                    row["conn_name"]
-                    and len(entities[eid]["top_connections"]) < connections_limit
-                ):
-                    entities[eid]["top_connections"].append(
+                    continue
+                
+                ent = entities[eid]
+                if len(ent["top_connections"]) >= connections_limit:
+                    continue
+                    
+                c_name = row["conn_name"]
+                if c_name not in ent["_conn_names"]:
+                    ent["_conn_names"].add(c_name)
+                    ent["top_connections"].append(
                         {
-                            "canonical_name": row["conn_name"].strip('"')
-                            if isinstance(row["conn_name"], str)
-                            else row["conn_name"],
+                            "canonical_name": c_name,
                             "aliases": row["conn_aliases"] or [],
+                            "weight": row["conn_weight"],
+                            "evidence_refs": (row["evidence_refs"] or [])[:evidence_limit],
+                            "context": row["conn_context"],
                             "facts": row["conn_facts"] or [],
-                            "weight": float(row["conn_weight"] or 1.0),
-                            "context": row["conn_context"].strip('"')
-                            if isinstance(row["conn_context"], str)
-                            else row["conn_context"],
-                            "evidence_refs": list(row["evidence_refs"] or [])[
-                                :evidence_limit
-                            ],
                         }
                     )
-            return list(entities.values())[:limit]
+
+            # Cleanup processing keys
+            for ent in entities.values():
+                ent.pop("_conn_names", None)
+
+            # Sort by last mentioned
+            result = list(entities.values())
+            result.sort(key=lambda x: x.get("last_mentioned") or 0, reverse=True)
+            return result[:limit]
 
         except Exception as e:
             logger.error(f"Failed search_entity: {e}")
@@ -338,64 +366,72 @@ class ToolQueries:
         if not entity_names:
             return []
 
-        cypher = """
-        MATCH (source:Entity) WHERE source.canonical_name IN $names
-        WITH source
-        WHERE $filter_projects = false OR source.project_id IN $visible_project_ids OR source.id = $identity_entity_id
-        MATCH (source)-[r:RELATED_TO]-(target:Entity)
-        WHERE $filter_projects = false OR target.project_id IN $visible_project_ids OR target.id = $identity_entity_id
-        OPTIONAL MATCH (target)-[:BELONGS_TO]->(t:Topic)
-        WITH source, r, target, t
-        WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
-        RETURN
+        filter_projects = bool(visible_project_ids)
+        visible_project_ids = visible_project_ids or []
+
+        query = """
+        SELECT
             source.canonical_name as source,
             target.canonical_name as target,
-            [(target)-[:HAS_FACT]->(f) WHERE f.invalid_at IS NULL | f.content] as target_facts,
+            COALESCE(
+                (SELECT array_agg(content) FROM facts f WHERE f.entity_id = target.entity_id AND f.invalid_at IS NULL),
+                '{}'::text[]
+            ) as target_facts,
             r.weight as connection_strength,
-            r.message_ids as evidence_refs,
-            r.confidence as confidence,
-            r.last_seen as last_seen,
-            r.context as context
-        ORDER BY r.weight DESC, r.last_seen DESC
-        LIMIT $limit
-        """
-        q = self.client.build_cypher(
-            cypher,
-            "source agtype, target agtype, target_facts agtype, connection_strength agtype, evidence_refs agtype, confidence agtype, last_seen agtype, context agtype",
-        )
-        try:
-            data = await self.client.execute_read(
-                q,
+            COALESCE(
                 (
-                    json.dumps(
-                        {
-                            "names": entity_names,
-                            "filter_topics": active_topics is not None,
-                            "active_topics": active_topics
-                            if active_topics is not None
-                            else [],
-                            "limit": limit,
-                            **self._scope_params(visible_project_ids),
-                        }
-                    ),
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'user_name', rer.user_name,
+                            'session_id', rer.session_id,
+                            'message_id', rer.message_id
+                        )
+                    )
+                    FROM relationship_evidence_refs rer 
+                    WHERE rer.relationship_id = r.relationship_id
                 ),
+                '[]'::jsonb
+            ) as evidence_refs,
+            r.confidence as confidence,
+            r.last_seen_ms as last_seen,
+            r.context as context
+        FROM entities source
+        JOIN relationships r ON (r.entity_a_id = source.entity_id OR r.entity_b_id = source.entity_id)
+        JOIN entities target ON (
+            target.entity_id = (CASE WHEN r.entity_a_id = source.entity_id THEN r.entity_b_id ELSE r.entity_a_id END)
+        )
+        WHERE source.canonical_name = ANY(%s)
+          AND (%s = false OR source.project_id = ANY(%s) OR source.entity_id = %s)
+          AND (%s = false OR target.project_id = ANY(%s) OR target.entity_id = %s)
+        """
+        
+        if active_topics is not None:
+            query += " AND target.topic = ANY(%s)"
+            params = (
+                entity_names, filter_projects, visible_project_ids, IDENTITY_ENTITY_ID, 
+                filter_projects, visible_project_ids, IDENTITY_ENTITY_ID, active_topics
             )
+        else:
+            params = (
+                entity_names, filter_projects, visible_project_ids, IDENTITY_ENTITY_ID, 
+                filter_projects, visible_project_ids, IDENTITY_ENTITY_ID
+            )
+            
+        query += " ORDER BY r.weight DESC, r.last_seen_ms DESC LIMIT %s"
+        params = (*params, limit)
+
+        try:
+            data = await self.client.execute_read(query, params)
             return [
                 {
-                    "source": r["source"].strip('"')
-                    if isinstance(r["source"], str)
-                    else r["source"],
-                    "target": r["target"].strip('"')
-                    if isinstance(r["target"], str)
-                    else r["target"],
+                    "source": r["source"],
+                    "target": r["target"],
                     "target_facts": r["target_facts"] or [],
                     "connection_strength": float(r["connection_strength"] or 1.0),
                     "evidence_refs": r["evidence_refs"] or [],
                     "confidence": float(r["confidence"] or 1.0),
                     "last_seen": r["last_seen"],
-                    "context": r["context"].strip('"')
-                    if isinstance(r["context"], str)
-                    else r["context"],
+                    "context": r["context"],
                 }
                 for r in data
             ]
@@ -414,42 +450,60 @@ class ToolQueries:
             return []
 
         cutoff_ms = get_now_ms() - (hours * 3600 * 1000)
-        cypher = """
-        MATCH (e:Entity {canonical_name: $name})-[r:RELATED_TO]-(target:Entity)
-        WHERE r.last_seen > $cutoff
-        AND ($filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
-        AND ($filter_projects = false OR target.project_id IN $visible_project_ids OR target.id = $identity_entity_id)
-        OPTIONAL MATCH (target)-[:BELONGS_TO]->(t:Topic)
-        WITH e, r, target, t
-        WHERE ($filter_topics = false) OR (t IS NULL) OR (t.name IN $active_topics)
-        RETURN target.canonical_name as entity, r.message_ids as evidence_refs, r.last_seen as time
-        ORDER BY r.last_seen DESC
-        """
-        q = self.client.build_cypher(
-            cypher, "entity agtype, evidence_refs agtype, time agtype"
-        )
-        try:
-            data = await self.client.execute_read(
-                q,
+        filter_projects = bool(visible_project_ids)
+        visible_project_ids = visible_project_ids or []
+
+        query = """
+        SELECT
+            target.canonical_name as entity,
+            COALESCE(
                 (
-                    json.dumps(
-                        {
-                            "name": entity_name,
-                            "cutoff": cutoff_ms,
-                            "filter_topics": active_topics is not None,
-                            "active_topics": active_topics
-                            if active_topics is not None
-                            else [],
-                            **self._scope_params(visible_project_ids),
-                        }
-                    ),
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'user_name', rer.user_name,
+                            'session_id', rer.session_id,
+                            'message_id', rer.message_id
+                        )
+                    )
+                    FROM relationship_evidence_refs rer 
+                    WHERE rer.relationship_id = r.relationship_id
                 ),
+                '[]'::jsonb
+            ) as evidence_refs,
+            r.last_seen_ms as time
+        FROM entities source
+        JOIN relationships r ON (r.entity_a_id = source.entity_id OR r.entity_b_id = source.entity_id)
+        JOIN entities target ON (
+            target.entity_id = (CASE WHEN r.entity_a_id = source.entity_id THEN r.entity_b_id ELSE r.entity_a_id END)
+        )
+        WHERE source.canonical_name = %s
+          AND r.last_seen_ms > %s
+          AND (%s = false OR source.project_id = ANY(%s) OR source.entity_id = %s)
+          AND (%s = false OR target.project_id = ANY(%s) OR target.entity_id = %s)
+        """
+
+        if active_topics is not None:
+            query += " AND target.topic = ANY(%s)"
+            params = (
+                entity_name, cutoff_ms,
+                filter_projects, visible_project_ids, IDENTITY_ENTITY_ID,
+                filter_projects, visible_project_ids, IDENTITY_ENTITY_ID,
+                active_topics
             )
+        else:
+            params = (
+                entity_name, cutoff_ms,
+                filter_projects, visible_project_ids, IDENTITY_ENTITY_ID,
+                filter_projects, visible_project_ids, IDENTITY_ENTITY_ID
+            )
+
+        query += " ORDER BY r.last_seen_ms DESC LIMIT 50"
+
+        try:
+            data = await self.client.execute_read(query, params)
             return [
                 {
-                    "entity": r["entity"].strip('"')
-                    if isinstance(r["entity"], str)
-                    else r["entity"],
+                    "entity": r["entity"],
                     "evidence_refs": r["evidence_refs"] or [],
                     "time": r["time"],
                 }

@@ -11,6 +11,8 @@ Scope rule used: only files under `knoggin-server` were read or analyzed.
 This document was originally generated as a broad codebase map. Recent stabilization work changed several important truths:
 
 - Storage has been hardened around `PostgresClient`, Apache AGE writers/readers, pgvector string bindings, and graph mutation contracts. The `tests/storage/` suite is currently a core regression boundary.
+- **Agent Memory**: The `Preference` AGE nodes have been completely removed. Agent `rules`, `preferences`, and `icks` are now managed via persistent Markdown identity files (`AGENT_IDENTITY.md`) rather than graph nodes.
+- **Tool Queries Optimization**: The primary tool queries (`get_hot_topic_context_with_messages`, `search_entity`, `get_related_entities`, etc.) have been migrated away from heavy AGE Cypher JSON serialization to pure Postgres SQL lookups and joins, significantly improving memory and performance. Apache AGE is now strictly reserved for multi-hop graph traversals (`find_path_filtered`).
 - Runtime assembly has focused fake-backed coverage for `SessionAssembler` and `ProjectManager.get_or_start_project`.
 - Wall-clock time is centralized in `src/common/utils/time_utils.py`; production code should use `get_now()`, `get_now_iso()`, `get_now_ms()`, or `get_now_unix()` instead of direct `datetime.now(...)` / `time.time()`.
 - `tests/session/` does not exist; session/runtime coverage currently lives under `tests/runtime/` and `tests/unit/session/`.
@@ -43,19 +45,19 @@ Primary evidence:
 
 ### Target Users And Business Purpose
 
-The target user is someone running a private, memory-backed AI assistant. The system converts conversational history into a queryable knowledge graph so an agent can later answer questions about people, projects, tasks, preferences, files, and relationships.
+The target user is someone running a private, memory-backed AI assistant. The system converts conversational history into a queryable knowledge graph so an agent can later answer questions about people, projects, tasks, files, and relationships.
 
 Business purposes by feature:
 
 - Session lifecycle: gives each conversation a durable Redis metadata record, isolated message buffer, conversation history, and session-scoped file RAG workspace. See `src/knoggin_server/session/session_manager.py`.
 - Project lifecycle: groups sessions under project scopes, supports cross-project readable scopes, and hosts shared project-level runtime state. See `src/knoggin_server/project/project_manager.py`.
 - Message ingestion: turns raw user messages into persisted `Message` graph nodes, search rows, entity nodes, relationship edges, and dirty queues for later refinement. See `src/knoggin_server/session/context.py`, `src/knoggin_server/ingestion/services/batch_consumer.py`, and `src/knoggin_server/ingestion/services/pipeline_service.py`.
-- Knowledge graph: stores entities, relationships, facts, messages, preferences, topics, hierarchy edges, and AAC discussion nodes in Apache AGE, with pgvector/FTS helper tables. See `src/infrastructure/schema.sql`, `src/infrastructure/graph_client.py`, and `src/knoggin_server/knowledge/db/*`.
+- Knowledge graph: stores entities, relationships, facts, messages, topics, hierarchy edges, and AAC discussion nodes in Apache AGE, with pgvector/FTS helper tables. See `src/infrastructure/schema.sql`, `src/infrastructure/graph_client.py`, and `src/knoggin_server/knowledge/db/*`.
 - Profile/fact refinement: converts recently touched entities and conversation windows into stable facts, invalidates contradicted facts, and updates embeddings. See `src/knoggin_server/knowledge/jobs/profile_job.py` and `src/knoggin_server/knowledge/services/fact_resolution.py`.
 - Merge detection: finds duplicate entities and hierarchy candidates, using fuzzy/vector candidates plus LLM judgment. See `src/knoggin_server/knowledge/jobs/merge_job.py`.
 - Agent execution: answers user queries using a bounded multi-step tool loop over graph, messages, files, web search, and memory. See `src/knoggin_server/agent/executor.py`, `src/knoggin_server/agent/tools/registry.py`, and `src/common/schema/tool_schema.py`.
 - Agent management: persists configurable agents in Redis and seeds default agent `STELLA`. See `src/knoggin_server/agent/services/agent_manager.py`.
-- Memory: provides topic-scoped session memory and agent working memory categories `rules`, `preferences`, and `icks`. See `src/knoggin_server/knowledge/services/memory_service.py`.
+- Memory: provides topic-scoped session memory and agent working memory managed via autonomous Markdown document editing (e.g. `AGENT_IDENTITY.md`).
 - File RAG: ingests uploaded files into session-scoped pgvector tables and searches with vector, BM25, and reranking. See `src/knoggin_server/knowledge/services/file_rag.py`.
 - Autonomous Agent Community (AAC): optionally starts multi-agent discussions that can save insights and spawn specialists. See `src/knoggin_server/community/community_manager.py`, `src/knoggin_server/community/community_job.py`, and `src/knoggin_server/agent/tools/community_tools.py`.
 

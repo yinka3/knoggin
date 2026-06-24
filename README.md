@@ -143,6 +143,25 @@ Install Python dependencies:
 uv sync
 ```
 
+### Running the Full Test Suite on Windows
+
+The real-infrastructure tests use the Postgres and Redis ports published by
+Docker Desktop. Start Docker Desktop in Linux-container mode, then run:
+
+```powershell
+docker compose up -d --build
+docker compose ps
+
+$env:KNOGGIN_TEST_DATABASE_URL = "postgresql://knoggin:knoggin@localhost:5432/knoggin_db"
+$env:KNOGGIN_TEST_REDIS_URL = "redis://localhost:6379/1"
+
+Set-Location .\knoggin-server
+uv run pytest -q
+```
+
+Storage tests backed by fakes remain independent of Postgres; only tests marked
+`requires_postgres` connect to and clean the real test database.
+
 `knoggin-server` currently ships as an engine package, not as a standalone HTTP API. The API layer for frontend and hosted access is intentionally separate and should import the engine rather than live inside it.
 
 For SDK usage and integration notes, see [knoggin-sdk/README.md](./knoggin-sdk/README.md).

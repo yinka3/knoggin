@@ -273,7 +273,8 @@ def make_agent_messages():
         ),
         (
             10,
-            "FileRAG folder upload will change later, so deep document chunking "
+            "DocumentService folder upload will change later, so deep document "
+            "chunking "
             "coverage should wait until the redesign settles.",
         ),
     ]
@@ -289,7 +290,7 @@ def make_search_tool(service, graph_client, messages):
         "rerank_candidates": 10,
         "default_message_limit": 5,
     }
-    tool.file_rag = None
+    tool.document_service = None
     tool.user_name = "ada"
     tool.session_id = "session-agent"
     tool.active_topics = ["Testing"]

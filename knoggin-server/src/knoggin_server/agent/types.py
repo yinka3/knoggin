@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 from common.schema.agent_stream import StreamUsage
-from common.schema.memory import PromptContext
 
 
 @dataclass(frozen=True)
@@ -25,11 +24,19 @@ class AgentRunConfig:
         ("get_recent_activity", 8),
         ("find_path", 8),
         ("get_hierarchy", 8),
+        ("list_documents", 4),
+        ("list_folder_uploads", 4),
+        ("get_folder_upload_summary", 6),
+        ("list_folder_tree", 6),
+        ("get_document_info", 6),
+        ("read_document", 6),
+        ("search_documents", 8),
         ("web_search", 8),
         ("news_search", 8),
-        ("save_memory", 4),
+        ("update_topics", 1),
+        ("read_brain", 4),
+        ("edit_brain", 2),
         ("save_insight", 4),
-        ("forget_memory", 4),
         ("spawn_specialist", 2),
         ("request_replanning", 2),
     )
@@ -130,6 +137,8 @@ class AgentContext:
     prompt: PromptContext = field(default_factory=PromptContext)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
+    topic_evaluation_needed: bool = False
+    maintenance_needed: bool = False
 
 
 @dataclass

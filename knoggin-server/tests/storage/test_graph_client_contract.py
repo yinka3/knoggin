@@ -108,13 +108,7 @@ def test_graph_client_community_property(graph_client):
             (1, 2),
             {"project_id": "test", "final_topic": "Projects"},
         ),
-        (
-            "create_preference",
-            "graph_writer",
-            ("id1", "content", "kind", "session"),
-            {},
-        ),
-        ("delete_preference", "graph_writer", ("pref1",), {}),
+
         ("delete_relationship", "graph_writer", (1, 2), {"project_id": "test"}),
         (
             "rebuild_project_projection",
@@ -256,7 +250,7 @@ def test_graph_client_community_property(graph_client):
         ),
         ("has_direct_edge", "graph_reader", (1, 2), {}),
         ("has_hierarchy_edge", "graph_reader", (1, 2), {}),
-        ("list_preferences", "graph_reader", ("session-1", "kind"), {}),
+
         ("get_graph_stats", "graph_reader", (), {}),
         ("get_neighbor_ids_batch", "graph_reader", ([1, 2],), {}),
         # --- Tool Queries (6) ---

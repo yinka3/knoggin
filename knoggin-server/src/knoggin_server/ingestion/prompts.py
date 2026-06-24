@@ -2,39 +2,49 @@ from typing import Dict, List, Tuple
 
 from loguru import logger
 
-from common.utils.prompt_loader import render_prompt
+from common.utils.prompt_loader import load_named_prompt, render_prompt_text
 
 
 def ner_reasoning_prompt(user_name: str) -> str:
-    return render_prompt("pipeline/extract_entities.j2", user_name=user_name)
+    return load_named_prompt("extract_entities", user_name=user_name)
 
 
 def get_connection_reasoning_prompt(user_name: str) -> str:
-    return render_prompt("pipeline/extract_relationships.j2", user_name=user_name)
+    return load_named_prompt("extract_relationships", user_name=user_name)
 
 
 def get_profile_extraction_prompt(user_name: str) -> str:
-    return render_prompt("pipeline/extract_facts.j2", user_name=user_name)
+    return load_named_prompt("extract_facts", user_name=user_name)
 
 
 def get_merge_judgment_prompt() -> str:
-    return render_prompt("pipeline/judge_merge.j2")
+    return load_named_prompt("judge_merge")
 
 
 def get_contradiction_judgment_prompt() -> str:
-    return render_prompt("pipeline/judge_contradiction.j2")
+    return load_named_prompt("judge_contradiction")
 
 
-def get_topic_seed_prompt(user_name: str) -> str:
-    return render_prompt("pipeline/generate_topic_seed.j2", user_name=user_name)
+def get_relevance_judgment_prompt() -> str:
+    return load_named_prompt("judge_relevance")
 
 
-def get_lightweight_extraction_prompt(content: str) -> str:
-    return render_prompt("pipeline/extract_ai_facts.j2", content=content)
+def render_configured_prompt(
+    prompt_template: str,
+    *,
+    prompt_name: str,
+    required: set[str] | None = None,
+    **values,
+) -> str:
+    """Strictly render a prompt supplied through runtime configuration."""
+    return render_prompt_text(
+        prompt_template,
+        values,
+        required=required,
+        prompt_name=prompt_name,
+    )
 
 
-def get_topic_evolution_prompt(user_name: str) -> str:
-    return render_prompt("pipeline/generate_topic_evolution.j2", user_name=user_name)
 
 
 async def enrich_facts_with_sources(
