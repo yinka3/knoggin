@@ -33,7 +33,11 @@ from common.utils.events import emit
 from common.utils.time_utils import get_now_unix
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.agent.prompts import get_connection_reasoning_prompt
+from knoggin_server.ingestion.prompts import (
+    get_connection_reasoning_prompt,
+    get_relevance_judgment_prompt,
+    render_configured_prompt,
+)
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
@@ -855,10 +859,7 @@ class BatchProcessor:
                     bulk_relevance: BulkRelevanceResult = (
                         await self.llm.generate_structured(
                             response_model=BulkRelevanceResult,
-                            system=(
-                                "You are a relevance judge. For each provided pair "
-                                "(message + entity facts), decide if they are related."
-                            ),
+                            system=get_relevance_judgment_prompt(),
                             user=prompt,
                             temperature=0.0,
                         )
@@ -965,7 +966,12 @@ class BatchProcessor:
                 )
 
         if self.connection_prompt:
-            system_03 = self.connection_prompt.replace("{user_name}", self.user_name)
+            system_03 = render_configured_prompt(
+                self.connection_prompt,
+                prompt_name="configured extract_relationships",
+                required={"user_name"},
+                user_name=self.user_name,
+            )
         else:
             system_03 = get_connection_reasoning_prompt(self.user_name)
 

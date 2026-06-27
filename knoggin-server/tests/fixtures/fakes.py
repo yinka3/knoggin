@@ -4,6 +4,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from common.schema.settings import RedisConnectionSettings
@@ -462,11 +463,41 @@ class FakeRedisManager(AsyncRedisClient):
         return self.client
 
 
+class FakePostgresClient:
+    def __init__(self):
+        self.read_results = []
+        self.write_count = 1
+        self.calls = []
+
+    async def fetch_all(self, query, params=None):
+        self.calls.append(("fetch_all", query, params))
+        if not self.read_results:
+            return []
+        return self.read_results.pop(0)
+
+    async def fetch_one(self, query, params=None):
+        self.calls.append(("fetch_one", query, params))
+        if not self.read_results:
+            return None
+        result = self.read_results.pop(0)
+        if isinstance(result, list):
+            return result[0] if result else None
+        return result
+
+    async def execute(self, query, params=None):
+        self.calls.append(("execute", query, params))
+        return self.write_count
+
+
 @dataclass
 class FakeResources:
     redis: FakeRedis = field(default_factory=FakeRedis)
     redis_manager: Any = None
     knowledge_store: FakeKnowledgeStore = field(default_factory=FakeKnowledgeStore)
+    postgres: FakePostgresClient = field(default_factory=FakePostgresClient)
+    document_storage_root: Path = field(
+        default_factory=lambda: Path("data/documents")
+    )
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None
@@ -509,20 +540,12 @@ class FakeConsumer:
         self.stopped += 1
 
 
-class FakeFileRAG:
-    def __init__(self):
-        self.cleanup_count = 0
-
-    def cleanup_session(self):
-        self.cleanup_count += 1
-
-
 class FakeContext:
     def __init__(self, session_id="session-1", project_id="project-1"):
         self.session_id = session_id
         self.project_id = project_id
         self.shutdown_count = 0
-        self.file_rag = FakeFileRAG()
+        self.document_service = None
 
     async def shutdown(self):
         self.shutdown_count += 1

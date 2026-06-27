@@ -69,7 +69,8 @@ async def test_real_embedding_retrieval_ranks_memory_rag_messages_over_unrelated
         ),
         (
             "msg_2",
-            "For FileRAG and folder upload, we agreed to wait because that path "
+            "For DocumentService and folder upload, we agreed to wait because "
+            "that path "
             "will change later. The document chunking tests should come after the "
             "redesign settles.",
         ),

@@ -17,7 +17,7 @@ from common.utils.events import emit
 from common.utils.time_utils import get_now
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.llm_client import LLMService
-from knoggin_server.agent.prompts import get_contradiction_judgment_prompt
+from knoggin_server.ingestion.prompts import get_contradiction_judgment_prompt
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 

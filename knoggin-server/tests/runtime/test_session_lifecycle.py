@@ -213,11 +213,13 @@ async def test_close_session_releases_project_and_shuts_context_down(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_delete_session_data_cleans_keys_membership_and_filerag(
+async def test_delete_session_data_does_not_remove_project_documents(
     session_manager,
 ):
     manager, resources, project_manager, active_sessions = session_manager
     ctx = FakeContext(session_id="session-1", project_id="project-1")
+    project_document_service = object()
+    ctx.document_service = project_document_service
     active_sessions["session-1"] = ctx
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
@@ -236,8 +238,113 @@ async def test_delete_session_data_cleans_keys_membership_and_filerag(
     deleted = await manager.delete_session_data("session-1")
 
     assert deleted >= 1
-    assert ctx.file_rag.cleanup_count == 1
+    assert ctx.document_service is project_document_service
     assert project_manager.remove_session_calls == [("project-1", "session-1")]
     assert await resources.redis.hget(RedisKeys.sessions("ada"), "session-1") is None
     assert await resources.redis.get(memory_key) is None
     assert await resources.redis.get(dedup_key) is None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_document_focus_persists_reads_and_clears(session_manager):
+    manager, resources, _, active_sessions = session_manager
+    ctx = FakeContext(session_id="session-1", project_id="project-1")
+
+    class FocusDocumentService:
+        async def resolve_focus_target(self, **kwargs):
+            assert kwargs == {
+                "session_id": "session-1",
+                "document_id": "doc-1",
+                "folder_root_id": None,
+                "path_prefix": None,
+            }
+            return {
+                "target_type": "document",
+                "document_id": "doc-1",
+                "relative_path": "docs/notes.md",
+                "folder_root_id": None,
+                "path_prefix": None,
+            }
+
+    ctx.document_service = FocusDocumentService()
+    active_sessions["session-1"] = ctx
+    await resources.redis.hset(
+        RedisKeys.sessions("ada"),
+        "session-1",
+        json.dumps(
+            {
+                "project_id": "project-1",
+                "document_focus": {
+                    "mode": "pinned",
+                    "target_type": "folder_upload",
+                    "document_id": None,
+                    "relative_path": None,
+                    "folder_root_id": "folder-1",
+                    "path_prefix": None,
+                    "created_at": "2026-06-22T12:00:00+00:00",
+                },
+            }
+        ),
+    )
+
+    focus = await manager.set_document_focus(
+        "session-1",
+        document_id="doc-1",
+    )
+
+    assert focus["target_type"] == "document"
+    assert focus["mode"] == "pinned"
+    assert focus["relative_path"] == "docs/notes.md"
+    assert await manager.get_document_focus("session-1") == focus
+    assert await manager.clear_document_focus("session-1") is True
+    assert await manager.get_document_focus("session-1") is None
+    assert await manager.clear_document_focus("session-1") is False
+    metadata = json.loads(
+        await resources.redis.hget(
+            RedisKeys.sessions("ada"),
+            "session-1",
+        )
+    )
+    assert metadata["project_id"] == "project-1"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_document_focus_survives_session_resume(
+    monkeypatch,
+    session_manager,
+):
+    manager, resources, _, active_sessions = session_manager
+    focus = {
+        "mode": "pinned",
+        "target_type": "folder_upload",
+        "document_id": None,
+        "relative_path": None,
+        "folder_root_id": "folder-1",
+        "path_prefix": None,
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
+    await resources.redis.hset(
+        RedisKeys.sessions("ada"),
+        "session-1",
+        json.dumps(
+            {
+                "project_id": "project-1",
+                "document_focus": focus,
+            }
+        ),
+    )
+
+    async def fake_create(**kwargs):
+        return FakeContext(
+            session_id=kwargs["session_id"],
+            project_id="project-1",
+        )
+
+    monkeypatch.setattr(Context, "create", fake_create)
+
+    await manager.get_or_resume_session("session-1")
+
+    assert "session-1" in active_sessions
+    assert await manager.get_document_focus("session-1") == focus

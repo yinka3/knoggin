@@ -64,11 +64,10 @@ class FakeTopicConfig:
 class FakeExecutor:
     instances = []
 
-    def __init__(self, ctx, llm, tools, memory_mgr):
+    def __init__(self, ctx, llm, tools):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
-        self.memory_mgr = memory_mgr
         self.execute_kwargs = None
         self.__class__.instances.append(self)
 
@@ -172,7 +171,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
             "topic_config": FakeTopicConfig(),
             "memory": object(),
             "entities": object(),
-            "file_rag": None,
+            "document_service": None,
             "tools": tools,
         }
 
@@ -235,7 +234,7 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
             "topic_config": FakeTopicConfig(),
             "memory": object(),
             "entities": object(),
-            "file_rag": None,
+            "document_service": None,
             "tools": tools,
         }
 
@@ -262,3 +261,81 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
         }
     }
     assert tools.hot_topic_calls == [(["Identity"], True)]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_loads_validated_document_focus_once():
+    context = FakeContext()
+    focus = {
+        "mode": "pinned",
+        "target_type": "subtree",
+        "document_id": None,
+        "relative_path": None,
+        "folder_root_id": "folder-1",
+        "path_prefix": "src",
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
+    await context.redis_client.hset(
+        RedisKeys.sessions("ada"),
+        "session-1",
+        json.dumps(
+            {
+                "project_id": "project-1",
+                "document_focus": focus,
+            }
+        ),
+    )
+
+    class FocusDocumentService:
+        async def resolve_focus_target(self, **kwargs):
+            assert kwargs == {
+                "session_id": "session-1",
+                "document_id": None,
+                "folder_root_id": "folder-1",
+                "path_prefix": "src",
+            }
+            return {
+                "target_type": "subtree",
+                "document_id": None,
+                "relative_path": None,
+                "folder_root_id": "folder-1",
+                "path_prefix": "src",
+            }
+
+    context.document_service = FocusDocumentService()
+
+    loaded = await Orchestrator()._load_document_focus(context)
+
+    assert loaded == focus
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_ignores_stale_document_focus():
+    context = FakeContext()
+
+    class MissingFocusService:
+        async def resolve_focus_target(self, **kwargs):
+            raise FileNotFoundError("Document focus target not found")
+
+    context.document_service = MissingFocusService()
+    await context.redis_client.hset(
+        RedisKeys.sessions("ada"),
+        "session-1",
+        json.dumps(
+            {
+                "document_focus": {
+                    "mode": "pinned",
+                    "target_type": "folder_upload",
+                    "document_id": None,
+                    "relative_path": None,
+                    "folder_root_id": "missing-folder",
+                    "path_prefix": None,
+                    "created_at": "2026-06-22T12:00:00+00:00",
+                }
+            }
+        ),
+    )
+
+    assert await Orchestrator()._load_document_focus(context) is None

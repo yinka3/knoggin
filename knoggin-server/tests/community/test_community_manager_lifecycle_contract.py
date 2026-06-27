@@ -191,7 +191,7 @@ async def test_run_loop_rotates_participants_persists_messages_and_stops_on_end(
             return SimpleNamespace(
                 session_id=session_id,
                 project=project_state,
-                file_rag=None,
+                document_service=None,
             )
 
     async def get_agent_config(agent_id):
@@ -263,7 +263,7 @@ async def test_run_loop_stops_when_active_discussion_key_changes(monkeypatch):
             return SimpleNamespace(
                 session_id=session_id,
                 project=project_state,
-                file_rag=None,
+                document_service=None,
             )
 
     async def get_agent_config(agent_id):
@@ -315,11 +315,10 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
         )
 
     class FakeExecutor:
-        def __init__(self, ctx, llm, tools, memory_mgr):
+        def __init__(self, ctx, llm, tools):
             captured["ctx"] = ctx
             captured["llm"] = llm
             captured["tools"] = tools
-            captured["memory_mgr"] = memory_mgr
 
         async def execute(self, **kwargs):
             captured["execute_kwargs"] = kwargs
@@ -338,7 +337,7 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
     ctx = SimpleNamespace(
         session_id="aac-disc-1",
         project=make_project_state(),
-        file_rag=None,
+        document_service=None,
     )
     agent = AgentConfig(
         id="agent-1",

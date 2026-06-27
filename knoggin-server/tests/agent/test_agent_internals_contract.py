@@ -180,22 +180,36 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
     update_accumulators(ctx, "fact_check", {"data": {"resolution": "exact"}})
     update_accumulators(
         ctx,
-        "search_files",
+        "search_documents",
         {
             "data": [
                 {
-                    "file_id": "file-1",
+                    "document_id": "file-1",
                     "chunk_index": 2,
                     "content": "profile plan",
-                    "file_name": "plan.md",
+                    "document_name": "plan.md",
                 },
                 {
-                    "file_id": "file-1",
+                    "document_id": "file-1",
                     "chunk_index": 2,
                     "content": "duplicate",
-                    "file_name": "plan.md",
+                    "document_name": "plan.md",
                 },
                 {"error": "skip"},
+            ]
+        },
+    )
+    update_accumulators(
+        ctx,
+        "read_document",
+        {
+            "data": [
+                {
+                    "document_id": "file-1",
+                    "chunk_index": "lines:10-12",
+                    "content": "10: exact content",
+                    "document_name": "plan.md",
+                }
             ]
         },
     )
@@ -221,7 +235,14 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
     assert [
         (msg["id"], msg["source_type"], msg["message"])
         for msg in ctx.evidence.messages
-    ] == [("file:file-1:2", "file", "profile plan")]
+    ] == [
+        ("document:file-1:2", "document", "profile plan"),
+        (
+            "document:file-1:lines:10-12",
+            "document",
+            "10: exact content",
+        ),
+    ]
     assert ctx.evidence.sources == [
         {"url": "https://example.test/a"},
         {"url": "https://example.test/news"},
@@ -255,8 +276,25 @@ def test_update_accumulators_ignores_errors_and_empty_results():
         ("fact_check", {"data": []}, ("No results", 0)),
         ("save_memory", {"data": {"saved": True}}, ("Memory updated", 1)),
         ("forget_memory", {"data": {"forgotten": True}}, ("Memory updated", 1)),
-        ("search_files", {"data": [{"id": "chunk"}]}, ("Found 1 relevant chunks", 1)),
-        ("search_files", {"data": [{"error": "nope"}]}, ("No results", 0)),
+        ("search_documents", {"data": [{"id": "chunk"}]}, ("Found 1 relevant chunks", 1)),
+        ("search_documents", {"data": [{"error": "nope"}]}, ("No results", 0)),
+        ("list_documents", {"data": [{"document_id": "doc-1"}]}, ("Found 1 items", 1)),
+        (
+            "list_folder_uploads",
+            {"data": [{"folder_root_id": "folder-1"}]},
+            ("Found 1 items", 1),
+        ),
+        ("list_folder_tree", {"data": []}, ("Found 0 items", 0)),
+        (
+            "get_folder_upload_summary",
+            {"data": {"folder_root_id": "folder-1"}},
+            ("Loaded folder upload summary", 1),
+        ),
+        (
+            "read_document",
+            {"data": [{"content": "lines"}]},
+            ("Read document content", 1),
+        ),
         (
             "request_replanning",
             {"data": {"replanning": "stuck"}},

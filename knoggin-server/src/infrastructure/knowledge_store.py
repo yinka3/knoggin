@@ -54,6 +54,10 @@ class KnowledgeStore:
         await self._postgres_client.close()
 
     @property
+    def postgres(self) -> PostgresClient:
+        return self._postgres_client
+
+    @property
     def community(self) -> CommunityStore:
         return self._community
 

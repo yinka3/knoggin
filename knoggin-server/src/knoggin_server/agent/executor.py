@@ -21,8 +21,9 @@ from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now
 from infrastructure.llm_client import LLMService
 from knoggin_server.agent.formatters import (
+    format_document_focus_context,
     format_entity_results,
-    format_files_context,
+    format_documents_context,
     format_graph_results,
     format_retrieved_messages,
 )
@@ -38,9 +39,11 @@ from knoggin_server.agent.system_prompt import (
     get_agent_prompt,
     get_fallback_summary_prompt,
 )
-from knoggin_server.agent.tools.registry import Tools
+from knoggin_server.agent.tools.registry import (
+    Tools,
+    configure_tool_authorization,
+)
 from knoggin_server.agent.types import ClarificationRequest, FinalResponse, ToolCall
-from knoggin_server.knowledge.services.memory_service import MemoryManager
 
 MAX_TOKEN_CHUNK_SIZE = 10000
 
@@ -54,12 +57,10 @@ class AgentExecutor:
         ctx: AgentContext,
         llm: LLMService,
         tools: Tools,
-        memory_mgr: MemoryManager,
     ):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
-        self.memory_mgr = memory_mgr
 
     async def execute(
         self,
@@ -80,23 +81,16 @@ class AgentExecutor:
             "%Y-%m-%d %H:%M %Z"
         )
 
-        if self.memory_mgr:
-            (
-                memory_context,
-                directives_str,
-            ) = await self.memory_mgr.load_prompt_strings(self.ctx.hot_topics)
-        else:
-            memory_context, directives_str = "", ""
-
-        files_context = ""
-        if self.tools.file_rag:
-            manifest = self.tools.get_file_manifest()
+        documents_context = ""
+        if self.tools.document_service:
+            manifest = await self.tools.get_document_manifest()
             if manifest:
-                files_context = format_files_context(manifest)
-
-        a_directives = (
-            agent_directives if agent_directives is not None else directives_str
+                documents_context = format_documents_context(manifest)
+        document_focus_context = format_document_focus_context(
+            getattr(self.tools, "document_focus", None)
         )
+
+        a_directives = agent_directives or ""
 
         last_result = None
 
@@ -158,8 +152,8 @@ class AgentExecutor:
                 current_reasoning,
                 current_mode_name,
                 enabled_tools,
-                memory_context,
-                files_context,
+                documents_context,
+                document_focus_context,
                 a_directives,
                 agent_temperature,
                 agent_instructions or "",
@@ -328,8 +322,8 @@ class AgentExecutor:
         reasoning: str,
         current_mode: str,
         enabled_tools: Optional[List[str]],
-        memory_context: str,
-        files_context: str,
+        documents_context: str,
+        document_focus_context: str,
         directives: str,
         temp: float,
         agent_instructions: str,
@@ -337,27 +331,55 @@ class AgentExecutor:
         client_tools: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
+        runtime_instructions = []
+        if self.ctx.topic_evaluation_needed:
+            runtime_instructions.append(
+                "[SYSTEM ALERT: The heartbeat counter has reached its threshold. "
+                "You MUST use the `update_topics` tool during this turn to evaluate "
+                "the recent conversation. Make no changes when the existing topics "
+                f"remain sufficient. Current active topics: "
+                f"{', '.join(self.ctx.active_topics) or 'None'}.]"
+            )
+
+        if self.ctx.maintenance_needed:
+            runtime_instructions.append(
+                "[SYSTEM ALERT: It is time for routine graph maintenance. "
+                "You MUST use the `check_graph_health` tool during this turn to check "
+                "if there are any duplicate entities that need merging.]"
+            )
 
         system_prompt = get_agent_prompt(
-            self.ctx.user_name,
-            date,
-            self.ctx.agent_persona,
-            self.ctx.agent_name,
-            memory_context=memory_context,
-            files_context=files_context,
+            user_name=self.ctx.user_name,
+            current_time=date,
+            persona=self.ctx.agent_persona,
+            agent_name=self.ctx.agent_name,
+            documents_context=documents_context,
+            document_focus_context=document_focus_context,
             agent_directives=directives,
             instructions=agent_instructions,
+            runtime_instructions="\n\n".join(runtime_instructions),
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
             current_mode=current_mode,
-            active_topics=self.ctx.active_topics,
         )
 
         user_message = build_user_message(self.ctx, last_result)
         self.ctx.state.last_error = None
-        active_schemas = get_filtered_schemas(enabled_tools)
+        effective_tools = enabled_tools
+        if self.ctx.topic_evaluation_needed and enabled_tools is not None:
+            effective_tools = list(dict.fromkeys([*enabled_tools, "update_topics"]))
+        active_schemas = get_filtered_schemas(effective_tools)
         if client_tools:
             active_schemas = active_schemas + client_tools
+        configure_tool_authorization(
+            self.tools,
+            active_schemas,
+            user_name=self.ctx.user_name,
+            agent_id=self.ctx.agent_id or getattr(self.tools, "agent_id", ""),
+            project_id=str(getattr(self.tools, "project_id", "")),
+            session_id=self.ctx.session_id,
+            run_id=self.ctx.run_id,
+        )
 
         saw_tool_calls = False
 
@@ -527,6 +549,16 @@ class AgentExecutor:
                     continue
 
                 result = await execute_tool(self.tools, call.name, call.args)
+
+                if call.name == "update_topics":
+                    self.ctx.topic_evaluation_needed = False
+                    if result.get("data", {}).get("success"):
+                        self.ctx.active_topics = list(
+                            result["data"].get(
+                                "active_topics",
+                                self.ctx.active_topics,
+                            )
+                        )
 
                 summary, _ = summarize_result(call.name, result)
                 update_accumulators(self.ctx, call.name, result)

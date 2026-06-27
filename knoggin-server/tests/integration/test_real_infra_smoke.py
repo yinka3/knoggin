@@ -24,6 +24,10 @@ EXPECTED_TABLES = {
     "entity_search",
     "message_search",
     "fact_search",
+    "project_documents",
+    "document_folder_uploads",
+    "project_document_scan_settings",
+    "document_chunks",
 }
 
 EXPECTED_SEQUENCES = {
@@ -53,6 +57,14 @@ EXPECTED_INDEXES = {
     "message_search_session_idx",
     "message_search_project_idx",
     "fact_search_project_idx",
+    "project_documents_project_idx",
+    "project_documents_visibility_idx",
+    "project_documents_hash_idx",
+    "project_documents_folder_root_idx",
+    "document_folder_uploads_project_idx",
+    "document_folder_uploads_visibility_idx",
+    "document_chunks_document_idx",
+    "document_chunks_embedding_idx",
 }
 
 
@@ -128,7 +140,11 @@ async def test_real_postgres_schema_tables_and_indexes_are_present():
                 ('hierarchy_edges'),
                 ('entity_search'),
                 ('message_search'),
-                ('fact_search')
+                ('fact_search'),
+                ('project_documents'),
+                ('document_folder_uploads'),
+                ('project_document_scan_settings'),
+                ('document_chunks')
         ) AS expected(table_name)
         """,
         load_age=False,
@@ -170,6 +186,122 @@ async def test_real_postgres_schema_tables_and_indexes_are_present():
         "Missing expected schema indexes. If tables exist but indexes are missing, "
         f"re-apply schema.sql. Missing: {sorted(missing_indexes)}"
     )
+
+    document_column_rows = _execute_direct_read(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'project_documents'
+          AND column_name IN (
+              'document_id',
+              'folder_root_id',
+              'source_kind',
+              'indexed_at',
+              'error_message'
+          )
+        """,
+        load_age=False,
+    )
+    assert {row["column_name"] for row in document_column_rows} == {
+        "document_id",
+        "folder_root_id",
+        "source_kind",
+        "indexed_at",
+        "error_message",
+    }
+
+    folder_column_rows = _execute_direct_read(
+        """
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'document_folder_uploads'
+          AND column_name IN (
+              'folder_root_id',
+              'excluded_reason_counts',
+              'scan_settings',
+              'indexed_at'
+          )
+        """,
+        load_age=False,
+    )
+    assert {
+        row["column_name"]: row["data_type"]
+        for row in folder_column_rows
+    } == {
+        "folder_root_id": "uuid",
+        "excluded_reason_counts": "jsonb",
+        "scan_settings": "jsonb",
+        "indexed_at": "timestamp with time zone",
+    }
+
+    scan_settings_column_rows = _execute_direct_read(
+        """
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'project_document_scan_settings'
+          AND column_name IN (
+              'project_id',
+              'settings',
+              'created_at',
+              'updated_at'
+          )
+        """,
+        load_age=False,
+    )
+    assert {
+        row["column_name"]: row["data_type"]
+        for row in scan_settings_column_rows
+    } == {
+        "project_id": "text",
+        "settings": "jsonb",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+    }
+
+    document_constraint_rows = _execute_direct_read(
+        """
+        SELECT conname
+        FROM pg_constraint
+        WHERE connamespace = 'public'::regnamespace
+          AND conname = ANY(%s)
+        """,
+        (
+            [
+                "project_documents_visibility_scope_check",
+                "project_documents_session_visibility_check",
+                "project_documents_status_check",
+                "project_documents_source_kind_check",
+                "project_documents_folder_source_check",
+                "project_documents_size_check",
+                "project_documents_folder_root_id_fkey",
+                "document_folder_uploads_visibility_scope_check",
+                "document_folder_uploads_session_visibility_check",
+                "document_folder_uploads_counts_check",
+                "document_chunks_document_index_unique",
+                "document_chunks_index_check",
+                "document_chunks_document_id_fkey",
+            ],
+        ),
+        load_age=False,
+    )
+    assert {row["conname"] for row in document_constraint_rows} == {
+        "project_documents_visibility_scope_check",
+        "project_documents_session_visibility_check",
+        "project_documents_status_check",
+        "project_documents_source_kind_check",
+        "project_documents_folder_source_check",
+        "project_documents_size_check",
+        "project_documents_folder_root_id_fkey",
+        "document_folder_uploads_visibility_scope_check",
+        "document_folder_uploads_session_visibility_check",
+        "document_folder_uploads_counts_check",
+        "document_chunks_document_index_unique",
+        "document_chunks_index_check",
+        "document_chunks_document_id_fkey",
+    }
 
 
 @pytest.mark.integration

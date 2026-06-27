@@ -5,7 +5,6 @@ import pytest
 from infrastructure.job.base import JobContext, JobResult
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.jobs.merge_job import MergeDetectionJob
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -125,35 +124,6 @@ def test_register_rejects_duplicate_job_names():
 
     with pytest.raises(ValueError, match="already registered"):
         scheduler.register(ControlledJob(name="duplicate"))
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_startup_check_recovers_merge_work_from_durable_queue(monkeypatch):
-    capture_events(monkeypatch)
-    redis = FakeRedis()
-    await redis.sadd(RedisKeys.merge_queue("ada", "project-1"), "2")
-    scheduler = Scheduler("ada", "project-1", redis)
-    job = MergeDetectionJob(
-        user_name="ada",
-        entities=object(),
-        knowledge_store=object(),
-        llm_client=object(),
-        topic_config=object(),
-        redis_client=redis,
-    )
-    executed = asyncio.Event()
-
-    async def execute(ctx):
-        executed.set()
-        return JobResult(success=True, summary="recovered")
-
-    job.execute = execute
-    scheduler.register(job)
-
-    await scheduler.start()
-    await asyncio.wait_for(executed.wait(), timeout=1)
-    await scheduler.stop()
 
 
 @pytest.mark.runtime

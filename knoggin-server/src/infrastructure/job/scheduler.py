@@ -8,7 +8,7 @@ from loguru import logger
 from common.utils.events import emit
 from common.utils.time_utils import get_now, get_now_iso, get_now_unix, parse_iso_time
 from infrastructure.job.base import BaseJob, JobContext
-from infrastructure.redis_client import RedisKeys
+from infrastructure.redis_client import RedisKeys, PROJECT_ACTIVITY_TTL_SECONDS
 
 
 class Scheduler:
@@ -130,6 +130,7 @@ class Scheduler:
         await self.redis.set(
             RedisKeys.project_last_activity(self.user_name, self.project_id),
             get_now_iso(),
+            ex=PROJECT_ACTIVITY_TTL_SECONDS,
         )
 
     async def _get_idle_seconds(self) -> float:

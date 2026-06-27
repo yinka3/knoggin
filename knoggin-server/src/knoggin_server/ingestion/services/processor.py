@@ -20,7 +20,10 @@ from common.utils.core_utils import (
 )
 from common.utils.events import emit
 from infrastructure.llm_client import LLMService
-from knoggin_server.agent.prompts import ner_reasoning_prompt
+from knoggin_server.ingestion.prompts import (
+    ner_reasoning_prompt,
+    render_configured_prompt,
+)
 
 
 class TextProcessor:
@@ -331,7 +334,12 @@ class TextProcessor:
         )
 
         if self.ner_prompt:
-            system_prompt = self.ner_prompt.replace("{user_name}", user_name)
+            system_prompt = render_configured_prompt(
+                self.ner_prompt,
+                prompt_name="configured extract_entities",
+                required={"user_name"},
+                user_name=user_name,
+            )
         else:
             system_prompt = ner_reasoning_prompt(user_name)
 

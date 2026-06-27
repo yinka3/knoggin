@@ -34,8 +34,8 @@ RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner
 # Copy the entire workspace source
 COPY . .
 
-# Ensure config directory exists for persistence
-RUN mkdir -p /app/config
+# Ensure local persistence directories exist
+RUN mkdir -p /app/config /app/data/files
 
 # Use the virtual environment created by uv
 ENV PATH="/app/.venv/bin:$PATH"

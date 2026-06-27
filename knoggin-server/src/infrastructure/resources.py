@@ -1,6 +1,7 @@
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -16,6 +17,7 @@ from common.schema.settings import RedisConnectionSettings
 from common.utils.events import CommunityEventEmitter
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.llm_client import LLMService
+from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 from log.llm_trace import get_trace_logger
@@ -40,6 +42,8 @@ class ResourceManager:
     def __init__(self):
 
         self.knowledge_store: Optional[KnowledgeStore] = None
+        self.postgres: Optional[PostgresClient] = None
+        self.document_storage_root: Optional[Path] = None
         self.embedding: Optional[EmbeddingService] = None
         self.redis_manager: Optional[AsyncRedisClient] = None
         self.redis: Optional[aioredis.Redis] = None
@@ -81,6 +85,14 @@ class ResourceManager:
                     raise ConfigurationError(
                         "DATABASE_URL environment variable is not set"
                     )
+                instance.document_storage_root = Path(
+                    os.getenv("KNOGGIN_DOCUMENT_STORAGE_DIR", "./data/documents")
+                ).expanduser().resolve()
+                await asyncio.to_thread(
+                    instance.document_storage_root.mkdir,
+                    parents=True,
+                    exist_ok=True,
+                )
                 redis_settings = RedisConnectionSettings.from_env()
                 instance.redis_manager = AsyncRedisClient(redis_settings)
                 instance.redis = await instance.redis_manager.connect()
@@ -121,6 +133,7 @@ class ResourceManager:
                     dsn=dsn,
                     embedding_service=instance.embedding,
                 )
+                instance.postgres = instance.knowledge_store.postgres
 
                 async def load_spacy():
                     exclude = ["ner", "lemmatizer", "attribute_ruler"]
@@ -157,7 +170,6 @@ class ResourceManager:
                     )
 
                 await instance.knowledge_store.connect()
-
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
                 return instance
@@ -190,6 +202,7 @@ class ResourceManager:
         if self.knowledge_store:
             await self.knowledge_store.close()
             self.knowledge_store = None
+        self.postgres = None
         if self.embedding:
             self.embedding.cleanup()
         if self.llm_service:
@@ -198,6 +211,7 @@ class ResourceManager:
         self.gliner = None
         self.spacy = None
         self.knowledge_store = None
+        self.document_storage_root = None
 
     async def shutdown(self):
         """Release all managed resources."""

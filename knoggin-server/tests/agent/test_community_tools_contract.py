@@ -1,18 +1,22 @@
-import json
 from types import SimpleNamespace
 
 import pytest
 
 from common.schema.aac_schema import AAC_DEFAULT_ENABLED_TOOLS
-from common.utils.time_utils import frozen_time
-from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.tools.community_tools import (
     MAX_SPAWNED_SPECIALISTS,
     CommunityTools,
 )
 from tests.fixtures.fakes import FakeRedis
 
-FROZEN_AT = "2026-02-03T04:05:06+00:00"
+
+PERSONA = {
+    "attention_bias": "Weak or missing evidence",
+    "reasoning_style": "Trace claims back to primary observations",
+    "social_temperament": "Calm and constructively skeptical",
+    "communication_signature": "Brief, sourced, and explicit about uncertainty",
+    "productive_flaw": "Can spend too long validating small details",
+}
 
 
 class RecordingCommunityStore:
@@ -40,41 +44,56 @@ class RecordingCommunityStore:
         )
 
 
-def make_base_tools(redis):
+class RecordingPostgres:
+    def __init__(self, *, spawned_count=0, write_count=1):
+        self.spawned_count = spawned_count
+        self.write_count = write_count
+        self.calls = []
+
+    async def fetch_all(self, query, params=None):
+        self.calls.append(("fetch_all", query, params))
+        return [{"count": self.spawned_count}]
+
+    async def execute(self, query, params=None):
+        self.calls.append(("execute", query, params))
+        return self.write_count
+
+
+def make_tool(*, postgres=None, participants=None):
+    redis = FakeRedis()
+    postgres = postgres or RecordingPostgres()
+    store = RecordingCommunityStore()
+    participants = participants if participants is not None else ["agent-1"]
     entities = SimpleNamespace(
         embedding_service=object(),
         project_id="project-1",
         readable_project_ids=["project-1"],
     )
-    return SimpleNamespace(
+    base_tools = SimpleNamespace(
         entities=entities,
         session_id="session-1",
         topic_config=SimpleNamespace(active_topics=["General"]),
         search_cfg={},
-        file_rag=None,
+        document_service=None,
+        document_focus=None,
         knowledge_store=SimpleNamespace(),
+        postgres=postgres,
         redis=redis,
         readable_project_ids=["project-1"],
     )
-
-
-def make_tool(*, redis=None, participants=None, discussion_id="disc-1"):
-    redis = redis or FakeRedis()
-    store = RecordingCommunityStore()
-    participants = participants if participants is not None else ["agent-1"]
     tool = CommunityTools(
         user_name="ada",
-        base_tools=make_base_tools(redis),
+        base_tools=base_tools,
         community_store=store,
-        discussion_id=discussion_id,
+        discussion_id="disc-1",
         agent_id="agent-1",
-        memory_mgr=object(),
         participants=participants,
     )
-    return tool, store, redis, participants
+    return tool, store, postgres, participants
 
 
-def patch_community_tool_config(monkeypatch, *, events=None):
+def patch_config_and_events(monkeypatch):
+    events = []
     root = SimpleNamespace(
         config=SimpleNamespace(llm=SimpleNamespace(agent_model="test-agent-model"))
     )
@@ -84,244 +103,95 @@ def patch_community_tool_config(monkeypatch, *, events=None):
     )
 
     async def fake_emit_community(*args):
-        if events is not None:
-            events.append(args)
+        events.append(args)
 
     monkeypatch.setattr(
         "knoggin_server.agent.tools.community_tools.emit_community",
         fake_emit_community,
     )
+    return events
 
 
 @pytest.mark.no_network
-async def test_community_tools_save_insight_writes_insight_message():
+async def test_save_insight_writes_only_to_discussion_store():
     tool, store, _, _ = make_tool()
 
-    try:
-        result = await tool.save_insight("Ada prefers precise regression tests")
-    finally:
-        await tool.close()
+    result = await tool.save_insight("Prefer direct evidence")
 
     assert result == {"saved": True, "type": "insight"}
     assert store.messages == [
         {
             "discussion_id": "disc-1",
             "agent_id": "system",
-            "content": "INSIGHT: Ada prefers precise regression tests",
+            "content": "INSIGHT: Prefer direct evidence",
             "role": "insight",
         }
     ]
 
 
 @pytest.mark.no_network
-async def test_community_tools_save_memory_stores_discussion_scoped_payload():
-    tool, _, redis, _ = make_tool()
-
-    try:
-        with frozen_time(FROZEN_AT):
-            result = await tool.save_memory(
-                "Check profile drift before broadening summaries",
-                topic="Testing",
-            )
-    finally:
-        await tool.close()
-
-    assert result["saved"] is True
-    assert result["memory_id"].startswith("comm_mem_")
-    key = RedisKeys.community_agent_memory("ada", "agent-1")
-    entries = await redis.hgetall(key)
-    assert list(entries) == [result["memory_id"]]
-    assert json.loads(entries[result["memory_id"]]) == {
-        "content": "Check profile drift before broadening summaries",
-        "topic": "Testing",
-        "created_at": FROZEN_AT,
-        "discussion_id": "disc-1",
-    }
-
-
-@pytest.mark.no_network
-async def test_community_tools_save_memory_refuses_when_memory_is_full():
-    redis = FakeRedis()
-    key = RedisKeys.community_agent_memory("ada", "agent-1")
-    for index in range(10):
-        await redis.hset(key, f"existing-{index}", "{}")
-    tool, _, _, _ = make_tool(redis=redis)
-
-    try:
-        result = await tool.save_memory("one too many")
-    finally:
-        await tool.close()
-
-    assert result == {"error": "Memory full (10/10). No new memories can be saved."}
-    assert await redis.hlen(key) == 10
-
-
-@pytest.mark.no_network
-async def test_community_memory_persists_across_discussions_for_same_agent():
-    redis = FakeRedis()
-    first, _, _, _ = make_tool(redis=redis, discussion_id="disc-1")
-    second, _, _, _ = make_tool(redis=redis, discussion_id="disc-2")
-
-    try:
-        first_result = await first.save_memory("first discussion")
-        second_result = await second.save_memory("second discussion")
-    finally:
-        await first.close()
-        await second.close()
-
-    key = RedisKeys.community_agent_memory("ada", "agent-1")
-    entries = {
-        memory_id: json.loads(payload)
-        for memory_id, payload in (await redis.hgetall(key)).items()
-    }
-
-    assert entries[first_result["memory_id"]]["discussion_id"] == "disc-1"
-    assert entries[second_result["memory_id"]]["discussion_id"] == "disc-2"
-
-
-@pytest.mark.no_network
-async def test_community_tools_spawn_specialist_creates_agent_and_seed_memory(
-    monkeypatch,
-):
-    events = []
-    patch_community_tool_config(monkeypatch, events=events)
+async def test_spawn_specialist_persists_agent_and_initial_brain(monkeypatch):
+    events = patch_config_and_events(monkeypatch)
     participants = ["agent-1"]
-    tool, store, redis, participants = make_tool(participants=participants)
+    tool, store, postgres, participants = make_tool(participants=participants)
 
-    try:
-        with frozen_time(FROZEN_AT):
-            result = await tool.spawn_specialist(
-                name="Evidence Steward",
-                persona="Tracks profile evidence and weak claims.",
-                initial_directives=[
-                    {
-                        "mode": "require",
-                        "content": "Never invent source messages.",
-                    },
-                    {"mode": "prefer", "content": "Prefer direct evidence."},
-                    {"mode": "avoid", "content": "Unscoped profile claims."},
-                ],
-            )
-    finally:
-        await tool.close()
+    result = await tool.spawn_specialist(
+        name="Evidence Steward",
+        persona=PERSONA,
+        initial_directives=[
+            {"mode": "require", "content": "Never invent source messages."},
+            {"mode": "avoid", "content": "Unscoped profile claims."},
+        ],
+    )
 
     assert result["id"].startswith("spawned_")
-    assert result["seeded_directives"] == 3
+    assert result["persona"] == PERSONA
+    assert result["seeded_directives"] == 2
     assert participants == ["agent-1", result["id"]]
 
-    raw_agent = await redis.hget(RedisKeys.agents("ada"), result["id"])
-    agent = json.loads(raw_agent)
-    assert agent["id"] == result["id"]
-    assert agent["name"] == "Evidence Steward"
-    assert agent["persona"] == "Tracks profile evidence and weak claims."
-    assert agent["model"] == "test-agent-model"
-    assert agent["enabled_tools"] == AAC_DEFAULT_ENABLED_TOOLS
-    assert agent["is_spawned"] is True
-    assert agent["spawned_by"] == "agent-1"
+    write = next(call for call in postgres.calls if call[0] == "execute")
+    params = write[2]
+    assert "INSERT INTO public.agents" in write[1]
+    assert "INSERT INTO public.agent_brain_revisions" in write[1]
+    assert params["project_id"] == "project-1"
+    assert params["model"] == "test-agent-model"
+    assert params["enabled_tools"]
+    assert params["spawned_by"] == "agent-1"
+    assert "Never invent source messages." in params["instructions"]
+    assert AAC_DEFAULT_ENABLED_TOOLS
 
-    assert store.spawns == [
-        {
-            "parent_id": "agent-1",
-            "child_id": result["id"],
-            "detail": "Tracks profile evidence and weak claims.",
-        }
-    ]
+    assert store.spawns[0]["child_id"] == result["id"]
+    assert store.spawns[0]["detail"] == result["persona_markdown"]
     assert events[0][2] == "agent_spawned"
-    assert events[0][3]["agent_id"] == result["id"]
-    assert events[0][3]["seeded_directives"] == result["seeded_directives"]
-
-    memory_key = RedisKeys.agent_directives("ada", result["id"])
-    seeded = [json.loads(value) for value in (await redis.hgetall(memory_key)).values()]
-    seeded.sort(key=lambda item: item["mode"])
-
-    assert seeded == [
-        {
-            "mode": "avoid",
-            "content": "Unscoped profile claims.",
-            "created_at": FROZEN_AT,
-            "seeded_by": "agent-1",
-        },
-        {
-            "mode": "prefer",
-            "content": "Prefer direct evidence.",
-            "created_at": FROZEN_AT,
-            "seeded_by": "agent-1",
-        },
-        {
-            "mode": "require",
-            "content": "Never invent source messages.",
-            "created_at": FROZEN_AT,
-            "seeded_by": "agent-1",
-        },
-    ]
 
 
 @pytest.mark.no_network
-async def test_community_tools_spawn_specialist_blocks_at_limit(monkeypatch):
-    patch_community_tool_config(monkeypatch)
-    redis = FakeRedis()
+async def test_spawn_specialist_blocks_at_postgres_backed_limit(monkeypatch):
+    patch_config_and_events(monkeypatch)
+    postgres = RecordingPostgres(spawned_count=MAX_SPAWNED_SPECIALISTS)
     participants = [f"spawned-{index}" for index in range(MAX_SPAWNED_SPECIALISTS)]
-    for agent_id in participants:
-        await redis.hset(
-            RedisKeys.agents("ada"),
-            agent_id,
-            json.dumps(
-                {
-                    "id": agent_id,
-                    "name": agent_id,
-                    "persona": "spawned",
-                    "is_spawned": True,
-                }
-            ),
-        )
-    tool, store, _, participants = make_tool(redis=redis, participants=participants)
+    tool, store, postgres, participants = make_tool(
+        postgres=postgres,
+        participants=participants,
+    )
 
-    try:
-        result = await tool.spawn_specialist("Extra", "Should not join")
-    finally:
-        await tool.close()
+    result = await tool.spawn_specialist("Extra", PERSONA)
 
     assert result == {
         "error": "Spawn limit reached. Max 10 sub-agents per discussion."
     }
-    assert len(participants) == MAX_SPAWNED_SPECIALISTS
+    assert not any(call[0] == "execute" for call in postgres.calls)
     assert store.spawns == []
 
 
 @pytest.mark.no_network
-async def test_community_tools_count_spawned_ignores_missing_and_malformed_agents():
-    redis = FakeRedis()
-    await redis.hset(
-        RedisKeys.agents("ada"),
-        "spawned-good",
-        json.dumps(
-            {
-                "id": "spawned-good",
-                "name": "Spawned Good",
-                "persona": "valid",
-                "is_spawned": True,
-            }
-        ),
-    )
-    await redis.hset(RedisKeys.agents("ada"), "malformed", "{not json")
-    await redis.hset(
-        RedisKeys.agents("ada"),
-        "regular-agent",
-        json.dumps(
-            {
-                "id": "regular-agent",
-                "name": "Regular",
-                "persona": "not spawned",
-                "is_spawned": False,
-            }
-        ),
-    )
-    tool, _, _, _ = make_tool(
-        redis=redis,
-        participants=["spawned-good", "malformed", "missing-agent", "regular-agent"],
+async def test_spawn_specialist_rejects_incomplete_persona_without_db_access():
+    tool, _, postgres, _ = make_tool()
+
+    result = await tool.spawn_specialist(
+        "Incomplete",
+        {"attention_bias": "Only one field"},
     )
 
-    try:
-        assert await tool._count_spawned_participants() == 1
-    finally:
-        await tool.close()
+    assert "error" in result
+    assert postgres.calls == []

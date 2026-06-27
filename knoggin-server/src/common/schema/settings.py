@@ -1,15 +1,12 @@
 import os
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from common.exceptions import ConfigurationError
-from knoggin_server.agent.prompts import (
-    get_connection_reasoning_prompt,
-    get_contradiction_judgment_prompt,
-    get_merge_judgment_prompt,
-    get_profile_extraction_prompt,
-    ner_reasoning_prompt,
+from common.utils.prompt_loader import (
+    load_pipeline_prompt_template,
+    validate_prompt_template,
 )
 
 
@@ -128,12 +125,6 @@ class ProfileSettings(BaseModel):
     contradiction_batch_size: int = Field(4, ge=1)
 
 
-class MergerSettings(BaseModel):
-    auto_threshold: float = Field(0.93, ge=0.5, le=1.0)
-    hitl_threshold: float = Field(0.65, ge=0.4, le=1.0)
-    cosine_threshold: float = Field(0.65, ge=0.1, le=1.0)
-
-
 class DLQSettings(BaseModel):
     interval_seconds: int = Field(60, ge=10)
     batch_size: int = Field(50, ge=1)
@@ -146,19 +137,16 @@ class ArchivalSettings(BaseModel):
     fallback_interval_hours: float = Field(24.0, ge=0.5)
 
 
-class TopicConfigSettings(BaseModel):
-    enabled: bool = Field(True)
-    interval_msgs: int = Field(40, ge=5)
-    conversation_window: int = Field(50, ge=5)
-
-
 class JobSettings(BaseModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     profile: ProfileSettings = Field(default_factory=ProfileSettings)
-    merger: MergerSettings = Field(default_factory=MergerSettings)
     dlq: DLQSettings = Field(default_factory=DLQSettings)
     archival: ArchivalSettings = Field(default_factory=ArchivalSettings)
-    topic_config: TopicConfigSettings = Field(default_factory=TopicConfigSettings)
+
+
+class TopicEvaluationSettings(BaseModel):
+    enabled: bool = Field(True)
+    interval_msgs: int = Field(40, ge=1)
 
 
 class AgentLimitSettings(BaseModel):
@@ -178,11 +166,18 @@ class AgentLimitSettings(BaseModel):
             "find_path": 8,
             "get_hierarchy": 8,
             "fact_check": 6,
-            "save_memory": 4,
-            "forget_memory": 4,
-            "search_files": 3,
+            "read_brain": 4,
+            "edit_brain": 2,
+            "list_documents": 4,
+            "search_documents": 3,
+            "list_folder_uploads": 3,
+            "get_folder_upload_summary": 4,
+            "list_folder_tree": 4,
+            "get_document_info": 4,
+            "read_document": 4,
             "web_search": 4,
             "news_search": 4,
+            "update_topics": 1,
         }
     )
 
@@ -191,17 +186,48 @@ class TextProcessorSettings(BaseModel):
     gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
     vp01_min_confidence: float = Field(0.8, ge=0.0, le=1.0)
     llm_ner: bool = Field(True)
-    ner_prompt: str = Field(default_factory=lambda: ner_reasoning_prompt("{user_name}"))
+    ner_prompt: str = Field(
+        default_factory=lambda: load_pipeline_prompt_template(
+            "prompts/extraction.md", "Extract Entities"
+        )
+    )
     connection_prompt: str = Field(
-        default_factory=lambda: get_connection_reasoning_prompt("{user_name}")
+        default_factory=lambda: load_pipeline_prompt_template(
+            "prompts/extraction.md", "Extract Relationships"
+        )
     )
     profile_prompt: str = Field(
-        default_factory=lambda: get_profile_extraction_prompt("{user_name}")
+        default_factory=lambda: load_pipeline_prompt_template(
+            "prompts/refinement.md", "Extract Facts"
+        )
     )
-    merge_prompt: str = Field(default_factory=lambda: get_merge_judgment_prompt())
+    merge_prompt: str = Field(
+        default_factory=lambda: load_pipeline_prompt_template(
+            "prompts/merge.md", "Judge Merge"
+        )
+    )
     contradiction_prompt: str = Field(
-        default_factory=lambda: get_contradiction_judgment_prompt()
+        default_factory=lambda: load_pipeline_prompt_template(
+            "prompts/refinement.md", "Judge Contradiction"
+        )
     )
+
+    @model_validator(mode="after")
+    def validate_prompt_contracts(self):
+        contracts = (
+            ("ner_prompt", self.ner_prompt, {"user_name"}),
+            ("connection_prompt", self.connection_prompt, {"user_name"}),
+            ("profile_prompt", self.profile_prompt, {"user_name"}),
+            ("merge_prompt", self.merge_prompt, set()),
+            ("contradiction_prompt", self.contradiction_prompt, set()),
+        )
+        for name, prompt, placeholders in contracts:
+            validate_prompt_template(
+                prompt,
+                required=placeholders,
+                prompt_name=f"developer_settings.nlp_pipeline.{name}",
+            )
+        return self
 
 
 class SearchSettings(BaseModel):
@@ -252,6 +278,9 @@ class CommunitySettings(BaseModel):
 class DeveloperSettings(BaseModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
+    topic_evaluation: TopicEvaluationSettings = Field(
+        default_factory=TopicEvaluationSettings
+    )
     limits: AgentLimitSettings = Field(default_factory=AgentLimitSettings)
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
@@ -332,12 +361,4 @@ class RootConfig(BaseModel):
     )
     llm: LLMSettings = Field(default_factory=LLMSettings)
     search: SearchAPIKeySettings = Field(default_factory=SearchAPIKeySettings)
-    default_topics: Dict[str, TopicSchema] = Field(
-        default_factory=lambda: {
-            "General": TopicSchema(active=True, labels=[], hierarchy={}, aliases=[]),
-            "Identity": TopicSchema(
-                active=True, labels=["person"], hierarchy={}, aliases=[]
-            ),
-        }
-    )
     developer_settings: DeveloperSettings = Field(default_factory=DeveloperSettings)

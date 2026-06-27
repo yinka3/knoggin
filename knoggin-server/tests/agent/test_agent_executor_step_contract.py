@@ -42,8 +42,8 @@ def make_executor(llm):
         agent_persona="Careful memory assistant",
         active_topics=["Identity", "Testing"],
     )
-    tools = SimpleNamespace(file_rag=None)
-    return AgentExecutor(ctx, llm, tools, memory_mgr=None)
+    tools = SimpleNamespace(document_service=None)
+    return AgentExecutor(ctx, llm, tools)
 
 
 @pytest.mark.no_network
@@ -108,7 +108,8 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
             current_mode="Architect",
             enabled_tools=["search_messages"],
             memory_context="[Identity]\n- memory",
-            files_context="- file.md",
+            documents_context="- file.md",
+            document_focus_context="",
             directives="Required:\n- stay grounded",
             temp=0.2,
             agent_instructions="Use citations",
@@ -150,7 +151,7 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
 
     _, prompt_kwargs = prompt_calls[0]
     assert prompt_kwargs["memory_context"] == "[Identity]\n- memory"
-    assert prompt_kwargs["files_context"] == "- file.md"
+    assert prompt_kwargs["documents_context"] == "- file.md"
     assert prompt_kwargs["agent_directives"] == "Required:\n- stay grounded"
     assert prompt_kwargs["instructions"] == "Use citations"
     assert prompt_kwargs["current_mode"] == "Architect"
@@ -205,7 +206,8 @@ async def test_step_completed_without_tool_calls_yields_formatting_step_error():
             current_mode="Architect",
             enabled_tools=None,
             memory_context="",
-            files_context="",
+            documents_context="",
+            document_focus_context="",
             directives="",
             temp=0.7,
             agent_instructions="",
@@ -240,7 +242,8 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             current_mode="Architect",
             enabled_tools=None,
             memory_context="",
-            files_context="",
+            documents_context="",
+            document_focus_context="",
             directives="",
             temp=0.7,
             agent_instructions="",
@@ -256,7 +259,8 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             current_mode="Architect",
             enabled_tools=None,
             memory_context="",
-            files_context="",
+            documents_context="",
+            document_focus_context="",
             directives="",
             temp=0.7,
             agent_instructions="",

@@ -63,7 +63,7 @@ def test_agent_prompt_omits_persistent_context_when_no_memory_or_files():
 
     assert "<persistent_context>" not in prompt
     assert "<your_memory>" not in prompt
-    assert "<uploaded_files>" not in prompt
+    assert "<uploaded_documents>" not in prompt
     assert "Active topics you can categorize memories under" not in prompt
 
 
@@ -71,16 +71,37 @@ def test_agent_prompt_omits_persistent_context_when_no_memory_or_files():
 def test_agent_prompt_renders_files_without_memory_section():
     prompt = get_agent_prompt(
         user_name="Ada",
-        files_context="- profile-plan.md (2KB, 3 chunks)",
+        documents_context="- profile-plan.md (2KB, 3 chunks)",
         active_topics=["Identity"],
     )
 
     assert "<persistent_context>" in prompt
-    assert "<uploaded_files>" in prompt
-    assert "Files available in this session. Use search_files to query them." in prompt
+    assert "<uploaded_documents>" in prompt
+    assert (
+        "Indexed documents visible in this project context. "
+        "Use search_documents to query them."
+    ) in prompt
     assert "- profile-plan.md (2KB, 3 chunks)" in prompt
     assert "<your_memory>" not in prompt
     assert "Active topics you can categorize memories under" not in prompt
+
+
+@pytest.mark.no_network
+def test_agent_prompt_renders_compact_document_focus_without_contents():
+    prompt = get_agent_prompt(
+        user_name="Ada",
+        document_focus_context=(
+            "Active document focus:\n"
+            "- mode: pinned\n"
+            "- expires: this session\n"
+            "- path_prefix: src"
+        ),
+    )
+
+    assert "<document_focus>" in prompt
+    assert "use_focus=false" in prompt
+    assert "- path_prefix: src" in prompt
+    assert "document contents" not in prompt
 
 
 @pytest.mark.no_network

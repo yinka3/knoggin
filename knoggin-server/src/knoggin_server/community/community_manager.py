@@ -14,6 +14,7 @@ from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.executor import AgentExecutor
+from knoggin_server.agent.services.agent_manager import AgentManager
 from knoggin_server.agent.system_prompt import get_agent_prompt
 from knoggin_server.agent.tools.community_tools import CommunityTools
 from knoggin_server.agent.types import (
@@ -22,13 +23,12 @@ from knoggin_server.agent.types import (
     AgentState,
     RetrievedEvidence,
 )
-from knoggin_server.knowledge.services.memory_service import MemoryManager
-from knoggin_server.project.lifecycle import ProjectStatus
 from knoggin_server.project.state import ProjectState
 from knoggin_server.session.boot import SessionAssembler
 from knoggin_server.session.context import Context
 
 COMMUNITY_ENABLED_TOOLS = AAC_READ_TOOL_NAMES
+ACTIVE_DISCUSSION_TTL_SECONDS = 2 * 60 * 60
 
 COMMUNITY_RUN_CONFIG = AgentRunConfig(
     max_calls=5,
@@ -41,7 +41,11 @@ COMMUNITY_RUN_CONFIG = AgentRunConfig(
         ("fact_check", 6),
         ("get_connections", 3),
         ("search_messages", 3),
-        ("save_memory", 4),
+        ("search_documents", 4),
+        ("read_document", 4),
+        ("list_documents", 2),
+        ("read_brain", 4),
+        ("edit_brain", 2),
         ("save_insight", 4),
         ("spawn_specialist", 2),
     ),
@@ -59,16 +63,8 @@ class CommunityManager:
         self._discussion_task: Optional[asyncio.Task] = None
 
     async def _get_agent_directives(self, agent_id: str) -> str:
-        """Fetch and format an agent's directives."""
-        memory_mgr = MemoryManager(
-            redis=self.resources.redis,
-            user_name=self.user_name,
-            session_id="community_system",
-            agent_id=agent_id,
-            topic_config=self.project_state.topic_config,
-        )
-
-        return await memory_mgr.load_directive_string()
+        """Legacy directives are now part of the durable Markdown brain."""
+        return ""
 
     async def _is_discussion_active(self) -> bool:
         return bool(await self.resources.redis.get(self._active_discussion_key()))
@@ -80,18 +76,17 @@ class CommunityManager:
         )
 
     async def _resolve_project_scope(self) -> List[str]:
-        raw_projects = await self.resources.redis.hgetall(
-            RedisKeys.projects(self.user_name)
+        rows = await self.resources.postgres.fetch_all(
+            """
+            SELECT project_id
+            FROM public.projects
+            WHERE user_name = %(user_name)s
+              AND status IN ('active', 'archived')
+            ORDER BY project_id
+            """,
+            {"user_name": self.user_name},
         )
-        readable_statuses = {
-            ProjectStatus.ACTIVE.value,
-            ProjectStatus.ARCHIVED.value,
-        }
-        readable = {}
-        for project_id, raw in raw_projects.items():
-            metadata = safe_json_loads(raw, {}) if raw else {}
-            if metadata.get("status") in readable_statuses:
-                readable[project_id] = metadata
+        readable = {str(row["project_id"]) for row in rows}
 
         configured = (
             ConfigManager.get().config.developer_settings.community.project_ids
@@ -107,40 +102,17 @@ class CommunityManager:
         return [IDENTITY_SCOPE, *projects] if projects else []
 
     async def _agent_exists(self, agent_id: str) -> bool:
-        return bool(
-            await self.resources.redis.hget(RedisKeys.agents(self.user_name), agent_id)
-        )
+        manager = AgentManager(self.resources, self.user_name, {})
+        return await manager.get_agent(agent_id) is not None
 
     async def _get_default_agent_id(self) -> str:
         """Get the default agent ID for fallback."""
-        default_id = await self.resources.redis.get(
-            RedisKeys.agents_default(self.user_name)
-        )
-        return default_id or "default_stella"
+        manager = AgentManager(self.resources, self.user_name, {})
+        return await manager.get_default_agent_id()
 
     async def _get_agent_config(self, agent_id: str) -> Optional[AgentConfig]:
-        raw = await self.resources.redis.hget(
-            RedisKeys.agents(self.user_name), agent_id
-        )
-        if raw:
-            data = safe_json_loads(raw)
-            if data and isinstance(data, dict):
-                return AgentConfig.from_dict(data)
-
-        default_id = await self.resources.redis.get(
-            RedisKeys.agents_default(self.user_name)
-        )
-        if default_id and default_id != agent_id:
-            return await self._get_agent_config(default_id)
-
-        logger.warning(f"AAC: Agent '{agent_id}' not found, using ephemeral default")
-        llm_config = ConfigManager.get().config.llm
-        return AgentConfig(
-            id=agent_id,
-            name="STELLA",
-            persona="Default AAC Facilitator. Warm and observant.",
-            model=llm_config.agent_model,
-        )
+        manager = AgentManager(self.resources, self.user_name, {})
+        return await manager.get_agent(agent_id)
 
     async def trigger_discussion(self) -> None:
         """Main entry point called by scheduler."""
@@ -169,7 +141,9 @@ class CommunityManager:
 
         topic = seed_data["topic"]
         await self.resources.redis.set(
-            self._active_discussion_key(), discussion_id
+            self._active_discussion_key(),
+            discussion_id,
+            ex=ACTIVE_DISCUSSION_TTL_SECONDS,
         )
         await self.resources.knowledge_store.community.create_discussion(
             discussion_id, topic, valid_agent_ids
@@ -307,22 +281,16 @@ class CommunityManager:
 
         agent_directives = await self._get_agent_directives(agent.id)
 
-        comm_memory = MemoryManager(
-            redis=self.resources.redis,
-            user_name=self.user_name,
-            session_id=ctx.session_id,
-            agent_id=agent.id,
-            topic_config=ctx.project.topic_config,
-        )
         readable_project_ids = await self._resolve_project_scope()
-
         base_tools = SimpleNamespace(
             entities=ctx.project.entities,
             session_id=ctx.session_id,
             topic_config=ctx.project.topic_config,
             search_cfg={},
-            file_rag=ctx.file_rag,
             knowledge_store=self.resources.knowledge_store,
+            document_service=ctx.document_service,
+            document_focus=None,
+            postgres=self.resources.postgres,
             redis=self.resources.redis,
             readable_project_ids=readable_project_ids,
         )
@@ -333,7 +301,6 @@ class CommunityManager:
             self.resources.knowledge_store.community,
             discussion_id,
             agent.id,
-            comm_memory,
             participants,
         )
 
@@ -347,7 +314,7 @@ class CommunityManager:
             run_id=f"run_{uuid.uuid4().hex[:8]}",
             agent_id=agent.id,
             agent_name=agent.name,
-            agent_persona=agent.persona,
+            agent_persona=agent.persona_markdown,
             history=history,
             is_community=True,
             current_participants=participants,
@@ -357,7 +324,6 @@ class CommunityManager:
             ctx=agent_ctx,
             llm=self.resources.llm_service,
             tools=comm_tools,
-            memory_mgr=comm_memory,
         )
 
         full_response: str = ""
@@ -434,28 +400,16 @@ class CommunityManager:
 
         directives_str = await self._get_agent_directives(seeding_agent.id)
 
-        comm_mem_key = RedisKeys.community_agent_memory(
-            self.user_name, seeding_agent.id
-        )
-        raw_mem = await self.resources.redis.hgetall(comm_mem_key)
-        mem_entries = []
-        if raw_mem:
-            for v in raw_mem.values():
-                parsed = safe_json_loads(v)
-                if parsed and isinstance(parsed, dict):
-                    content = parsed.get("content", "")
-                    if content:
-                        mem_entries.append(content)
-        agent_memory_context = "\n".join(mem_entries)
-
         base_prompt = get_agent_prompt(
             user_name=self.user_name,
             current_time=get_now().strftime("%Y-%m-%d %H:%M UTC"),
-            persona=seeding_agent.persona,
+            persona=seeding_agent.persona_markdown,
             agent_name=seeding_agent.name,
-            memory_context=agent_memory_context,
             agent_directives=directives_str,
             instructions=seeding_agent.instructions,
+            documents_context="",
+            is_community=False,
+            current_mode="Architect",
         )
 
         seeding_instructions = """
@@ -479,6 +433,7 @@ class CommunityManager:
     - Avoid repeating recent discussion topics
     - Match agents to topics based on their personas
     - Prefer depth over breadth — focused discussions are better
+    - You now have access to project documents via search_documents. Consider initiating discussions around analyzing uploaded files!
     </seeding_role>
     """
 
@@ -693,42 +648,25 @@ class CommunityManager:
 
     async def _build_agent_pool_context(self) -> tuple[List[str], str]:
         """Build descriptive agent pool. Returns (agent_ids, formatted_description)."""
-        raw_agents = await self.resources.redis.hgetall(
-            RedisKeys.agents(self.user_name)
-        )
-
-        if not raw_agents:
-            return ["default_stella"], "- STELLA (default): General purpose assistant."
-
-        pool_ids = (
+        manager = AgentManager(self.resources, self.user_name, {})
+        agents = await manager.list_agents()
+        pool_ids = set(
             ConfigManager.get().config.developer_settings.community.agent_pool_ids
+            or []
         )
         if pool_ids:
-            raw_agents = {
-                aid: raw
-                for aid, raw in raw_agents.items()
-                if aid in pool_ids
-            }
+            agents = [agent for agent in agents if agent.id in pool_ids]
+        if not agents:
+            default_id = await manager.get_default_agent_id()
+            default_agent = await manager.get_agent(default_id)
+            agents = [default_agent] if default_agent else []
 
-        if not raw_agents:
-            return ["default_stella"], "- STELLA (default): General purpose assistant."
-
-        agent_ids = list(raw_agents.keys())
+        agent_ids = [agent.id for agent in agents]
         descriptions = []
-
-        for aid, raw in raw_agents.items():
-            data = safe_json_loads(raw)
-            if data and isinstance(data, dict):
-                try:
-                    name = data.get("name", "Unknown")
-                    persona = data.get("persona", "")[:120]
-                    is_spawned = data.get("is_spawned", False)
-
-                    spawned_tag = " [spawned]" if is_spawned else ""
-                    descriptions.append(f"- {name}{spawned_tag} (id: {aid}): {persona}")
-                except Exception:
-                    descriptions.append(f"- Unknown (id: {aid})")
-            else:
-                descriptions.append(f"- Unknown (id: {aid})")
-
+        for agent in agents:
+            spawned_tag = " [spawned]" if agent.is_spawned else ""
+            persona_preview = " ".join(agent.persona_markdown.split())[:160]
+            descriptions.append(
+                f"- {agent.name}{spawned_tag} (id: {agent.id}): {persona_preview}"
+            )
         return agent_ids, "\n".join(descriptions)

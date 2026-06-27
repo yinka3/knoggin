@@ -1,237 +1,123 @@
-import json
-
 import pytest
 
-from common.schema.settings import TopicSchema
-from common.utils.time_utils import frozen_time
-from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.services.memory_service import MemoryManager
-from tests.fixtures.factories import make_topic_config
-from tests.fixtures.fakes import FakeRedis
+from knoggin_server.agent.tools.memory import MemoryTools
 
 
-@pytest.fixture
-def memory_manager():
-    events = []
-    redis = FakeRedis()
-    manager = MemoryManager(
-        redis=redis,
-        user_name="ada",
-        session_id="session-1",
-        agent_id="agent-1",
-        topic_config=make_topic_config(),
-        on_event=lambda source, event, data: events.append((source, event, data)),
-    )
-    return manager, redis, events
+class RecordingPostgres:
+    def __init__(self, rows=None, execute_result=1):
+        self.rows = list(rows or [])
+        self.execute_result = execute_result
+        self.calls = []
+
+    async def fetch_all(self, query, params=None):
+        self.calls.append(("fetch_all", query, params))
+        return self.rows.pop(0) if self.rows else []
+
+    async def execute(self, query, params=None):
+        self.calls.append(("execute", query, params))
+        return self.execute_result
 
 
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_memory_manager_saves_lists_and_forgets_session_memory(memory_manager):
-    manager, redis, events = memory_manager
-
-    saved = await manager.save_memory(" remember this ", "General")
-
-    assert saved.success is True
-    key = RedisKeys.session_memory("ada", "session-1", "General")
-    assert saved.memory_id in redis.hashes[key]
-    payload = json.loads(redis.hashes[key][saved.memory_id])
-    assert payload["content"] == "remember this"
-
-    listed = await manager.get_memory_blocks(["General"])
-    assert listed.total == 1
-    assert listed.blocks["General"][0].content == "remember this"
-
-    forgotten = await manager.forget_memory(saved.memory_id)
-    assert forgotten.success is True
-    assert forgotten.topic == "General"
-    assert redis.hashes[key] == {}
-    assert [event[1] for event in events] == ["memory_saved", "memory_forgotten"]
+class BrainHarness(MemoryTools):
+    def __init__(self, postgres, agent_id="agent-1"):
+        self.postgres = postgres
+        self.agent_id = agent_id
+        self.user_name = "ada"
 
 
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_memory_manager_prompt_strings_include_only_requested_active_topics(
-    memory_manager, monkeypatch
-):
-    manager, redis, _ = memory_manager
-    manager.topic_config.add_topic(
-        "Work",
-        TopicSchema(active=True, labels=["project"], hierarchy={}, aliases=["job"]),
-    )
-    manager.topic_config.toggle_active("Identity", False)
-
-    with frozen_time("2026-01-01T10:00:00+00:00"):
-        general = await manager.save_memory("General note", "General")
-    with frozen_time("2026-01-01T10:05:00+00:00"):
-        work = await manager.save_memory("Work note", "job")
-
-    identity_key = RedisKeys.session_memory("ada", "session-1", "Identity")
-    await redis.hset(
-        identity_key,
-        "mem_identity",
-        json.dumps(
-            {
-                "content": "inactive identity note",
-                "topic": "Identity",
-                "created_at": "2026-01-01T10:10:00+00:00",
-            }
+def brain_row(*, revision=3):
+    return {
+        "instructions": (
+            "# Self-Conception\nEvidence-focused agent.\n\n"
+            "# Behavioral Directives\nStay grounded.\n\n"
+            "# Project Context\nOld context\n\n"
+            "# User Preferences & Lessons Learned\nOld lesson\n"
         ),
-    )
-    await redis.hset(
-        RedisKeys.session_memory("ada", "session-1", "General"),
-        "mem_corrupt",
-        "{not-json",
-    )
-
-    await manager.add_directive("require", "Stay grounded")
-    await manager.add_directive("prefer", "Prefer direct evidence")
-    await manager.add_directive("avoid", "Avoid vague claims")
-
-    prompt = await manager.load_prompt_strings(["job", "Identity", "unknown"])
-
-    assert prompt.memory_ctx == f"[Work]\n  - ({work.memory_id}) Work note"
-    assert prompt.directives == (
-        "Required:\n"
-        "- Stay grounded\n\n"
-        "Preferred:\n"
-        "- Prefer direct evidence\n\n"
-        "Avoid:\n"
-        "- Avoid vague claims"
-    )
-    assert general.memory_id not in prompt.memory_ctx
-    assert "General note" not in prompt.memory_ctx
-    assert "inactive identity note" not in prompt.memory_ctx
-    assert "mem_corrupt" not in prompt.memory_ctx
+        "persona": "Evidence-focused",
+        "brain_revision": revision,
+    }
 
 
-@pytest.mark.storage
 @pytest.mark.no_network
-async def test_memory_manager_can_load_general_when_explicitly_requested(
-    memory_manager,
-):
-    manager, _, _ = memory_manager
-    saved = await manager.save_memory("General note", "General")
+async def test_read_brain_returns_durable_content_and_revision():
+    postgres = RecordingPostgres([[brain_row()]])
 
-    blocks = await manager.get_memory_blocks(["General"])
+    result = await BrainHarness(postgres).read_brain()
 
-    assert blocks.total == 1
-    assert blocks.blocks["General"][0].id == saved.memory_id
-    assert blocks.blocks["General"][0].content == "General note"
+    assert result["revision"] == 3
+    assert "Old context" in result["content"]
+    assert "Project Context" in result["editable_sections"]
+    assert postgres.calls[0][2] == {
+        "user_name": "ada",
+        "agent_id": "agent-1",
+    }
 
 
-@pytest.mark.storage
 @pytest.mark.no_network
-async def test_memory_manager_session_and_user_scopes_do_not_leak():
-    redis = FakeRedis()
-    manager = MemoryManager(
-        redis=redis,
-        user_name="ada",
-        session_id="session-1",
-        agent_id="agent-1",
-        topic_config=make_topic_config(),
-    )
-    same_user_other_session = MemoryManager(
-        redis=redis,
-        user_name="ada",
-        session_id="session-2",
-        agent_id="agent-1",
-        topic_config=make_topic_config(),
-    )
-    other_user_same_session = MemoryManager(
-        redis=redis,
-        user_name="grace",
-        session_id="session-1",
-        agent_id="agent-1",
-        topic_config=make_topic_config(),
+async def test_brain_tools_require_active_durable_agent_identity():
+    postgres = RecordingPostgres()
+    tools = BrainHarness(postgres, agent_id=None)
+
+    assert await tools.read_brain() == {
+        "error": "No durable agent identity is active"
+    }
+    assert (
+        await tools.edit_brain("Project Context", "new", expected_revision=1)
+    ) == {"error": "No durable agent identity is active"}
+    assert postgres.calls == []
+
+
+@pytest.mark.no_network
+async def test_edit_brain_rejects_stale_revision_without_writing():
+    postgres = RecordingPostgres([[brain_row(revision=4)]])
+
+    result = await BrainHarness(postgres).edit_brain(
+        "Project Context",
+        "New context",
+        expected_revision=3,
     )
 
-    saved = await manager.save_memory("Scoped note", "General")
-
-    assert (await same_user_other_session.get_memory_blocks(["General"])).total == 0
-    assert (await other_user_same_session.get_memory_blocks(["General"])).total == 0
-
-    miss = await same_user_other_session.forget_memory(saved.memory_id)
-    assert miss.success is False
-    assert saved.memory_id in redis.hashes[
-        RedisKeys.session_memory("ada", "session-1", "General")
-    ]
-
-    removed = await manager.forget_memory(saved.memory_id)
-    assert removed.success is True
-    assert saved.memory_id not in redis.hashes[
-        RedisKeys.session_memory("ada", "session-1", "General")
-    ]
+    assert result == {
+        "error": "Brain changed since it was read",
+        "current_revision": 4,
+    }
+    assert [call[0] for call in postgres.calls] == ["fetch_all"]
 
 
-@pytest.mark.storage
 @pytest.mark.no_network
-async def test_memory_manager_rejects_empty_inactive_and_oversized_memory(
-    memory_manager,
-):
-    manager, _, _ = memory_manager
-    manager.topic_config.toggle_active("Identity", False)
+async def test_edit_brain_updates_one_section_and_records_revision():
+    postgres = RecordingPostgres([[brain_row(revision=3)]])
 
-    empty = await manager.save_memory("   ", "General")
-    inactive = await manager.save_memory("hello", "Identity")
-    oversized = await manager.save_memory("x" * 201, "General")
+    result = await BrainHarness(postgres).edit_brain(
+        "Project Context",
+        "Investigate graph drift.",
+        expected_revision=3,
+    )
 
-    assert empty.success is False
-    assert empty.error == "Empty memory content"
-    assert inactive.success is False
-    assert "not active" in inactive.error
-    assert oversized.success is False
-    assert "Memory too long" in oversized.error
+    assert result == {
+        "success": True,
+        "section": "Project Context",
+        "revision": 4,
+        "message": "Brain section updated.",
+    }
+    write = postgres.calls[1]
+    assert write[0] == "execute"
+    assert "UPDATE public.agents" in write[1]
+    assert "INSERT INTO public.agent_brain_revisions" in write[1]
+    assert "Investigate graph drift." in write[2]["content"]
+    assert "Old lesson" in write[2]["content"]
+    assert write[2]["expected_revision"] == 3
 
 
-@pytest.mark.storage
 @pytest.mark.no_network
-async def test_memory_manager_directive_lifecycle(memory_manager):
-    manager, redis, events = memory_manager
+async def test_edit_brain_rejects_noneditable_section():
+    postgres = RecordingPostgres([[brain_row()]])
 
-    added = await manager.add_directive("require", "Be concise")
-    listed = await manager.list_directives("require")
-    removed = await manager.remove_directive(added.directive_id)
+    result = await BrainHarness(postgres).edit_brain(
+        "Birth Persona",
+        "Rewrite identity",
+        expected_revision=3,
+    )
 
-    assert added.success is True
-    assert added.mode == "require"
-    assert listed.directives[0].content == "Be concise"
-    assert listed.directives[0].mode == "require"
-    assert removed.success is True
-    assert redis.hashes[RedisKeys.agent_directives("ada", "agent-1")] == {}
-    assert [event[1] for event in events] == [
-        "directive_added",
-        "directive_removed",
-    ]
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_memory_manager_clear_directives_counts_removed_items(
-    memory_manager,
-):
-    manager, _, _ = memory_manager
-
-    await manager.add_directive("prefer", "Prefer detail")
-    await manager.add_directive("prefer", "Prefer examples")
-    await manager.add_directive("avoid", "Avoid vague claims")
-    cleared = await manager.clear_directives("prefer")
-    remaining = await manager.list_directives()
-
-    assert cleared.success is True
-    assert cleared.cleared == 2
-    assert [directive.mode for directive in remaining.directives] == ["avoid"]
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_memory_manager_rejects_invalid_directive_mode(memory_manager):
-    manager, _, _ = memory_manager
-
-    invalid = await manager.add_directive("rule", "Stay grounded")
-    empty = await manager.add_directive("prefer", "   ")
-
-    assert invalid.success is False
-    assert "Invalid directive mode" in invalid.error
-    assert empty.success is False
-    assert empty.error == "Empty directive content"
+    assert "error" in result
+    assert not any(call[0] == "execute" for call in postgres.calls)

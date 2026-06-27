@@ -113,10 +113,11 @@ class PostgresClient:
 
     async def execute(
         self, query: str, params: Optional[QueryParams] = None
-    ) -> None:
-        """Execute a statement whose result is intentionally ignored."""
+    ) -> int:
+        """Execute a statement and return its affected-row count."""
         async with self.transaction() as cur:
             await cur.execute(query, params)
+            return cur.rowcount
 
     # --- Cypher Helpers ---
 

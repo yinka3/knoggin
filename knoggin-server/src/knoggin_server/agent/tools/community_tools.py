@@ -1,19 +1,16 @@
 import json
 import uuid
-from typing import Dict, List
+from typing import Dict, List, Mapping
 
 from common.conf.manager import ConfigManager
 from common.schema.aac_schema import AAC_DEFAULT_ENABLED_TOOLS
-from common.schema.agent_contracts import AgentConfig
+from common.schema.agent_contracts import PersonaProfile
+from common.utils.agent_identity import (
+    normalize_agent_brain,
+)
 from common.utils.events import emit_community
-from common.utils.time_utils import get_now_iso
-from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.community.community_store import CommunityStore
-from knoggin_server.knowledge.services.memory_service import (
-    DIRECTIVE_MODES,
-    MemoryManager,
-)
 
 MAX_SPAWNED_SPECIALISTS = 10
 
@@ -32,7 +29,6 @@ class CommunityTools(Tools):
         community_store: CommunityStore,
         discussion_id: str,
         agent_id: str,
-        memory_mgr: MemoryManager,
         participants: List[str] = None,
     ):
         super().__init__(
@@ -41,10 +37,12 @@ class CommunityTools(Tools):
             session_id=base_tools.session_id,
             topic_config=base_tools.topic_config,
             search_config=base_tools.search_cfg,
-            file_rag=base_tools.file_rag,
-            memory=memory_mgr,
+            document_service=getattr(base_tools, "document_service", None),
+            document_focus=getattr(base_tools, "document_focus", None),
             knowledge_store=base_tools.knowledge_store,
+            postgres=base_tools.postgres,
             redis=base_tools.redis,
+            agent_id=agent_id,
         )
         self.readable_project_ids = list(base_tools.readable_project_ids)
         self.community_store = community_store
@@ -62,116 +60,149 @@ class CommunityTools(Tools):
         )
         return {"saved": True, "type": "insight"}
 
-    async def save_memory(self, content: str, topic: str = "General") -> Dict:
-        """
-        Saves persistent AAC memory for this user and agent across discussions.
-        The ten-entry lifetime cap forces summarization over accumulation.
-        """
-        key = RedisKeys.community_agent_memory(self.user_name, self.agent_id)
-        count = await self.redis.hlen(key)
-        if count >= 10:
-            return {"error": "Memory full (10/10). No new memories can be saved."}
-        mem_id = f"comm_mem_{uuid.uuid4().hex[:8]}"
-        payload = json.dumps(
-            {
-                "content": content,
-                "topic": topic,
-                "created_at": get_now_iso(),
-                "discussion_id": self.discussion_id,
-            }
-        )
-        await self.redis.hset(key, mem_id, payload)
-        return {"saved": True, "memory_id": mem_id}
+
 
     async def spawn_specialist(
         self,
         name: str,
-        persona: str,
+        persona: Mapping[str, str],
         initial_directives: List[Dict] = None,
     ) -> Dict:
-        """Spawn a new specialist sub-agent."""
-        spawned_count = await self._count_spawned_participants()
-        if spawned_count >= MAX_SPAWNED_SPECIALISTS:
+        """Create a Postgres-backed specialist with an immutable birth persona."""
+        clean_name = (name or "").strip()
+        if not clean_name:
+            return {"error": "Specialist name is required."}
+        if len(clean_name) > 100:
+            return {"error": "Specialist name must be 100 characters or fewer."}
+
+        try:
+            persona_profile = PersonaProfile.from_value(persona)
+            persona_markdown = persona_profile.to_markdown()
+            directives = self._format_initial_directives(initial_directives or [])
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        if await self._count_spawned_participants() >= MAX_SPAWNED_SPECIALISTS:
             return {
                 "error": (
-                    "Spawn limit reached. Max "
-                    f"{MAX_SPAWNED_SPECIALISTS} sub-agents per discussion."
+                    "Spawn limit reached. "
+                    f"Max {MAX_SPAWNED_SPECIALISTS} sub-agents per discussion."
                 )
             }
 
-        new_id = f"spawned_{uuid.uuid4().hex[:8]}"
+        agent_id = f"spawned_{uuid.uuid4().hex}"
+        brain = normalize_agent_brain(directives, persona_markdown)
+        model = ConfigManager.get().config.llm.agent_model
 
-        llm_config = ConfigManager.get().config.llm
-        new_agent = AgentConfig(
-            id=new_id,
-            name=name,
-            persona=persona,
-            model=llm_config.agent_model,
-            enabled_tools=AAC_DEFAULT_ENABLED_TOOLS,
-            is_spawned=True,
-            spawned_by=self.agent_id,
-        )
-
-        await self.redis.hset(
-            RedisKeys.agents(self.user_name), new_id, json.dumps(new_agent.to_dict())
-        )
-
-        now = get_now_iso()
-        seeded_directives = 0
-        directives_key = RedisKeys.agent_directives(self.user_name, new_id)
-        for directive in initial_directives or []:
-            if not isinstance(directive, dict):
-                continue
-            mode = (directive.get("mode") or "").strip().lower()
-            content = (directive.get("content") or "").strip()
-            if mode not in DIRECTIVE_MODES or not content:
-                continue
-
-            directive_id = f"directive_{uuid.uuid4().hex[:8]}"
-            payload = json.dumps(
-                {
-                    "mode": mode,
-                    "content": content,
-                    "created_at": now,
-                    "seeded_by": self.agent_id,
-                }
+        inserted = await self.postgres.execute(
+            """
+            WITH new_agent AS (
+                INSERT INTO public.agents (
+                    agent_id, user_name, project_id, name, persona, instructions,
+                    model, temperature, enabled_tools, is_default, is_spawned,
+                    spawned_by
+                ) VALUES (
+                    %(agent_id)s, %(user_name)s, %(project_id)s, %(name)s,
+                    %(persona)s, %(instructions)s, %(model)s, 0.7,
+                    %(enabled_tools)s, false, true, %(spawned_by)s
+                )
+                RETURNING agent_id, user_name, brain_revision, instructions
             )
-            await self.redis.hset(directives_key, directive_id, payload)
-            seeded_directives += 1
+            INSERT INTO public.agent_brain_revisions (
+                agent_id, revision, user_name, content, edited_by
+            )
+            SELECT
+                agent_id, brain_revision, user_name, instructions, 'aac_spawn'
+            FROM new_agent
+            """,
+            {
+                "agent_id": agent_id,
+                "user_name": self.user_name,
+                "project_id": self.project_id,
+                "name": clean_name,
+                "persona": persona_markdown,
+                "instructions": brain,
+                "model": model,
+                "enabled_tools": json.dumps(AAC_DEFAULT_ENABLED_TOOLS),
+                "spawned_by": self.agent_id,
+            },
+        )
+        if inserted != 1:
+            return {"error": "Specialist could not be created."}
 
-        await self.community_store.register_agent_spawn(self.agent_id, new_id, persona)
-        self.current_participants.append(new_id)
+        await self.community_store.register_agent_spawn(
+            parent_id=self.agent_id,
+            child_id=agent_id,
+            detail=persona_markdown,
+        )
+        if agent_id not in self.current_participants:
+            self.current_participants.append(agent_id)
 
+        seeded_directives = len(initial_directives or [])
         await emit_community(
             self.user_name,
             "community",
             "agent_spawned",
             {
                 "discussion_id": self.discussion_id,
-                "parent_agent_id": self.agent_id,
-                "agent_id": new_id,
-                "name": name,
-                "persona": persona,
+                "agent_id": agent_id,
+                "parent_id": self.agent_id,
                 "seeded_directives": seeded_directives,
             },
         )
-
         return {
-            "id": new_id,
-            "message": f"Spawned {name} and added to discussion pool.",
+            "id": agent_id,
+            "name": clean_name,
+            "persona": persona_profile.to_dict(),
+            "persona_markdown": persona_markdown,
             "seeded_directives": seeded_directives,
         }
 
     async def _count_spawned_participants(self) -> int:
-        count = 0
-        for agent_id in self.current_participants:
-            raw = await self.redis.hget(RedisKeys.agents(self.user_name), agent_id)
-            if not raw:
-                continue
-            try:
-                data = json.loads(raw)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if data.get("is_spawned"):
-                count += 1
-        return count
+        if not self.current_participants:
+            return 0
+        rows = await self.postgres.fetch_all(
+            """
+            SELECT count(*) AS count
+            FROM public.agents
+            WHERE user_name = %(user_name)s
+              AND agent_id = ANY(%(agent_ids)s)
+              AND is_spawned = true
+            """,
+            {
+                "user_name": self.user_name,
+                "agent_ids": self.current_participants,
+            },
+        )
+        return int(rows[0]["count"]) if rows else 0
+
+    @staticmethod
+    def _format_initial_directives(directives: List[Dict]) -> str:
+        if not directives:
+            return ""
+
+        labels = {
+            "require": "Required",
+            "prefer": "Preferred",
+            "avoid": "Avoid",
+        }
+        grouped = {mode: [] for mode in labels}
+        for directive in directives:
+            mode = str(directive.get("mode", "")).strip().lower()
+            content = str(directive.get("content", "")).strip()
+            if mode not in labels:
+                raise ValueError(
+                    "Directive mode must be require, prefer, or avoid."
+                )
+            if not content:
+                raise ValueError("Directive content cannot be empty.")
+            grouped[mode].append(content)
+
+        sections = []
+        for mode, title in labels.items():
+            if grouped[mode]:
+                sections.append(
+                    f"### {title}\n"
+                    + "\n".join(f"- {item}" for item in grouped[mode])
+                )
+        return "\n\n".join(sections)

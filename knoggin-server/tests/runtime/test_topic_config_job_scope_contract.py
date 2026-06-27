@@ -1,85 +1,97 @@
 import pytest
 
 from common.conf.topics_config import TopicConfig
-from common.schema.contracts import TopicConfigResult, TopicDetail
 from common.schema.settings import TopicSchema
-from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.jobs.topics_job import TopicConfigJob
-from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
+from knoggin_server.agent.tools.topic_tools import TopicTools
+from tests.fixtures.fakes import FakeRedis
 
 
-class RecordingLLM:
-    merge_model = "fake-merge"
-
-    def __init__(self):
+class RecordingPostgres:
+    def __init__(self, result=1):
+        self.result = result
         self.calls = []
 
-    async def generate_structured(self, **kwargs):
-        self.calls.append(kwargs)
-        return TopicConfigResult(
-            topics={"General": TopicDetail(active=True, labels=[])}
+    async def execute(self, query, params=None):
+        self.calls.append((query, params))
+        return self.result
+
+
+class TopicHarness(TopicTools):
+    def __init__(self, postgres, redis):
+        self.postgres = postgres
+        self.redis = redis
+        self.user_name = "ada"
+        self.project_id = "project-1"
+        self.topic_config = TopicConfig(
+            {
+                "General": TopicSchema(active=True),
+                "Identity": TopicSchema(active=True, labels=["person"]),
+            }
         )
+        self.entities = type("Entities", (), {"hierarchy_config": {}})()
+        self.active_topics = []
+        self.refreshes = 0
+        self.topic_refresh_callback = self._refresh
 
-
-async def noop_update(new_config):
-    return None
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_topic_config_job_uses_project_heartbeat_and_session_buffers():
-    redis = FakeRedis()
-    knowledge_store = FakeKnowledgeStore()
-    job = TopicConfigJob(
-        llm=RecordingLLM(),
-        topic_config=TopicConfig({"General": TopicSchema(active=True)}),
-        update_callback=noop_update,
-        redis_client=redis,
-        knowledge_store=knowledge_store,
-        interval_msgs=2,
-    )
-    ctx = JobContext(user_name="ada", project_id="project-1")
-
-    await redis.set(RedisKeys.project_heartbeat_counter("ada", "project-1"), 2)
-    await redis.sadd(RedisKeys.project_sessions("ada", "project-1"), "session-1")
-    await redis.rpush(RedisKeys.buffer("ada", "session-1"), "pending")
-
-    assert await job.should_run(ctx) is False
-
-    await redis.ltrim(RedisKeys.buffer("ada", "session-1"), 1, -1)
-
-    assert await job.should_run(ctx) is True
+    def _refresh(self):
+        self.refreshes += 1
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_topic_config_job_reads_project_messages_from_graph():
+async def test_update_topics_persists_project_config_and_refreshes_runtime():
+    postgres = RecordingPostgres()
     redis = FakeRedis()
-    knowledge_store = FakeKnowledgeStore()
-    knowledge_store.recent_project_messages = [
-        {
-            "id": 1,
-            "user_name": "ada",
-            "session_id": "session-1",
-            "project_id": "project-1",
-            "role": "user",
-            "content": "I am learning planning systems.",
-        }
-    ]
-    llm = RecordingLLM()
-    job = TopicConfigJob(
-        llm=llm,
-        topic_config=TopicConfig({"General": TopicSchema(active=True)}),
-        update_callback=noop_update,
-        redis_client=redis,
-        knowledge_store=knowledge_store,
-        interval_msgs=1,
+    tools = TopicHarness(postgres, redis)
+
+    result = await tools.update_topics(
+        add_topics=[
+            {
+                "name": "Research",
+                "labels": ["paper"],
+                "aliases": ["study"],
+            }
+        ],
+        reasoning="The project now contains a stable research domain.",
     )
-    ctx = JobContext(user_name="ada", project_id="project-1")
 
-    result = await job.execute(ctx)
+    assert result["success"] is True
+    assert result["added"] == ["Research"]
+    assert "Research" in result["active_topics"]
+    assert tools.entities.hierarchy_config == tools.topic_config.hierarchy
+    assert tools.refreshes == 1
+    assert "UPDATE public.projects" in postgres.calls[0][0]
+    assert await redis.get(
+        RedisKeys.project_heartbeat_counter("ada", "project-1")
+    ) == "0"
 
-    assert result.success is True
-    assert "I am learning planning systems." in llm.calls[0]["user"]
-    assert await redis.get(RedisKeys.project_heartbeat_counter("ada", "project-1")) == "0"
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_update_topics_rolls_back_when_postgres_write_fails():
+    postgres = RecordingPostgres(result=0)
+    tools = TopicHarness(postgres, FakeRedis())
+    before = tools.topic_config.snapshot()
+
+    result = await tools.update_topics(
+        add_topics=[{"name": "Research", "labels": ["paper"]}]
+    )
+
+    assert "error" in result
+    assert tools.topic_config.snapshot() == before
+    assert tools.refreshes == 0
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_update_topics_rejects_invalid_change_without_persisting():
+    postgres = RecordingPostgres()
+    tools = TopicHarness(postgres, FakeRedis())
+
+    result = await tools.update_topics(
+        add_topics=[{"name": "", "labels": []}]
+    )
+
+    assert "error" in result
+    assert postgres.calls == []
