@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from loguru import logger
 
@@ -303,18 +303,36 @@ def format_memory_context(blocks: dict) -> str:
     return "\n".join(sections)
 
 
-def format_files_context(files: list) -> str:
-    """Format the metadata of uploaded files into a digest for the agent's system prompt context."""
-    if not files:
+def format_documents_context(documents: list) -> str:
+    """Format indexed document metadata for the agent system prompt."""
+    if not documents:
         return ""
 
     lines = []
-    for f in files:
-        size_kb = f.get("size_bytes", 0) / 1024
+    for document in documents:
+        size_kb = document.get("size_bytes", 0) / 1024
         lines.append(
-            f"- {f['original_name']} ({size_kb:.0f}KB, {f['chunk_count']} chunks)"
+            f"- {document['original_name']} "
+            f"({size_kb:.0f}KB, "
+            f"{document.get('chunk_count', 0)} chunks)"
         )
 
+    return "\n".join(lines)
+
+
+def format_document_focus_context(focus: Optional[Dict]) -> str:
+    """Format a compact, content-free document focus hint."""
+    if not focus:
+        return ""
+    lines = ["Active document focus:", "- mode: pinned", "- expires: this session"]
+    target_type = focus.get("target_type")
+    if target_type == "document":
+        lines.append(f"- relative_path: {focus.get('relative_path', '')}")
+    elif target_type == "subtree":
+        lines.append(f"- folder_root_id: {focus.get('folder_root_id', '')}")
+        lines.append(f"- path_prefix: {focus.get('path_prefix', '')}")
+    elif target_type == "folder_upload":
+        lines.append(f"- folder_root_id: {focus.get('folder_root_id', '')}")
     return "\n".join(lines)
 
 

@@ -8,6 +8,10 @@ from loguru import logger
 from common.exceptions import DependencyError
 from common.schema.settings import RedisConnectionSettings
 
+SESSION_RUNTIME_TTL_SECONDS = 72 * 3600
+SHORT_LIVED_DEDUP_TTL_SECONDS = 5 * 60
+PROJECT_ACTIVITY_TTL_SECONDS = 30 * 24 * 3600
+
 
 def _endpoint_label(url: str) -> str:
     """Return a credential-free endpoint for logs and errors."""
@@ -131,17 +135,61 @@ class AsyncRedisClient:
 
 
 class RedisKeys:
-    """Centralized Redis key patterns for explicit project and session scopes."""
+    """
+    Centralized Redis key patterns for explicit project and session scopes.
 
-    @staticmethod
-    def projects(user: str) -> str:
-        """Hash: project_id → JSON metadata"""
-        return f"projects:{user}"
+    Ownership rule: Redis keys are cache/coordination only. Durable projects,
+    sessions, agents, topic configuration, documents, messages, and merge
+    history are Postgres-owned. Legacy helpers remain only so cleanup and old
+    tests can name those key families; they are not authoritative write paths.
+    """
 
-    @staticmethod
-    def project_sessions(user: str, project_id: str) -> str:
-        """Set of session_ids belonging to a project"""
-        return f"project_sessions:{user}:{project_id}"
+    REBUILDABLE_FROM_POSTGRES = frozenset(
+        {
+            "conversation",
+            "recent_conversation",
+            "message_content",
+            "last_processed",
+            "project_last_processed",
+            "project_last_activity",
+        }
+    )
+    EPHEMERAL_ONLY = frozenset(
+        {
+            "buffer",
+            "checkpoint",
+            "message_dedup",
+            "heartbeat_counter",
+            "project_heartbeat_counter",
+            "dirty_entities",
+            "merge_queue",
+            "merge_proposals",
+            "merge_intent",
+            "merge_intents_index",
+            "job_last_run",
+            "job_lease",
+            "dlq",
+            "dlq_parked",
+            "project_profile_complete",
+            "project_user_profile_ran",
+            "last_profile_update",
+            "community_discussion_active",
+            "community_pubsub_channel",
+        }
+    )
+    LEGACY_NON_AUTHORITATIVE = frozenset(
+        {
+            "projects",
+            "project_topic_config",
+            "sessions",
+            "project_sessions",
+            "agents",
+            "agents_default",
+            "agent_directives",
+            "session_memory",
+            "community_agent_memory",
+        }
+    )
 
     @staticmethod
     def dirty_entities(user: str, project_id: str) -> str:
@@ -188,21 +236,25 @@ class RedisKeys:
         return f"project_heartbeat_counter:{user}:{project_id}"
 
     @staticmethod
-    def project_topic_config(user: str) -> str:
-        return f"project_topic_config:{user}"
-
-    @staticmethod
     def session_keys(user: str, session: str) -> list[str]:
         """Returns all Redis keys that are scoped to a specific session."""
         return [
             RedisKeys.buffer(user, session),
             RedisKeys.checkpoint(user, session),
-            RedisKeys.message_content(user, session),
-            RedisKeys.last_processed(user, session),
             RedisKeys.conversation(user, session),
             RedisKeys.recent_conversation(user, session),
+            RedisKeys.message_content(user, session),
+            RedisKeys.last_processed(user, session),
             RedisKeys.heartbeat_counter(user, session),
         ]
+
+    @staticmethod
+    def conversation(user: str, session: str) -> str:
+        return f"conversation:{user}:{session}"
+
+    @staticmethod
+    def recent_conversation(user: str, session: str) -> str:
+        return f"recent_conversation:{user}:{session}"
 
     @staticmethod
     def message_dedup(user: str, session: str, digest: str) -> str:
@@ -229,14 +281,6 @@ class RedisKeys:
         return f"last_processed_msg:{user}:{session}"
 
     @staticmethod
-    def conversation(user: str, session: str) -> str:
-        return f"conversation:{user}:{session}"
-
-    @staticmethod
-    def recent_conversation(user: str, session: str) -> str:
-        return f"recent_conversation:{user}:{session}"
-
-    @staticmethod
     def merge_intent(
         user: str, project_id: str, primary_id: int, secondary_id: int
     ) -> str:
@@ -255,6 +299,30 @@ class RedisKeys:
         return f"job_lease:{user}:{project_id}:{job_name}"
 
     @staticmethod
+    def projects(user: str) -> str:
+        return f"projects:{user}"
+
+    @staticmethod
+    def project_topic_config(user: str) -> str:
+        return f"project_topic_config:{user}"
+
+    @staticmethod
+    def sessions(user: str) -> str:
+        return f"sessions:{user}"
+
+    @staticmethod
+    def project_sessions(user: str, project_id: str) -> str:
+        return f"project_sessions:{user}:{project_id}"
+
+    @staticmethod
+    def agents(user: str) -> str:
+        return f"agents:{user}"
+
+    @staticmethod
+    def agents_default(user: str) -> str:
+        return f"agents:default:{user}"
+
+    @staticmethod
     def session_memory(user: str, session: str, topic: str) -> str:
         return f"memory:{user}:{session}:{topic}"
 
@@ -265,18 +333,6 @@ class RedisKeys:
     @staticmethod
     def heartbeat_counter(user: str, session: str) -> str:
         return f"heartbeat_counter:{user}:{session}"
-
-    @staticmethod
-    def sessions(user: str) -> str:
-        return f"sessions:{user}"
-
-    @staticmethod
-    def agents_default(user: str) -> str:
-        return f"agents:default:{user}"
-
-    @staticmethod
-    def agents(user: str) -> str:
-        return f"agents:{user}"
 
     @staticmethod
     def agent_directives(user: str, agent_id: str) -> str:

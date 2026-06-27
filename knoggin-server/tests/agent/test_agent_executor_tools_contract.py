@@ -24,7 +24,7 @@ def make_executor(*, config=None, state=None):
         session_id="session-1",
         run_id="run-1",
     )
-    return AgentExecutor(ctx, llm=object(), tools=SimpleNamespace(), memory_mgr=None)
+    return AgentExecutor(ctx, llm=object(), tools=SimpleNamespace())
 
 
 @pytest.mark.no_network

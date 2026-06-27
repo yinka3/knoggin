@@ -1,10 +1,17 @@
 import json
+import uuid
 from typing import Dict, List, Optional, Tuple, Union
 
 from loguru import logger
 
 from common.exceptions import ToolExecutionError
-from common.schema.tool_schema import TOOL_SCHEMAS
+from common.schema.tool_schema import (
+    READ_CAPABILITY,
+    TOOL_SCHEMAS,
+    TOOL_SCHEMAS_BY_NAME,
+    get_schema_capability,
+    validate_tool_arguments,
+)
 from common.utils.time_utils import parse_iso_time_or_now
 from knoggin_server.agent.formatters import (
     format_entity_results,
@@ -41,6 +48,15 @@ def _coerce_arg(value, expected_type: str):
         if isinstance(value, str):
             return value
         return str(value)
+    if expected_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes"}:
+                return True
+            if normalized in {"false", "0", "no"}:
+                return False
     return value
 
 
@@ -92,7 +108,8 @@ def build_user_message(
                 "find_path",
                 "fact_check",
                 "get_hierarchy",
-                "search_files",
+                "search_documents",
+                "read_document",
                 "web_search",
                 "news_search",
             ):
@@ -150,8 +167,8 @@ def _format_evidence(
                 new_message_keys = {
                     _message_evidence_key(d) for d in data if _message_evidence_key(d)
                 }
-            elif tool == "search_files":
-                new_message_keys = {_file_evidence_key(d) for d in data}
+            elif tool in ("search_documents", "read_document"):
+                new_message_keys = {_document_evidence_key(d) for d in data}
             elif tool in ("get_connections", "get_recent_activity"):
                 new_graph_keys = {
                     (d.get("source"), d.get("target"))
@@ -244,8 +261,8 @@ def _message_evidence_key(item: Dict) -> Optional[Tuple]:
     if not isinstance(item, dict):
         return None
 
-    if item.get("source_type") == "file":
-        return _file_evidence_key(item)
+    if item.get("source_type") == "document":
+        return _document_evidence_key(item)
 
     item_id = item.get("id")
     if item_id is None:
@@ -258,38 +275,43 @@ def _message_evidence_key(item: Dict) -> Optional[Tuple]:
     return ("message", item_id)
 
 
-def _file_evidence_key(item: Dict) -> Optional[Tuple]:
+def _document_evidence_key(item: Dict) -> Optional[Tuple]:
     if not isinstance(item, dict):
         return None
 
-    file_id = item.get("file_id")
+    document_id = item.get("document_id")
     chunk_index = item.get("chunk_index")
     item_id = item.get("id")
 
-    if file_id is not None or chunk_index is not None:
-        return ("file", file_id or "file", chunk_index or 0)
-    if isinstance(item_id, str) and item_id.startswith("file:"):
-        return ("file", item_id)
+    if document_id is not None or chunk_index is not None:
+        return ("document", document_id or "document", chunk_index or 0)
+    if isinstance(item_id, str) and item_id.startswith("document:"):
+        return ("document", item_id)
     return None
 
 
-def _normalize_file_chunks(data: List[Dict]) -> List[Dict]:
-    """Normalize search_files results into the standard message shape."""
+def _normalize_document_chunks(data: List[Dict]) -> List[Dict]:
+    """Normalize document retrieval into the standard message shape."""
     return [
         {
-            "id": f"file:{chunk.get('file_id', 'file')}:{chunk.get('chunk_index', 0)}",
-            "file_id": chunk.get("file_id", "file"),
+            "id": (
+                f"document:{chunk.get('document_id', 'document')}:"
+                f"{chunk.get('chunk_index', 0)}"
+            ),
+            "document_id": chunk.get("document_id", "document"),
             "chunk_index": chunk.get("chunk_index", 0),
             "content": chunk.get("content", ""),
             "message": chunk.get("content", ""),
-            "role": "file",
+            "role": "document",
             "score": chunk.get("score", 0.5),
-            "source": chunk.get("file_name", "uploaded file"),
-            "source_type": "file",
+            "source": chunk.get("document_name", "uploaded document"),
+            "source_type": "document",
             "context": [
                 {
-                    "role": "file",
-                    "timestamp": chunk.get("file_name", "uploaded file"),
+                    "role": "document",
+                    "timestamp": chunk.get(
+                        "document_name", "uploaded document"
+                    ),
                     "content": chunk.get("content", ""),
                     "is_hit": True,
                 }
@@ -351,9 +373,14 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
         ),
         "get_hierarchy": lambda ev, d, cfg: _acc_extend_or_append(ev.hierarchy, d),
         "fact_check": lambda ev, d, cfg: _acc_extend_or_append(ev.facts, d),
-        "search_files": lambda ev, d, cfg: _merge_unique(
+        "search_documents": lambda ev, d, cfg: _merge_unique(
             ev.messages,
-            _normalize_file_chunks(d) if isinstance(d, list) else [],
+            _normalize_document_chunks(d) if isinstance(d, list) else [],
+            _message_evidence_key,
+        ),
+        "read_document": lambda ev, d, cfg: _merge_unique(
+            ev.messages,
+            _normalize_document_chunks(d) if isinstance(d, list) else [],
             _message_evidence_key,
         ),
         "web_search": lambda ev, d, cfg: _merge_unique(
@@ -400,15 +427,29 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Resolved via {res_type} ({count} matches)", count
         return "No results", 0
 
-    if tool_name in ("save_memory", "forget_memory"):
+    if tool_name == "edit_brain":
         if "error" in result:
             return f"Error: {result['error']}", 0
-        return "Memory updated", 1
+        return "Brain updated", 1
 
-    if tool_name == "search_files":
+    if tool_name == "read_brain":
+        return "Brain loaded", 1
+
+    if tool_name in ("search_documents", "read_document"):
         count = len(data) if isinstance(data, list) else 0
         if count > 0 and "error" not in (data[0] if data else {}):
+            if tool_name == "read_document":
+                return "Read document content", 1
             return f"Found {count} relevant chunks", count
+        return "No results", 0
+
+    if tool_name in ("list_documents", "list_folder_uploads", "list_folder_tree"):
+        count = len(data) if isinstance(data, list) else 0
+        return f"Found {count} items", count
+
+    if tool_name == "get_folder_upload_summary":
+        if isinstance(data, dict):
+            return "Loaded folder upload summary", 1
         return "No results", 0
 
     if tool_name == "request_replanning":
@@ -433,18 +474,231 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
     if method is None:
         raise ToolExecutionError(name, f"Tool method not found: {method_name}")
 
-    logger.info(f"[TOOL CALL] {name}: {json.dumps(args)}")
+    active_schemas = getattr(tools, "active_tool_schemas", {})
+    schema = active_schemas.get(name) or TOOL_SCHEMAS_BY_NAME.get(name)
+    authorization = getattr(tools, "tool_authorization", None)
+    capability = get_schema_capability(schema) if schema else READ_CAPABILITY
 
+    logger.info(f"[TOOL CALL] {name}: {json.dumps(args, default=str)}")
+    audit_id = None
     try:
-        kwargs = {k: args.get(k) for k in param_keys if k in args}
+        if authorization is not None:
+            rejection = authorization.authorize(name, capability)
+            if rejection:
+                if capability != READ_CAPABILITY:
+                    audit_id = await _start_tool_audit(
+                        tools,
+                        name,
+                        capability,
+                        args,
+                        authorization,
+                    )
+                raise ToolExecutionError(name, rejection)
+        elif capability != READ_CAPABILITY:
+            raise ToolExecutionError(
+                name,
+                "Write tool execution requires an authorization context",
+            )
 
-        param_types = _TOOL_PARAM_TYPES.get(name, {})
+        if capability != READ_CAPABILITY:
+            audit_id = await _start_tool_audit(
+                tools,
+                name,
+                capability,
+                args,
+                authorization,
+            )
+
+        kwargs = dict(args)
+
+        param_types = (
+            {
+                key: value.get("type", "string")
+                for key, value in schema["function"]
+                .get("parameters", {})
+                .get("properties", {})
+                .items()
+            }
+            if schema
+            else _TOOL_PARAM_TYPES.get(name, {})
+        )
         for k, v in kwargs.items():
             if k in param_types:
                 kwargs[k] = _coerce_arg(v, param_types[k])
 
+        if schema:
+            validation_errors = validate_tool_arguments(schema, kwargs)
+            if validation_errors:
+                raise ToolExecutionError(
+                    name,
+                    "Invalid arguments: " + "; ".join(validation_errors),
+                )
+
+            parameter_names = set(
+                schema["function"]
+                .get("parameters", {})
+                .get("properties", {})
+            )
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in parameter_names
+            }
+        else:
+            kwargs = {k: args.get(k) for k in param_keys if k in args}
+
         result = await method(**kwargs)
+        if audit_id:
+            audit_status = (
+                "rejected"
+                if isinstance(result, dict) and result.get("error")
+                else "succeeded"
+            )
+            await _safe_finish_tool_audit(
+                tools,
+                audit_id,
+                status=audit_status,
+                result=result,
+            )
         return {"data": result}
+    except ToolExecutionError:
+        if audit_id:
+            await _safe_finish_tool_audit(
+                tools,
+                audit_id,
+                status="rejected",
+                error="Tool execution was rejected.",
+            )
+        raise
     except Exception as e:
+        if audit_id:
+            await _safe_finish_tool_audit(
+                tools,
+                audit_id,
+                status="failed",
+                error=str(e),
+            )
         logger.error(f"Tool {name} failed: {e}")
         raise ToolExecutionError(name, str(e))
+
+
+def _redact_audit_value(value):
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if any(
+                    marker in key.lower()
+                    for marker in ("token", "secret", "password", "api_key")
+                )
+                else _redact_audit_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_audit_value(item) for item in value]
+    return value
+
+
+async def _start_tool_audit(
+    tools,
+    tool_name: str,
+    capability: str,
+    arguments: Dict,
+    authorization,
+) -> str:
+    postgres = getattr(tools, "postgres", None)
+    if postgres is None or authorization is None:
+        raise ToolExecutionError(
+            tool_name,
+            "Write audit context is unavailable",
+        )
+
+    audit_id = str(uuid.uuid4())
+    await postgres.execute(
+        """
+        INSERT INTO public.agent_tool_audits (
+            audit_id,
+            user_name,
+            agent_id,
+            project_id,
+            session_id,
+            run_id,
+            tool_name,
+            capability,
+            confirmation_state,
+            arguments,
+            status
+        ) VALUES (
+            %(audit_id)s,
+            %(user_name)s,
+            %(agent_id)s,
+            %(project_id)s,
+            %(session_id)s,
+            %(run_id)s,
+            %(tool_name)s,
+            %(capability)s,
+            %(confirmation_state)s,
+            %(arguments)s::jsonb,
+            'started'
+        )
+        """,
+        {
+            "audit_id": audit_id,
+            "user_name": authorization.user_name,
+            "agent_id": authorization.agent_id,
+            "project_id": authorization.project_id,
+            "session_id": authorization.session_id,
+            "run_id": authorization.run_id,
+            "tool_name": tool_name,
+            "capability": capability,
+            "confirmation_state": authorization.confirmation_state,
+            "arguments": json.dumps(
+                _redact_audit_value(arguments),
+                default=str,
+            ),
+        },
+    )
+    return audit_id
+
+
+async def _finish_tool_audit(
+    tools,
+    audit_id: str,
+    *,
+    status: str,
+    result=None,
+    error: Optional[str] = None,
+) -> None:
+    await tools.postgres.execute(
+        """
+        UPDATE public.agent_tool_audits
+        SET status = %(status)s,
+            result = %(result)s::jsonb,
+            error = %(error)s,
+            completed_at = NOW()
+        WHERE audit_id = %(audit_id)s
+        """,
+        {
+            "audit_id": audit_id,
+            "status": status,
+            "result": (
+                json.dumps(_redact_audit_value(result), default=str)
+                if result is not None
+                else None
+            ),
+            "error": error,
+        },
+    )
+
+
+async def _safe_finish_tool_audit(tools, audit_id: str, **values) -> None:
+    try:
+        await _finish_tool_audit(tools, audit_id, **values)
+    except Exception:
+        # The durable "started" row still proves the write was authorized and
+        # attempted. Do not turn a completed domain write into a false failure
+        # solely because its audit completion update had an infrastructure fault.
+        logger.exception(
+            f"Failed to finish agent tool audit {audit_id}"
+        )

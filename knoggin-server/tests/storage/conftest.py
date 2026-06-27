@@ -1,13 +1,26 @@
 import os
+from pathlib import Path
 
 import pytest
 
 from infrastructure.postgres_client import PostgresClient
 
+STORAGE_TEST_ROOT = Path(__file__).resolve().parent
 DB_URL = os.environ.get(
     "KNOGGIN_TEST_DATABASE_URL",
     "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
 )
+
+
+def pytest_collection_modifyitems(items):
+    """Attach database cleanup only to tests that opt into real Postgres."""
+    for item in items:
+        item_path = Path(item.path).resolve()
+        if (
+            item_path.is_relative_to(STORAGE_TEST_ROOT)
+            and item.get_closest_marker("requires_postgres") is not None
+        ):
+            item.add_marker(pytest.mark.usefixtures("clean_db"))
 
 
 @pytest.fixture
@@ -21,12 +34,16 @@ async def real_postgres_client():
         await client.close()
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 async def clean_db(real_postgres_client):
     """Wipes relational tables and the AGE graph before every test."""
     await real_postgres_client.execute(
         """
         TRUNCATE TABLE
+            document_chunks,
+            project_documents,
+            document_folder_uploads,
+            project_document_scan_settings,
             relationship_evidence_refs,
             relationships,
             hierarchy_edges,

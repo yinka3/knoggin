@@ -17,22 +17,6 @@ from tests.knowledge.test_retrieval_embedding_smoke import (
 )
 
 
-class FakeMemoryManager:
-    def __init__(self):
-        self.calls = []
-
-    async def load_prompt_strings(self, hot_topics):
-        self.calls.append(list(hot_topics))
-        return (
-            "[Testing]\n- Agent tests use fake LLMs and real local embeddings.",
-            (
-                "Keep tool evidence grounded. "
-                "Prefer subsystem-sized coverage. "
-                "Do not hide retrieval failures."
-            ),
-        )
-
-
 class ScriptedLLM:
     agent_model = "architect-model"
     extraction_model = "librarian-model"
@@ -274,7 +258,8 @@ def make_agent_messages():
         ),
         (
             10,
-            "FileRAG folder upload will change later, so deep document chunking "
+            "DocumentService folder upload will change later, so deep document "
+            "chunking "
             "coverage should wait until the redesign settles.",
         ),
     ]
@@ -290,7 +275,7 @@ def make_search_tool(service, knowledge_store, messages):
         "rerank_candidates": 10,
         "default_message_limit": 5,
     }
-    tool.file_rag = None
+    tool.document_service = None
     tool.user_name = "ada"
     tool.session_id = "session-agent"
     tool.active_topics = ["Testing"]
@@ -336,9 +321,8 @@ async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
     messages = make_agent_messages()
     knowledge_store = FakeKnowledgeStore(messages)
     tools = make_search_tool(service, knowledge_store, messages)
-    memory = FakeMemoryManager()
     llm = ScriptedLLM()
-    executor = QuietExecutor(make_agent_context(), llm, tools, memory)
+    executor = QuietExecutor(make_agent_context(), llm, tools)
 
     query = (
         "AgentExecutor tool behavior prompt context active topics fake LLM "
@@ -371,7 +355,6 @@ async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
             ["project-agent"],
         )
     ]
-    assert memory.calls == [["Testing"]]
     assert executor.llm_calls == [
         ("architect-model", "high", 1),
         ("librarian-model", "medium", 2),

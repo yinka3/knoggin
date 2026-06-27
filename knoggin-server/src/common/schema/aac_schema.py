@@ -3,6 +3,12 @@ AAC_READ_TOOL_NAMES = [
     "fact_check",
     "get_connections",
     "search_messages",
+    "search_documents",
+    "read_document",
+    "list_documents",
+    "get_document_info",
+    "list_folder_tree",
+    "read_brain",
 ]
 
 AAC_SPECIFIC_SCHEMAS = [
@@ -26,35 +32,42 @@ AAC_SPECIFIC_SCHEMAS = [
                 },
                 "required": ["content"],
             },
-            "tags": ["community:write"],
+            "tags": ["community"],
+            "capability": "reversible_write",
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "save_memory",
+            "name": "edit_brain",
             "description": (
-                "Save something to your own persistent memory for use in "
-                "future discussions."
+                "Update one editable section of your persistent identity. "
+                "Call read_brain first and pass its revision."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The fact or note to remember.",
+                        "description": "Replacement content for the selected section.",
                     },
-                    "topic": {
+                    "section": {
                         "type": "string",
-                        "description": (
-                            "The topic to group this memory under. Match an active "
-                            "topic if possible, otherwise use 'General'."
-                        ),
+                        "enum": [
+                            "Behavioral Directives",
+                            "Project Context",
+                            "User Preferences & Lessons Learned",
+                        ],
+                    },
+                    "expected_revision": {
+                        "type": "integer",
+                        "description": "Revision returned by read_brain.",
                     },
                 },
-                "required": ["content"],
+                "required": ["section", "content", "expected_revision"],
             },
-            "tags": ["community:write"],
+            "tags": ["community", "identity"],
+            "capability": "identity_write",
         },
     },
     {
@@ -64,7 +77,8 @@ AAC_SPECIFIC_SCHEMAS = [
             "description": (
                 "Spawn a new specialist sub-agent to join this discussion if "
                 "the topic requires expertise clearly outside your own scope "
-                "or persona."
+                "or persona. You may choose the new specialist's persona at "
+                "creation time, but cannot edit any existing agent's persona."
             ),
             "parameters": {
                 "type": "object",
@@ -74,8 +88,25 @@ AAC_SPECIFIC_SCHEMAS = [
                         "description": "A short, descriptive name for the specialist.",
                     },
                     "persona": {
-                        "type": "string",
-                        "description": "The specialist's expertise and style.",
+                        "type": "object",
+                        "description": (
+                            "The specialist's stable differentiating persona. "
+                            "This is chosen once when the specialist is spawned."
+                        ),
+                        "properties": {
+                            "attention_bias": {"type": "string"},
+                            "reasoning_style": {"type": "string"},
+                            "social_temperament": {"type": "string"},
+                            "communication_signature": {"type": "string"},
+                            "productive_flaw": {"type": "string"},
+                        },
+                        "required": [
+                            "attention_bias",
+                            "reasoning_style",
+                            "social_temperament",
+                            "communication_signature",
+                            "productive_flaw",
+                        ],
                     },
                     "initial_directives": {
                         "type": "array",
@@ -94,7 +125,8 @@ AAC_SPECIFIC_SCHEMAS = [
                 },
                 "required": ["name", "persona"],
             },
-            "tags": ["community:write"],
+            "tags": ["community"],
+            "capability": "configuration_write",
         },
     },
 ]

@@ -8,7 +8,6 @@ from common.utils.events import DebugEventEmitter
 from infrastructure.resources import ResourceManager
 from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
 from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
-from knoggin_server.knowledge.services.file_rag import FileRAGService
 from knoggin_server.project.state import ProjectState
 from knoggin_server.session.context import Context
 
@@ -86,9 +85,8 @@ class SessionAssembler:
             )
         )
 
-        # Initialize File RAG
-        file_rag = self._init_file_rag(session_id)
-        ctx.file_rag = file_rag
+        # Sessions share the project-owned document boundary.
+        ctx.document_service = project_state.document_service
 
         # Register session to emitter for project event propagation
         DebugEventEmitter.get().register_session(project_state.project_id, session_id)
@@ -141,10 +139,4 @@ class SessionAssembler:
             batch_timeout=batch_timeout,
             checkpoint_interval=checkpoint_interval,
             session_window=session_window,
-        )
-
-    def _init_file_rag(self, session_id: str) -> FileRAGService:
-        return FileRAGService(
-            session_id=session_id,
-            embedding_service=self.resources.embedding,
         )

@@ -19,9 +19,10 @@ from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.agent.prompts import (
+from knoggin_server.ingestion.prompts import (
     enrich_facts_with_sources,
     get_profile_extraction_prompt,
+    render_configured_prompt,
 )
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 from knoggin_server.knowledge.services.entity_embedding import (
@@ -459,7 +460,12 @@ class ProfileRefinementJob(BaseJob):
             return False
 
         if self.profile_prompt:
-            system_reasoning = self.profile_prompt.replace("{user_name}", ctx.user_name)
+            system_reasoning = render_configured_prompt(
+                self.profile_prompt,
+                prompt_name="configured extract_facts",
+                required={"user_name"},
+                user_name=ctx.user_name,
+            )
         else:
             system_reasoning = get_profile_extraction_prompt(ctx.user_name)
 
@@ -615,8 +621,11 @@ class ProfileRefinementJob(BaseJob):
             )
 
             if self.profile_prompt:
-                system_reasoning = self.profile_prompt.replace(
-                    "{user_name}", ctx.user_name
+                system_reasoning = render_configured_prompt(
+                    self.profile_prompt,
+                    prompt_name="configured extract_facts",
+                    required={"user_name"},
+                    user_name=ctx.user_name,
                 )
             else:
                 system_reasoning = get_profile_extraction_prompt(ctx.user_name)

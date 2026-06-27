@@ -6,15 +6,15 @@ from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 if TYPE_CHECKING:
     from knoggin_server.session.context import Context
 
-import redis.asyncio as aioredis
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.agent_contracts import AgentConfig
 from common.schema.agent_stream import PublicAgentStreamEvent
+from common.schema.document import DocumentFocus
 from common.utils.json_utils import safe_json_loads
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.executor import AgentExecutor
+from knoggin_server.agent.services.agent_manager import AgentManager
 from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.agent.types import (
     AgentContext,
@@ -22,8 +22,6 @@ from knoggin_server.agent.types import (
     AgentState,
     RetrievedEvidence,
 )
-from knoggin_server.knowledge.services.memory_service import MemoryManager
-
 
 class Orchestrator:
     """
@@ -71,16 +69,9 @@ class Orchestrator:
                 tool_limits=tuple(limits.tool_limits.items()),
             )
 
-            # Services (Context-Aware)
-            services = await self._bootstrap_services(context, agent_id)
-            tools = services["tools"]
-            memory_mgr = services["memory"]
-            topic_config = services["topic_config"]
-
             # Identity & Persona
             identity = await self._resolve_agent_identity(
-                user_name,
-                context.redis_client,
+                context,
                 agent_id,
                 agent_name_override,
                 agent_persona_override,
@@ -96,6 +87,31 @@ class Orchestrator:
                     else 0.7
                 )
             )
+
+            # Services (Context-Aware)
+            services = await self._bootstrap_services(
+                context,
+                agent_cfg.id if agent_cfg else None,
+            )
+            tools = services["tools"]
+            topic_config = services["topic_config"]
+
+            # Check heartbeat
+            topic_eval = False
+            if context.project_id:
+                count = await context.redis_client.get(
+                    RedisKeys.project_heartbeat_counter(
+                        user_name,
+                        context.project_id,
+                    )
+                )
+                topic_settings = config.developer_settings.topic_evaluation
+                if (
+                    topic_settings.enabled
+                    and count
+                    and int(count) >= topic_settings.interval_msgs
+                ):
+                    topic_eval = True
 
             # Context & State Assembly
             requested_hot_topics = (
@@ -128,11 +144,13 @@ class Orchestrator:
                 agent_name=identity["name"],
                 agent_persona=identity["persona"],
                 history=conversation_history or [],
+                topic_evaluation_needed=topic_eval,
+                maintenance_needed=False,
             )
 
             # Execution via AgentExecutor
             executor = AgentExecutor(
-                ctx, context.llm, tools, memory_mgr
+                ctx, context.llm, tools
             )
 
             async for event in executor.execute(
@@ -158,36 +176,25 @@ class Orchestrator:
 
     async def _resolve_agent_identity(
         self,
-        user_name: str,
-        redis: aioredis.Redis,
+        context: Context,
         agent_id: Optional[str],
         name_override: Optional[str],
         persona_override: Optional[str],
     ) -> Dict:
-        """Fetches agent profile and resolves final name/persona."""
-        agent_cfg = None
-        if agent_id:
-            agent_data = await redis.hget(RedisKeys.agents(user_name), agent_id)
-            if agent_data:
-                try:
-                    parsed_agent_data = safe_json_loads(agent_data)
-                    if parsed_agent_data:
-                        agent_cfg = AgentConfig.from_dict(parsed_agent_data)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to parse agent config for '{agent_id}': {e}"
-                    )
+        """Resolve the durable Postgres agent used for this run."""
+        manager = AgentManager(context.resources, context.user_name, {})
+        resolved_id = agent_id or await manager.get_default_agent_id()
+        agent_cfg = await manager.get_agent(resolved_id)
+        if agent_cfg is None:
+            raise ValueError(f"Agent identity not found: {resolved_id}")
 
         return {
             "config": agent_cfg,
             "name": name_override
-            or (agent_cfg.name if agent_cfg else "knoggin_server"),
+            or agent_cfg.name,
             "persona": persona_override
-            or (
-                agent_cfg.persona
-                if agent_cfg
-                else "A helpful and thorough personal intelligence assistant."
-            ),
+            or agent_cfg.persona_markdown
+            or "A helpful and thorough personal intelligence assistant.",
         }
 
     async def _bootstrap_services(
@@ -195,20 +202,14 @@ class Orchestrator:
         context: Context,
         agent_id: Optional[str] = None,
     ) -> Dict:
-        """Retrieve Context services and instantiate the session MemoryManager."""
+        """Retrieve context services and instantiate the agent tool suite."""
         config = ConfigManager.get().config
         search_cfg = {
             **config.developer_settings.search.model_dump(),
             **config.search.model_dump(),
         }
 
-        memory_mgr = MemoryManager(
-            redis=context.redis_client,
-            user_name=context.user_name,
-            session_id=context.session_id,
-            agent_id=agent_id or "default",
-            topic_config=context.project.topic_config,
-        )
+        document_focus = await self._load_document_focus(context)
 
         tools = Tools(
             user_name=context.user_name,
@@ -216,16 +217,80 @@ class Orchestrator:
             session_id=context.session_id,
             topic_config=context.project.topic_config,
             search_config=search_cfg,
-            file_rag=context.file_rag,
-            memory=memory_mgr,
+            document_service=context.document_service,
+            document_focus=document_focus,
             knowledge_store=context.knowledge_store,
+            postgres=context.resources.postgres,
             redis=context.redis_client,
+            agent_id=agent_id,
+            topic_refresh_callback=(
+                context.project.refresh_topic_mappings
+                if context.project
+                else None
+            ),
         )
 
         return {
             "topic_config": context.project.topic_config,
-            "memory": memory_mgr,
             "entities": context.project.entities,
-            "file_rag": context.file_rag,
+            "document_service": context.document_service,
             "tools": tools,
         }
+
+    async def _load_document_focus(
+        self,
+        context: Context,
+    ) -> Optional[dict]:
+        """Load and validate Postgres-owned session focus for this run."""
+        rows = await context.resources.postgres.fetch_all(
+            """
+            SELECT document_focus
+            FROM public.sessions
+            WHERE user_name = %(user_name)s
+              AND session_id = %(session_id)s
+            """,
+            {
+                "user_name": context.user_name,
+                "session_id": context.session_id,
+            },
+        )
+        if not rows:
+            return None
+        focus = rows[0].get("document_focus")
+        if isinstance(focus, str):
+            focus = safe_json_loads(focus, {})
+        if focus is None:
+            return None
+        try:
+            persisted = DocumentFocus.model_validate(focus)
+            if context.document_service is None:
+                return None
+            target = await context.document_service.resolve_focus_target(
+                session_id=context.session_id,
+                document_id=(
+                    persisted.document_id
+                    if persisted.target_type == "document"
+                    else None
+                ),
+                folder_root_id=(
+                    persisted.folder_root_id
+                    if persisted.target_type != "document"
+                    else None
+                ),
+                path_prefix=(
+                    persisted.path_prefix
+                    if persisted.target_type == "subtree"
+                    else None
+                ),
+            )
+            return DocumentFocus(
+                mode="pinned",
+                created_at=persisted.created_at,
+                **target,
+            ).model_dump(mode="json")
+        except (FileNotFoundError, ValueError) as exc:
+            logger.warning(
+                "Ignoring invalid or inaccessible document focus for session "
+                f"{context.session_id}: {exc}"
+            )
+            return None

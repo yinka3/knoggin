@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 import re
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -173,107 +174,61 @@ def validate_entity(
 
 
 async def fetch_conversation_turns(
-    redis_client: aioredis.Redis,
+    pg_client,
     user_name: str,
     session_id: str,
     num_turns: int,
     up_to_msg_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
+    """Fetch conversation turns natively from Postgres in chronological order."""
+    query = """
+        SELECT message_id, role, content, timestamp_ms as timestamp, user_msg_id, metadata
+        FROM public.messages
+        WHERE user_name = %(user_name)s AND session_id = %(session_id)s
     """
-    Fetch conversation turns from Redis in chronological order.
-
-    Shared between Context (agent prompt context) and ProfileRefinementJob
-    (fact extraction context). Callers post-process the results for their
-    specific formatting needs.
-
-    Returns list of dicts with keys:
-        message_id, role, content, timestamp, user_msg_id, metadata
-    """
-    sorted_key = RedisKeys.recent_conversation(user_name, session_id)
-    conv_key = RedisKeys.conversation(user_name, session_id)
+    params = {"user_name": user_name, "session_id": session_id, "limit": num_turns}
 
     if up_to_msg_id:
-        message_key = str(up_to_msg_id)
-        message_rank = await redis_client.zrank(sorted_key, message_key)
-        if message_rank is not None:
-            message_ids = await redis_client.zrange(
-                sorted_key,
-                max(0, message_rank - num_turns),
-                message_rank - 1,
-            )
-        else:
-            # If the ID is absent, detect an old DLQ retry from the latest message.
-            latest_message_ids = await redis_client.zrange(
-                sorted_key, 0, 0, desc=True
-            )
-            is_dlq_retry = False
-            latest_msg_id = None
+        query += " AND message_id <= %(up_to_msg_id)s "
+        params["up_to_msg_id"] = up_to_msg_id
 
-            if latest_message_ids:
-                latest_message_data = await redis_client.hget(
-                    conv_key, latest_message_ids[0]
-                )
-                if latest_message_data:
-                    try:
-                        parsed = safe_json_loads(latest_message_data)
-                        if parsed:
-                            latest_msg_id = parsed.get("user_msg_id")
-                            if latest_msg_id is not None and int(latest_msg_id) >= int(
-                                up_to_msg_id
-                            ):
-                                is_dlq_retry = True
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to unpack latest message for DLQ guard: {e}"
-                        )
+    query += " ORDER BY message_id DESC LIMIT %(limit)s "
 
-            if is_dlq_retry:
-                logger.warning(
-                    f"DLQ Guard: Msg {up_to_msg_id} missing from cache, but DB "
-                    f"is already at msg {latest_msg_id}. "
-                    "Returning empty context to prevent leaking future messages."
-                )
-                return []
+    rows = await pg_client.fetch_all(query, params)
 
-            # A truly new message can use the current conversation as context.
-            message_ids = await redis_client.zrange(
-                sorted_key, 0, num_turns - 1, desc=True
-            )
-            message_ids = list(message_ids)
-            message_ids.reverse()
-    else:
-        message_ids = await redis_client.zrange(
-            sorted_key, 0, num_turns - 1, desc=True
-        )
-        message_ids = list(message_ids)
-        message_ids.reverse()
-
-    if not message_ids:
-        return []
-
-    message_data = await redis_client.hmget(conv_key, *message_ids)
+    # We want chronological order, but we fetched DESC to get the latest `limit` rows.
+    # So we reverse the rows.
+    rows = list(rows)
+    rows.reverse()
 
     results = []
-    for message_id, data in zip(message_ids, message_data):
-        if not data:
-            continue
-        try:
-            parsed = safe_json_loads(data)
-            if not parsed:
-                continue
-            results.append(
-                {
-                    "message_id": message_id,
-                    "role": parsed["role"],
-                    "content": parsed["content"],
-                    "timestamp": parsed["timestamp"],
-                    "user_msg_id": parsed.get("user_msg_id"),
-                    "metadata": parsed.get("metadata"),
-                }
-            )
-        except Exception as e:
-            logger.warning(f"Failed to parse conversation message {message_id}: {e}")
-            continue
+    for row in rows:
+        meta = row.get("metadata")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (TypeError, json.JSONDecodeError):
+                meta = {}
+
+        # Keep the public conversation-turn shape stable while storing the
+        # canonical timestamp as milliseconds in Postgres.
+        from datetime import datetime, timezone
+
+        ts = row["timestamp"]
+        if ts:
+            dt = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
+            ts_str = dt.isoformat()
+        else:
+            ts_str = ""
+
+        results.append({
+            "message_id": row["message_id"],
+            "role": row["role"],
+            "content": row["content"],
+            "timestamp": ts_str,
+            "user_msg_id": row.get("user_msg_id"),
+            "metadata": meta or {},
+        })
 
     return results
 

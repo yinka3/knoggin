@@ -10,9 +10,10 @@ if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
     from infrastructure.knowledge_store import KnowledgeStore
+    from infrastructure.postgres_client import PostgresClient
     from knoggin_server.knowledge.services.embedding_service import EmbeddingService
     from knoggin_server.knowledge.services.entity_service import EntityManager
-    from knoggin_server.knowledge.services.file_rag import FileRAGService
+    from knoggin_server.knowledge.services.document_service import DocumentService
 
 import httpx
 from loguru import logger
@@ -29,14 +30,203 @@ except ImportError:
 class SearchTools:
     redis: aioredis.Redis
     knowledge_store: KnowledgeStore
+    postgres: PostgresClient
     embedding_service: EmbeddingService
     search_cfg: Dict
-    file_rag: Optional[FileRAGService]
+    document_service: Optional[DocumentService]
+    document_focus: Optional[Dict] = None
     user_name: str
     session_id: str
     active_topics: Optional[List[str]]
     entities: EntityManager
     readable_project_ids: Optional[List[str]]
+
+    async def list_documents(
+        self,
+        folder_root_id: str = None,
+        path_prefix: str = None,
+        visibility_scope: str = None,
+        limit: int = 50,
+        use_focus: bool = True,
+    ) -> List[Dict]:
+        """List documents visible to the current project/session."""
+        if not self.document_service:
+            return [{"error": "No project document service available"}]
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("limit must be between 1 and 100")
+
+        if (
+            use_focus
+            and folder_root_id is None
+            and path_prefix is None
+            and self.document_focus
+        ):
+            if self.document_focus["target_type"] == "document":
+                document = await self.document_service.get_document_info(
+                    session_id=self.session_id,
+                    document_id=self.document_focus["document_id"],
+                )
+                if (
+                    visibility_scope is None
+                    or document["visibility_scope"] == visibility_scope
+                ):
+                    return [document]
+                return []
+            folder_root_id = self.document_focus.get("folder_root_id")
+            path_prefix = self.document_focus.get("path_prefix")
+
+        documents = await self.document_service.list_documents(
+            session_id=self.session_id,
+            folder_root_id=folder_root_id,
+            path_prefix=path_prefix,
+            visibility_scope=visibility_scope,
+            limit=limit,
+        )
+        return documents
+
+    async def list_folder_uploads(
+        self,
+        visibility_scope: str = None,
+        limit: int = 25,
+    ) -> List[Dict]:
+        """List visible folder upload batches."""
+        if not self.document_service:
+            return [{"error": "No project document service available"}]
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("limit must be between 1 and 100")
+        return await self.document_service.list_folder_uploads(
+            session_id=self.session_id,
+            visibility_scope=visibility_scope,
+            limit=limit,
+        )
+
+    async def get_folder_upload_summary(
+        self,
+        folder_root_id: str = None,
+        use_focus: bool = True,
+    ) -> Dict:
+        """Get one visible folder upload summary."""
+        if not self.document_service:
+            return {"error": "No project document service available"}
+        explicit_folder = folder_root_id is not None
+        if folder_root_id is None and use_focus and self.document_focus:
+            if self.document_focus["target_type"] in (
+                "folder_upload",
+                "subtree",
+            ):
+                folder_root_id = self.document_focus["folder_root_id"]
+        focus_path_prefix = None
+        if (
+            use_focus
+            and self.document_focus
+            and self.document_focus["target_type"] == "subtree"
+            and not explicit_folder
+            and folder_root_id == self.document_focus["folder_root_id"]
+        ):
+            focus_path_prefix = self.document_focus["path_prefix"]
+        if folder_root_id is None:
+            raise ValueError("folder_root_id is required without folder focus")
+        return await self.document_service.get_folder_upload_summary(
+            folder_root_id=folder_root_id,
+            session_id=self.session_id,
+            path_prefix=focus_path_prefix,
+        )
+
+    async def list_folder_tree(
+        self,
+        folder_root_id: str = None,
+        path_prefix: str = None,
+        max_depth: int = 3,
+        use_focus: bool = True,
+    ) -> List[Dict]:
+        """List the visible document tree for one folder upload."""
+        if not self.document_service:
+            return [{"error": "No project document service available"}]
+        if (
+            not isinstance(max_depth, int)
+            or isinstance(max_depth, bool)
+            or not 1 <= max_depth <= 10
+        ):
+            raise ValueError("max_depth must be between 1 and 10")
+        if (
+            folder_root_id is None
+            and use_focus
+            and self.document_focus
+            and self.document_focus["target_type"] in (
+                "folder_upload",
+                "subtree",
+            )
+        ):
+            folder_root_id = self.document_focus["folder_root_id"]
+            if path_prefix is None:
+                path_prefix = self.document_focus.get("path_prefix")
+        if folder_root_id is None:
+            raise ValueError("folder_root_id is required without folder focus")
+        return await self.document_service.list_folder_tree(
+            folder_root_id=folder_root_id,
+            session_id=self.session_id,
+            path_prefix=path_prefix,
+            max_depth=max_depth,
+        )
+
+    async def get_document_info(
+        self,
+        document_id: str = None,
+        relative_path: str = None,
+        use_focus: bool = True,
+    ) -> Dict:
+        """Get metadata for one visible document."""
+        if not self.document_service:
+            return {"error": "No project document service available"}
+        if (
+            document_id is None
+            and relative_path is None
+            and use_focus
+            and self.document_focus
+            and self.document_focus["target_type"] == "document"
+        ):
+            document_id = self.document_focus["document_id"]
+        return await self.document_service.get_document_info(
+            session_id=self.session_id,
+            document_id=document_id,
+            relative_path=relative_path,
+        )
+
+    async def read_document(
+        self,
+        document_id: str = None,
+        relative_path: str = None,
+        start_line: int = 1,
+        end_line: int = None,
+        use_focus: bool = True,
+    ) -> List[Dict]:
+        """Read a bounded line range from one visible document."""
+        if not self.document_service:
+            return [{"error": "No project document service available"}]
+        if (
+            document_id is None
+            and relative_path is None
+            and use_focus
+            and self.document_focus
+            and self.document_focus["target_type"] == "document"
+        ):
+            document_id = self.document_focus["document_id"]
+        result = await self.document_service.read_document(
+            session_id=self.session_id,
+            document_id=document_id,
+            relative_path=relative_path,
+            start_line=start_line,
+            end_line=end_line,
+        )
+        return [result]
 
     async def search_messages(self, query: str, limit: int = None) -> List[Dict]:
         """
@@ -151,51 +341,138 @@ class SearchTools:
 
         return results
 
-    async def search_files(
-        self, query: str, file_name: str = None, limit: int = 5
+    async def search_documents(
+        self,
+        query: str,
+        document_name: str = None,
+        relative_path: str = None,
+        path_prefix: str = None,
+        folder_root_id: str = None,
+        limit: int = 5,
+        use_focus: bool = True,
     ) -> List[Dict]:
         """
-        Search uploaded session files for relevant content.
+        Search indexed documents visible to the current project and session.
 
         Args:
             query: What to search for
-            file_name: Optional filename to restrict search to
+            document_name: Optional document name to restrict search
+            relative_path: Optional exact path to restrict search
+            path_prefix: Optional subtree to restrict search
+            folder_root_id: Optional folder upload batch
             limit: Max chunks to return
 
         Returns:
-            List of matching chunks with file name, content, and relevance score.
+            Matching chunks with document metadata and relevance scores.
         """
-        if not self.file_rag:
-            return [{"error": "No file service available for this session"}]
+        if not self.document_service:
+            return [{"error": "No project document service available"}]
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 50
+        ):
+            raise ValueError("limit must be between 1 and 50")
+        if document_name is not None and relative_path is not None:
+            raise ValueError(
+                "document_name and relative_path are mutually exclusive"
+            )
+        if path_prefix is not None and (
+            document_name is not None or relative_path is not None
+        ):
+            raise ValueError(
+                "path_prefix cannot be combined with an exact document selector"
+            )
 
-        files = self.file_rag.list_files()
+        document_filter = None
+        if (
+            use_focus
+            and document_name is None
+            and relative_path is None
+            and path_prefix is None
+            and folder_root_id is None
+            and self.document_focus
+        ):
+            if self.document_focus["target_type"] == "document":
+                document_filter = self.document_focus["document_id"]
+            else:
+                folder_root_id = self.document_focus.get("folder_root_id")
+                path_prefix = self.document_focus.get("path_prefix")
 
-        if not files:
-            return [{"error": "No files uploaded to this session"}]
+        if document_filter is not None:
+            focused_document = await self.document_service.get_document_info(
+                session_id=self.session_id,
+                document_id=document_filter,
+            )
+            visible_documents = [focused_document]
+        else:
+            visible_documents = await self.document_service.list_documents(
+                session_id=self.session_id,
+                folder_root_id=folder_root_id,
+                path_prefix=path_prefix,
+                limit=1000,
+            )
+        documents = [
+            document
+            for document in visible_documents
+            if document.get("status") == "indexed"
+        ]
 
-        file_filter = None
-        if file_name:
-            for f in files:
-                if f["original_name"].lower() == file_name.lower():
-                    file_filter = f["file_id"]
-                    break
-            if not file_filter:
-                available = [f["original_name"] for f in files]
+        if not documents:
+            return [{"error": "No indexed documents available in this project"}]
+
+        if document_name:
+            requested = document_name.lower()
+            path_matches = [
+                document
+                for document in documents
+                if document.get("relative_path", "").lower() == requested
+            ]
+            name_matches = [
+                document
+                for document in documents
+                if document["original_name"].lower() == requested
+            ]
+            matches = path_matches or name_matches
+            if len(matches) == 1:
+                document_filter = matches[0]["document_id"]
+            elif len(matches) > 1:
+                paths = [document["relative_path"] for document in matches]
                 return [
                     {
                         "error": (
-                            f"File '{file_name}' not found. Available: "
+                            f"Document name '{document_name}' is ambiguous. "
+                            f"Use one of these paths: {', '.join(paths)}"
+                        )
+                    }
+                ]
+            else:
+                available = [
+                    document["relative_path"] for document in documents
+                ]
+                return [
+                    {
+                        "error": (
+                            f"Document '{document_name}' not found. Available: "
                             f"{', '.join(available)}"
                         )
                     }
                 ]
 
-        results = await self.file_rag.search(
-            query, n_results=limit, file_filter=file_filter
+        results = await self.document_service.search(
+            query,
+            session_id=self.session_id,
+            n_results=limit,
+            document_filter=document_filter,
+            folder_root_id=folder_root_id,
+            relative_path=relative_path,
+            path_prefix=path_prefix,
         )
 
         if not results:
-            return [{"info": "No relevant content found in uploaded files"}]
+            return [
+                {"info": "No relevant content found in indexed documents"}
+            ]
 
         return results
 
@@ -401,17 +678,12 @@ class SearchTools:
         raw_by_idx = {}
         grouped = {}
         for item in normalized:
-            bucket = "message" if item["key"].startswith("msg_") else "conversation"
-            group_key = (item["user_name"], item["session_id"], bucket)
+            group_key = (item["user_name"], item["session_id"])
             grouped.setdefault(group_key, []).append(item)
 
         try:
-            for (user_name, session_id, bucket), items in grouped.items():
-                redis_key = (
-                    RedisKeys.message_content(user_name, session_id)
-                    if bucket == "message"
-                    else RedisKeys.conversation(user_name, session_id)
-                )
+            for (user_name, session_id), items in grouped.items():
+                redis_key = RedisKeys.message_content(user_name, session_id)
                 pipe = self.redis.pipeline()
                 for item in items:
                     pipe.hget(redis_key, item["key"])
@@ -486,13 +758,20 @@ class SearchTools:
         if not self.readable_project_ids:
             return [self.session_id]
 
+        rows = await self.postgres.fetch_all(
+            """
+            SELECT session_id
+            FROM public.sessions
+            WHERE user_name = %s
+              AND project_id = ANY(%s)
+            """,
+            (self.user_name, self.readable_project_ids),
+        )
         visible = {self.session_id}
-        for project_id in self.readable_project_ids:
-            session_ids = await self.redis.smembers(
-                RedisKeys.project_sessions(self.user_name, project_id)
-            )
-            visible.update(session_ids or [])
-        return list(visible)
+        visible.update(str(row["session_id"]) for row in rows)
+        return sorted(visible)
+
+
 
     async def _get_surrounding_context(
         self,
@@ -506,147 +785,43 @@ class SearchTools:
         context (previous and succeeding turns) to provide continuity in search results.
         """
         target_session_id = session_id or self.session_id
-        sorted_key = RedisKeys.recent_conversation(self.user_name, target_session_id)
-        conv_key = RedisKeys.conversation(self.user_name, target_session_id)
-
         is_prefixed_msg_id = msg_id.startswith("msg_")
-        target_message_id = (
-            msg_id.split("_", 1)[1] if is_prefixed_msg_id else msg_id
-        )
 
-        rank = await self.redis.zrank(sorted_key, target_message_id)
+        if is_prefixed_msg_id:
+            try:
+                numerical_msg_id = int(msg_id.split("_")[1])
+                fallback_msgs = await self.knowledge_store.get_surrounding_messages(
+                    numerical_msg_id,
+                    user_name=self.user_name,
+                    session_id=target_session_id,
+                    visible_project_ids=self.readable_project_ids,
+                    forward=forward,
+                    target_total=target_total,
+                )
 
-        if rank is None:
-            if is_prefixed_msg_id:
-                try:
-                    numerical_msg_id = int(msg_id.split("_")[1])
-                    fallback_msgs = await self.knowledge_store.get_surrounding_messages(
-                        numerical_msg_id,
-                        user_name=self.user_name,
-                        session_id=target_session_id,
-                        visible_project_ids=self.readable_project_ids,
-                        forward=forward,
-                        target_total=target_total,
+                formatted_fallback = []
+                for m in fallback_msgs:
+                    ts_iso = ""
+                    if "timestamp" in m and isinstance(
+                        m["timestamp"], (int, float)
+                    ):
+                        ts_iso = datetime.fromtimestamp(
+                            m["timestamp"] / 1000.0, timezone.utc
+                        ).isoformat()
+
+                    formatted_fallback.append(
+                        {
+                            "role": m["role"],
+                            "timestamp": ts_iso,
+                            "content": m["content"],
+                            "id": f"msg_{m['id']}",
+                            "is_hit": m["id"] == numerical_msg_id,
+                        }
                     )
-
-                    formatted_fallback = []
-                    for m in fallback_msgs:
-                        ts_iso = ""
-                        if "timestamp" in m and isinstance(
-                            m["timestamp"], (int, float)
-                        ):
-                            ts_iso = datetime.fromtimestamp(
-                                m["timestamp"] / 1000.0, timezone.utc
-                            ).isoformat()
-
-                        formatted_fallback.append(
-                            {
-                                "role": m["role"],
-                                "timestamp": ts_iso,
-                                "content": m["content"],
-                                "id": f"msg_{m['id']}",
-                                "is_hit": m["id"] == numerical_msg_id,
-                            }
-                        )
-                    return formatted_fallback
-                except (ValueError, IndexError):
-                    pass
-            return []
-
-        back_fetch = target_total * 2
-        start = max(0, rank - back_fetch)
-        end = rank + forward + 1
-
-        message_ids = await self.redis.zrange(sorted_key, start, end)
-        if not message_ids:
-            return []
-
-        pipe = self.redis.pipeline()
-        for _id in message_ids:
-            pipe.hget(conv_key, _id)
-        results = await pipe.execute()
-
-        raw_map = {
-            message_id: result
-            for message_id, result in zip(message_ids, results)
-            if result
-        }
-
-        if target_message_id not in message_ids:
-            return []
-        target_index = message_ids.index(target_message_id)
-
-        pre_context = []
-        post_context = []
-
-        current_back_count = 0
-        max_back = target_total - forward
-
-        for i in range(target_index - 1, -1, -1):
-            message_id = message_ids[i]
-            if message_id not in raw_map:
-                continue
-
-            data = safe_json_loads(raw_map[message_id])
-            if not data or not isinstance(data, dict):
-                continue
-
-            role = data.get("role", "unknown")
-            content = data.get("content", "") or ""
-
-            pre_context.append(
-                {
-                    "role": role,
-                    "timestamp": data.get("timestamp", ""),
-                    "content": content,
-                    "id": f"msg_{message_id}",
-                }
-            )
-
-            current_back_count += 1
-            if current_back_count >= max_back:
-                break
-
-        pre_context.reverse()
-
-        tgt_data = safe_json_loads(raw_map[target_message_id])
-        if tgt_data and isinstance(tgt_data, dict):
-            target_msg = {
-                "role": tgt_data.get("role", "unknown"),
-                "timestamp": tgt_data.get("timestamp", ""),
-                "content": tgt_data.get("content", ""),
-                "id": f"msg_{target_message_id}",
-                "is_hit": True,
-            }
-        else:
-            target_msg = {
-                "role": "unknown",
-                "timestamp": "",
-                "content": "",
-                "id": f"msg_{target_message_id}",
-                "is_hit": True,
-            }
-
-        for i in range(
-            target_index + 1, min(len(message_ids), target_index + forward + 1)
-        ):
-            message_id = message_ids[i]
-            if message_id not in raw_map:
-                continue
-
-            data = safe_json_loads(raw_map[message_id])
-            if not data or not isinstance(data, dict):
-                continue
-            post_context.append(
-                {
-                    "role": data.get("role", "unknown"),
-                    "timestamp": data.get("timestamp", ""),
-                    "content": data.get("content", ""),
-                    "id": f"msg_{message_id}",
-                }
-            )
-
-        return pre_context + [target_msg] + post_context
+                return formatted_fallback
+            except (ValueError, IndexError):
+                pass
+        return []
 
     async def _search_duckduckgo(
         self, query: str, limit: int, freshness: str = None

@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -6,7 +7,10 @@ from loguru import logger
 from common.conf.topics_config import TopicConfig
 from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.job.scheduler import Scheduler
+from infrastructure.postgres_client import PostgresClient
 from knoggin_server.ingestion.services.processor import TextProcessor
+from knoggin_server.knowledge.services.document_service import DocumentService
+from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 from knoggin_server.knowledge.services.entity_service import EntityManager
 
 
@@ -25,6 +29,9 @@ class ProjectState:
         user_name: str,
         redis_client: aioredis.Redis,
         readable_project_ids: list[str],
+        postgres_client: PostgresClient,
+        document_storage_root: Path,
+        embedding_service: EmbeddingService,
         batch_processor: Optional[Any] = None,
     ):
         self.project_id = require_scope_value(
@@ -42,10 +49,18 @@ class ProjectState:
         self.scheduler = scheduler
         self.user_name = user_name
         self.redis_client = redis_client
+        self.postgres_client = postgres_client
+        self.document_storage_root = document_storage_root
+        self.embedding_service = embedding_service
         self.batch_processor = batch_processor
+        self.document_service = DocumentService(
+            project_id=project_id,
+            postgres_client=postgres_client,
+            storage_root=document_storage_root,
+            embedding_service=embedding_service,
+        )
 
         self.profile_job: Optional[Any] = None
-        self.merge_job: Optional[Any] = None
         self.active_runtime_sessions_count = 0
         self.config_unsubscribers: list[Any] = []
 
@@ -68,9 +83,17 @@ class ProjectState:
         # but they will be garbage collected.
 
     async def update_topics_config(self, new_config: dict):
-        """Update topic config, save to redis, and refresh project components."""
-        self.topic_config.update(new_config)
-        await self.topic_config.save(self.redis_client, self.user_name, self.project_id)
+        """Replace project topics, persist to Postgres, and refresh runtime mappings."""
+        self.topic_config.replace(new_config)
+        await self.topic_config.save(
+            self.postgres_client,
+            self.user_name,
+            self.project_id,
+        )
+        self.refresh_topic_mappings()
+
+    def refresh_topic_mappings(self):
+        """Refresh runtime consumers after the shared TopicConfig changes."""
         self.entities.hierarchy_config = self.topic_config.hierarchy
         if self.batch_processor is not None:
             self.batch_processor.refresh_topic_mappings()

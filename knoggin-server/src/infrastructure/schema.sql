@@ -1,11 +1,98 @@
-
 CREATE SCHEMA IF NOT EXISTS public;
 
--- Canonical knowledge storage.
--- These tables are the long-term source of truth. AGE remains the graph
--- traversal projection, while *_search tables below remain derived indexes.
--- The application is pre-release: recreate development database volumes after
--- constraint changes instead of carrying compatibility migrations.
+-- ==============================================================================
+-- PROJECT STATE
+-- ==============================================================================
+
+CREATE TABLE IF NOT EXISTS public.projects (
+    project_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    access_mode TEXT NOT NULL DEFAULT 'open',
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'archived', 'deleted')),
+    topic_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    last_activity_at TIMESTAMPTZ,
+    UNIQUE (user_name, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.project_read_scopes (
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
+    readable_project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
+    PRIMARY KEY (user_name, project_id, readable_project_id),
+    CHECK (project_id <> readable_project_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.agents (
+    agent_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT REFERENCES public.projects(project_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    persona TEXT,
+    instructions TEXT,
+    model TEXT,
+    temperature DOUBLE PRECISION,
+    enabled_tools JSONB,
+    is_default BOOLEAN NOT NULL DEFAULT false,
+    is_spawned BOOLEAN NOT NULL DEFAULT false,
+    spawned_by TEXT,
+    brain_revision INTEGER NOT NULL DEFAULT 1 CHECK (brain_revision >= 1),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.agent_brain_revisions (
+    agent_id TEXT NOT NULL REFERENCES public.agents(agent_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    user_name TEXT NOT NULL,
+    content TEXT NOT NULL,
+    edited_by TEXT NOT NULL DEFAULT 'agent',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (agent_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS agent_brain_revisions_user_idx
+ON public.agent_brain_revisions(user_name, agent_id, revision DESC);
+
+INSERT INTO public.agent_brain_revisions (
+    agent_id, revision, user_name, content, edited_by
+)
+SELECT
+    agent_id,
+    brain_revision,
+    user_name,
+    COALESCE(instructions, ''),
+    'seed'
+FROM public.agents
+ON CONFLICT (agent_id, revision) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS public.sessions (
+    session_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
+    model TEXT,
+    agent_id TEXT REFERENCES public.agents(agent_id) ON DELETE SET NULL,
+    enabled_tools JSONB,
+    document_focus JSONB,
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'closed', 'deleted')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS sessions_project_idx
+ON public.sessions(user_name, project_id, created_at);
+
+-- ==============================================================================
+-- KNOWLEDGE GRAPH
+-- ==============================================================================
 
 CREATE SEQUENCE IF NOT EXISTS public.entity_id_seq
 AS BIGINT
@@ -21,9 +108,11 @@ CREATE TABLE IF NOT EXISTS public.messages (
     user_name TEXT NOT NULL,
     session_id TEXT NOT NULL,
     message_id BIGINT NOT NULL UNIQUE,
-    project_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    user_msg_id BIGINT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     timestamp_ms BIGINT,
     PRIMARY KEY (user_name, session_id, message_id)
 );
@@ -144,6 +233,109 @@ ON public.hierarchy_edges(parent_id);
 CREATE INDEX IF NOT EXISTS hierarchy_edges_child_entity_idx
 ON public.hierarchy_edges(child_id);
 
+-- Durable review boundary for destructive entity merges. Proposal records do
+-- not use entity foreign keys because the duplicate entity is deleted after a
+-- successful merge and the historical IDs must remain auditable.
+CREATE TABLE IF NOT EXISTS public.entity_merge_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    primary_entity_id BIGINT NOT NULL,
+    duplicate_entity_id BIGINT NOT NULL,
+    evidence_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    reasoning TEXT NOT NULL,
+    model_confidence DOUBLE PRECISION,
+    reviewed_state_hash TEXT NOT NULL,
+    reviewed_state JSONB NOT NULL,
+    policy_checks JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'confirmation_required',
+    confirmation_token_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_at TIMESTAMPTZ,
+    executed_at TIMESTAMPTZ,
+    confirmed_by TEXT,
+    failure_reason TEXT,
+    CONSTRAINT entity_merge_proposals_distinct_entities
+        CHECK (primary_entity_id <> duplicate_entity_id),
+    CONSTRAINT entity_merge_proposals_status
+        CHECK (
+            status IN (
+                'confirmation_required',
+                'executing',
+                'executed',
+                'rejected',
+                'failed'
+            )
+        )
+);
+
+CREATE INDEX IF NOT EXISTS entity_merge_proposals_project_idx
+ON public.entity_merge_proposals(project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS entity_merge_proposals_status_idx
+ON public.entity_merge_proposals(project_id, status);
+
+CREATE TABLE IF NOT EXISTS public.entity_merge_audits (
+    audit_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL
+        REFERENCES public.entity_merge_proposals(proposal_id),
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    primary_entity_id BIGINT NOT NULL,
+    duplicate_entity_id BIGINT NOT NULL,
+    evidence_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    reasoning TEXT NOT NULL,
+    confirmed_by TEXT NOT NULL,
+    before_state JSONB NOT NULL,
+    after_state JSONB,
+    status TEXT NOT NULL DEFAULT 'executing',
+    failure_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS entity_merge_audits_project_idx
+ON public.entity_merge_audits(project_id, created_at DESC);
+
+-- Durable authorization and outcome trail for every model-initiated write.
+CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
+    audit_id UUID PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    confirmation_state TEXT NOT NULL DEFAULT 'not_confirmed',
+    arguments JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result JSONB,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT agent_tool_audits_capability_check CHECK (
+        capability IN (
+            'reversible_write',
+            'configuration_write',
+            'identity_write',
+            'destructive_write'
+        )
+    ),
+    CONSTRAINT agent_tool_audits_status_check CHECK (
+        status IN ('started', 'succeeded', 'rejected', 'failed')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS agent_tool_audits_scope_idx
+ON public.agent_tool_audits(
+    user_name,
+    project_id,
+    created_at DESC
+);
+
+CREATE INDEX IF NOT EXISTS agent_tool_audits_run_idx
+ON public.agent_tool_audits(run_id, created_at);
+
 -- 4. Entity and Message Vector/FTS search (Hybrid storage for the Graph)
 -- Since AGE nodes don't support pgvector indexes directly inside `agtype`,
 -- we store the heavy vectors and tsvectors in standard relational tables
@@ -198,3 +390,123 @@ ON public.message_search(user_name, project_id);
 
 CREATE INDEX IF NOT EXISTS fact_search_project_idx
 ON public.fact_search(user_name, project_id);
+
+-- Project-owned folder upload batches.
+CREATE TABLE IF NOT EXISTS public.document_folder_uploads (
+    folder_root_id UUID PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    visibility_scope TEXT NOT NULL,
+    folder_name TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL,
+    candidate_bytes BIGINT NOT NULL,
+    document_count INTEGER NOT NULL,
+    total_size_bytes BIGINT NOT NULL,
+    excluded_count INTEGER NOT NULL,
+    excluded_bytes BIGINT NOT NULL,
+    excluded_directory_count INTEGER NOT NULL,
+    excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
+    scan_settings JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    indexed_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT document_folder_uploads_visibility_scope_check
+        CHECK (visibility_scope IN ('project', 'session')),
+    CONSTRAINT document_folder_uploads_session_visibility_check
+        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
+    CONSTRAINT document_folder_uploads_counts_check
+        CHECK (
+            candidate_count >= 0
+            AND candidate_bytes >= 0
+            AND document_count >= 0
+            AND total_size_bytes >= 0
+            AND excluded_count >= 0
+            AND excluded_bytes >= 0
+            AND excluded_directory_count >= 0
+        )
+);
+
+CREATE INDEX IF NOT EXISTS document_folder_uploads_project_idx
+ON public.document_folder_uploads(project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS document_folder_uploads_visibility_idx
+ON public.document_folder_uploads(
+    project_id,
+    visibility_scope,
+    session_id
+);
+
+CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
+    project_id TEXT PRIMARY KEY,
+    settings JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Project-owned source documents and their derived retrieval chunks.
+CREATE TABLE IF NOT EXISTS public.project_documents (
+    document_id UUID PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    visibility_scope TEXT NOT NULL,
+    folder_root_id UUID REFERENCES public.document_folder_uploads(folder_root_id)
+        ON DELETE CASCADE,
+    source_kind TEXT NOT NULL DEFAULT 'manual_upload',
+    original_name TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    extension TEXT NOT NULL DEFAULT '',
+    size_bytes BIGINT NOT NULL,
+    content_hash TEXT NOT NULL,
+    storage_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'uploaded',
+    indexed_at TIMESTAMPTZ,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT project_documents_visibility_scope_check
+        CHECK (visibility_scope IN ('project', 'session')),
+    CONSTRAINT project_documents_session_visibility_check
+        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
+    CONSTRAINT project_documents_status_check
+        CHECK (status IN ('uploaded', 'indexed', 'failed')),
+    CONSTRAINT project_documents_source_kind_check
+        CHECK (source_kind IN ('manual_upload', 'folder_upload')),
+    CONSTRAINT project_documents_folder_source_check
+        CHECK (
+            (source_kind = 'manual_upload' AND folder_root_id IS NULL)
+            OR
+            (source_kind = 'folder_upload' AND folder_root_id IS NOT NULL)
+        ),
+    CONSTRAINT project_documents_size_check
+        CHECK (size_bytes >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS project_documents_project_idx
+ON public.project_documents(project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS project_documents_visibility_idx
+ON public.project_documents(project_id, visibility_scope, session_id);
+
+CREATE INDEX IF NOT EXISTS project_documents_hash_idx
+ON public.project_documents(project_id, content_hash);
+
+CREATE INDEX IF NOT EXISTS project_documents_folder_root_idx
+ON public.project_documents(folder_root_id, relative_path);
+
+CREATE TABLE IF NOT EXISTS public.document_chunks (
+    chunk_id UUID PRIMARY KEY,
+    document_id UUID NOT NULL REFERENCES public.project_documents(document_id)
+        ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    embedding vector(1024) NOT NULL,
+    CONSTRAINT document_chunks_document_index_unique
+        UNIQUE (document_id, chunk_index),
+    CONSTRAINT document_chunks_index_check
+        CHECK (chunk_index >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS document_chunks_document_idx
+ON public.document_chunks(document_id);
+
+CREATE INDEX IF NOT EXISTS document_chunks_embedding_idx
+ON public.document_chunks USING hnsw (embedding vector_cosine_ops);

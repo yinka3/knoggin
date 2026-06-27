@@ -146,6 +146,11 @@ class GraphWriter:
                         "user_name": msg["user_name"],
                         "session_id": msg["session_id"],
                         "project_id": msg["project_id"],
+                        "user_msg_id": (
+                            msg.get("user_msg_id")
+                            or (msg["id"] if msg["role"] == "user" else None)
+                        ),
+                        "metadata": json.dumps(msg.get("metadata") or {}),
                         "timestamp": self._normalize_timestamp_ms(
                             msg.get("timestamp")
                         ),
@@ -163,12 +168,16 @@ class GraphWriter:
                         project_id,
                         role,
                         content,
+                        user_msg_id,
+                        metadata,
                         timestamp_ms
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
                     ON CONFLICT (user_name, session_id, message_id)
                     DO UPDATE SET
-                        message_id = EXCLUDED.message_id
+                        message_id = EXCLUDED.message_id,
+                        user_msg_id = EXCLUDED.user_msg_id,
+                        metadata = EXCLUDED.metadata
                     WHERE messages.project_id = EXCLUDED.project_id
                       AND messages.role = EXCLUDED.role
                       AND messages.content = EXCLUDED.content
@@ -182,6 +191,8 @@ class GraphWriter:
                         msg["project_id"],
                         msg["role"],
                         msg["content"],
+                        msg["user_msg_id"],
+                        msg["metadata"],
                         msg["timestamp"],
                     ),
                 )

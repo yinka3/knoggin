@@ -13,24 +13,12 @@ from knoggin_server.agent.types import (
 )
 
 
-class FakeMemoryManager:
-    def __init__(self):
-        self.calls = []
-
-    async def load_prompt_strings(self, hot_topics):
-        self.calls.append(list(hot_topics))
-        return (
-            "[Identity]\n- remembers stable profile preferences",
-            "Required:\n- memory directive",
-        )
-
-
 class FakeTools:
     def __init__(self, *, files=None):
-        self.file_rag = object() if files is not None else None
+        self.document_service = object() if files is not None else None
         self.files = files or []
 
-    def get_file_manifest(self):
+    async def get_document_manifest(self):
         return self.files
 
 
@@ -77,7 +65,8 @@ class ScriptedExecutor(AgentExecutor):
         current_mode,
         enabled_tools,
         memory_context,
-        files_context,
+        documents_context,
+        document_focus_context,
         directives,
         temp,
         agent_instructions,
@@ -92,7 +81,8 @@ class ScriptedExecutor(AgentExecutor):
                 "current_mode": current_mode,
                 "enabled_tools": enabled_tools,
                 "memory_context": memory_context,
-                "files_context": files_context,
+                "documents_context": documents_context,
+                "document_focus_context": document_focus_context,
                 "directives": directives,
                 "temp": temp,
                 "agent_instructions": agent_instructions,
@@ -184,7 +174,6 @@ def step_error(message, *, kind="provider"):
 
 @pytest.mark.no_network
 async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
-    memory = FakeMemoryManager()
     tools = FakeTools(
         files=[
             {
@@ -198,7 +187,6 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
         make_ctx(),
         FakeLLM(),
         tools,
-        memory,
         step_events=[
             [
                 done_with(
@@ -263,7 +251,6 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
             },
         },
     ]
-    assert memory.calls == [["Identity"]]
     assert executor.emitted_llm_calls == [
         ("architect-model", "high", 1),
         ("librarian-model", "medium", 2),
@@ -279,7 +266,7 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
     assert first_call["memory_context"] == (
         "[Identity]\n- remembers stable profile preferences"
     )
-    assert first_call["files_context"] == "- profile-plan.md (2KB, 3 chunks)"
+    assert first_call["documents_context"] == "- profile-plan.md (2KB, 3 chunks)"
     assert first_call["directives"] == "Required:\n- override directive"
     assert first_call["temp"] == 0.2
     assert first_call["agent_instructions"] == "Use citations"
@@ -308,7 +295,6 @@ async def test_execute_model_override_applies_to_all_modes():
         make_ctx(),
         FakeLLM(),
         FakeTools(),
-        memory_mgr=None,
         step_events=[
             [
                 done_with(
@@ -331,7 +317,6 @@ async def test_execute_clarification_and_replanning_short_circuit_paths():
         make_ctx(),
         FakeLLM(),
         FakeTools(),
-        memory_mgr=None,
         step_events=[
             [
                 done_with(
@@ -367,7 +352,6 @@ async def test_execute_clarification_and_replanning_short_circuit_paths():
         make_ctx(),
         FakeLLM(),
         FakeTools(),
-        memory_mgr=None,
         step_events=[
             [
                 done_with(
@@ -404,7 +388,6 @@ async def test_execute_consecutive_empty_results_force_replanning():
         make_ctx(config=config),
         FakeLLM(),
         FakeTools(),
-        memory_mgr=None,
         step_events=[
             [done_with(ToolCall(name="search_messages", args={"query": "one"}))],
             [done_with(ToolCall(name="search_messages", args={"query": "two"}))],
@@ -430,7 +413,6 @@ async def test_execute_hides_transient_step_errors_and_resets_after_tool_success
         make_ctx(),
         FakeLLM(),
         FakeTools(),
-        memory_mgr=None,
         step_events=[
             [step_error("temporary provider failure")],
             [done_with(ToolCall(name="search_messages", args={"query": "profile"}))],
@@ -464,7 +446,6 @@ async def test_execute_emits_one_terminal_error_after_consecutive_step_failures(
         make_ctx(config=config),
         FakeLLM(),
         FakeTools(),
-        memory_mgr=None,
         step_events=[
             [step_error("first failure", kind=kind)],
             [step_error("second failure", kind=kind)],
@@ -501,7 +482,6 @@ async def test_execute_preserves_approximate_usage_in_final_response():
         make_ctx(),
         FakeLLM(),
         FakeTools(),
-        memory_mgr=None,
         step_events=[[tool_events]],
     )
 
@@ -530,7 +510,6 @@ async def test_fallback_without_evidence_asks_for_rephrase():
         make_ctx(),
         FakeLLM(),
         FakeTools(),
-        memory_mgr=None,
     )
 
     result = await executor._fallback()
@@ -576,7 +555,6 @@ async def test_fallback_with_evidence_generates_summary_and_preserves_sources():
         make_ctx(evidence=evidence),
         llm,
         FakeTools(),
-        memory_mgr=None,
     )
 
     result = await executor._fallback()
@@ -606,7 +584,6 @@ async def test_manage_context_size_below_threshold_leaves_evidence_untouched():
         make_ctx(evidence=evidence),
         FakeLLM(token_counts=[9999]),
         FakeTools(),
-        memory_mgr=None,
     )
 
     await executor._manage_context_size()
@@ -633,7 +610,7 @@ async def test_manage_context_size_summarizes_and_trims_large_evidence():
         hierarchy=[{"entity": "Knoggin"}],
     )
     llm = FakeLLM(token_counts=[12000, 4], summary="compact evidence summary")
-    executor = AgentExecutor(make_ctx(evidence=evidence), llm, FakeTools(), None)
+    executor = AgentExecutor(make_ctx(evidence=evidence), llm, FakeTools())
 
     await executor._manage_context_size()
 
@@ -668,7 +645,7 @@ async def test_manage_context_size_truncates_when_summary_generation_fails():
         hierarchy=[{"entity": "Knoggin"}],
     )
     llm = FakeLLM(token_counts=[15000, 123], raises=True)
-    executor = AgentExecutor(make_ctx(evidence=evidence), llm, FakeTools(), None)
+    executor = AgentExecutor(make_ctx(evidence=evidence), llm, FakeTools())
 
     await executor._manage_context_size()
 

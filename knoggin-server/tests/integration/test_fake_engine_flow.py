@@ -159,7 +159,6 @@ async def test_soft_project_delete_and_explicit_session_cleanup_are_separate():
     assert deleted_project["status"] == "deleted"
     assert deleted_project["deleted_at"]
     assert deleted_count >= 2
-    assert active_sessions[session_id].file_rag.cleanup_count == 1
     assert (await project_manager.get_project(project["id"]))["status"] == "deleted"
     assert await resources.redis.hget(RedisKeys.sessions("ada"), session_id) is None
     assert (

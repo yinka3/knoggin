@@ -9,7 +9,9 @@ from infrastructure import resources as resources_module
 
 
 @pytest.mark.no_network
-async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monkeypatch):
+async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
+    monkeypatch, tmp_path
+):
     captured_llm_kwargs = {}
     unsubscribe_calls = []
     subscribe_calls = []
@@ -42,6 +44,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
         def __init__(self, dsn, embedding_service):
             self.dsn = dsn
             self.embedding_service = embedding_service
+            self.postgres = object()
             self.connected = False
             self.closed = False
 
@@ -118,6 +121,10 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv(
+        "KNOGGIN_DOCUMENT_STORAGE_DIR",
+        str(tmp_path / "documents"),
+    )
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", "custom/embedder")
     monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", "custom/reranker")
@@ -152,6 +159,9 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(monke
     assert captured_llm_kwargs["trace_logger"] is None
     assert manager.embedding.embedding_model == "custom/embedder"
     assert manager.embedding.reranker_model == "custom/reranker"
+    assert manager.postgres is manager.knowledge_store.postgres
+    assert manager.document_storage_root == (tmp_path / "documents").resolve()
+    assert manager.document_storage_root.is_dir()
     assert subscribe_calls == [(manager.llm_service.update_settings, "llm")]
     assert manager.llm_service.updated_settings == [fake_config.config.llm]
 
@@ -205,6 +215,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
     class FailingKnowledgeStore:
         def __init__(self, dsn, embedding_service):
+            self.postgres = object()
             self.closed = False
             knowledge_store_instances.append(self)
 
@@ -323,10 +334,10 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
 
 @pytest.mark.no_network
-async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
+async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
     class FakeKnowledgeStore:
         def __init__(self, dsn, embedding_service):
-            pass
+            self.postgres = object()
 
         async def connect(self):
             pass
@@ -379,6 +390,10 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv(
+        "KNOGGIN_DOCUMENT_STORAGE_DIR",
+        str(tmp_path / "documents"),
+    )
     monkeypatch.setenv("KNOGGIN_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
@@ -399,11 +414,11 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch):
 
 
 @pytest.mark.no_network
-async def test_resource_manager_resolves_gpu_mps(monkeypatch):
+async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
     # Same mocks as cuda
     class FakeKnowledgeStore:
         def __init__(self, dsn, embedding_service):
-            pass
+            self.postgres = object()
 
         async def connect(self):
             pass
@@ -456,6 +471,10 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv(
+        "KNOGGIN_DOCUMENT_STORAGE_DIR",
+        str(tmp_path / "documents"),
+    )
     monkeypatch.setenv("KNOGGIN_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
@@ -494,10 +513,10 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch):
 
 
 @pytest.mark.no_network
-async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch):
+async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_path):
     class FakeKnowledgeStore:
         def __init__(self, dsn, embedding_service):
-            pass
+            self.postgres = object()
 
         async def connect(self):
             pass
@@ -550,6 +569,10 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv(
+        "KNOGGIN_DOCUMENT_STORAGE_DIR",
+        str(tmp_path / "documents"),
+    )
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 
