@@ -6,6 +6,20 @@ from common.schema.agent_stream import StreamUsage
 
 
 @dataclass(frozen=True)
+class MaintenanceCandidate:
+    """Python-selected autonomous maintenance work offered to an agent run."""
+
+    id: str
+    kind: str
+    reason: str
+    suggested_tool: str
+    priority: str = "normal"
+    metadata: Dict = field(default_factory=dict)
+    attempts: int = 0
+    cooldown_until: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class AgentRunConfig:
     """Immutable settings governing limits and timeouts for an agent run."""
 
@@ -35,7 +49,10 @@ class AgentRunConfig:
         ("news_search", 8),
         ("update_topics", 1),
         ("read_brain", 4),
+        ("list_brain_snapshots", 4),
+        ("read_brain_snapshot", 4),
         ("edit_brain", 2),
+        ("restore_brain_section", 2),
         ("save_insight", 4),
         ("spawn_specialist", 2),
         ("request_replanning", 2),
@@ -126,6 +143,7 @@ class AgentContext:
     user_name: str = ""
     user_query: str = ""
     session_id: str = ""
+    project_id: str = ""
     run_id: str = ""
     agent_id: str = ""
     agent_name: str = "STELLA"
@@ -134,11 +152,9 @@ class AgentContext:
     hot_topics: List[str] = field(default_factory=list)
     active_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
-    prompt: PromptContext = field(default_factory=PromptContext)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
-    topic_evaluation_needed: bool = False
-    maintenance_needed: bool = False
+    maintenance_candidates: List[MaintenanceCandidate] = field(default_factory=list)
 
 
 @dataclass

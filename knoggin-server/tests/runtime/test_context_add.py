@@ -214,6 +214,8 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
                 "session_id": "session-1",
                 "project_id": "project-1",
                 "timestamp": timestamp.timestamp() * 1000,
+                "metadata": {},
+                "user_msg_id": None,
             }
         ]
     ]

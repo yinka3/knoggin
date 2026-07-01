@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Set, Tuple
@@ -33,6 +32,13 @@ from common.utils.events import emit
 from common.utils.time_utils import get_now_unix
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
+from knoggin_server.ingestion.dlq_state import (
+    DLQ_STATUS_PROCESSING,
+    DLQ_STATUS_QUEUED,
+    TERMINAL_DLQ_STATUSES,
+    ensure_dlq_id,
+    serialize_dlq_entry,
+)
 from knoggin_server.ingestion.prompts import (
     get_connection_reasoning_prompt,
     get_relevance_judgment_prompt,
@@ -1202,7 +1208,19 @@ class BatchProcessor:
             entry["batch_result"] = batch_result.to_dict()
 
         try:
-            await self.redis.rpush(dlq_key, json.dumps(entry, default=_safe_json))
+            dlq_id = ensure_dlq_id(entry)
+            state_key = RedisKeys.dlq_state(self.user_name, self.project_id)
+            existing_state = await self.redis.hget(state_key, dlq_id)
+            if existing_state in {
+                DLQ_STATUS_QUEUED,
+                DLQ_STATUS_PROCESSING,
+                *TERMINAL_DLQ_STATUSES,
+            }:
+                logger.warning(f"DLQ [{stage}]: duplicate item skipped ({dlq_id})")
+                return True
+
+            await self.redis.rpush(dlq_key, serialize_dlq_entry(entry))
+            await self.redis.hset(state_key, dlq_id, DLQ_STATUS_QUEUED)
             logger.warning(f"DLQ [{stage}]: {len(messages)} messages stored")
 
             await emit(
@@ -1210,6 +1228,11 @@ class BatchProcessor:
                 "pipeline",
                 "dlq_enqueued",
                 {
+                    "user_name": self.user_name,
+                    "project_id": self.project_id,
+                    "session_id": session_id,
+                    "dlq_key": dlq_key,
+                    "dlq_id": dlq_id,
                     "msg_ids": [m["id"] for m in messages],
                     "error": error,
                     "stage": stage,

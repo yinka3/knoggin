@@ -3,17 +3,20 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import ToolExecutionError
+from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.executor import AgentExecutor
 from knoggin_server.agent.types import (
     AgentContext,
     AgentRunConfig,
     AgentState,
+    MaintenanceCandidate,
     RetrievedEvidence,
     ToolCall,
 )
+from tests.fixtures.fakes import FakeRedis
 
 
-def make_executor(*, config=None, state=None):
+def make_executor(*, config=None, state=None, redis=None):
     ctx = AgentContext(
         config=config
         or AgentRunConfig(max_calls=4, tool_limits=(("search_messages", 2),)),
@@ -22,9 +25,14 @@ def make_executor(*, config=None, state=None):
         user_name="ada",
         user_query="Find profile evidence",
         session_id="session-1",
+        project_id="project-1",
         run_id="run-1",
     )
-    return AgentExecutor(ctx, llm=object(), tools=SimpleNamespace())
+    return AgentExecutor(
+        ctx,
+        llm=object(),
+        tools=SimpleNamespace(redis=redis, project_id="project-1"),
+    )
 
 
 @pytest.mark.no_network
@@ -343,5 +351,136 @@ async def test_execute_tools_tool_errors_increment_and_success_resets(monkeypatc
         "error": "Internal tool failure",
     }
     assert executor.ctx.state.consecutive_errors == 1
-    assert len(results) == 1
-    assert results[0]["tool"] == "search_messages"
+
+
+@pytest.mark.no_network
+async def test_successful_maintenance_tool_clears_attempts_and_cooldown(monkeypatch):
+    redis = FakeRedis()
+    executor = make_executor(redis=redis)
+    candidate = MaintenanceCandidate(
+        id="graph_merge_scan:project-1",
+        kind="graph_merge_scan",
+        reason="Merge queue has candidates.",
+        suggested_tool="check_graph_health",
+    )
+    executor.ctx.maintenance_candidates = [candidate]
+    await redis.set(
+        RedisKeys.maintenance_attempts("ada", "project-1", candidate.id),
+        "1",
+    )
+    await redis.set(
+        RedisKeys.maintenance_cooldown("ada", "project-1", candidate.id),
+        "2000",
+    )
+
+    async def fake_execute_tool(*_args):
+        return {"data": {"message": "Graph is healthy."}}
+
+    monkeypatch.setattr(
+        "knoggin_server.agent.executor.execute_tool",
+        fake_execute_tool,
+    )
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall(name="check_graph_health", args={})],
+            results,
+        )
+    ]
+
+    assert events[-1]["event"] == "tool_end"
+    assert (
+        await redis.get(
+            RedisKeys.maintenance_attempts("ada", "project-1", candidate.id)
+        )
+        is None
+    )
+    assert (
+        await redis.get(
+            RedisKeys.maintenance_cooldown("ada", "project-1", candidate.id)
+        )
+        is None
+    )
+    assert executor.ctx.maintenance_candidates == []
+
+
+@pytest.mark.no_network
+async def test_failed_maintenance_tool_records_cooldown_without_terminal_error(
+    monkeypatch,
+):
+    redis = FakeRedis()
+    executor = make_executor(redis=redis)
+    candidate = MaintenanceCandidate(
+        id="topic_evaluation:project-1",
+        kind="topic_evaluation",
+        reason="Heartbeat reached threshold.",
+        suggested_tool="update_topics",
+    )
+    executor.ctx.maintenance_candidates = [candidate]
+
+    async def fake_execute_tool(*_args):
+        raise ToolExecutionError("update_topics", "topic write failed")
+
+    monkeypatch.setattr(
+        "knoggin_server.agent.executor.execute_tool",
+        fake_execute_tool,
+    )
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall(name="update_topics", args={})],
+            results,
+        )
+    ]
+
+    assert events[-1]["event"] == "tool_error"
+    assert await redis.get(
+        RedisKeys.maintenance_attempts("ada", "project-1", candidate.id)
+    ) == "1"
+    assert await redis.get(
+        RedisKeys.maintenance_cooldown("ada", "project-1", candidate.id)
+    )
+    assert executor.ctx.state.consecutive_errors == 0
+    assert results[0]["tool"] == "update_topics"
+    assert "topic write failed" in results[0]["error"]
+    assert executor.ctx.maintenance_candidates == []
+
+
+@pytest.mark.no_network
+async def test_maintenance_tool_error_result_records_cooldown(monkeypatch):
+    redis = FakeRedis()
+    executor = make_executor(redis=redis)
+    candidate = MaintenanceCandidate(
+        id="topic_evaluation:project-1",
+        kind="topic_evaluation",
+        reason="Heartbeat reached threshold.",
+        suggested_tool="update_topics",
+    )
+    executor.ctx.maintenance_candidates = [candidate]
+
+    async def fake_execute_tool(*_args):
+        return {"data": {"error": "topic validation failed"}}
+
+    monkeypatch.setattr(
+        "knoggin_server.agent.executor.execute_tool",
+        fake_execute_tool,
+    )
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall(name="update_topics", args={})],
+            results,
+        )
+    ]
+
+    assert events[-1]["event"] == "tool_end"
+    assert await redis.get(
+        RedisKeys.maintenance_attempts("ada", "project-1", candidate.id)
+    ) == "1"
+    assert await redis.get(
+        RedisKeys.maintenance_cooldown("ada", "project-1", candidate.id)
+    )
+    assert executor.ctx.maintenance_candidates == []

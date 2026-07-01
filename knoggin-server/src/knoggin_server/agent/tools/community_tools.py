@@ -6,6 +6,7 @@ from common.conf.manager import ConfigManager
 from common.schema.aac_schema import AAC_DEFAULT_ENABLED_TOOLS
 from common.schema.agent_contracts import PersonaProfile
 from common.utils.agent_identity import (
+    build_brain_snapshot_summary,
     normalize_agent_brain,
 )
 from common.utils.events import emit_community
@@ -98,21 +99,28 @@ class CommunityTools(Tools):
             """
             WITH new_agent AS (
                 INSERT INTO public.agents (
-                    agent_id, user_name, project_id, name, persona, instructions,
+                    agent_id, user_name, project_id, name, persona, brain,
                     model, temperature, enabled_tools, is_default, is_spawned,
                     spawned_by
                 ) VALUES (
                     %(agent_id)s, %(user_name)s, %(project_id)s, %(name)s,
-                    %(persona)s, %(instructions)s, %(model)s, 0.7,
+                    %(persona)s, %(brain)s, %(model)s, 0.7,
                     %(enabled_tools)s, false, true, %(spawned_by)s
                 )
-                RETURNING agent_id, user_name, brain_revision, instructions
+                RETURNING agent_id, user_name, brain_revision, brain
             )
-            INSERT INTO public.agent_brain_revisions (
-                agent_id, revision, user_name, content, edited_by
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
             )
             SELECT
-                agent_id, brain_revision, user_name, instructions, 'aac_spawn'
+                agent_id,
+                brain_revision,
+                user_name,
+                brain,
+                'aac_spawn',
+                'specialist_spawn',
+                %(change_summary)s
             FROM new_agent
             """,
             {
@@ -121,10 +129,13 @@ class CommunityTools(Tools):
                 "project_id": self.project_id,
                 "name": clean_name,
                 "persona": persona_markdown,
-                "instructions": brain,
+                "brain": brain,
                 "model": model,
                 "enabled_tools": json.dumps(AAC_DEFAULT_ENABLED_TOOLS),
                 "spawned_by": self.agent_id,
+                "change_summary": build_brain_snapshot_summary(
+                    "specialist_spawn"
+                ),
             },
         )
         if inserted != 1:

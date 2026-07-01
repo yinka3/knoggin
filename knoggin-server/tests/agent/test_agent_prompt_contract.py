@@ -19,7 +19,8 @@ def test_agent_prompt_renders_core_identity_mode_and_tool_policy():
     assert prompt.startswith(
         "You are STELLA, operating within the Knoggin knowledge system for Ada."
     )
-    assert "<persona>Precise, skeptical, and warm.</persona>" in prompt
+    assert "<cognitive_persona>" in prompt
+    assert "Precise, skeptical, and warm." in prompt
     assert "YOUR CURRENT MODE: Architect" in prompt
     assert "Current time: 2026-04-05 10:30 UTC." in prompt
     assert 'fact_check("Ada")' in prompt
@@ -31,40 +32,30 @@ def test_agent_prompt_uses_default_voice_without_custom_persona():
     prompt = get_agent_prompt(user_name="Ada")
 
     assert (
-        "<persona>Warm and direct. Match their energy. No corporate filler.</persona>"
+        "Warm, direct, and attentive to useful patterns."
         in prompt
     )
 
 
 @pytest.mark.no_network
-def test_agent_prompt_renders_memory_with_active_topics_and_saved_guidance():
+def test_agent_prompt_renders_agent_brain_without_nested_instructions_tag():
     prompt = get_agent_prompt(
         user_name="Ada",
-        memory_context="[Identity]\n- Ada prefers explicit test coverage.",
-        active_topics=["Identity", "Testing"],
+        agent_brain="# Project Context\nAda prefers explicit test coverage.",
     )
 
-    assert "<persistent_context>" in prompt
-    assert "<your_memory>" in prompt
-    assert (
-        "Active topics you can categorize memories under: Identity, Testing"
-        in prompt
-    )
-    assert "[Identity]\n- Ada prefers explicit test coverage." in prompt
-    assert "Do not save things already here." in prompt
+    assert "<agent_brain>" in prompt
+    assert "# Project Context\nAda prefers explicit test coverage." in prompt
+    assert "<instructions>" not in prompt
 
 
 @pytest.mark.no_network
 def test_agent_prompt_omits_persistent_context_when_no_memory_or_files():
-    prompt = get_agent_prompt(
-        user_name="Ada",
-        active_topics=["Identity"],
-    )
+    prompt = get_agent_prompt(user_name="Ada")
 
-    assert "<persistent_context>" not in prompt
-    assert "<your_memory>" not in prompt
+    assert "<retrieved_context>" not in prompt
     assert "<uploaded_documents>" not in prompt
-    assert "Active topics you can categorize memories under" not in prompt
+    assert "\n<agent_brain>\nPersistent" not in prompt
 
 
 @pytest.mark.no_network
@@ -72,18 +63,16 @@ def test_agent_prompt_renders_files_without_memory_section():
     prompt = get_agent_prompt(
         user_name="Ada",
         documents_context="- profile-plan.md (2KB, 3 chunks)",
-        active_topics=["Identity"],
     )
 
-    assert "<persistent_context>" in prompt
+    assert "<retrieved_context>" in prompt
     assert "<uploaded_documents>" in prompt
     assert (
         "Indexed documents visible in this project context. "
         "Use search_documents to query them."
     ) in prompt
     assert "- profile-plan.md (2KB, 3 chunks)" in prompt
-    assert "<your_memory>" not in prompt
-    assert "Active topics you can categorize memories under" not in prompt
+    assert "\n<agent_brain>\nPersistent" not in prompt
 
 
 @pytest.mark.no_network
@@ -117,20 +106,20 @@ def test_agent_prompt_renders_agent_and_community_contexts():
             "Avoid:\n"
             "- Do not overstate weak evidence."
         ),
-        instructions="Use the available evidence before answering.",
+        agent_brain="Use the available evidence before answering.",
         is_community=True,
         participants=["planner", "critic"],
         current_mode="Librarian",
     )
 
-    assert "<agent_instructions>" in prompt
-    assert "<agent_directives>" in prompt
+    assert "<agent_brain>" in prompt
+    assert "<run_directives>" in prompt
     assert "Required:\n- Stay grounded.\n- Cite evidence." in prompt
     assert "Preferred:\n- Prefer concise answers." in prompt
     assert "Avoid:\n- Do not overstate weak evidence." in prompt
     assert "<community_context>" in prompt
     assert "Current participants: planner, critic" in prompt
-    assert "<instructions>\nUse the available evidence before answering." in prompt
+    assert "Use the available evidence before answering." in prompt
     assert "YOUR CURRENT MODE: Librarian" in prompt
     assert "request_replanning" in prompt
 

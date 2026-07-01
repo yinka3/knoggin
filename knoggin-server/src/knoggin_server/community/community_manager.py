@@ -333,7 +333,7 @@ class CommunityManager:
             async for event in executor.execute(
                 model=agent.model,
                 agent_temperature=agent.temperature,
-                agent_instructions=agent.instructions,
+                agent_brain=agent.brain,
                 agent_directives=agent_directives,
                 enabled_tools=enabled_tools,
                 client_tools=client_tools,
@@ -406,7 +406,7 @@ class CommunityManager:
             persona=seeding_agent.persona_markdown,
             agent_name=seeding_agent.name,
             agent_directives=directives_str,
-            instructions=seeding_agent.instructions,
+            agent_brain=seeding_agent.brain,
             documents_context="",
             is_community=False,
             current_mode="Architect",

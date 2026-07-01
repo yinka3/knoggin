@@ -3,17 +3,14 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
-if TYPE_CHECKING:
-    from knoggin_server.session.context import Context
-
 from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.schema.agent_stream import PublicAgentStreamEvent
 from common.schema.document import DocumentFocus
 from common.utils.json_utils import safe_json_loads
-from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.executor import AgentExecutor
+from knoggin_server.agent.maintenance import build_maintenance_candidates
 from knoggin_server.agent.services.agent_manager import AgentManager
 from knoggin_server.agent.tools.registry import Tools
 from knoggin_server.agent.types import (
@@ -22,6 +19,10 @@ from knoggin_server.agent.types import (
     AgentState,
     RetrievedEvidence,
 )
+
+if TYPE_CHECKING:
+    from knoggin_server.session.context import Context
+
 
 class Orchestrator:
     """
@@ -44,7 +45,7 @@ class Orchestrator:
         enabled_tools: Optional[List[str]] = None,
         simulated_date: Optional[str] = None,
         agent_temperature: Optional[float] = None,
-        agent_instructions: Optional[str] = None,
+        agent_brain: Optional[str] = None,
         agent_directives: Optional[str] = None,
         conversation_history: Optional[List[Dict]] = None,
         hot_topics: Optional[List[str]] = None,
@@ -96,22 +97,16 @@ class Orchestrator:
             tools = services["tools"]
             topic_config = services["topic_config"]
 
-            # Check heartbeat
-            topic_eval = False
-            if context.project_id:
-                count = await context.redis_client.get(
-                    RedisKeys.project_heartbeat_counter(
-                        user_name,
-                        context.project_id,
-                    )
-                )
-                topic_settings = config.developer_settings.topic_evaluation
-                if (
-                    topic_settings.enabled
-                    and count
-                    and int(count) >= topic_settings.interval_msgs
-                ):
-                    topic_eval = True
+            effective_enabled_tools = enabled_tools or (
+                agent_cfg.enabled_tools if agent_cfg else None
+            )
+            maintenance_candidates = await build_maintenance_candidates(
+                redis=context.redis_client,
+                user_name=user_name,
+                project_id=context.project_id,
+                enabled_tools=effective_enabled_tools,
+                topic_settings=config.developer_settings.topic_evaluation,
+            )
 
             # Context & State Assembly
             requested_hot_topics = (
@@ -136,6 +131,7 @@ class Orchestrator:
                 evidence=RetrievedEvidence(),
                 user_name=user_name,
                 session_id=session_id,
+                project_id=context.project_id or "",
                 user_query=user_query,
                 run_id=str(uuid.uuid4()),
                 hot_topics=effective_hot_topics,
@@ -144,8 +140,7 @@ class Orchestrator:
                 agent_name=identity["name"],
                 agent_persona=identity["persona"],
                 history=conversation_history or [],
-                topic_evaluation_needed=topic_eval,
-                maintenance_needed=False,
+                maintenance_candidates=maintenance_candidates,
             )
 
             # Execution via AgentExecutor
@@ -156,12 +151,11 @@ class Orchestrator:
             async for event in executor.execute(
                 user_timezone=user_timezone,
                 model=effective_model,
-                enabled_tools=enabled_tools
-                or (agent_cfg.enabled_tools if agent_cfg else None),
+                enabled_tools=effective_enabled_tools,
                 simulated_date=simulated_date,
                 agent_temperature=effective_temperature,
-                agent_instructions=agent_instructions
-                or (agent_cfg.instructions if agent_cfg else None),
+                agent_brain=agent_brain
+                or (agent_cfg.brain if agent_cfg else None),
                 agent_directives=agent_directives,
                 client_tools=client_tools,
             ):

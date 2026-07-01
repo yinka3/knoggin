@@ -360,7 +360,7 @@ async def test_explicit_query_helpers_preserve_params_and_result_shapes(recordin
     assert await client.fetch_all("SELECT many", None) == [{"id": 1}, {"id": 2}]
     assert await client.fetch_one("SELECT one", ("value",)) == {"id": 3}
     assert await client.fetch_one("SELECT missing") is None
-    assert await client.execute("UPDATE things", {"id": 3}) is None
+    assert await client.execute("UPDATE things", {"id": 3}) == 99
 
     assert pool.execute_calls == [
         ("SELECT many", None),

@@ -758,17 +758,30 @@ class SearchTools:
         if not self.readable_project_ids:
             return [self.session_id]
 
-        rows = await self.postgres.fetch_all(
-            """
-            SELECT session_id
-            FROM public.sessions
-            WHERE user_name = %s
-              AND project_id = ANY(%s)
-            """,
-            (self.user_name, self.readable_project_ids),
-        )
         visible = {self.session_id}
-        visible.update(str(row["session_id"]) for row in rows)
+        postgres = getattr(self, "postgres", None)
+        if postgres is not None:
+            rows = await postgres.fetch_all(
+                """
+                SELECT session_id
+                FROM public.sessions
+                WHERE user_name = %s
+                  AND project_id = ANY(%s)
+                """,
+                (self.user_name, self.readable_project_ids),
+            )
+            visible.update(str(row["session_id"]) for row in rows)
+            return sorted(visible)
+
+        redis = getattr(self, "redis", None)
+        if redis is not None:
+            for project_id in self.readable_project_ids:
+                session_ids = await redis.smembers(
+                    RedisKeys.project_sessions(self.user_name, project_id)
+                )
+                visible.update(str(session_id) for session_id in session_ids)
+            return sorted(visible)
+
         return sorted(visible)
 
 
@@ -790,6 +803,15 @@ class SearchTools:
         if is_prefixed_msg_id:
             try:
                 numerical_msg_id = int(msg_id.split("_")[1])
+                cached_context = await self._get_cached_surrounding_context(
+                    numerical_msg_id,
+                    target_session_id,
+                    forward=forward,
+                    target_total=target_total,
+                )
+                if cached_context:
+                    return cached_context
+
                 fallback_msgs = await self.knowledge_store.get_surrounding_messages(
                     numerical_msg_id,
                     user_name=self.user_name,
@@ -822,6 +844,51 @@ class SearchTools:
             except (ValueError, IndexError):
                 pass
         return []
+
+    async def _get_cached_surrounding_context(
+        self,
+        numerical_msg_id: int,
+        session_id: str,
+        *,
+        forward: int,
+        target_total: int,
+    ) -> List[Dict]:
+        redis = getattr(self, "redis", None)
+        if redis is None:
+            return []
+
+        target_member = str(numerical_msg_id)
+        recent_key = RedisKeys.recent_conversation(self.user_name, session_id)
+        rank = await redis.zrank(recent_key, target_member)
+        if rank is None:
+            return []
+
+        backward = max(target_total - forward - 1, 0)
+        start = max(rank - backward, 0)
+        end = rank + forward
+        message_ids = await redis.zrange(recent_key, start, end)
+        if not message_ids:
+            return []
+
+        conv_key = RedisKeys.conversation(self.user_name, session_id)
+        context = []
+        for raw_id in message_ids:
+            item_id = str(raw_id)
+            raw = await redis.hget(conv_key, item_id)
+            data = safe_json_loads(raw) if raw else None
+            if not isinstance(data, dict):
+                continue
+            entry = {
+                "role": data.get("role", "user"),
+                "timestamp": data.get("timestamp", ""),
+                "content": data.get("message", data.get("content", "")),
+                "id": f"msg_{item_id}",
+            }
+            if item_id == target_member:
+                entry["is_hit"] = True
+            context.append(entry)
+
+        return context
 
     async def _search_duckduckgo(
         self, query: str, limit: int, freshness: str = None

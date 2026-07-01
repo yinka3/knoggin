@@ -35,6 +35,11 @@ from knoggin_server.agent.internals import (
     summarize_result,
     update_accumulators,
 )
+from knoggin_server.agent.maintenance import (
+    find_candidate_for_tool,
+    mark_maintenance_handled,
+    record_maintenance_failure,
+)
 from knoggin_server.agent.system_prompt import (
     get_agent_prompt,
     get_fallback_summary_prompt,
@@ -43,9 +48,15 @@ from knoggin_server.agent.tools.registry import (
     Tools,
     configure_tool_authorization,
 )
-from knoggin_server.agent.types import ClarificationRequest, FinalResponse, ToolCall
+from knoggin_server.agent.types import (
+    ClarificationRequest,
+    FinalResponse,
+    MaintenanceCandidate,
+    ToolCall,
+)
 
 MAX_TOKEN_CHUNK_SIZE = 10000
+
 
 class AgentExecutor:
     """
@@ -69,7 +80,7 @@ class AgentExecutor:
         enabled_tools: Optional[List[str]] = None,
         simulated_date: Optional[str] = None,
         agent_temperature: float = 0.7,
-        agent_instructions: Optional[str] = None,
+        agent_brain: Optional[str] = None,
         agent_directives: Optional[str] = None,
         client_tools: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
@@ -156,7 +167,7 @@ class AgentExecutor:
                 document_focus_context,
                 a_directives,
                 agent_temperature,
-                agent_instructions or "",
+                agent_brain or "",
                 last_result,
                 client_tools,
             ):
@@ -326,27 +337,24 @@ class AgentExecutor:
         document_focus_context: str,
         directives: str,
         temp: float,
-        agent_instructions: str,
+        agent_brain: str,
         last_result: Optional[List[Dict]],
         client_tools: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
         runtime_instructions = []
-        if self.ctx.topic_evaluation_needed:
-            runtime_instructions.append(
-                "[SYSTEM ALERT: The heartbeat counter has reached its threshold. "
-                "You MUST use the `update_topics` tool during this turn to evaluate "
-                "the recent conversation. Make no changes when the existing topics "
-                f"remain sufficient. Current active topics: "
-                f"{', '.join(self.ctx.active_topics) or 'None'}.]"
-            )
+        active_schemas = get_filtered_schemas(enabled_tools)
+        if client_tools:
+            active_schemas = active_schemas + client_tools
 
-        if self.ctx.maintenance_needed:
-            runtime_instructions.append(
-                "[SYSTEM ALERT: It is time for routine graph maintenance. "
-                "You MUST use the `check_graph_health` tool during this turn to check "
-                "if there are any duplicate entities that need merging.]"
-            )
+        active_tool_names = {
+            schema["function"]["name"] for schema in active_schemas
+        }
+        maintenance_instruction = self._maintenance_runtime_instruction(
+            active_tool_names
+        )
+        if maintenance_instruction:
+            runtime_instructions.append(maintenance_instruction)
 
         system_prompt = get_agent_prompt(
             user_name=self.ctx.user_name,
@@ -356,8 +364,9 @@ class AgentExecutor:
             documents_context=documents_context,
             document_focus_context=document_focus_context,
             agent_directives=directives,
-            instructions=agent_instructions,
+            agent_brain=agent_brain,
             runtime_instructions="\n\n".join(runtime_instructions),
+            active_topics=self.ctx.active_topics,
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
             current_mode=current_mode,
@@ -365,18 +374,14 @@ class AgentExecutor:
 
         user_message = build_user_message(self.ctx, last_result)
         self.ctx.state.last_error = None
-        effective_tools = enabled_tools
-        if self.ctx.topic_evaluation_needed and enabled_tools is not None:
-            effective_tools = list(dict.fromkeys([*enabled_tools, "update_topics"]))
-        active_schemas = get_filtered_schemas(effective_tools)
-        if client_tools:
-            active_schemas = active_schemas + client_tools
         configure_tool_authorization(
             self.tools,
             active_schemas,
             user_name=self.ctx.user_name,
             agent_id=self.ctx.agent_id or getattr(self.tools, "agent_id", ""),
-            project_id=str(getattr(self.tools, "project_id", "")),
+            project_id=(
+                self.ctx.project_id or str(getattr(self.tools, "project_id", ""))
+            ),
             session_id=self.ctx.session_id,
             run_id=self.ctx.run_id,
         )
@@ -418,6 +423,31 @@ class AgentExecutor:
                     "message": f"LLM API failure: {str(e)}",
                 },
             }
+
+    def _maintenance_runtime_instruction(self, active_tool_names: set[str]) -> str:
+        candidates = [
+            candidate
+            for candidate in self.ctx.maintenance_candidates
+            if candidate.suggested_tool in active_tool_names
+        ]
+        if not candidates:
+            return ""
+
+        lines = [
+            "[SYSTEM NOTICE: Optional maintenance is available. "
+            "Python has already checked eligibility and tool availability. "
+            "You may handle one candidate if it is relevant, but do not block "
+            "the user's response if maintenance is not useful right now.",
+            "Maintenance candidates:",
+        ]
+        for candidate in candidates:
+            lines.append(
+                "- "
+                f"{candidate.kind} via `{candidate.suggested_tool}` "
+                f"({candidate.priority} priority): {candidate.reason}"
+            )
+        lines.append("]")
+        return "\n".join(lines)
 
     def _parse_tool_calls(
         self,
@@ -551,7 +581,6 @@ class AgentExecutor:
                 result = await execute_tool(self.tools, call.name, call.args)
 
                 if call.name == "update_topics":
-                    self.ctx.topic_evaluation_needed = False
                     if result.get("data", {}).get("success"):
                         self.ctx.active_topics = list(
                             result["data"].get(
@@ -559,6 +588,7 @@ class AgentExecutor:
                                 self.ctx.active_topics,
                             )
                         )
+                await self._record_maintenance_tool_result(call.name, result)
 
                 summary, _ = summarize_result(call.name, result)
                 update_accumulators(self.ctx, call.name, result)
@@ -577,20 +607,118 @@ class AgentExecutor:
                 }
 
             except ToolExecutionError as e:
-                self.ctx.state.last_error = e.message
-                self.ctx.state.consecutive_errors += 1
+                handled_as_maintenance = await self._record_maintenance_tool_error(
+                    call.name
+                )
+                if not handled_as_maintenance:
+                    self.ctx.state.last_error = e.message
+                    self.ctx.state.consecutive_errors += 1
+                results_out.append({"tool": call.name, "error": e.message})
                 yield {
                     "event": "tool_error",
                     "data": {"tool": call.name, "error": e.message},
                 }
             except Exception as e:
                 logger.exception(f"Tool {call.name} unexpected failure: {e}")
-                self.ctx.state.last_error = "Internal tool failure"
-                self.ctx.state.consecutive_errors += 1
+                handled_as_maintenance = await self._record_maintenance_tool_error(
+                    call.name
+                )
+                if not handled_as_maintenance:
+                    self.ctx.state.last_error = "Internal tool failure"
+                    self.ctx.state.consecutive_errors += 1
+                results_out.append({"tool": call.name, "error": "Internal tool failure"})
                 yield {
                     "event": "tool_error",
                     "data": {"tool": call.name, "error": "Internal tool failure"},
                 }
+
+    async def _record_maintenance_tool_result(
+        self,
+        tool_name: str,
+        result: Dict,
+    ) -> None:
+        candidate = find_candidate_for_tool(
+            self.ctx.maintenance_candidates,
+            tool_name,
+        )
+        if not candidate:
+            return
+
+        data = result.get("data")
+        if isinstance(data, dict) and data.get("error"):
+            await self._record_maintenance_failure(candidate)
+            return
+
+        if tool_name == "update_topics" and isinstance(data, dict):
+            if data.get("success"):
+                await self._mark_maintenance_handled(candidate)
+            return
+
+        if tool_name == "check_graph_health" and isinstance(data, dict):
+            if not data.get("suggestions"):
+                await self._mark_maintenance_handled(candidate)
+
+    async def _record_maintenance_tool_error(self, tool_name: str) -> bool:
+        candidate = find_candidate_for_tool(
+            self.ctx.maintenance_candidates,
+            tool_name,
+        )
+        if not candidate:
+            return False
+        await self._record_maintenance_failure(candidate)
+        return True
+
+    async def _mark_maintenance_handled(
+        self,
+        candidate: MaintenanceCandidate,
+    ) -> None:
+        redis = getattr(self.tools, "redis", None)
+        project_id = self.ctx.project_id or str(getattr(self.tools, "project_id", ""))
+        if redis is not None and project_id:
+            try:
+                await mark_maintenance_handled(
+                    redis,
+                    candidate,
+                    user_name=self.ctx.user_name,
+                    project_id=project_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to clear maintenance state for "
+                    f"{candidate.id}: {exc}"
+                )
+        self._remove_maintenance_candidate(candidate)
+
+    async def _record_maintenance_failure(
+        self,
+        candidate: MaintenanceCandidate,
+    ) -> None:
+        redis = getattr(self.tools, "redis", None)
+        project_id = self.ctx.project_id or str(getattr(self.tools, "project_id", ""))
+        if redis is not None and project_id:
+            try:
+                await record_maintenance_failure(
+                    redis,
+                    candidate,
+                    user_name=self.ctx.user_name,
+                    project_id=project_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to record maintenance failure for "
+                    f"{candidate.id}: {exc}"
+                )
+        self._remove_maintenance_candidate(candidate)
+
+    def _remove_maintenance_candidate(
+        self,
+        candidate: MaintenanceCandidate,
+    ) -> None:
+        self.ctx.maintenance_candidates = [
+            item
+            for item in self.ctx.maintenance_candidates
+            if item.id != candidate.id
+        ]
 
     def _accumulate_usage(self, usage: Optional[StreamUsage]):
         if usage:

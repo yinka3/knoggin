@@ -28,9 +28,20 @@ TOOL_DISPATCH = {
     "find_path": ("find_path", ["entity_a", "entity_b"]),
     "get_hierarchy": ("get_hierarchy", ["entity_name", "direction"]),
     "read_brain": ("read_brain", []),
+    "list_brain_snapshots": ("list_brain_snapshots", []),
+    "read_brain_snapshot": ("read_brain_snapshot", ["revision"]),
     "edit_brain": (
         "edit_brain",
-        ["section", "content", "expected_revision"],
+        ["section", "content", "expected_revision", "change_note"],
+    ),
+    "restore_brain_section": (
+        "restore_brain_section",
+        [
+            "section",
+            "from_snapshot_revision",
+            "expected_current_revision",
+            "change_note",
+        ],
     ),
     "list_documents": (
         "list_documents",

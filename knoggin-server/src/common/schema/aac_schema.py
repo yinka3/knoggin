@@ -9,6 +9,8 @@ AAC_READ_TOOL_NAMES = [
     "get_document_info",
     "list_folder_tree",
     "read_brain",
+    "list_brain_snapshots",
+    "read_brain_snapshot",
 ]
 
 AAC_SPECIFIC_SCHEMAS = [
@@ -62,6 +64,11 @@ AAC_SPECIFIC_SCHEMAS = [
                     "expected_revision": {
                         "type": "integer",
                         "description": "Revision returned by read_brain.",
+                    },
+                    "change_note": {
+                        "type": "string",
+                        "maxLength": 120,
+                        "description": "Optional short note for snapshot metadata.",
                     },
                 },
                 "required": ["section", "content", "expected_revision"],
@@ -131,5 +138,8 @@ AAC_SPECIFIC_SCHEMAS = [
     },
 ]
 
-AAC_TOOL_NAMES = [schema["function"]["name"] for schema in AAC_SPECIFIC_SCHEMAS]
+AAC_TOOL_NAMES = [
+    "restore_brain_section",
+    *[schema["function"]["name"] for schema in AAC_SPECIFIC_SCHEMAS],
+]
 AAC_DEFAULT_ENABLED_TOOLS = AAC_READ_TOOL_NAMES + AAC_TOOL_NAMES

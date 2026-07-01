@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS public.agents (
     project_id TEXT REFERENCES public.projects(project_id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     persona TEXT,
-    instructions TEXT,
+    brain TEXT,
     model TEXT,
     temperature DOUBLE PRECISION,
     enabled_tools JSONB,
@@ -47,28 +47,37 @@ CREATE TABLE IF NOT EXISTS public.agents (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.agent_brain_revisions (
+DROP TABLE IF EXISTS public.agent_brain_revisions;
+
+CREATE TABLE IF NOT EXISTS public.agent_brain_snapshots (
     agent_id TEXT NOT NULL REFERENCES public.agents(agent_id) ON DELETE CASCADE,
     revision INTEGER NOT NULL CHECK (revision >= 1),
     user_name TEXT NOT NULL,
     content TEXT NOT NULL,
     edited_by TEXT NOT NULL DEFAULT 'agent',
+    change_type TEXT NOT NULL DEFAULT 'initial_seed',
+    changed_section TEXT,
+    change_summary TEXT NOT NULL DEFAULT 'Initial Brain',
+    restored_from_revision INTEGER,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (agent_id, revision)
 );
 
-CREATE INDEX IF NOT EXISTS agent_brain_revisions_user_idx
-ON public.agent_brain_revisions(user_name, agent_id, revision DESC);
+CREATE INDEX IF NOT EXISTS agent_brain_snapshots_user_idx
+ON public.agent_brain_snapshots(user_name, agent_id, revision DESC);
 
-INSERT INTO public.agent_brain_revisions (
-    agent_id, revision, user_name, content, edited_by
+INSERT INTO public.agent_brain_snapshots (
+    agent_id, revision, user_name, content, edited_by, change_type,
+    change_summary
 )
 SELECT
     agent_id,
     brain_revision,
     user_name,
-    COALESCE(instructions, ''),
-    'seed'
+    COALESCE(brain, ''),
+    'seed',
+    'initial_seed',
+    'Initial Brain'
 FROM public.agents
 ON CONFLICT (agent_id, revision) DO NOTHING;
 
@@ -286,15 +295,31 @@ CREATE TABLE IF NOT EXISTS public.entity_merge_audits (
     evidence_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     reasoning TEXT NOT NULL,
     confirmed_by TEXT NOT NULL,
-    before_state JSONB NOT NULL,
+    before_state JSONB,
     after_state JSONB,
     status TEXT NOT NULL DEFAULT 'executing',
     failure_reason TEXT,
+    rollback_status TEXT NOT NULL DEFAULT 'unavailable',
+    rollback_expires_at TIMESTAMPTZ,
+    rolled_back_at TIMESTAMPTZ,
+    rolled_back_by TEXT,
+    rollback_failure_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE public.entity_merge_audits
+    ALTER COLUMN before_state DROP NOT NULL,
+    ADD COLUMN IF NOT EXISTS rollback_status TEXT NOT NULL DEFAULT 'unavailable',
+    ADD COLUMN IF NOT EXISTS rollback_expires_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS rolled_back_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS rolled_back_by TEXT,
+    ADD COLUMN IF NOT EXISTS rollback_failure_reason TEXT;
+
 CREATE INDEX IF NOT EXISTS entity_merge_audits_project_idx
 ON public.entity_merge_audits(project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS entity_merge_audits_rollback_expiry_idx
+ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
 
 -- Durable authorization and outcome trail for every model-initiated write.
 CREATE TABLE IF NOT EXISTS public.agent_tool_audits (

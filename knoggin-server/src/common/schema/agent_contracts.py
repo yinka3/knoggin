@@ -58,7 +58,7 @@ class AgentConfig:
     # Stable, user-editable differentiation profile. The agent Brain stores
     # evolving context and lessons instead.
     persona: PersonaProfile
-    instructions: Optional[str] = None
+    brain: Optional[str] = None
     model: Optional[str] = None
     temperature: float = 0.7
     enabled_tools: Optional[List[str]] = None
@@ -77,7 +77,7 @@ class AgentConfig:
             "name": self.name,
             "persona": self.persona.to_dict(),
             "persona_markdown": self.persona_markdown,
-            "instructions": self.instructions,
+            "brain": self.brain,
             "model": self.model,
             "temperature": self.temperature,
             "enabled_tools": self.enabled_tools,
@@ -110,7 +110,7 @@ class AgentConfig:
             id=data["id"],
             name=data["name"],
             persona=persona_value,
-            instructions=data.get("instructions"),
+            brain=data.get("brain"),
             model=data.get("model"),
             temperature=data.get("temperature", 0.7),
             enabled_tools=data.get("enabled_tools"),

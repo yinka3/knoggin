@@ -3,7 +3,7 @@ import pytest
 
 from common.schema.primitives import FactRecord
 from common.utils.time_utils import get_now
-from knoggin_server.knowledge.jobs.profile_job import ProfileRefinementJob
+from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
 from knoggin_server.knowledge.services.entity_service import EntityManager
 from tests.knowledge.test_retrieval_embedding_smoke import load_local_embedding_service
 

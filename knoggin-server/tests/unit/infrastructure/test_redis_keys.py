@@ -31,6 +31,16 @@ def test_user_and_project_scoped_keys_do_not_collide():
     assert RedisKeys.community_discussion_active(
         "ada", "project-1"
     ) != RedisKeys.community_discussion_active("ada", "project-2")
+    assert RedisKeys.maintenance_attempts(
+        "ada", "project-1", "topic_evaluation:project-1"
+    ) != RedisKeys.maintenance_attempts(
+        "ada", "project-2", "topic_evaluation:project-2"
+    )
+    assert RedisKeys.maintenance_cooldown(
+        "ada", "project-1", "topic_evaluation:project-1"
+    ) != RedisKeys.maintenance_cooldown(
+        "ada", "project-2", "topic_evaluation:project-2"
+    )
 
 
 @pytest.mark.unit

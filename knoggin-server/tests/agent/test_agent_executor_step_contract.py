@@ -8,6 +8,7 @@ from knoggin_server.agent.types import (
     AgentContext,
     AgentRunConfig,
     AgentState,
+    MaintenanceCandidate,
     RetrievedEvidence,
 )
 
@@ -37,6 +38,7 @@ def make_executor(llm):
         user_name="ada",
         user_query="What changed in profile behavior?",
         session_id="session-1",
+        project_id="project-1",
         run_id="run-1",
         agent_name="STELLA",
         agent_persona="Careful memory assistant",
@@ -96,7 +98,11 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
     )
     client_tool = {
         "type": "function",
-        "function": {"name": "client_tool", "parameters": {"type": "object"}},
+        "function": {
+            "name": "client_tool",
+            "capability": "read",
+            "parameters": {"type": "object"},
+        },
     }
 
     events = [
@@ -107,12 +113,11 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
             reasoning="high",
             current_mode="Architect",
             enabled_tools=["search_messages"],
-            memory_context="[Identity]\n- memory",
             documents_context="- file.md",
             document_focus_context="",
             directives="Required:\n- stay grounded",
             temp=0.2,
-            agent_instructions="Use citations",
+            agent_brain="Use citations",
             last_result=None,
             client_tools=[client_tool],
         )
@@ -150,12 +155,119 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
     assert "search_entity" not in tool_names
 
     _, prompt_kwargs = prompt_calls[0]
-    assert prompt_kwargs["memory_context"] == "[Identity]\n- memory"
     assert prompt_kwargs["documents_context"] == "- file.md"
     assert prompt_kwargs["agent_directives"] == "Required:\n- stay grounded"
-    assert prompt_kwargs["instructions"] == "Use citations"
+    assert prompt_kwargs["agent_brain"] == "Use citations"
     assert prompt_kwargs["current_mode"] == "Architect"
-    assert prompt_kwargs["active_topics"] == ["Identity", "Testing"]
+
+
+@pytest.mark.no_network
+async def test_step_presents_maintenance_as_optional_when_tool_is_enabled(
+    monkeypatch,
+):
+    llm = StreamingLLM(
+        [
+            {
+                "event": "tool_calls",
+                "data": {"content": "I can answer.", "calls": []},
+            }
+        ]
+    )
+    executor = make_executor(llm)
+    executor.ctx.maintenance_candidates = [
+        MaintenanceCandidate(
+            id="topic_evaluation:project-1",
+            kind="topic_evaluation",
+            reason="Project heartbeat reached 40 messages.",
+            suggested_tool="update_topics",
+        )
+    ]
+    prompt_calls = []
+
+    def fake_agent_prompt(*args, **kwargs):
+        prompt_calls.append(kwargs)
+        return "SYSTEM PROMPT"
+
+    monkeypatch.setattr(
+        "knoggin_server.agent.executor.get_agent_prompt",
+        fake_agent_prompt,
+    )
+
+    events = [
+        event
+        async for event in executor._step(
+            date="now",
+            model="model",
+            reasoning="high",
+            current_mode="Architect",
+            enabled_tools=["update_topics"],
+            documents_context="",
+            document_focus_context="",
+            directives="",
+            temp=0.7,
+            agent_brain="",
+            last_result=None,
+        )
+    ]
+
+    instruction = prompt_calls[0]["runtime_instructions"]
+    assert "Optional maintenance is available" in instruction
+    assert "You may handle one candidate" in instruction
+    assert "MUST" not in instruction
+    assert "`update_topics`" in instruction
+    assert events[0]["event"] == "tool_calls"
+
+
+@pytest.mark.no_network
+async def test_step_does_not_auto_add_disabled_maintenance_tool(monkeypatch):
+    llm = StreamingLLM(
+        [
+            {
+                "event": "tool_calls",
+                "data": {"content": "I can answer.", "calls": []},
+            }
+        ]
+    )
+    executor = make_executor(llm)
+    executor.ctx.maintenance_candidates = [
+        MaintenanceCandidate(
+            id="topic_evaluation:project-1",
+            kind="topic_evaluation",
+            reason="Project heartbeat reached 40 messages.",
+            suggested_tool="update_topics",
+        )
+    ]
+    prompt_calls = []
+
+    def fake_agent_prompt(*args, **kwargs):
+        prompt_calls.append(kwargs)
+        return "SYSTEM PROMPT"
+
+    monkeypatch.setattr(
+        "knoggin_server.agent.executor.get_agent_prompt",
+        fake_agent_prompt,
+    )
+
+    await anext(
+        executor._step(
+            date="now",
+            model="model",
+            reasoning="high",
+            current_mode="Architect",
+            enabled_tools=["search_messages"],
+            documents_context="",
+            document_focus_context="",
+            directives="",
+            temp=0.7,
+            agent_brain="",
+            last_result=None,
+        )
+    )
+
+    tool_names = [schema["function"]["name"] for schema in llm.calls[0]["tools"]]
+    assert "search_messages" in tool_names
+    assert "update_topics" not in tool_names
+    assert prompt_calls[0]["runtime_instructions"] == ""
 
 
 @pytest.mark.no_network
@@ -205,12 +317,11 @@ async def test_step_completed_without_tool_calls_yields_formatting_step_error():
             reasoning="high",
             current_mode="Architect",
             enabled_tools=None,
-            memory_context="",
             documents_context="",
             document_focus_context="",
             directives="",
             temp=0.7,
-            agent_instructions="",
+            agent_brain="",
             last_result=None,
         )
     ]
@@ -241,12 +352,11 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             reasoning="high",
             current_mode="Architect",
             enabled_tools=None,
-            memory_context="",
             documents_context="",
             document_focus_context="",
             directives="",
             temp=0.7,
-            agent_instructions="",
+            agent_brain="",
             last_result=None,
         )
     ]
@@ -258,12 +368,11 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             reasoning="high",
             current_mode="Architect",
             enabled_tools=None,
-            memory_context="",
             documents_context="",
             document_focus_context="",
             directives="",
             temp=0.7,
-            agent_instructions="",
+            agent_brain="",
             last_result=None,
         )
     ]

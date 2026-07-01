@@ -12,11 +12,13 @@ from knoggin_server.knowledge.db.projection_rebuilder import ProjectionRebuilder
 from knoggin_server.knowledge.db.readers.entity_reader import EntityReader
 from knoggin_server.knowledge.db.readers.fact_reader import FactReader
 from knoggin_server.knowledge.db.readers.graph_reader import GraphReader
+from knoggin_server.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from knoggin_server.knowledge.db.search_index_rebuilder import SearchIndexRebuilder
 from knoggin_server.knowledge.db.tool_queries import ToolQueries
 from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
 from knoggin_server.knowledge.db.writers.fact_writer import FactWriter
 from knoggin_server.knowledge.db.writers.graph_writer import GraphWriter
+from knoggin_server.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 
@@ -35,9 +37,11 @@ class KnowledgeStore:
         self._entity_writer = EntityWriter(self._postgres_client)
         self._fact_writer = FactWriter(self._postgres_client)
         self._graph_writer = GraphWriter(self._postgres_client)
+        self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
         self._fact_reader = FactReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
+        self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._tools = ToolQueries(self._postgres_client)
         self._projection_rebuilder = ProjectionRebuilder(self._postgres_client)
         self._search_index_rebuilder = SearchIndexRebuilder(
@@ -187,6 +191,19 @@ class KnowledgeStore:
     ) -> int:
         return await self._fact_writer.delete_old_invalidated_facts(
             cutoff, project_id=project_id
+        )
+
+    async def expire_merge_rollback_states(
+        self,
+        cutoff: datetime,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> int:
+        return await self._merge_audit_writer.expire_rollback_states(
+            cutoff,
+            user_name=user_name,
+            project_id=project_id,
         )
 
     async def delete_relationship(

@@ -5,7 +5,11 @@ from typing import List, Mapping, Optional, Union
 from loguru import logger
 
 from common.schema.agent_contracts import AgentConfig, PersonaProfile
-from common.utils.agent_identity import normalize_agent_brain
+from common.utils.agent_identity import (
+    build_brain_snapshot_summary,
+    normalize_agent_brain,
+    should_snapshot_brain_revision,
+)
 
 
 class AgentManager:
@@ -18,7 +22,7 @@ class AgentManager:
     async def list_agents(self) -> List[AgentConfig]:
         """List all agents for the user."""
         query = '''
-            SELECT agent_id, name, persona, instructions, model, temperature,
+            SELECT agent_id, name, persona, brain, model, temperature,
                    enabled_tools, is_default, is_spawned, spawned_by,
                    brain_revision, created_at
             FROM public.agents
@@ -37,8 +41,8 @@ class AgentManager:
                 id=row["agent_id"],
                 name=row["name"],
                 persona=row["persona"],
-                instructions=normalize_agent_brain(
-                    row["instructions"] or "",
+                brain=normalize_agent_brain(
+                    row["brain"] or "",
                     row["persona"] or "",
                 ),
                 model=row["model"],
@@ -55,7 +59,7 @@ class AgentManager:
     async def get_agent(self, agent_id: str) -> Optional[AgentConfig]:
         """Get agent by ID."""
         query = '''
-            SELECT agent_id, name, persona, instructions, model, temperature,
+            SELECT agent_id, name, persona, brain, model, temperature,
                    enabled_tools, is_default, is_spawned, spawned_by,
                    brain_revision, created_at
             FROM public.agents
@@ -71,8 +75,8 @@ class AgentManager:
             id=row["agent_id"],
             name=row["name"],
             persona=row["persona"],
-            instructions=normalize_agent_brain(
-                row["instructions"] or "",
+            brain=normalize_agent_brain(
+                row["brain"] or "",
                 row["persona"] or "",
             ),
             model=row["model"],
@@ -88,7 +92,7 @@ class AgentManager:
     async def get_agent_by_name(self, name: str) -> Optional[AgentConfig]:
         """Get agent by name (case-insensitive)."""
         query = '''
-            SELECT agent_id, name, persona, instructions, model, temperature,
+            SELECT agent_id, name, persona, brain, model, temperature,
                    enabled_tools, is_default, is_spawned, spawned_by,
                    brain_revision, created_at
             FROM public.agents
@@ -105,8 +109,8 @@ class AgentManager:
             id=row["agent_id"],
             name=row["name"],
             persona=row["persona"],
-            instructions=normalize_agent_brain(
-                row["instructions"] or "",
+            brain=normalize_agent_brain(
+                row["brain"] or "",
                 row["persona"] or "",
             ),
             model=row["model"],
@@ -134,7 +138,7 @@ class AgentManager:
         self,
         name: str,
         persona: Union[PersonaProfile, Mapping[str, str]],
-        instructions: Optional[str] = None,
+        brain: Optional[str] = None,
         model: str = None,
         temperature: Optional[float] = 0.7,
         enabled_tools: Optional[List[str]] = None,
@@ -143,25 +147,32 @@ class AgentManager:
         agent_id = str(uuid.uuid4())
         persona_profile = PersonaProfile.from_value(persona)
         persona_markdown = persona_profile.to_markdown()
-        instructions = normalize_agent_brain(instructions or "", persona_markdown)
+        brain = normalize_agent_brain(brain or "", persona_markdown)
         tools_json = json.dumps(enabled_tools) if enabled_tools else None
 
         query = '''
             WITH inserted AS (
                 INSERT INTO public.agents (
-                agent_id, user_name, name, persona, instructions,
+                agent_id, user_name, name, persona, brain,
                 model, temperature, enabled_tools, is_default, is_spawned
                 ) VALUES (
-                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(instructions)s,
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
                     %(model)s, %(temperature)s, %(enabled_tools)s, false, false
                 )
-                RETURNING agent_id, user_name, brain_revision, instructions
+                RETURNING agent_id, user_name, brain_revision, brain
             )
-            INSERT INTO public.agent_brain_revisions (
-                agent_id, revision, user_name, content, edited_by
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
             )
             SELECT
-                agent_id, brain_revision, user_name, COALESCE(instructions, ''), 'user'
+                agent_id,
+                brain_revision,
+                user_name,
+                COALESCE(brain, ''),
+                'user',
+                'initial_seed',
+                'Initial Brain'
             FROM inserted
         '''
         await self.pg.execute(query, {
@@ -169,7 +180,7 @@ class AgentManager:
             "user_name": self.user_name,
             "name": name,
             "persona": persona_markdown,
-            "instructions": instructions,
+            "brain": brain,
             "model": model,
             "temperature": temperature,
             "enabled_tools": tools_json
@@ -182,7 +193,7 @@ class AgentManager:
         self,
         agent_id: str,
         name: str = None,
-        instructions: str = None,
+        brain: str = None,
         model: str = None,
         temperature: Optional[float] = None,
         enabled_tools: Optional[List[str]] = None,
@@ -198,14 +209,15 @@ class AgentManager:
         if name is not None:
             updates.append("name = %(name)s")
             params["name"] = name
-        if instructions is not None:
-            instructions = normalize_agent_brain(
-                instructions,
+        if brain is not None:
+            new_revision = int(config.brain_revision or 1) + 1
+            brain = normalize_agent_brain(
+                brain,
                 config.persona_markdown,
             )
-            updates.append("instructions = %(instructions)s")
+            updates.append("brain = %(brain)s")
             updates.append("brain_revision = brain_revision + 1")
-            params["instructions"] = instructions
+            params["brain"] = brain
         if model is not None:
             updates.append("model = %(model)s")
             params["model"] = model
@@ -222,24 +234,35 @@ class AgentManager:
         updates.append("updated_at = now()")
         set_clause = ", ".join(updates)
 
-        if instructions is not None:
+        if brain is not None and should_snapshot_brain_revision(new_revision):
+            params["change_summary"] = build_brain_snapshot_summary(
+                "full_user_update"
+            )
             query = f'''
                 WITH updated AS (
                     UPDATE public.agents
                     SET {set_clause}
                     WHERE user_name = %(user_name)s
                       AND agent_id = %(agent_id)s
-                    RETURNING agent_id, user_name, brain_revision, instructions
+                    RETURNING agent_id, user_name, brain_revision, brain
                 )
-                INSERT INTO public.agent_brain_revisions (
-                    agent_id, revision, user_name, content, edited_by
+                INSERT INTO public.agent_brain_snapshots (
+                    agent_id,
+                    revision,
+                    user_name,
+                    content,
+                    edited_by,
+                    change_type,
+                    change_summary
                 )
                 SELECT
                     agent_id,
                     brain_revision,
                     user_name,
-                    COALESCE(instructions, ''),
-                    'user'
+                    COALESCE(brain, ''),
+                    'user',
+                    'full_user_update',
+                    %(change_summary)s
                 FROM updated
             '''
         else:
@@ -320,7 +343,7 @@ class AgentManager:
         temperature = default_config.temperature if default_config else 0.7
         tools_json = json.dumps(default_config.enabled_tools) if default_config and default_config.enabled_tools else None
 
-        instructions = default_config.instructions if default_config else "Warm and direct. Match their energy. No corporate filler."
+        brain = default_config.brain if default_config else "Warm and direct. Match their energy. No corporate filler."
         persona = (
             default_config.persona_markdown
             if default_config
@@ -328,24 +351,31 @@ class AgentManager:
                 "Warm and direct. Match their energy. No corporate filler."
             ).to_markdown()
         )
-        instructions = normalize_agent_brain(instructions, persona)
+        brain = normalize_agent_brain(brain, persona)
 
         query = '''
             WITH inserted AS (
                 INSERT INTO public.agents (
-                agent_id, user_name, name, persona, instructions, model, temperature, enabled_tools, is_default
+                agent_id, user_name, name, persona, brain, model, temperature, enabled_tools, is_default
                 ) VALUES (
-                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(instructions)s,
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
                     %(model)s, %(temperature)s, %(enabled_tools)s, true
                 )
                 ON CONFLICT (agent_id) DO NOTHING
-                RETURNING agent_id, user_name, brain_revision, instructions
+                RETURNING agent_id, user_name, brain_revision, brain
             )
-            INSERT INTO public.agent_brain_revisions (
-                agent_id, revision, user_name, content, edited_by
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
             )
             SELECT
-                agent_id, brain_revision, user_name, COALESCE(instructions, ''), 'seed'
+                agent_id,
+                brain_revision,
+                user_name,
+                COALESCE(brain, ''),
+                'seed',
+                'initial_seed',
+                'Initial Brain'
             FROM inserted
         '''
         await self.pg.execute(query, {
@@ -353,7 +383,7 @@ class AgentManager:
             "user_name": self.user_name,
             "name": name,
             "persona": persona,
-            "instructions": instructions,
+            "brain": brain,
             "model": model,
             "temperature": temperature,
             "enabled_tools": tools_json

@@ -1,9 +1,12 @@
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Mapping
+from typing import TYPE_CHECKING, Dict, Iterable, Mapping
 
 import yaml
+
+if TYPE_CHECKING:
+    from common.schema.agent_contracts import AgentConfig
 
 
 _TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
@@ -275,7 +278,7 @@ def load_agent_config(agent_id: str = "AGENT_IDENTITY") -> "AgentConfig":
         ),
         model=frontmatter.get("model"),
         temperature=frontmatter.get("temperature", 0.7),
-        instructions=body,
+        brain=body,
         enabled_tools=frontmatter.get("enabled_tools"),
         is_default=frontmatter.get("is_default", False),
     )

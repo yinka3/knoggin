@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional, Set
 import redis.asyncio as aioredis
 from loguru import logger
 
+from common.utils.coordination_log import write_coordination_event
+from common.utils.event_persistence_policy import normalize_coordination_event
 from common.utils.time_utils import get_now, get_now_iso, parse_iso_time
 from infrastructure.redis_client import RedisKeys
 
@@ -193,12 +195,21 @@ class DebugEventEmitter(BaseEventEmitter):
         data: Dict[str, Any] = None,
         verbose_only: bool = False,
     ):
+        ts = get_now_iso()
+        self._persist_coordination_event(
+            ts=ts,
+            scope_id=session_id,
+            component=component,
+            event=event,
+            data=data,
+            verbose_only=verbose_only,
+        )
         # If session_id is a registered project_id, fan out to all its active sessions
         if session_id in self.project_sessions:
             active_sess_list = list(self.project_sessions[session_id])
             for active_sess in active_sess_list:
                 evt = DebugEvent(
-                    ts=get_now_iso(),
+                    ts=ts,
                     session_id=active_sess,
                     component=component,
                     event=event,
@@ -208,7 +219,7 @@ class DebugEventEmitter(BaseEventEmitter):
                 await self._emit_to_subs(active_sess, evt)
         else:
             evt = DebugEvent(
-                ts=get_now_iso(),
+                ts=ts,
                 session_id=session_id,
                 component=component,
                 event=event,
@@ -220,6 +231,28 @@ class DebugEventEmitter(BaseEventEmitter):
         self._emit_count += 1
         if self._emit_count % 100 == 0:
             asyncio.create_task(self.cleanup_stale_sessions())
+
+    def _persist_coordination_event(
+        self,
+        *,
+        ts: str,
+        scope_id: str,
+        component: str,
+        event: str,
+        data: Dict[str, Any] = None,
+        verbose_only: bool = False,
+    ) -> None:
+        record = normalize_coordination_event(
+            ts=ts,
+            scope_id=scope_id,
+            component=component,
+            event=event,
+            data=data,
+            verbose_only=verbose_only,
+        )
+        if record is None:
+            return
+        write_coordination_event(record.fields)
 
     async def cleanup_stale_sessions(self, max_age_hours: int = 24):
         stale = await self._base_cleanup(max_age_hours)

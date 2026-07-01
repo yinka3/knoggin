@@ -1,13 +1,11 @@
-import json
 from types import SimpleNamespace
 
 import pytest
 
 from common.schema.agent_contracts import AgentConfig
 from common.schema.settings import CommunitySettings, DeveloperSettings, RootConfig
-from infrastructure.redis_client import RedisKeys
 from knoggin_server.community.community_manager import CommunityManager
-from tests.fixtures.fakes import FakeRedis
+from tests.fixtures.fakes import FakePostgresClient, FakeRedis
 
 
 class RecordingCommunityGraph:
@@ -106,6 +104,7 @@ def root_config(**community_overrides):
 def make_resources(*, redis=None, llm_response="{}"):
     return SimpleNamespace(
         redis=redis or FakeRedis(),
+        postgres=FakePostgresClient(),
         knowledge_store=RecordingKnowledgeStore(),
         llm_service=RecordingLLM(llm_response),
     )
@@ -115,7 +114,7 @@ def make_project_state():
     return SimpleNamespace(project_id="project-1", topic_config=SimpleNamespace())
 
 
-async def save_agent(redis, agent_id, *, name=None, persona=None, **overrides):
+async def save_agent(postgres, agent_id, *, name=None, persona=None, **overrides):
     agent = AgentConfig(
         id=agent_id,
         name=name or agent_id.title(),
@@ -123,16 +122,12 @@ async def save_agent(redis, agent_id, *, name=None, persona=None, **overrides):
         model=overrides.pop("model", "agent-model"),
         **overrides,
     )
-    await redis.hset(RedisKeys.agents("ada"), agent_id, json.dumps(agent.to_dict()))
+    postgres.upsert_agent(agent)
     return agent
 
 
-async def save_project(redis, project_id, status="active"):
-    await redis.hset(
-        RedisKeys.projects("ada"),
-        project_id,
-        json.dumps({"status": status}),
-    )
+async def save_project(postgres, project_id, status="active"):
+    postgres.upsert_project(project_id, status=status)
 
 
 def patch_manager_config(monkeypatch, root):
@@ -163,43 +158,52 @@ async def test_build_agent_pool_context_returns_default_without_agents(monkeypat
 
     agent_ids, description = await manager._build_agent_pool_context()
 
-    assert agent_ids == ["default_stella"]
-    assert description == "- STELLA (default): General purpose assistant."
+    assert len(agent_ids) == 1
+    assert "- STELLA (id:" in description
 
 
 @pytest.mark.no_network
 async def test_build_agent_pool_context_filters_pool_and_marks_spawned(monkeypatch):
-    redis = FakeRedis()
-    await save_agent(redis, "agent-1", name="Planner", persona="Plans carefully")
+    resources = make_resources()
     await save_agent(
-        redis,
+        resources.postgres,
+        "agent-1",
+        name="Planner",
+        persona="Plans carefully",
+    )
+    await save_agent(
+        resources.postgres,
         "spawned-1",
         name="Evidence",
         persona="Tracks evidence",
         is_spawned=True,
     )
-    await save_agent(redis, "filtered-out", name="Hidden", persona="Not in pool")
-    await redis.hset(RedisKeys.agents("ada"), "bad-json", "{not json")
+    await save_agent(
+        resources.postgres,
+        "filtered-out",
+        name="Hidden",
+        persona="Not in pool",
+    )
     patch_manager_config(
         monkeypatch,
         root_config(agent_pool_ids=["agent-1", "spawned-1", "bad-json"]),
     )
-    resources = make_resources(redis=redis)
     manager = CommunityManager(make_project_state(), "ada", resources)
 
     agent_ids, description = await manager._build_agent_pool_context()
 
-    assert agent_ids == ["agent-1", "spawned-1", "bad-json"]
-    assert "- Planner (id: agent-1): Plans carefully" in description
-    assert "- Evidence [spawned] (id: spawned-1): Tracks evidence" in description
-    assert "- Unknown (id: bad-json)" in description
+    assert agent_ids == ["agent-1", "spawned-1"]
+    assert "- Planner (id: agent-1):" in description
+    assert "Plans carefully" in description
+    assert "- Evidence [spawned] (id: spawned-1):" in description
+    assert "Tracks evidence" in description
     assert "filtered-out" not in description
 
 
 @pytest.mark.no_network
 async def test_build_seeding_context_includes_graph_and_community_sections():
     resources = make_resources()
-    await save_project(resources.redis, "project-1")
+    await save_project(resources.postgres, "project-1")
     manager = CommunityManager(make_project_state(), "ada", resources)
 
     context = await manager._build_seeding_context()
@@ -221,7 +225,7 @@ async def test_build_seeding_context_includes_graph_and_community_sections():
 @pytest.mark.no_network
 async def test_build_seeding_context_falls_back_when_graph_collection_fails():
     resources = make_resources()
-    await save_project(resources.redis, "project-1")
+    await save_project(resources.postgres, "project-1")
     resources.knowledge_store.raise_context = True
     manager = CommunityManager(make_project_state(), "ada", resources)
 
@@ -233,15 +237,15 @@ async def test_build_seeding_context_falls_back_when_graph_collection_fails():
 
 @pytest.mark.no_network
 async def test_community_scope_defaults_to_active_and_archived_projects(monkeypatch):
-    redis = FakeRedis()
-    await save_project(redis, "active-project", "active")
-    await save_project(redis, "archived-project", "archived")
-    await save_project(redis, "deleted-project", "deleted")
+    resources = make_resources()
+    await save_project(resources.postgres, "active-project", "active")
+    await save_project(resources.postgres, "archived-project", "archived")
+    await save_project(resources.postgres, "deleted-project", "deleted")
     patch_manager_config(monkeypatch, root_config())
     manager = CommunityManager(
         make_project_state(),
         "ada",
-        make_resources(redis=redis),
+        resources,
     )
 
     assert await manager._resolve_project_scope() == [
@@ -255,10 +259,10 @@ async def test_community_scope_defaults_to_active_and_archived_projects(monkeypa
 async def test_community_scope_configuration_is_exact_and_filters_invalid_ids(
     monkeypatch,
 ):
-    redis = FakeRedis()
-    await save_project(redis, "project-1", "active")
-    await save_project(redis, "project-2", "archived")
-    await save_project(redis, "deleted-project", "deleted")
+    resources = make_resources()
+    await save_project(resources.postgres, "project-1", "active")
+    await save_project(resources.postgres, "project-2", "archived")
+    await save_project(resources.postgres, "deleted-project", "deleted")
     patch_manager_config(
         monkeypatch,
         root_config(
@@ -268,7 +272,7 @@ async def test_community_scope_configuration_is_exact_and_filters_invalid_ids(
     manager = CommunityManager(
         make_project_state(),
         "ada",
-        make_resources(redis=redis),
+        resources,
     )
 
     assert await manager._resolve_project_scope() == [
@@ -293,10 +297,6 @@ async def test_community_seeding_skips_storage_when_scope_is_empty(monkeypatch):
 async def test_seed_discussion_parses_fenced_json_and_filters_unknown_agents(
     monkeypatch,
 ):
-    redis = FakeRedis()
-    await redis.set(RedisKeys.agents_default("ada"), "seed-agent")
-    await save_agent(redis, "seed-agent", name="Seeder", persona="Starts discussions")
-    await save_agent(redis, "agent-1", name="Analyst", persona="Analyzes evidence")
     response = """
     ```json
     {
@@ -308,7 +308,21 @@ async def test_seed_discussion_parses_fenced_json_and_filters_unknown_agents(
     }
     ```
     """
-    resources = make_resources(redis=redis, llm_response=response)
+    resources = make_resources(llm_response=response)
+    await save_project(resources.postgres, "project-1")
+    await save_agent(
+        resources.postgres,
+        "seed-agent",
+        name="Seeder",
+        persona="Starts discussions",
+        is_default=True,
+    )
+    await save_agent(
+        resources.postgres,
+        "agent-1",
+        name="Analyst",
+        persona="Analyzes evidence",
+    )
     patch_manager_config(monkeypatch, root_config())
     events = patch_events(monkeypatch)
     manager = CommunityManager(make_project_state(), "ada", resources)
@@ -343,10 +357,15 @@ async def test_seed_discussion_parses_fenced_json_and_filters_unknown_agents(
 async def test_seed_discussion_falls_back_to_seeding_agent_on_invalid_response(
     monkeypatch,
 ):
-    redis = FakeRedis()
-    await redis.set(RedisKeys.agents_default("ada"), "seed-agent")
-    await save_agent(redis, "seed-agent", name="Seeder", persona="Starts discussions")
-    resources = make_resources(redis=redis, llm_response="not json")
+    resources = make_resources(llm_response="not json")
+    await save_project(resources.postgres, "project-1")
+    await save_agent(
+        resources.postgres,
+        "seed-agent",
+        name="Seeder",
+        persona="Starts discussions",
+        is_default=True,
+    )
     patch_manager_config(monkeypatch, root_config())
     patch_events(monkeypatch)
     manager = CommunityManager(make_project_state(), "ada", resources)

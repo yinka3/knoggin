@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -6,9 +5,8 @@ import pytest
 from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent_contracts import AgentConfig
 from common.schema.settings import CommunitySettings, DeveloperSettings, RootConfig
-from infrastructure.redis_client import RedisKeys
 from knoggin_server.community.community_manager import CommunityManager
-from tests.fixtures.fakes import FakeRedis
+from tests.fixtures.fakes import FakePostgresClient, FakeRedis
 
 
 class RecordingCommunityGraph:
@@ -79,6 +77,7 @@ def patch_events(monkeypatch):
 def make_resources(*, redis=None):
     return SimpleNamespace(
         redis=redis or FakeRedis(),
+        postgres=FakePostgresClient(),
         knowledge_store=RecordingKnowledgeStore(),
         llm_service=object(),
     )
@@ -96,7 +95,7 @@ def make_project_state():
     )
 
 
-async def save_agent(redis, agent_id, *, name=None, persona=None, **overrides):
+async def save_agent(postgres, agent_id, *, name=None, persona=None, **overrides):
     agent = AgentConfig(
         id=agent_id,
         name=name or agent_id.title(),
@@ -104,7 +103,7 @@ async def save_agent(redis, agent_id, *, name=None, persona=None, **overrides):
         model=overrides.pop("model", "agent-model"),
         **overrides,
     )
-    await redis.hset(RedisKeys.agents("ada"), agent_id, json.dumps(agent.to_dict()))
+    postgres.upsert_agent(agent)
     return agent
 
 
@@ -134,8 +133,8 @@ async def test_trigger_discussion_creates_discussion_and_cleans_up_after_error(
     patch_manager_config(monkeypatch)
     events = patch_events(monkeypatch)
     redis = FakeRedis()
-    await save_agent(redis, "agent-1", name="Analyst")
     resources = make_resources(redis=redis)
+    await save_agent(resources.postgres, "agent-1", name="Analyst")
     manager = CommunityManager(make_project_state(), "ada", resources)
 
     async def seed_discussion():
@@ -345,7 +344,7 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
         persona="Careful analyst",
         model="agent-model",
         temperature=0.2,
-        instructions="Use evidence.",
+        brain="Use evidence.",
         enabled_tools=["search_entity", "save_insight", "not_allowed"],
     )
 
@@ -365,14 +364,14 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
     assert agent_ctx.session_id == "aac-disc-1"
     assert agent_ctx.agent_id == "agent-1"
     assert agent_ctx.agent_name == "Analyst"
-    assert agent_ctx.agent_persona == "Careful analyst"
+    assert "Careful analyst" in agent_ctx.agent_persona
     assert agent_ctx.current_participants == ["agent-1", "agent-2"]
     assert agent_ctx.history == [{"role": "assistant", "content": "previous"}]
 
     execute_kwargs = captured["execute_kwargs"]
     assert execute_kwargs["model"] == "agent-model"
     assert execute_kwargs["agent_temperature"] == 0.2
-    assert execute_kwargs["agent_instructions"] == "Use evidence."
+    assert execute_kwargs["agent_brain"] == "Use evidence."
     assert execute_kwargs["agent_directives"] == (
         "Required:\n"
         "- Stay grounded\n\n"

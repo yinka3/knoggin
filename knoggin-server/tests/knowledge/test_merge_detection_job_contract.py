@@ -6,7 +6,6 @@ from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.tools.maintenance import MaintenanceTools
 from knoggin_server.knowledge.services.entity_merge_service import EntityMergeService
 from tests.fixtures.fakes import FakeRedis
-
 from tests.knowledge.test_entity_merge_classification_contract import (
     RecordingKnowledgeStore,
     RecordingPostgres,
@@ -193,7 +192,16 @@ async def test_confirm_rejects_proposal_when_reviewed_state_changed():
 
 
 @pytest.mark.no_network
-async def test_confirm_executes_canonical_merge_and_updates_runtime_queue():
+async def test_confirm_executes_canonical_merge_and_updates_runtime_queue(monkeypatch):
+    events = []
+
+    async def fake_emit(*args, **kwargs):
+        events.append((args, kwargs))
+
+    monkeypatch.setattr(
+        "knoggin_server.knowledge.services.entity_merge_service.emit",
+        fake_emit,
+    )
     reviewed_snapshot = {
         "entities": snapshot_results()[0],
         "facts": snapshot_results()[1],
@@ -235,3 +243,23 @@ async def test_confirm_executes_canonical_merge_and_updates_runtime_queue():
     assert await redis.smembers(
         RedisKeys.dirty_entities("ada", "project-1")
     ) == {"2"}
+    assert [event[0][2] for event in events] == [
+        "merge_queue_removed",
+        "dirty_entities_marked",
+    ]
+    assert events[0][0] == (
+        "project-1",
+        "job",
+        "merge_queue_removed",
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "merge_key": merge_key,
+            "entity_ids": [2, 3],
+            "cleared_count": 2,
+            "reason": "merge_executed",
+            "proposal_id": "proposal-1",
+            "primary_id": 2,
+            "duplicate_id": 3,
+        },
+    )

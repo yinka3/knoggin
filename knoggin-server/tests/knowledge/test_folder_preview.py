@@ -187,24 +187,24 @@ async def test_preview_applies_root_and_nested_gitignore_negation(
     preview = await preview_service.preview_folder(
         folder_name="repo",
         entries=[
-            entry(".gitignore", b"*.log\n!keep.log\nnested/*.tmp\n"),
-            entry("drop.log"),
-            entry("keep.log"),
-            entry("nested/.gitignore", b"!keep.tmp\n"),
-            entry("nested/drop.tmp"),
-            entry("nested/keep.tmp"),
+            entry(".gitignore", b"*.dropme\n!keep.dropme\nnested/*.skipme\n"),
+            entry("drop.dropme"),
+            entry("keep.dropme"),
+            entry("nested/.gitignore", b"!keep.skipme\n"),
+            entry("nested/drop.skipme"),
+            entry("nested/keep.skipme"),
         ],
     )
 
     assert [item.relative_path for item in preview.included] == [
-        "keep.log",
-        "nested/keep.tmp",
+        "keep.dropme",
+        "nested/keep.skipme",
     ]
     reasons = {
         item.relative_path: item.reason for item in preview.excluded
     }
-    assert reasons["drop.log"] == "gitignore"
-    assert reasons["nested/drop.tmp"] == "gitignore"
+    assert reasons["drop.dropme"] == "gitignore"
+    assert reasons["nested/drop.skipme"] == "gitignore"
     assert reasons[".gitignore"] == "hidden_path"
     assert reasons["nested/.gitignore"] == "hidden_path"
 

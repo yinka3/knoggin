@@ -318,7 +318,15 @@ async def test_graph_mutation_plan_treats_unknown_validation_as_valid():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities():
+async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities(
+    monkeypatch,
+):
+    events = []
+
+    async def fake_emit(*args, **kwargs):
+        events.append((args, kwargs))
+
+    monkeypatch.setattr(write_graph_db, "emit", fake_emit)
     batch = scoped_batch(
         entity_ids=[2, 3, 4],
         new_entity_ids={2},
@@ -365,6 +373,24 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
     dirty_key = RedisKeys.dirty_entities("ada", "project-1")
     assert redis.sets[dirty_key] == {"2", "3", "4"}
     assert profile_key in redis.deleted_keys
+    assert events == [
+        (
+            (
+                "project-1",
+                "job",
+                "dirty_entities_marked",
+                {
+                    "user_name": "ada",
+                    "project_id": "project-1",
+                    "dirty_key": dirty_key,
+                    "entity_ids": [2, 3, 4],
+                    "marked_count": 3,
+                    "reason": "graph_write",
+                },
+            ),
+            {},
+        )
+    ]
     assert summary.model_dump() == {
         "entities_written": 2,
         "relationships_written": 2,
