@@ -156,6 +156,36 @@ Tool schemas must match registry dispatch and concrete methods. Capability
 classes are enforced in Python. Destructive tools require explicit confirmation
 state; entity merge execution is not available as a normal agent tool.
 
+## Agent Memory Structures
+
+An agent has four distinct memory structures with different scopes and owners:
+
+| Memory | Lifetime | Owner |
+|---|---|---|
+| Brain (`agent_brain_revisions`) | Persistent, versioned Markdown | Agent writes it via `edit_brain` |
+| Persona (`agents.persona`) | Persistent, immutable to the agent | User/settings only |
+| Knowledge graph (entities, facts, relationships) | Persistent, project-scoped | Ingestion pipeline only |
+| `RetrievedEvidence` | Single run, in-memory | Accumulated from tool calls |
+
+The brain and persona are stored in the same `agents` row but are separate
+columns with different write paths. The agent can only reach `instructions` via
+`edit_brain`. The `persona` column has no agent-accessible write path — only
+`AgentManager.update_persona()` touches it, and `AgentManager` is not exposed
+as a tool.
+
+`replace_brain_section` enforces an explicit allowlist:
+
+```
+EDITABLE_BRAIN_SECTIONS = (
+    "Behavioral Directives",
+    "Project Context",
+    "User Preferences & Lessons Learned",
+)
+```
+
+The SQL in `edit_brain` only ever sets `instructions`. The persona column is
+never in that `SET` clause. Do not add persona mutation to any agent tool.
+
 ## Entity Merges
 
 Automatic background merging has been removed. The current flow is:
