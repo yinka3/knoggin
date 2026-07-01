@@ -3,6 +3,8 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional
 
+from psycopg import sql
+
 from loguru import logger
 
 from common.conf.manager import ConfigManager
@@ -365,19 +367,19 @@ class SessionManager:
 
     async def update_session_metadata(self, session_id: str, new_data: dict) -> dict:
         """Update session metadata directly."""
-        updates = []
-        params = {"user_name": self.user_name, "session_id": session_id}
+        cols = {k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in new_data.items()}
 
-        for k, v in new_data.items():
-            updates.append(f"{k} = %({k})s")
-            params[k] = json.dumps(v) if isinstance(v, (dict, list)) else v
-
-        if not updates:
+        if not cols:
             return {}
 
-        set_clause = ", ".join(updates)
-        query = f"UPDATE public.sessions SET {set_clause} WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
-        await self.pg.execute(query, params)
+        stmt = sql.SQL(
+            "UPDATE public.sessions SET {fields} WHERE user_name = %s AND session_id = %s"
+        ).format(
+            fields=sql.SQL(", ").join(
+                sql.SQL("{} = %s").format(sql.Identifier(k)) for k in cols
+            )
+        )
+        await self.pg.execute(stmt, [*cols.values(), self.user_name, session_id])
         return new_data
 
     async def get_document_focus(

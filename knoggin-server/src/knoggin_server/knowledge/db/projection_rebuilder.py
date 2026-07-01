@@ -202,13 +202,8 @@ class ProjectionRebuilder:
         project_id: str,
         user_name: str,
     ) -> List[Dict]:
-        filters = ["project_id = %s"]
-        params = [project_id]
-        filters.append("user_name = %s")
-        params.append(user_name)
-
         await cur.execute(
-            f"""
+            """
             SELECT
                 message_id AS id,
                 content,
@@ -218,10 +213,11 @@ class ProjectionRebuilder:
                 project_id,
                 timestamp_ms AS timestamp
             FROM messages
-            WHERE {" AND ".join(filters)}
+            WHERE project_id = %s
+              AND user_name = %s
             ORDER BY user_name, session_id, message_id
             """,
-            tuple(params),
+            (project_id, user_name),
         )
         return list(await cur.fetchall())
 
@@ -231,13 +227,8 @@ class ProjectionRebuilder:
         project_id: str,
         user_name: str,
     ) -> List[Dict]:
-        filters = ["(e.project_id = %s OR e.entity_id = %s)"]
-        params = [project_id, IDENTITY_ENTITY_ID]
-        filters.append("(e.user_name = %s OR e.entity_id = %s)")
-        params.extend([user_name, IDENTITY_ENTITY_ID])
-
         await cur.execute(
-            f"""
+            """
             SELECT
                 e.entity_id AS id,
                 e.user_name,
@@ -258,11 +249,12 @@ class ProjectionRebuilder:
             FROM entities e
             LEFT JOIN entity_aliases a
               ON a.entity_id = e.entity_id
-            WHERE {" AND ".join(filters)}
+            WHERE (e.project_id = %s OR e.entity_id = %s)
+              AND (e.user_name = %s OR e.entity_id = %s)
             GROUP BY e.entity_id
             ORDER BY e.entity_id
             """,
-            tuple(params),
+            (project_id, IDENTITY_ENTITY_ID, user_name, IDENTITY_ENTITY_ID),
         )
         return list(await cur.fetchall())
 
@@ -272,13 +264,8 @@ class ProjectionRebuilder:
         project_id: str,
         user_name: str,
     ) -> List[Dict]:
-        filters = ["rel.project_id = %s"]
-        params = [project_id]
-        filters.append("rel.user_name = %s")
-        params.append(user_name)
-
         await cur.execute(
-            f"""
+            """
             SELECT
                 rel.relationship_id,
                 rel.user_name,
@@ -303,11 +290,12 @@ class ProjectionRebuilder:
             FROM relationships rel
             LEFT JOIN relationship_evidence_refs ref
               ON ref.relationship_id = rel.relationship_id
-            WHERE {" AND ".join(filters)}
+            WHERE rel.project_id = %s
+              AND rel.user_name = %s
             GROUP BY rel.relationship_id
             ORDER BY rel.relationship_id
             """,
-            tuple(params),
+            (project_id, user_name),
         )
         return list(await cur.fetchall())
 
@@ -317,13 +305,8 @@ class ProjectionRebuilder:
         project_id: str,
         user_name: str,
     ) -> List[Dict]:
-        filters = ["project_id = %s"]
-        params = [project_id]
-        filters.append("user_name = %s")
-        params.append(user_name)
-
         await cur.execute(
-            f"""
+            """
             SELECT
                 fact_id,
                 entity_id,
@@ -338,10 +321,11 @@ class ProjectionRebuilder:
                 source_session_id,
                 source
             FROM facts
-            WHERE {" AND ".join(filters)}
+            WHERE project_id = %s
+              AND user_name = %s
             ORDER BY entity_id, fact_id
             """,
-            tuple(params),
+            (project_id, user_name),
         )
         return list(await cur.fetchall())
 

@@ -495,9 +495,43 @@ params.append(limit)
 |---|---|---|
 | `session_manager.py` SET clause (fix 1) | **Yes** | Column names from a caller-supplied dict — `sql.Identifier` prevents injection |
 | `project_manager.py` SET clause (fix 2) | **Yes** | Same reason |
+| `agent_manager.py` SET clause (fix 10 — see below) | **No** | Column names are hardcoded `if`-branch literals (`name`, `brain`, `model`, etc.), never caller-supplied. Same shape as fixes 1–2 but no injection surface. |
 | Everything else (fixes 3–9) | **Optional** | All injected fragments are hardcoded string literals chosen by `if` branches, not user input. Only values go through `%s`, which psycopg already parameterises safely. The `psycopg.sql` wrapper adds noise with no safety benefit. |
 
 Fixes 1 and 2 are the only ones with a real justification. The rest are purely cosmetic.
+
+---
+
+## Full codebase scan results
+
+Scan performed across all `.py` files under `src/` for:
+- f-string SQL construction (`f"...SELECT`, `f"...UPDATE`, etc.)
+- `query +=` / `sql +=` appends
+- `" AND ".join(...)` / `", ".join(...)` inside query strings
+
+### Files with dynamic SQL construction
+
+| File | Lines | Pattern | Safe? |
+|---|---|---|---|
+| `session_manager.py` | 265–279 | SET cols from caller dict via f-string | ⚠️ **Fix needed** (fix 1) |
+| `project_manager.py` | 218–251 | SET cols from `if` branches via f-string | ✅ Hardcoded col names |
+| `agent_manager.py` | 235–273 | SET cols from `if` branches via f-string | ✅ Hardcoded col names |
+| `entity_reader.py` | 163–213 | WHERE clause built from `if` branches | ✅ Hardcoded fragments |
+| `fact_reader.py` | 76–177 | Optional `AND` clause via f-string | ✅ Hardcoded fragment |
+| `graph_reader.py` | 141–198 | Optional `AND` clause via f-string | ✅ Hardcoded fragment |
+| `projection_rebuilder.py` | 221, 261, 306, 341 | Two-entry filter list joined in f-string | ✅ Hardcoded fragments, fixed count |
+| `core_utils.py` | 192–195 | `query +=` optional clause + ORDER BY | ✅ Hardcoded fragment |
+| `tool_queries.py` | 308, 504, 526, 595, 615 | `query +=` optional topic clause + ORDER BY | ✅ Hardcoded fragment |
+| `document_service.py` | 1968, 2096, 2258–2270, 2358–2373 | `query +=` optional clauses + suffix | ✅ Hardcoded fragments |
+
+### Files confirmed NOT SQL (false positives from scan)
+
+| File | Line | What it actually is |
+|---|---|---|
+| `agent/internals.py` | 534 | `"; ".join(validation_errors)` — error message string |
+| `agent/tools/search.py` | 1047 | `" ... ".join(extra_snippets)` — search result formatting |
+| `ingestion/services/pipeline_service.py` | various | NLP text assembly, no SQL |
+| `common/conf/topics_config.py` | various | Config text formatting, no SQL |
 
 ---
 

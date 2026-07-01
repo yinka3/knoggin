@@ -5,6 +5,8 @@ from enum import Enum
 from functools import partial
 from typing import Dict, List, Optional
 
+from psycopg import sql
+
 from loguru import logger
 
 from common.conf.manager import ConfigManager
@@ -270,17 +272,14 @@ class ProjectManager:
         if meta["status"] == ProjectStatus.DELETED.value:
             raise ValueError(f"Deleted project '{project_id}' cannot be updated")
 
-        updates = []
-        params = {"user_name": self.user_name, "project_id": project_id}
+        col_values = {}
 
         if name is not None:
             if not name.strip():
                 raise ValueError("update_project requires a non-empty project name")
-            updates.append("name = %(name)s")
-            params["name"] = name.strip()
+            col_values["name"] = name.strip()
         if description is not None:
-            updates.append("description = %(description)s")
-            params["description"] = description
+            col_values["description"] = description
 
         if allowed_projects is not None:
             active_state = self.active_projects.get(project_id)
@@ -294,16 +293,26 @@ class ProjectManager:
                 del self.active_projects[project_id]
 
             # Replace read scopes
-            await self.pg.execute("DELETE FROM public.project_read_scopes WHERE user_name = %(user_name)s AND project_id = %(project_id)s", params)
+            await self.pg.execute(
+                "DELETE FROM public.project_read_scopes WHERE user_name = %(user_name)s AND project_id = %(project_id)s",
+                {"user_name": self.user_name, "project_id": project_id},
+            )
             for allowed_id in validated_allowed:
                 await self.pg.execute("""
                     INSERT INTO public.project_read_scopes (user_name, project_id, readable_project_id)
                     VALUES (%(user_name)s, %(project_id)s, %(readable)s)
                 """, {"user_name": self.user_name, "project_id": project_id, "readable": allowed_id})
-        if updates:
-            updates.append("updated_at = now()")
-            set_clause = ", ".join(updates)
-            await self.pg.execute(f"UPDATE public.projects SET {set_clause} WHERE user_name = %(user_name)s AND project_id = %(project_id)s", params)
+
+        if col_values:
+            stmt = sql.SQL(
+                "UPDATE public.projects SET {fields}, updated_at = now()"
+                " WHERE user_name = %s AND project_id = %s"
+            ).format(
+                fields=sql.SQL(", ").join(
+                    sql.SQL("{} = %s").format(sql.Identifier(k)) for k in col_values
+                )
+            )
+            await self.pg.execute(stmt, [*col_values.values(), self.user_name, project_id])
 
         return await self.get_project(project_id)
 
