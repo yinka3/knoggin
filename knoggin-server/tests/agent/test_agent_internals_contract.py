@@ -64,7 +64,16 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
                 "tool": "search_entity",
                 "result": {"data": [{"id": 7, "canonical_name": "Ada"}]},
             },
-            {"tool": "save_memory", "result": {"data": {"saved": True}}},
+            {
+                "tool": "edit_brain",
+                "result": {
+                    "data": {
+                        "success": True,
+                        "section": "Project Context",
+                        "revision": 2,
+                    }
+                },
+            },
             {"tool": "fact_check", "result": {"data": []}},
             {"tool": "search_messages", "error": "boom"},
         ],
@@ -78,7 +87,8 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     assert "**Calls remaining:** 11" in message
     assert "**Last action rejected:** Duplicate call skipped" in message
     assert "`search_entity`: Found 1 items" in message
-    assert '`save_memory`: {\n  "saved": true\n}' in message
+    assert '`edit_brain`: {\n  "success": true,' in message
+    assert '"section": "Project Context"' in message
     assert "`fact_check`: No results found." in message
     assert "`search_messages`: Error - boom" in message
     assert "[HOT: Identity]" in message
@@ -274,9 +284,13 @@ def test_update_accumulators_ignores_errors_and_empty_results():
             ("Resolved via exact (2 matches)", 2),
         ),
         ("fact_check", {"data": []}, ("No results", 0)),
-        ("save_memory", {"data": {"saved": True}}, ("Memory updated", 1)),
-        ("forget_memory", {"data": {"forgotten": True}}, ("Memory updated", 1)),
-        ("search_documents", {"data": [{"id": "chunk"}]}, ("Found 1 relevant chunks", 1)),
+        ("edit_brain", {"data": {"success": True}}, ("Brain updated", 1)),
+        ("read_brain", {"data": {"content": "brain"}}, ("Brain loaded", 1)),
+        (
+            "search_documents",
+            {"data": [{"id": "chunk"}]},
+            ("Found 1 relevant chunks", 1),
+        ),
         ("search_documents", {"data": [{"error": "nope"}]}, ("No results", 0)),
         ("list_documents", {"data": [{"document_id": "doc-1"}]}, ("Found 1 items", 1)),
         (

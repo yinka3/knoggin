@@ -8,7 +8,7 @@ from common.scoping import IDENTITY_SCOPE
 from common.utils.time_utils import frozen_time
 from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.jobs.profile_job import ProfileRefinementJob
+from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -180,7 +180,7 @@ def patch_profile_events(monkeypatch):
     async def fake_emit(*args, **kwargs):
         events.append((args, kwargs))
 
-    monkeypatch.setattr("knoggin_server.knowledge.jobs.profile_job.emit", fake_emit)
+    monkeypatch.setattr("knoggin_server.ingestion.jobs.profile_job.emit", fake_emit)
     return events
 
 
@@ -289,7 +289,7 @@ def test_source_session_by_msg_id_maps_only_user_messages_with_session_id():
 async def test_execute_filters_dirty_ids_force_limit_clears_processed_and_merges(
     monkeypatch,
 ):
-    patch_profile_events(monkeypatch)
+    events = patch_profile_events(monkeypatch)
     redis = FakeRedis()
     dirty_key = RedisKeys.dirty_entities("ada", "project-1")
     await redis.sadd(dirty_key, "bad", "1", "2", "3", "4", "5", "6")
@@ -338,6 +338,39 @@ async def test_execute_filters_dirty_ids_force_limit_clears_processed_and_merges
     assert written_updates[1] == "project-1"
     assert await redis.smembers(dirty_key) == {"1", "6", "bad"}
     assert await redis.smembers(RedisKeys.merge_queue("ada", "project-1")) == {"2"}
+    assert [event[0][2] for event in events] == [
+        "profiles_refined",
+        "merge_queue_marked",
+        "dirty_entities_cleared",
+    ]
+    merge_event = events[1][0]
+    assert merge_event == (
+        "project-1",
+        "job",
+        "merge_queue_marked",
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "merge_key": RedisKeys.merge_queue("ada", "project-1"),
+            "entity_ids": ["2"],
+            "marked_count": 1,
+            "reason": "profile_refined",
+        },
+    )
+    clear_event = events[2][0]
+    assert clear_event == (
+        "project-1",
+        "job",
+        "dirty_entities_cleared",
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "dirty_key": dirty_key,
+            "entity_ids": ["2", "3", "4", "5"],
+            "cleared_count": 4,
+            "reason": "profile_processed",
+        },
+    )
     assert await redis.get(
         RedisKeys.project_profile_complete("ada", "project-1")
     ) == "1770091506.0"
@@ -535,7 +568,7 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
         )
 
     monkeypatch.setattr(
-        "knoggin_server.knowledge.jobs.profile_job."
+        "knoggin_server.ingestion.jobs.profile_job."
         "FactResolutionUtils.apply_fact_changes",
         fake_apply_fact_changes,
     )
@@ -797,11 +830,11 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
         )
 
     monkeypatch.setattr(
-        "knoggin_server.knowledge.jobs.profile_job.enrich_facts_with_sources",
+        "knoggin_server.ingestion.jobs.profile_job.enrich_facts_with_sources",
         fake_enrich_facts_with_sources,
     )
     monkeypatch.setattr(
-        "knoggin_server.knowledge.jobs.profile_job."
+        "knoggin_server.ingestion.jobs.profile_job."
         "FactResolutionUtils.apply_fact_changes",
         fake_apply_fact_changes,
     )
@@ -869,8 +902,17 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     ]
     assert [args[2] for args, _ in events] == [
         "llm_call",
+        "dirty_entities_marked",
         "user_profile_refined",
     ]
+    assert events[1][0][3] == {
+        "user_name": "ada",
+        "project_id": "project-1",
+        "dirty_key": RedisKeys.dirty_entities("ada", "project-1"),
+        "entity_ids": [1],
+        "marked_count": 1,
+        "reason": "fact_invalidation_failed",
+    }
     assert events[-1][0][3] == {
         "user_name": "ada",
         "facts_invalidated": 1,

@@ -1677,7 +1677,7 @@ async def test_accept_folder_preparation_failure_leaves_no_state(
 ):
     service, postgres, storage_root = document_harness
 
-    with pytest.raises(UnicodeDecodeError):
+    with pytest.raises(ValueError, match="valid UTF-8"):
         await service.accept_folder(
             folder_name="repo",
             entries=[

@@ -4,6 +4,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -234,6 +235,44 @@ class FakeRedis:
         if not self.lists.get(key):
             return None
         return self.lists[key].pop(0)
+
+    async def lmove(self, source, destination, src="LEFT", dest="RIGHT"):
+        self._purge_expired(source)
+        self._purge_expired(destination)
+        if not self.lists.get(source):
+            return None
+        src = str(src).upper()
+        dest = str(dest).upper()
+        value = (
+            self.lists[source].pop(0)
+            if src == "LEFT"
+            else self.lists[source].pop()
+        )
+        if dest == "LEFT":
+            self.lists[destination].insert(0, value)
+        else:
+            self.lists[destination].append(value)
+        return value
+
+    async def lrem(self, key, count, value):
+        self._purge_expired(key)
+        items = self.lists.get(key, [])
+        if count == 0:
+            removed = items.count(value)
+            self.lists[key] = [item for item in items if item != value]
+            return removed
+
+        remaining = []
+        removed = 0
+        limit = abs(int(count))
+        iterable = items if count > 0 else list(reversed(items))
+        for item in iterable:
+            if item == value and removed < limit:
+                removed += 1
+                continue
+            remaining.append(item)
+        self.lists[key] = remaining if count > 0 else list(reversed(remaining))
+        return removed
 
     async def llen(self, key):
         self._purge_expired(key)
@@ -468,11 +507,19 @@ class FakePostgresClient:
         self.read_results = []
         self.write_count = 1
         self.calls = []
+        self.agents: dict[str, dict[str, Any]] = {}
+        self.projects: dict[str, dict[str, Any]] = {}
+        self.project_read_scopes: dict[tuple[str, str], set[str]] = defaultdict(set)
+        self.sessions: dict[str, dict[str, Any]] = {}
+        self.messages: list[dict[str, Any]] = []
 
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
         if not self.read_results:
-            return []
+            inserted = self._fetch_write_against_stores(query, params or {})
+            if inserted is not None:
+                return inserted
+            return self._fetch_from_stores(query, params or {})
         return self.read_results.pop(0)
 
     async def fetch_one(self, query, params=None):
@@ -486,7 +533,340 @@ class FakePostgresClient:
 
     async def execute(self, query, params=None):
         self.calls.append(("execute", query, params))
+        self._execute_against_stores(query, params or {})
         return self.write_count
+
+    @staticmethod
+    def _now():
+        return datetime.now(timezone.utc)
+
+    def upsert_agent(self, agent):
+        data = agent.to_dict() if hasattr(agent, "to_dict") else dict(agent)
+        self.agents[data["id"]] = {
+            "agent_id": data["id"],
+            "user_name": data.get("user_name", "ada"),
+            "name": data["name"],
+            "persona": data.get("persona_markdown") or data.get("persona"),
+            "brain": data.get("brain"),
+            "model": data.get("model"),
+            "temperature": data.get("temperature", 0.7),
+            "enabled_tools": data.get("enabled_tools"),
+            "is_default": data.get("is_default", False),
+            "is_spawned": data.get("is_spawned", False),
+            "spawned_by": data.get("spawned_by"),
+            "brain_revision": data.get("brain_revision", 1),
+            "created_at": data.get("created_at", get_now_iso()),
+        }
+
+    def upsert_project(self, project_id, status="active", user_name="ada"):
+        self.projects[project_id] = {
+            "project_id": project_id,
+            "user_name": user_name,
+            "name": project_id,
+            "description": None,
+            "access_mode": "open",
+            "status": status,
+            "topic_config": {},
+            "created_at": self._now(),
+            "updated_at": self._now(),
+            "archived_at": None,
+            "deleted_at": None,
+            "last_activity_at": None,
+        }
+
+    def _project_row(self, row):
+        result = dict(row)
+        key = (row.get("user_name"), row.get("project_id"))
+        result["session_count"] = sum(
+            1
+            for session in self.sessions.values()
+            if session.get("project_id") == row.get("project_id")
+        )
+        result["allowed_projects"] = sorted(
+            self.project_read_scopes.get(key, set())
+        )
+        return result
+
+    def _fetch_write_against_stores(self, query, params):
+        normalized = " ".join(query.lower().split())
+        if "insert into public.projects" in normalized:
+            project_id = params.get("project_id")
+            if not project_id:
+                return []
+            now = self._now()
+            self.projects[project_id] = {
+                "project_id": project_id,
+                "user_name": params.get("user_name"),
+                "name": params.get("name"),
+                "description": params.get("description"),
+                "access_mode": params.get("access_mode", "open"),
+                "status": params.get("status", "active"),
+                "topic_config": json.loads(params["topic_config"])
+                if isinstance(params.get("topic_config"), str)
+                else params.get("topic_config", {}),
+                "created_at": now,
+                "updated_at": now,
+                "archived_at": None,
+                "deleted_at": None,
+                "last_activity_at": None,
+            }
+            return [{"created_at": now, "updated_at": now}]
+        return None
+
+    def _fetch_from_stores(self, query, params):
+        normalized = " ".join(query.lower().split())
+        if "from public.projects" in normalized:
+            rows = [
+                self._project_row(row)
+                for row in sorted(
+                    self.projects.values(),
+                    key=lambda item: item["project_id"],
+                )
+                if row.get("user_name") == params.get("user_name")
+            ]
+            if "and p.project_id = %(project_id)s" in normalized:
+                rows = [
+                    row
+                    for row in rows
+                    if row.get("project_id") == params.get("project_id")
+                ]
+            elif "and project_id = any(%(requested)s)" in normalized:
+                requested = set(params.get("requested") or [])
+                rows = [
+                    row for row in rows if row.get("project_id") in requested
+                ]
+            elif "and project_id = any(%(allowed)s)" in normalized:
+                allowed = set(params.get("allowed") or [])
+                rows = [
+                    {"project_id": row["project_id"]}
+                    for row in rows
+                    if row.get("project_id") in allowed
+                    and row.get("status") in {"active", "archived"}
+                ]
+            elif "status in ('active', 'archived')" in normalized:
+                rows = [
+                    {"project_id": row["project_id"]}
+                    for row in rows
+                    if row.get("status") in {"active", "archived"}
+                ]
+            return rows[:1] if "limit 1" in normalized else rows
+
+        if "from public.sessions" in normalized:
+            rows = [
+                dict(row)
+                for row in self.sessions.values()
+                if row.get("user_name") == params.get("user_name")
+            ]
+            if "session_id = %(session_id)s" in normalized:
+                rows = [
+                    row
+                    for row in rows
+                    if row.get("session_id") == params.get("session_id")
+                ]
+            return rows[:1] if "limit 1" in normalized else rows
+
+        if "from public.messages" in normalized:
+            rows = [
+                {
+                    "message_id": row["message_id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "timestamp": row["timestamp_ms"],
+                }
+                for row in self.messages
+                if row.get("user_name") == params.get("user_name")
+                and row.get("session_id") == params.get("session_id")
+            ]
+            rows.sort(key=lambda row: row["message_id"])
+            limit = params.get("limit")
+            return rows[: int(limit)] if limit else rows
+
+        if "from public.agents" not in normalized:
+            return []
+
+        rows = [
+            dict(row)
+            for row in self.agents.values()
+            if row.get("user_name") == params.get("user_name")
+        ]
+        if "and agent_id = %(agent_id)s" in normalized:
+            rows = [
+                row for row in rows if row["agent_id"] == params.get("agent_id")
+            ]
+        elif "lower(name) = lower(%(name)s)" in normalized:
+            wanted = str(params.get("name", "")).lower()
+            rows = [row for row in rows if row["name"].lower() == wanted]
+        elif "is_default = true" in normalized:
+            rows = [row for row in rows if row.get("is_default")]
+        elif "agent_id = any(%(agent_ids)s)" in normalized:
+            ids = set(params.get("agent_ids") or [])
+            rows = [row for row in rows if row["agent_id"] in ids]
+            if "count(*)" in normalized:
+                return [
+                    {
+                        "count": sum(
+                            1 for row in rows if row.get("is_spawned")
+                        )
+                    }
+                ]
+        return rows[:1] if "limit 1" in normalized else rows
+
+    def _execute_against_stores(self, query, params):
+        normalized = " ".join(query.lower().split())
+        if "insert into public.project_read_scopes" in normalized:
+            key = (params.get("user_name"), params.get("project_id"))
+            self.project_read_scopes[key].add(params.get("readable"))
+            return
+
+        if "delete from public.project_read_scopes" in normalized:
+            key = (params.get("user_name"), params.get("project_id"))
+            self.project_read_scopes.pop(key, None)
+            return
+
+        if "insert into public.sessions" in normalized:
+            session_id = params.get("session_id")
+            if not session_id:
+                return
+            now = self._now()
+            self.sessions[session_id] = {
+                "session_id": session_id,
+                "user_name": params.get("user_name"),
+                "project_id": params.get("project_id"),
+                "model": params.get("model"),
+                "agent_id": params.get("agent_id"),
+                "enabled_tools": json.loads(params["enabled_tools"])
+                if isinstance(params.get("enabled_tools"), str)
+                else params.get("enabled_tools"),
+                "document_focus": None,
+                "status": "open",
+                "created_at": now,
+                "last_active_at": now,
+                "deleted_at": None,
+            }
+            return
+
+        if "update public.sessions" in normalized:
+            row = self.sessions.get(params.get("session_id"))
+            if not row:
+                return
+            if "document_focus = null" in normalized:
+                row["document_focus"] = None
+            elif "document_focus = %(focus)s" in normalized:
+                focus = params.get("focus")
+                row["document_focus"] = (
+                    json.loads(focus) if isinstance(focus, str) else focus
+                )
+            if "last_active_at = now()" in normalized:
+                row["last_active_at"] = self._now()
+            for field in ("model", "agent_id", "enabled_tools"):
+                if field in params:
+                    value = params[field]
+                    if field == "enabled_tools" and isinstance(value, str):
+                        value = json.loads(value)
+                    row[field] = value
+            return
+
+        if "delete from public.messages" in normalized:
+            self.messages = [
+                row
+                for row in self.messages
+                if not (
+                    row.get("user_name") == params.get("user_name")
+                    and row.get("session_id") == params.get("session_id")
+                    and (
+                        "message_id = %(message_id)s" not in normalized
+                        or row.get("message_id") == params.get("message_id")
+                    )
+                )
+            ]
+            return
+
+        if "delete from public.sessions" in normalized:
+            self.sessions.pop(params.get("session_id"), None)
+            return
+
+        if "delete from public.projects" in normalized:
+            project_id = params.get("project_id")
+            self.projects.pop(project_id, None)
+            self.sessions = {
+                session_id: row
+                for session_id, row in self.sessions.items()
+                if row.get("project_id") != project_id
+            }
+            self.messages = [
+                row
+                for row in self.messages
+                if row.get("project_id") != project_id
+            ]
+            return
+
+        if "update public.projects" in normalized:
+            row = self.projects.get(params.get("project_id"))
+            if not row:
+                return
+            for field in ("name", "description", "status", "topic_config"):
+                if field in params:
+                    value = params[field]
+                    if field == "topic_config" and isinstance(value, str):
+                        value = json.loads(value)
+                    row[field] = value
+            if "archived_at = now()" in normalized:
+                row["archived_at"] = self._now()
+            if "archived_at = null" in normalized:
+                row["archived_at"] = None
+            if "deleted_at = now()" in normalized:
+                row["deleted_at"] = self._now()
+            row["updated_at"] = self._now()
+            return
+
+        if "insert into public.agents" in normalized:
+            agent_id = params.get("agent_id")
+            if not agent_id:
+                return
+            self.agents[agent_id] = {
+                "agent_id": agent_id,
+                "user_name": params.get("user_name"),
+                "project_id": params.get("project_id"),
+                "name": params.get("name"),
+                "persona": params.get("persona"),
+                "brain": params.get("brain"),
+                "model": params.get("model"),
+                "temperature": params.get("temperature", 0.7),
+                "enabled_tools": json.loads(params["enabled_tools"])
+                if isinstance(params.get("enabled_tools"), str)
+                else params.get("enabled_tools"),
+                "is_default": "%(enabled_tools)s, true" in normalized,
+                "is_spawned": "true, %(spawned_by)s" in normalized,
+                "spawned_by": params.get("spawned_by"),
+                "brain_revision": 1,
+                "created_at": get_now_iso(),
+            }
+            return
+
+        if "update public.agents" in normalized:
+            if "set is_default = false" in normalized:
+                for row in self.agents.values():
+                    if row.get("user_name") == params.get("user_name"):
+                        row["is_default"] = False
+                return
+            agent_id = params.get("agent_id")
+            row = self.agents.get(agent_id)
+            if not row:
+                return
+            for field in ("name", "brain", "model", "temperature", "enabled_tools"):
+                if field in params:
+                    value = params[field]
+                    if field == "enabled_tools" and isinstance(value, str):
+                        value = json.loads(value)
+                    row[field] = value
+            if "brain_revision = brain_revision + 1" in normalized:
+                row["brain_revision"] += 1
+            if "set is_default = true" in normalized:
+                row["is_default"] = True
+            return
+
+        if "delete from public.agents" in normalized:
+            self.agents.pop(params.get("agent_id"), None)
 
 
 @dataclass

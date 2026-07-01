@@ -41,7 +41,9 @@ def knowledge_store(monkeypatch):
 
         return Component
 
-    monkeypatch.setattr(knowledge_store_module, "PostgresClient", RecordingPostgresClient)
+    monkeypatch.setattr(
+        knowledge_store_module, "PostgresClient", RecordingPostgresClient
+    )
     monkeypatch.setattr(
         knowledge_store_module, "IdAllocator", component_factory("id_allocator")
     )
@@ -55,6 +57,11 @@ def knowledge_store(monkeypatch):
         knowledge_store_module, "GraphWriter", component_factory("graph_writer")
     )
     monkeypatch.setattr(
+        knowledge_store_module,
+        "MergeAuditWriter",
+        component_factory("merge_audit_writer"),
+    )
+    monkeypatch.setattr(
         knowledge_store_module, "EntityReader", component_factory("entity_reader")
     )
     monkeypatch.setattr(
@@ -63,7 +70,14 @@ def knowledge_store(monkeypatch):
     monkeypatch.setattr(
         knowledge_store_module, "GraphReader", component_factory("graph_reader")
     )
-    monkeypatch.setattr(knowledge_store_module, "ToolQueries", component_factory("tools"))
+    monkeypatch.setattr(
+        knowledge_store_module,
+        "MergeAuditReader",
+        component_factory("merge_audit_reader"),
+    )
+    monkeypatch.setattr(
+        knowledge_store_module, "ToolQueries", component_factory("tools")
+    )
     monkeypatch.setattr(
         knowledge_store_module,
         "ProjectionRebuilder",
@@ -99,6 +113,8 @@ async def test_knowledge_store_connect_and_close_delegate_to_postgres(knowledge_
 
 @pytest.mark.storage
 @pytest.mark.no_network
+@pytest.mark.storage
+@pytest.mark.no_network
 def test_knowledge_store_community_property(knowledge_store):
     client, components = knowledge_store
     assert client.community is components["community"]
@@ -121,6 +137,12 @@ def test_knowledge_store_community_property(knowledge_store):
             {"project_id": "test", "final_topic": "Projects"},
         ),
         ("delete_relationship", "graph_writer", (1, 2), {"project_id": "test"}),
+        (
+            "expire_merge_rollback_states",
+            "merge_audit_writer",
+            ("2026-01-01T05:00:00+00:00",),
+            {"user_name": "ada", "project_id": "project-1"},
+        ),
         (
             "rebuild_project_projection",
             "projection_rebuilder",
@@ -492,6 +514,7 @@ async def test_knowledge_store_facade_delegates_correctly(
 
     # Verify the facade routed the call to the expected storage component.
     component_method_name = {
+        "expire_merge_rollback_states": "expire_rollback_states",
         "rebuild_project_search_indexes": "rebuild_project_indexes",
     }.get(method_name, method_name)
     assert result == f"{component_method_name}-result"

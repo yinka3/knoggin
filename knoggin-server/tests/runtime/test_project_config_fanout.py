@@ -107,6 +107,10 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         lambda **kwargs: RecordingJob("fact_archival", **kwargs),
     )
     monkeypatch.setattr(
+        "knoggin_server.project.project_manager.MergeRollbackCleanupJob",
+        lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
+    )
+    monkeypatch.setattr(
         "knoggin_server.project.project_manager.AACJob",
         lambda state, deps: RecordingJob(
             "aac_discussion",
@@ -127,6 +131,7 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "dlq_auto_replay",
         "entity_cleanup",
         "fact_archival",
+        "merge_rollback_cleanup",
         "aac_discussion",
     ]
     assert [path for _, path in config_manager.subscriptions] == [
@@ -136,8 +141,9 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "developer_settings.jobs.dlq",
         "developer_settings.jobs.cleaner",
         "developer_settings.jobs.archival",
+        "developer_settings.jobs.merge_rollback",
     ]
-    assert len(project_state.unsubscribers) == 6
+    assert len(project_state.unsubscribers) == 7
 
 
 @pytest.mark.runtime
@@ -177,6 +183,10 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         lambda **kwargs: RecordingJob("fact_archival", **kwargs),
     )
     monkeypatch.setattr(
+        "knoggin_server.project.project_manager.MergeRollbackCleanupJob",
+        lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
+    )
+    monkeypatch.setattr(
         "knoggin_server.project.project_manager.AACJob",
         lambda *_: RecordingJob("aac_discussion"),
     )
@@ -189,6 +199,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     config_manager.emit("developer_settings.jobs.dlq", marker)
     config_manager.emit("developer_settings.jobs.cleaner", marker)
     config_manager.emit("developer_settings.jobs.archival", marker)
+    config_manager.emit("developer_settings.jobs.merge_rollback", marker)
 
     assert entities.updates[-1] is marker
     assert processor.updates[-2:] == [marker, marker]
@@ -196,5 +207,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     assert state.scheduler._jobs["dlq_auto_replay"].updates[-1] is marker
     assert state.scheduler._jobs["entity_cleanup"].updates[-1] is marker
     assert state.scheduler._jobs["fact_archival"].updates[-1] is marker
+    assert state.scheduler._jobs["merge_rollback_cleanup"].updates[-1] is marker
     assert "merge_detection" not in state.scheduler._jobs
     assert "topic_config" not in state.scheduler._jobs

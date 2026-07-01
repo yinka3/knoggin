@@ -18,6 +18,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     redis_client = object()
     redis_instances = []
     event_calls = []
+    configure_coordination_log = MagicMock()
 
     class FakeConfigManager:
         def __init__(self):
@@ -33,7 +34,12 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 
         def subscribe(self, callback, path=None):
             subscribe_calls.append((callback, path))
-            callback(self.config.llm)
+            if path == "llm":
+                callback(self.config.llm)
+            elif path == "developer_settings.coordination_log":
+                callback(self.config.developer_settings.coordination_log)
+            else:
+                raise AssertionError(f"unexpected subscription path: {path}")
 
             def unsubscribe():
                 unsubscribe_calls.append(path)
@@ -141,6 +147,11 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
         "get",
         staticmethod(lambda: FakeCommunityEmitter()),
     )
+    monkeypatch.setattr(
+        resources_module,
+        "configure_coordination_log",
+        configure_coordination_log,
+    )
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -162,12 +173,19 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     assert manager.postgres is manager.knowledge_store.postgres
     assert manager.document_storage_root == (tmp_path / "documents").resolve()
     assert manager.document_storage_root.is_dir()
-    assert subscribe_calls == [(manager.llm_service.update_settings, "llm")]
+    assert subscribe_calls == [
+        (configure_coordination_log, "developer_settings.coordination_log"),
+        (manager.llm_service.update_settings, "llm"),
+    ]
+    assert configure_coordination_log.call_args_list == [
+        ((fake_config.config.developer_settings.coordination_log,),),
+        ((fake_config.config.developer_settings.coordination_log,),),
+    ]
     assert manager.llm_service.updated_settings == [fake_config.config.llm]
 
     await manager.shutdown()
 
-    assert unsubscribe_calls == ["llm"]
+    assert unsubscribe_calls == ["developer_settings.coordination_log", "llm"]
     assert redis_instances[0].closed is True
     assert event_calls == [
         ("bind", redis_client),

@@ -1,6 +1,5 @@
 import pytest
 
-from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.services.agent_manager import AgentManager
 from tests.fixtures.fakes import FakeResources
 
@@ -21,18 +20,18 @@ async def test_agent_manager_seeds_default_agent_when_listing_empty(manager):
     assert len(agents) == 1
     assert agents[0].name == "STELLA"
     assert agents[0].is_default is True
-    assert await resources.redis.get(RedisKeys.agents_default("ada")) == agents[0].id
+    assert resources.postgres.agents[agents[0].id]["is_default"] is True
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_agent_manager_create_update_and_lookup_preserves_config(manager):
-    agent_manager, _ = manager
+    agent_manager, resources = manager
 
     created = await agent_manager.create_agent(
         name="Researcher",
         persona="Careful",
-        instructions="Use sources",
+        brain="Use sources",
         model="test-model",
         temperature=0.2,
         enabled_tools=["search_entity"],
@@ -49,6 +48,13 @@ async def test_agent_manager_create_update_and_lookup_preserves_config(manager):
     assert updated.temperature == 0.4
     assert updated.enabled_tools == ["fact_check"]
     assert fetched.id == created.id
+    create_snapshot_write = next(
+        call
+        for call in resources.postgres.calls
+        if call[0] == "execute"
+        and "INSERT INTO public.agent_brain_snapshots" in call[1]
+    )
+    assert create_snapshot_write[2]["brain"]
 
 
 @pytest.mark.runtime

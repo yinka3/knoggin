@@ -137,11 +137,20 @@ class ArchivalSettings(BaseModel):
     fallback_interval_hours: float = Field(24.0, ge=0.5)
 
 
+class MergeRollbackSettings(BaseModel):
+    enabled: bool = Field(True)
+    retention_hours: float = Field(5.0, ge=0.5)
+    fallback_interval_hours: float = Field(1.0, ge=0.25)
+
+
 class JobSettings(BaseModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     profile: ProfileSettings = Field(default_factory=ProfileSettings)
     dlq: DLQSettings = Field(default_factory=DLQSettings)
     archival: ArchivalSettings = Field(default_factory=ArchivalSettings)
+    merge_rollback: MergeRollbackSettings = Field(
+        default_factory=MergeRollbackSettings
+    )
 
 
 class TopicEvaluationSettings(BaseModel):
@@ -167,7 +176,10 @@ class AgentLimitSettings(BaseModel):
             "get_hierarchy": 8,
             "fact_check": 6,
             "read_brain": 4,
+            "list_brain_snapshots": 4,
+            "read_brain_snapshot": 4,
             "edit_brain": 2,
+            "restore_brain_section": 2,
             "list_documents": 4,
             "search_documents": 3,
             "list_folder_uploads": 3,
@@ -275,6 +287,13 @@ class CommunitySettings(BaseModel):
     project_ids: List[str] = Field(default_factory=list)
 
 
+class CoordinationLogSettings(BaseModel):
+    enabled: bool = Field(True)
+    path: str = Field("logs/coordination.log", min_length=1)
+    retention_days: int = Field(14, ge=1)
+    rotation_mb: int = Field(10, ge=1)
+
+
 class DeveloperSettings(BaseModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
@@ -288,6 +307,9 @@ class DeveloperSettings(BaseModel):
     nlp_pipeline: TextProcessorSettings = Field(default_factory=TextProcessorSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
     community: CommunitySettings = Field(default_factory=CommunitySettings)
+    coordination_log: CoordinationLogSettings = Field(
+        default_factory=CoordinationLogSettings
+    )
 
 
 class RootConfig(BaseModel):

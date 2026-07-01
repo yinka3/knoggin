@@ -10,13 +10,11 @@ from common.schema.primitives import FactRecord
 from common.schema.settings import ProfileSettings
 from common.scoping import IDENTITY_SCOPE
 from common.utils.core_utils import format_vp04_input
-from common.utils.data_utils import (
-    process_extracted_facts,
-)
+from common.utils.data_utils import process_extracted_facts
 from common.utils.events import emit
 from common.utils.time_utils import get_now_unix, parse_iso_time_or_now
-from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.llm_client import LLMService
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.prompts import (
@@ -381,6 +379,19 @@ class ProfileRefinementJob(BaseJob):
 
                         if updated_ids:
                             await self.redis.sadd(merge_queue, *updated_ids)
+                            await emit(
+                                ctx.project_id,
+                                "job",
+                                "merge_queue_marked",
+                                {
+                                    "user_name": ctx.user_name,
+                                    "project_id": ctx.project_id,
+                                    "merge_key": merge_queue,
+                                    "entity_ids": updated_ids,
+                                    "marked_count": len(updated_ids),
+                                    "reason": "profile_refined",
+                                },
+                            )
                             logger.info(
                                 f"Passed {len(updated_ids)} updated entities "
                                 "to Merge Queue"
@@ -406,6 +417,19 @@ class ProfileRefinementJob(BaseJob):
 
                 if processed_ids:
                     await self.redis.srem(dirty_key, *processed_ids)
+                    await emit(
+                        ctx.project_id,
+                        "job",
+                        "dirty_entities_cleared",
+                        {
+                            "user_name": ctx.user_name,
+                            "project_id": ctx.project_id,
+                            "dirty_key": dirty_key,
+                            "entity_ids": processed_ids,
+                            "cleared_count": len(processed_ids),
+                            "reason": "profile_processed",
+                        },
+                    )
                     logger.debug(
                         f"Cleared {len(processed_ids)} entities from dirty queue"
                     )
@@ -552,6 +576,19 @@ class ProfileRefinementJob(BaseJob):
         if fact_summary.failed_invalidations:
             dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
             await self.redis.sadd(dirty_key, str(user_id))
+            await emit(
+                ctx.project_id,
+                "job",
+                "dirty_entities_marked",
+                {
+                    "user_name": ctx.user_name,
+                    "project_id": ctx.project_id,
+                    "dirty_key": dirty_key,
+                    "entity_ids": [user_id],
+                    "marked_count": 1,
+                    "reason": "fact_invalidation_failed",
+                },
+            )
             logger.warning(
                 f"Re-dirtied user entity {user_id}: {len(fact_summary.failed_invalidations)} invalidations failed"
             )
@@ -700,6 +737,19 @@ class ProfileRefinementJob(BaseJob):
                 if fact_summary.failed_invalidations:
                     dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
                     await self.redis.sadd(dirty_key, str(orig["ent_id"]))
+                    await emit(
+                        ctx.project_id,
+                        "job",
+                        "dirty_entities_marked",
+                        {
+                            "user_name": ctx.user_name,
+                            "project_id": ctx.project_id,
+                            "dirty_key": dirty_key,
+                            "entity_ids": [orig["ent_id"]],
+                            "marked_count": 1,
+                            "reason": "fact_invalidation_failed",
+                        },
+                    )
                     logger.warning(
                         f"Re-dirtied entity {orig['ent_id']}: {len(fact_summary.failed_invalidations)} invalidations failed"
                     )

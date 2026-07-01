@@ -1,6 +1,5 @@
 import re
-from typing import Dict, Mapping
-
+from typing import Dict, Mapping, Optional
 
 EDITABLE_BRAIN_SECTIONS = (
     "Behavioral Directives",
@@ -11,6 +10,12 @@ SELF_CONCEPTION_SECTION = "Self-Conception"
 REQUIRED_BRAIN_SECTIONS = (SELF_CONCEPTION_SECTION, *EDITABLE_BRAIN_SECTIONS)
 MAX_BRAIN_SECTION_CHARS = 4000
 MAX_BRAIN_CHARS = 12000
+BRAIN_SNAPSHOT_INTERVAL = 5
+MAX_BRAIN_CHANGE_NOTE_CHARS = 120
+BRAIN_SNAPSHOT_POLICY = (
+    "Full Brain snapshots are stored at revision 1, every "
+    f"{BRAIN_SNAPSHOT_INTERVAL} revisions, and every restore."
+)
 
 PERSONA_FIELDS = (
     ("attention_bias", "Attention Bias"),
@@ -128,3 +133,62 @@ def replace_brain_section(markdown: str, section: str, content: str) -> str:
     if len(updated) > MAX_BRAIN_CHARS:
         raise ValueError(f"Brain exceeds {MAX_BRAIN_CHARS} characters")
     return updated
+
+
+def extract_brain_section(markdown: str, section: str) -> str:
+    """Return the body of one editable Brain section."""
+    if section not in EDITABLE_BRAIN_SECTIONS:
+        allowed = ", ".join(EDITABLE_BRAIN_SECTIONS)
+        raise ValueError(f"Section is not agent-editable. Allowed sections: {allowed}")
+
+    heading = f"# {section}"
+    heading_match = re.search(rf"(?m)^{re.escape(heading)}\s*$", markdown)
+    if not heading_match:
+        raise ValueError(f"Brain is missing required section: {section}")
+
+    remainder = markdown[heading_match.end() :]
+    next_heading = re.search(r"(?m)^#\s+", remainder)
+    section_end = (
+        heading_match.end() + next_heading.start()
+        if next_heading
+        else len(markdown)
+    )
+    return markdown[heading_match.end() : section_end].strip()
+
+
+def should_snapshot_brain_revision(revision: int) -> bool:
+    return revision == 1 or revision % BRAIN_SNAPSHOT_INTERVAL == 0
+
+
+def clean_brain_change_note(change_note: Optional[str]) -> Optional[str]:
+    note = (change_note or "").strip()
+    if not note:
+        return None
+    note = re.sub(r"\s+", " ", note)
+    return note[:MAX_BRAIN_CHANGE_NOTE_CHARS]
+
+
+def build_brain_snapshot_summary(
+    change_type: str,
+    *,
+    section: Optional[str] = None,
+    restored_from_revision: Optional[int] = None,
+    change_note: Optional[str] = None,
+) -> str:
+    if change_type == "initial_seed":
+        base = "Initial Brain"
+    elif change_type == "specialist_spawn":
+        base = "Spawned specialist Brain"
+    elif change_type == "section_edit" and section:
+        base = f"Edited {section}"
+    elif change_type == "section_restore" and section and restored_from_revision:
+        base = f"Restored {section} from snapshot {restored_from_revision}"
+    elif change_type == "full_user_update":
+        base = "User updated full Brain"
+    else:
+        base = "Brain snapshot"
+
+    note = clean_brain_change_note(change_note)
+    if note:
+        return f"{base}: {note}"
+    return base

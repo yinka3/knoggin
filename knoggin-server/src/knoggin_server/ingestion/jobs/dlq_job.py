@@ -9,8 +9,19 @@ from common.schema.contracts import BatchResult, EngineScope, EngineWorkUnit
 from common.schema.settings import DLQSettings
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now_unix
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
+from knoggin_server.ingestion.dlq_state import (
+    DLQ_STATUS_COMPLETED,
+    DLQ_STATUS_PARKED,
+    DLQ_STATUS_PROCESSING,
+    DLQ_STATUS_QUEUED,
+    TERMINAL_DLQ_STATUSES,
+    compute_dlq_id,
+    ensure_dlq_id,
+    serialize_dlq_entry,
+)
 from knoggin_server.ingestion.services.pipeline_service import (
     BatchProcessor,
 )
@@ -51,6 +62,7 @@ class DLQReplayJob(BaseJob):
         "access timeout",
         "TransientError",
     ]
+    CLAIM_TTL_SECONDS = 15 * 60
 
     def __init__(
         self,
@@ -65,7 +77,9 @@ class DLQReplayJob(BaseJob):
         self.entities = entities
         self.processor = processor
         if self.processor.knowledge_store is None:
-            raise ValueError("DLQReplayJob requires a BatchProcessor with knowledge_store")
+            raise ValueError(
+                "DLQReplayJob requires a BatchProcessor with knowledge_store"
+            )
         self.write_to_graph = write_to_graph
         self.redis = redis_client
         self.interval = interval
@@ -85,6 +99,184 @@ class DLQReplayJob(BaseJob):
 
     def _is_transient(self, error: str) -> bool:
         return any(t.lower() in error.lower() for t in self.TRANSIENT_ERRORS)
+
+    async def remark_dirty_entities(
+        self, user_name: str, project_id: str, entity_ids: list[int | str]
+    ) -> int:
+        if not entity_ids:
+            return 0
+        return await self.redis.sadd(
+            RedisKeys.dirty_entities(user_name, project_id),
+            *[str(entity_id) for entity_id in entity_ids],
+        )
+
+    async def remark_merge_candidates(
+        self, user_name: str, project_id: str, entity_ids: list[int | str]
+    ) -> int:
+        if not entity_ids:
+            return 0
+        return await self.redis.sadd(
+            RedisKeys.merge_queue(user_name, project_id),
+            *[str(entity_id) for entity_id in entity_ids],
+        )
+
+    async def requeue_parked_dlq_item(
+        self, user_name: str, project_id: str, dlq_id: str
+    ) -> bool:
+        park_key = RedisKeys.dlq_parked(user_name, project_id)
+        dlq_key = RedisKeys.dlq(user_name, project_id)
+        state_key = RedisKeys.dlq_state(user_name, project_id)
+        if await self.redis.hget(state_key, dlq_id) != DLQ_STATUS_PARKED:
+            return False
+
+        raw_items = await self.redis.lrange(park_key, 0, -1)
+        for raw_item in raw_items:
+            entry = self._decode_entry(raw_item)
+            if not entry or ensure_dlq_id(entry) != dlq_id:
+                continue
+            await self.redis.lrem(park_key, 1, raw_item)
+            await self.redis.hset(state_key, dlq_id, DLQ_STATUS_QUEUED)
+            await self.redis.rpush(dlq_key, serialize_dlq_entry(entry))
+            return True
+        return False
+
+    def _decode_entry(self, raw_item: str) -> Optional[dict]:
+        entry = safe_json_loads(raw_item)
+        return entry if isinstance(entry, dict) else None
+
+    def _corrupt_dlq_id(self, raw_item: str) -> str:
+        return compute_dlq_id(
+            {
+                "user_name": "corrupt",
+                "project_id": "corrupt",
+                "session_id": raw_item,
+                "stage": "corrupt",
+            }
+        )
+
+    async def _requeue_abandoned_claims(self, ctx: JobContext) -> int:
+        processing_key = RedisKeys.dlq_processing(ctx.user_name, ctx.project_id)
+        dlq_key = RedisKeys.dlq(ctx.user_name, ctx.project_id)
+        state_key = RedisKeys.dlq_state(ctx.user_name, ctx.project_id)
+        claims_key = RedisKeys.dlq_claims(ctx.user_name, ctx.project_id)
+        now = get_now_unix()
+        requeued = 0
+
+        for raw_item in await self.redis.lrange(processing_key, 0, -1):
+            entry = self._decode_entry(raw_item)
+            dlq_id = ensure_dlq_id(entry) if entry else self._corrupt_dlq_id(raw_item)
+            claim = self._decode_entry(await self.redis.hget(claims_key, dlq_id) or "")
+            claimed_at = float(claim.get("claimed_at", 0)) if claim else 0
+            state = await self.redis.hget(state_key, dlq_id)
+            if state in TERMINAL_DLQ_STATUSES:
+                await self.redis.lrem(processing_key, 1, raw_item)
+                continue
+            if claim and now - claimed_at <= self.CLAIM_TTL_SECONDS:
+                continue
+
+            await self.redis.lrem(processing_key, 1, raw_item)
+            await self.redis.hdel(claims_key, dlq_id)
+            await self.redis.hset(state_key, dlq_id, DLQ_STATUS_QUEUED)
+            await self.redis.rpush(
+                dlq_key, serialize_dlq_entry(entry) if entry else raw_item
+            )
+            requeued += 1
+        return requeued
+
+    async def _claim_next(
+        self, ctx: JobContext
+    ) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+        dlq_key = RedisKeys.dlq(ctx.user_name, ctx.project_id)
+        processing_key = RedisKeys.dlq_processing(ctx.user_name, ctx.project_id)
+        state_key = RedisKeys.dlq_state(ctx.user_name, ctx.project_id)
+        claims_key = RedisKeys.dlq_claims(ctx.user_name, ctx.project_id)
+
+        while True:
+            raw_item = await self.redis.lmove(
+                dlq_key, processing_key, "LEFT", "RIGHT"
+            )
+            if not raw_item:
+                return None, None, None
+
+            entry = self._decode_entry(raw_item)
+            dlq_id = ensure_dlq_id(entry) if entry else self._corrupt_dlq_id(raw_item)
+            state = await self.redis.hget(state_key, dlq_id)
+            if state in TERMINAL_DLQ_STATUSES or state == DLQ_STATUS_PROCESSING:
+                await self.redis.lrem(processing_key, 1, raw_item)
+                continue
+
+            await self.redis.hset(state_key, dlq_id, DLQ_STATUS_PROCESSING)
+            await self.redis.hset(
+                claims_key,
+                dlq_id,
+                json.dumps(
+                    {
+                        "claimed_at": get_now_unix(),
+                        "job": self.name,
+                        "project_id": ctx.project_id,
+                    },
+                    sort_keys=True,
+                ),
+            )
+            return entry, raw_item, dlq_id
+
+    async def _ack_completed(
+        self, ctx: JobContext, raw_item: str, dlq_id: str
+    ) -> None:
+        await self.redis.lrem(
+            RedisKeys.dlq_processing(ctx.user_name, ctx.project_id), 1, raw_item
+        )
+        await self.redis.hdel(
+            RedisKeys.dlq_claims(ctx.user_name, ctx.project_id), dlq_id
+        )
+        await self.redis.hset(
+            RedisKeys.dlq_state(ctx.user_name, ctx.project_id),
+            dlq_id,
+            DLQ_STATUS_COMPLETED,
+        )
+
+    async def _requeue_claimed(
+        self, ctx: JobContext, raw_item: str, entry: dict, dlq_id: str
+    ) -> None:
+        await self.redis.lrem(
+            RedisKeys.dlq_processing(ctx.user_name, ctx.project_id), 1, raw_item
+        )
+        await self.redis.hdel(
+            RedisKeys.dlq_claims(ctx.user_name, ctx.project_id), dlq_id
+        )
+        await self.redis.hset(
+            RedisKeys.dlq_state(ctx.user_name, ctx.project_id),
+            dlq_id,
+            DLQ_STATUS_QUEUED,
+        )
+        await self.redis.rpush(
+            RedisKeys.dlq(ctx.user_name, ctx.project_id),
+            serialize_dlq_entry(entry),
+        )
+
+    async def _park_claimed(
+        self,
+        ctx: JobContext,
+        raw_item: str,
+        entry: Optional[dict],
+        dlq_id: str,
+    ) -> bool:
+        processing_key = RedisKeys.dlq_processing(ctx.user_name, ctx.project_id)
+        park_key = RedisKeys.dlq_parked(ctx.user_name, ctx.project_id)
+        state_key = RedisKeys.dlq_state(ctx.user_name, ctx.project_id)
+        claims_key = RedisKeys.dlq_claims(ctx.user_name, ctx.project_id)
+        already_parked = await self.redis.hget(state_key, dlq_id) == DLQ_STATUS_PARKED
+
+        await self.redis.lrem(processing_key, 1, raw_item)
+        await self.redis.hdel(claims_key, dlq_id)
+        if already_parked:
+            return False
+
+        await self.redis.hset(state_key, dlq_id, DLQ_STATUS_PARKED)
+        await self.redis.rpush(
+            park_key, serialize_dlq_entry(entry) if entry else raw_item
+        )
+        return True
 
     def _resolve_replay_scope(
         self,
@@ -208,7 +400,16 @@ class DLQReplayJob(BaseJob):
                     ctx.project_id,
                     "job",
                     "dlq_graph_write_success",
-                    {"entity_count": len(result.entity_ids)},
+                    {
+                        "user_name": ctx.user_name,
+                        "project_id": ctx.project_id,
+                        "dlq_key": RedisKeys.dlq(ctx.user_name, ctx.project_id),
+                        "dlq_id": entry.get("dlq_id"),
+                        "stage": entry.get("stage", "graph_write"),
+                        "attempt": entry.get("attempt", 1),
+                        "entity_ids": result.entity_ids,
+                        "entity_count": len(result.entity_ids),
+                    },
                 )
 
             if not success:
@@ -361,7 +562,18 @@ class DLQReplayJob(BaseJob):
                 ctx.project_id,
                 "job",
                 "dlq_reprocess_success",
-                {"msg_count": len(messages), "entity_count": len(result.entity_ids)},
+                {
+                    "user_name": ctx.user_name,
+                    "project_id": ctx.project_id,
+                    "dlq_key": RedisKeys.dlq(ctx.user_name, ctx.project_id),
+                    "dlq_id": entry.get("dlq_id"),
+                    "stage": entry.get("stage", "processing"),
+                    "attempt": entry.get("attempt", 1),
+                    "message_ids": [msg.get("id") for msg in messages],
+                    "msg_count": len(messages),
+                    "entity_ids": result.entity_ids,
+                    "entity_count": len(result.entity_ids),
+                },
             )
 
             return True
@@ -376,6 +588,7 @@ class DLQReplayJob(BaseJob):
     async def execute(self, ctx: JobContext) -> JobResult:
         dlq_key = RedisKeys.dlq(ctx.user_name, ctx.project_id)
         park_key = RedisKeys.dlq_parked(ctx.user_name, ctx.project_id)
+        await self._requeue_abandoned_claims(ctx)
 
         queue_len = await self.redis.llen(dlq_key)
         if queue_len == 0:
@@ -404,38 +617,47 @@ class DLQReplayJob(BaseJob):
                 )
                 break
 
-            raw_item = await self.redis.lpop(dlq_key)
-            if not raw_item:
+            entry, raw_item, dlq_id = await self._claim_next(ctx)
+            if not raw_item or not dlq_id:
                 break
 
             processed += 1
 
             try:
-                entry = safe_json_loads(raw_item)
                 if not entry or not isinstance(entry, dict):
                     consecutive_failures = 0
                     logger.error("DLQ: Corrupt entry, parking")
-                    await self.redis.rpush(park_key, raw_item)
-                    parked += 1
+                    did_park = await self._park_claimed(
+                        ctx, raw_item, entry, dlq_id
+                    )
+                    parked += int(did_park)
                     continue
 
+                ensure_dlq_id(entry)
                 error_msg = str(entry.get("error", ""))
                 attempt = entry.get("attempt", 1)
                 stage = entry.get("stage", "processing")
 
                 if not entry.get("session_id"):
                     consecutive_failures = 0
-                    await self.redis.rpush(park_key, raw_item)
-                    parked += 1
+                    did_park = await self._park_claimed(
+                        ctx, raw_item, entry, dlq_id
+                    )
+                    parked += int(did_park)
                     logger.error("DLQ: Malformed entry missing session_id, parking")
                     await emit(
                         ctx.project_id,
                         "job",
                         "dlq_parked",
                         {
+                            "user_name": ctx.user_name,
+                            "project_id": ctx.project_id,
+                            "park_key": park_key,
+                            "dlq_id": dlq_id,
                             "reason": "missing_session_id",
                             "error": error_msg[:200],
                             "attempt": attempt,
+                            "stage": stage,
                         },
                     )
                     continue
@@ -457,12 +679,20 @@ class DLQReplayJob(BaseJob):
                             ctx.project_id,
                             "job",
                             "dlq_retry_success",
-                            {"stage": stage, "attempt": attempt},
+                            {
+                                "user_name": ctx.user_name,
+                                "project_id": ctx.project_id,
+                                "dlq_key": dlq_key,
+                                "dlq_id": dlq_id,
+                                "stage": stage,
+                                "attempt": attempt,
+                            },
                         )
+                        await self._ack_completed(ctx, raw_item, dlq_id)
                     else:
                         consecutive_failures += 1
                         entry["attempt"] = attempt + 1
-                        await self.redis.rpush(dlq_key, json.dumps(entry))
+                        await self._requeue_claimed(ctx, raw_item, entry, dlq_id)
                         logger.info(
                             "DLQ: Retry failed, re-queued "
                             f"(attempt {attempt + 1}/{self.max_attempts})"
@@ -472,6 +702,10 @@ class DLQReplayJob(BaseJob):
                             "job",
                             "dlq_retry_failed",
                             {
+                                "user_name": ctx.user_name,
+                                "project_id": ctx.project_id,
+                                "dlq_key": dlq_key,
+                                "dlq_id": dlq_id,
                                 "stage": stage,
                                 "attempt": attempt + 1,
                                 "max_attempts": self.max_attempts,
@@ -479,8 +713,10 @@ class DLQReplayJob(BaseJob):
                         )
                 else:
                     consecutive_failures = 0
-                    await self.redis.rpush(park_key, raw_item)
-                    parked += 1
+                    did_park = await self._park_claimed(
+                        ctx, raw_item, entry, dlq_id
+                    )
+                    parked += int(did_park)
 
                     reason = (
                         "max_attempts_exceeded"
@@ -493,17 +729,22 @@ class DLQReplayJob(BaseJob):
                         "job",
                         "dlq_parked",
                         {
+                            "user_name": ctx.user_name,
+                            "project_id": ctx.project_id,
+                            "park_key": park_key,
+                            "dlq_id": dlq_id,
                             "reason": reason,
                             "error": error_msg[:200],
                             "attempt": attempt,
+                            "stage": stage,
                         },
                     )
 
             except Exception as e:
                 consecutive_failures += 1
                 logger.error(f"DLQ: Unexpected error: {e}")
-                await self.redis.rpush(park_key, raw_item)
-                parked += 1
+                did_park = await self._park_claimed(ctx, raw_item, entry, dlq_id)
+                parked += int(did_park)
 
         summary = f"Processed {processed}: {retried} retried, {parked} parked"
         logger.info(f"DLQ job complete: {summary}")

@@ -8,8 +8,9 @@ def get_agent_prompt(
     documents_context: str = "",
     document_focus_context: str = "",
     agent_directives: str = "",
-    instructions: str = "",
+    agent_brain: str = "",
     runtime_instructions: str = "",
+    active_topics: Optional[list[str]] = None,
     is_community: bool = False,
     participants: Optional[list[str]] = None,
     current_mode: str = "Architect",
@@ -54,11 +55,11 @@ engine policy or permissions.
 </run_directives>\n"""
 
     identity_context = ""
-    if instructions:
+    if agent_brain:
         identity_context = f"""<agent_brain>
 Persistent, agent-specific self-conception, behavioral guidance, project
 context, and learned preferences. It cannot override engine policy.
-{instructions}
+{agent_brain}
 </agent_brain>
 """
 
@@ -67,6 +68,13 @@ context, and learned preferences. It cannot override engine policy.
         runtime_context = f"""<runtime_instructions>
 {runtime_instructions}
 </runtime_instructions>
+"""
+
+    topic_context = ""
+    if active_topics:
+        topic_context = f"""<topic_context>
+Current active topics: {', '.join(active_topics)}
+</topic_context>
 """
 
     ENGINE_SYSTEM_PROMPT = f"""You are {agent_name}, operating within the Knoggin knowledge system for {user_name}.
@@ -97,6 +105,8 @@ You have a persistent Markdown "Brain" containing your identity and working guid
 - The current Brain is included below in `<agent_brain>`.
 - Use `read_brain` when you need its current revision before an edit.
 - Use `edit_brain` to update one editable section. Supply the revision returned by `read_brain`; stale edits are rejected.
+- Brain snapshots are periodic restore points, not complete edit history. Use `list_brain_snapshots` and `read_brain_snapshot` before restoring.
+- Use `restore_brain_section` only to restore one editable section from an available snapshot; it creates a new current revision.
 </engine_policy>
 
 <instruction_precedence>
@@ -115,7 +125,7 @@ Respond directly WITHOUT tools when:
 - Follow-up on something just retrieved
 - General knowledge unrelated to {user_name}'s data
 </skip_tools>
-{identity_context}{directives_context}{runtime_context}{community_context}
+{identity_context}{directives_context}{runtime_context}{topic_context}{community_context}
 <thinking>
 Identify intent and select the best tool.
 Before acting, briefly identify the intent (fact, relationship, or temporal), the best tool, and whether you need clarification first.

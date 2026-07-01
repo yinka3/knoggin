@@ -31,6 +31,45 @@ class SessionManager:
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
+    async def _read_redis_session_metadata(self, session_id: str) -> Optional[dict]:
+        raw = await self.resources.redis.hget(
+            RedisKeys.sessions(self.user_name),
+            session_id,
+        )
+        if not raw:
+            return None
+        metadata = safe_json_loads(raw)
+        return metadata if isinstance(metadata, dict) else None
+
+    async def _write_redis_session_metadata(
+        self,
+        session_id: str,
+        metadata: dict,
+    ) -> None:
+        await self.resources.redis.hset(
+            RedisKeys.sessions(self.user_name),
+            session_id,
+            json.dumps(metadata, default=str),
+        )
+        project_id = metadata.get("project_id")
+        if project_id:
+            await self.resources.redis.sadd(
+                RedisKeys.project_sessions(self.user_name, project_id),
+                session_id,
+            )
+
+    async def _delete_redis_session_metadata(
+        self,
+        session_id: str,
+        project_id: Optional[str] = None,
+    ) -> None:
+        await self.resources.redis.hdel(RedisKeys.sessions(self.user_name), session_id)
+        if project_id:
+            await self.resources.redis.srem(
+                RedisKeys.project_sessions(self.user_name, project_id),
+                session_id,
+            )
+
     async def list_sessions(self) -> Dict[str, dict]:
         try:
             query = """
@@ -109,6 +148,17 @@ class SessionManager:
                 "agent_id": agent_id,
                 "enabled_tools": tools_json
             })
+            await self._write_redis_session_metadata(
+                session_id,
+                {
+                    "project_id": project_id,
+                    "model": model,
+                    "agent_id": agent_id,
+                    "enabled_tools": enabled_tools,
+                    "created_at": get_now_iso(),
+                    "last_active": get_now_iso(),
+                },
+            )
 
             self.active_sessions[session_id] = context
             logger.info(f"Created session: {session_id}")
@@ -130,11 +180,23 @@ class SessionManager:
             query = "SELECT project_id, model FROM public.sessions WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
             rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "session_id": session_id})
 
+            redis_metadata = None
             if not rows:
-                return None
+                redis_metadata = await self._read_redis_session_metadata(session_id)
+                if not redis_metadata:
+                    return None
+                metadata = redis_metadata
+            else:
+                metadata = rows[0]
 
-            metadata = rows[0]
-            project_id = metadata["project_id"]
+            project_id = metadata.get("project_id")
+            if not project_id:
+                raise ValueError(f"Session {session_id} has no valid project_id")
+
+            model = metadata.get("model")
+
+            if not rows and redis_metadata is None:
+                return None
 
             project_state = await self.project_manager.acquire_project_for_session(
                 project_id, session_id
@@ -145,7 +207,7 @@ class SessionManager:
                     user_name=self.user_name,
                     resources=self.resources,
                     session_id=session_id,
-                    model=metadata.get("model"),
+                    model=model,
                     project_state=project_state,
                 )
             except Exception:
@@ -156,6 +218,13 @@ class SessionManager:
 
             update_query = "UPDATE public.sessions SET last_active_at = now() WHERE session_id = %(session_id)s"
             await self.pg.execute(update_query, {"session_id": session_id})
+            redis_metadata = (
+                redis_metadata
+                or await self._read_redis_session_metadata(session_id)
+                or {"project_id": project_id, "model": model}
+            )
+            redis_metadata["last_active"] = get_now_iso()
+            await self._write_redis_session_metadata(session_id, redis_metadata)
 
             logger.info(f"Resumed session: {session_id}")
             return context
@@ -182,6 +251,10 @@ class SessionManager:
 
         update_query = "UPDATE public.sessions SET last_active_at = now() WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
         await self.pg.execute(update_query, {"user_name": self.user_name, "session_id": session_id})
+        metadata = await self._read_redis_session_metadata(session_id)
+        if metadata is not None:
+            metadata["last_active"] = get_now_iso()
+            await self._write_redis_session_metadata(session_id, metadata)
 
         logger.info(f"Closed session: {session_id}")
         return True
@@ -202,6 +275,29 @@ class SessionManager:
             "session_id": session_id,
             "limit": limit
         })
+        if not rows:
+            recent_key = RedisKeys.recent_conversation(self.user_name, session_id)
+            conv_key = RedisKeys.conversation(self.user_name, session_id)
+            message_ids = await self.resources.redis.zrange(recent_key, 0, -1)
+            if limit:
+                message_ids = message_ids[-limit:]
+            rows = []
+            for message_id in message_ids:
+                raw = await self.resources.redis.hget(conv_key, message_id)
+                data = safe_json_loads(raw) if raw else None
+                if not isinstance(data, dict):
+                    continue
+                rows.append(
+                    {
+                        "message_id": data.get("message_id", int(message_id)),
+                        "role": data.get("role", "user"),
+                        "content": data.get(
+                            "content",
+                            data.get("message", ""),
+                        ),
+                        "timestamp": data.get("timestamp", ""),
+                    }
+                )
 
         turns = []
         for row in rows:
@@ -230,6 +326,10 @@ class SessionManager:
 
         if not project_id and session_id in self.active_sessions:
             project_id = self.active_sessions[session_id].project_id
+        if not project_id:
+            metadata = await self._read_redis_session_metadata(session_id)
+            if metadata:
+                project_id = metadata.get("project_id")
 
         # Ephemeral Redis Cleanup
         direct_keys = RedisKeys.session_keys(user, session_id)
@@ -258,6 +358,7 @@ class SessionManager:
 
         if project_id:
             await self.project_manager.remove_session(project_id, session_id)
+        await self._delete_redis_session_metadata(session_id, project_id)
 
         logger.info(f"Cleaned up {deleted} Redis keys and deleted Postgres session {session_id}")
         return deleted
@@ -288,9 +389,13 @@ class SessionManager:
         rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "session_id": session_id})
 
         if not rows or not rows[0].get("document_focus"):
-            return None
+            metadata = await self._read_redis_session_metadata(session_id)
+            if not metadata or not metadata.get("document_focus"):
+                return None
+            focus = metadata["document_focus"]
+        else:
+            focus = rows[0]["document_focus"]
 
-        focus = rows[0]["document_focus"]
         if isinstance(focus, str):
             focus = safe_json_loads(focus)
 
@@ -328,14 +433,37 @@ class SessionManager:
 
         query = "UPDATE public.sessions SET document_focus = %(focus)s WHERE session_id = %(session_id)s"
         await self.pg.execute(query, {"focus": json.dumps(focus), "session_id": session_id})
+        metadata = await self._read_redis_session_metadata(session_id) or {
+            "project_id": getattr(context, "project_id", None),
+        }
+        metadata["document_focus"] = focus
+        await self._write_redis_session_metadata(session_id, metadata)
 
         return focus
 
     async def clear_document_focus(self, session_id: str) -> bool:
         """Remove persisted focus while preserving all other session metadata."""
-        query = "UPDATE public.sessions SET document_focus = NULL WHERE user_name = %(user_name)s AND session_id = %(session_id)s RETURNING session_id"
+        query = """
+            UPDATE public.sessions
+            SET document_focus = NULL
+            WHERE user_name = %(user_name)s
+              AND session_id = %(session_id)s
+            RETURNING session_id
+        """
         # We simulate returning by checking row count, but psycopg returns rowcount
-        rowcount = await self.pg.execute(query, {"user_name": self.user_name, "session_id": session_id})
-        if rowcount == 0:
+        rowcount = await self.pg.execute(
+            query,
+            {"user_name": self.user_name, "session_id": session_id},
+        )
+        metadata = await self._read_redis_session_metadata(session_id)
+        if rowcount == 0 and metadata is None:
             raise FileNotFoundError("Session not found")
+        if metadata is not None:
+            had_focus = (
+                "document_focus" in metadata
+                and metadata["document_focus"] is not None
+            )
+            metadata["document_focus"] = None
+            await self._write_redis_session_metadata(session_id, metadata)
+            return had_focus
         return True

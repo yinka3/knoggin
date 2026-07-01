@@ -161,10 +161,10 @@ async def test_search_entity_applies_sql_and_cypher_visible_project_scope():
             [
                 {
                     "id": "2",
-                    "canonical_name": '"Ada Lovelace"',
+                    "canonical_name": "Ada Lovelace",
                     "aliases": ["Ada"],
-                    "type": '"person"',
-                    "topic": '"Identity"',
+                    "type": "person",
+                    "topic": "Identity",
                     "last_mentioned": 123,
                     "last_updated": 456,
                     "facts": ["writes algorithms"],
@@ -190,20 +190,28 @@ async def test_search_entity_applies_sql_and_cypher_visible_project_scope():
     )
 
     assert results[0]["canonical_name"] == "Ada Lovelace"
-    sql_call, graph_call = client.calls
+    sql_call, entity_call, rel_call = client.calls
     assert "AND (project_id = ANY(%s) OR entity_id = %s)" in sql_call[1]
     assert sql_call[2] == ("%Ada%", ["project-1"], IDENTITY_ENTITY_ID, 2)
-    graph_params = json.loads(graph_call[2][0])
-    assert "parent_rel.project_id IN $visible_project_ids" in graph_call[1]
-    assert "child_rel.project_id IN $visible_project_ids" in graph_call[1]
-    assert "r.project_id IN $visible_project_ids" in graph_call[1]
-    assert "f.project_id IN $visible_project_ids" in graph_call[1]
-    assert graph_params["ids"] == [2]
-    assert graph_params["filter_projects"] is True
-    assert graph_params["visible_project_ids"] == ["project-1"]
-    assert graph_params["identity_entity_id"] == IDENTITY_ENTITY_ID
-    assert graph_params["filter_topics"] is True
-    assert graph_params["active_topics"] == ["Identity"]
+    assert "AND e.topic = ANY(%s)" in entity_call[1]
+    assert entity_call[2] == (
+        ["project-1"],
+        ["project-1"],
+        ["project-1"],
+        [2],
+        ["Identity"],
+    )
+    assert "r.project_id = ANY(%s)" in rel_call[1]
+    assert rel_call[2] == (
+        ["project-1"],
+        [2],
+        [2],
+        [2],
+        [2],
+        ["project-1"],
+        ["project-1"],
+        IDENTITY_ENTITY_ID,
+    )
 
 
 @pytest.mark.storage
@@ -213,8 +221,8 @@ async def test_get_hot_topic_context_with_messages_groups_dedupes_and_scopes():
         fetch_all_results=[
             [
                 {
-                    "topic": '"Work"',
-                    "name": '"Ada"',
+                    "topic": "Work",
+                    "name": "Ada",
                     "aliases": ["A"],
                     "facts": ["fact 1"],
                     "msg_ids": [
@@ -231,8 +239,8 @@ async def test_get_hot_topic_context_with_messages_groups_dedupes_and_scopes():
                     ],
                 },
                 {
-                    "topic": '"Work"',
-                    "name": '"Ada"',
+                    "topic": "Work",
+                    "name": "Ada",
                     "aliases": ["Duplicate"],
                     "facts": ["duplicate"],
                     "msg_ids": [
@@ -244,11 +252,11 @@ async def test_get_hot_topic_context_with_messages_groups_dedupes_and_scopes():
                     ],
                 },
                 {
-                    "topic": '"Work"',
-                    "name": '"Grace"',
+                    "topic": "Work",
+                    "name": "Grace",
                     "aliases": [],
                     "facts": ["fact 2"],
-                    "msg_ids": ["legacy-ref"],
+                    "msg_ids": [],
                 },
             ]
         ]
@@ -273,13 +281,14 @@ async def test_get_hot_topic_context_with_messages_groups_dedupes_and_scopes():
             ],
         }
     }
-    params = json.loads(client.calls[0][2][0])
-    assert params == {
-        "hot_topics": ["Work"],
-        "filter_projects": True,
-        "visible_project_ids": ["project-1"],
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
+    assert client.calls[0][2] == (
+        False,
+        ["project-1"],
+        ["project-1"],
+        ["Work"],
+        ["project-1"],
+        IDENTITY_ENTITY_ID,
+    )
 
 
 @pytest.mark.storage
@@ -289,8 +298,8 @@ async def test_get_hot_topic_context_slim_omits_facts():
         fetch_all_results=[
             [
                 {
-                    "topic": '"Work"',
-                    "name": '"Ada"',
+                    "topic": "Work",
+                    "name": "Ada",
                     "aliases": [],
                     "facts": ["hidden"],
                     "msg_ids": None,
@@ -321,14 +330,14 @@ async def test_get_related_entities_applies_topic_and_project_scope():
         fetch_all_results=[
             [
                 {
-                    "source": '"Ada"',
-                    "target": '"Grace"',
+                    "source": "Ada",
+                    "target": "Grace",
                     "target_facts": ["compiler"],
                     "connection_strength": "2",
                     "evidence_refs": [{"message_id": 7}],
                     "confidence": "0.75",
                     "last_seen": "123",
-                    "context": '"worked with"',
+                    "context": "worked with",
                 }
             ]
         ]
@@ -354,16 +363,17 @@ async def test_get_related_entities_applies_topic_and_project_scope():
             "context": "worked with",
         }
     ]
-    params = json.loads(client.calls[0][2][0])
-    assert params == {
-        "names": ["Ada"],
-        "filter_topics": True,
-        "active_topics": ["Identity"],
-        "limit": 3,
-        "filter_projects": True,
-        "visible_project_ids": ["project-1"],
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
+    assert client.calls[0][2] == (
+        ["project-1"],
+        ["Ada"],
+        ["project-1"],
+        IDENTITY_ENTITY_ID,
+        ["project-1"],
+        IDENTITY_ENTITY_ID,
+        ["project-1"],
+        ["Identity"],
+        3,
+    )
 
 
 @pytest.mark.storage
@@ -373,7 +383,7 @@ async def test_get_recent_activity_applies_filters_and_hydrates_rows():
         fetch_all_results=[
             [
                 {
-                    "entity": '"Grace"',
+                    "entity": "Grace",
                     "evidence_refs": [{"message_id": 7}],
                     "time": "123",
                 }
@@ -400,34 +410,38 @@ async def test_get_recent_activity_applies_filters_and_hydrates_rows():
             "time": "123",
         }
     ]
-    params = json.loads(client.calls[0][2][0])
-    assert params == {
-        "name": "Ada",
-        "cutoff": int((1000 - (2 * 3600)) * 1000),
-        "filter_topics": True,
-        "active_topics": ["Identity"],
-        "filter_projects": True,
-        "visible_project_ids": ["project-1"],
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
+    assert client.calls[0][2] == (
+        "Ada",
+        int((1000 - (2 * 3600)) * 1000),
+        ["project-1"],
+        IDENTITY_ENTITY_ID,
+        ["project-1"],
+        IDENTITY_ENTITY_ID,
+        ["project-1"],
+        ["Identity"],
+    )
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_find_path_filtered_falls_back_to_active_only_path():
     client = RecordingPostgresClient(
-        fetch_one_results=[
-            {
-                "names": ["Ada", "Dormant", "Grace"],
-                "node_topics": ["Identity", "Archive", "Identity"],
-                "evidence_refs": [["m1"], ["m2"]],
-                "has_inactive": True,
-            },
-            {
-                "names": ["Ada", "Grace"],
-                "node_topics": ["Identity", "Identity"],
-                "evidence_refs": [["m3"]],
-            },
+        fetch_all_results=[
+            [
+                {
+                    "names": ["Ada", "Dormant", "Grace"],
+                    "node_topics": ["Identity", "Archive", "Identity"],
+                    "evidence_refs": [["m1"], ["m2"]],
+                    "has_inactive": True,
+                }
+            ],
+            [
+                {
+                    "names": ["Ada", "Grace"],
+                    "node_topics": ["Identity", "Identity"],
+                    "evidence_refs": [["m3"]],
+                }
+            ],
         ]
     )
     queries = ToolQueries(client)
@@ -462,13 +476,15 @@ async def test_find_path_filtered_falls_back_to_active_only_path():
 @pytest.mark.no_network
 async def test_find_path_filtered_returns_shortest_path_when_no_inactive_topics():
     client = RecordingPostgresClient(
-        fetch_one_results=[
-            {
-                "names": ["Ada", "Grace"],
-                "node_topics": ["Identity", "Identity"],
-                "evidence_refs": [["m1"]],
-                "has_inactive": False,
-            }
+        fetch_all_results=[
+            [
+                {
+                    "names": ["Ada", "Grace"],
+                    "node_topics": ["Identity", "Identity"],
+                    "evidence_refs": [["m1"]],
+                    "has_inactive": False,
+                }
+            ]
         ]
     )
     queries = ToolQueries(client)
@@ -502,7 +518,7 @@ async def test_find_path_filtered_returns_shortest_path_when_no_inactive_topics(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_find_path_filtered_returns_empty_when_no_path():
-    client = RecordingPostgresClient(fetch_one_results=[None])
+    client = RecordingPostgresClient(fetch_all_results=[[]])
     queries = ToolQueries(client)
 
     assert await queries.find_path_filtered(

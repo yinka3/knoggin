@@ -14,6 +14,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
 from common.schema.settings import RedisConnectionSettings
+from common.utils.coordination_log import configure_coordination_log
 from common.utils.events import CommunityEventEmitter
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.llm_client import LLMService
@@ -99,6 +100,13 @@ class ResourceManager:
                 CommunityEventEmitter.get().bind_redis(instance.redis)
 
                 config = ConfigManager.get().config
+                configure_coordination_log(config.developer_settings.coordination_log)
+                instance.config_unsubscribers.append(
+                    ConfigManager.get().subscribe(
+                        configure_coordination_log,
+                        "developer_settings.coordination_log",
+                    )
+                )
                 llm_config = config.llm
                 trace_logger = (
                     get_trace_logger()

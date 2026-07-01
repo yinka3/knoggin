@@ -119,7 +119,7 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
 
 @pytest.mark.integration
 @pytest.mark.no_network
-async def test_soft_project_delete_and_explicit_session_cleanup_are_separate():
+async def test_hard_project_delete_and_explicit_session_cleanup_are_separate():
     resources = FakeResources()
     project_manager = ProjectManager(resources, user_name="ada")
     project = await project_manager.create_project("Scratch")
@@ -152,14 +152,13 @@ async def test_soft_project_delete_and_explicit_session_cleanup_are_separate():
     )
 
     deleted_project = await project_manager.delete_project(project["id"])
-    assert await project_manager.get_session_ids(project["id"]) == [session_id]
+    assert await project_manager.get_session_ids(project["id"]) == []
 
     deleted_count = await manager.delete_session_data(session_id)
 
     assert deleted_project["status"] == "deleted"
-    assert deleted_project["deleted_at"]
+    assert await project_manager.get_project(project["id"]) is None
     assert deleted_count >= 2
-    assert (await project_manager.get_project(project["id"]))["status"] == "deleted"
     assert await resources.redis.hget(RedisKeys.sessions("ada"), session_id) is None
     assert (
         await resources.redis.lrange(RedisKeys.buffer("ada", session_id), 0, -1)

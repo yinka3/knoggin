@@ -376,7 +376,4 @@ async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
     second_turn_user_message = llm.stream_calls[1]["user"]
     assert "AgentExecutor chunk 8 smoke testing" in second_turn_user_message
     assert "`search_messages`: Found" in second_turn_user_message
-    assert (
-        "Active topics you can categorize memories under: Testing"
-        in (llm.stream_calls[0]["system"])
-    )
+    assert "Current active topics: Testing" in llm.stream_calls[0]["system"]

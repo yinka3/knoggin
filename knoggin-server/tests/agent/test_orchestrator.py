@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from common.schema.agent_contracts import AgentConfig
@@ -24,6 +22,11 @@ class FakeConfig:
         {
             "limits": FakeLimits(),
             "search": type("Search", (), {"model_dump": lambda self: {}})(),
+            "topic_evaluation": type(
+                "TopicEvaluation",
+                (),
+                {"enabled": True, "interval_msgs": 10},
+            )(),
         },
     )()
     search = type("SearchKeys", (), {"model_dump": lambda self: {}})()
@@ -84,6 +87,7 @@ class FakeContext:
         self.llm = self.resources.llm_service
         self.user_name = "ada"
         self.session_id = "session-1"
+        self.project_id = "project-1"
 
 
 @pytest.fixture(autouse=True)
@@ -94,7 +98,7 @@ def reset_fake_executor():
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_orchestrator_resolves_agent_identity_from_redis():
-    redis = FakeResources().redis
+    context = FakeContext()
     agent = AgentConfig(
         id="agent-1",
         name="Researcher",
@@ -103,11 +107,10 @@ async def test_orchestrator_resolves_agent_identity_from_redis():
         temperature=0.3,
         enabled_tools=["search_entity"],
     )
-    await redis.hset(RedisKeys.agents("ada"), "agent-1", json.dumps(agent.to_dict()))
+    context.resources.postgres.upsert_agent(agent)
 
     identity = await Orchestrator()._resolve_agent_identity(
-        "ada",
-        redis,
+        context,
         agent_id="agent-1",
         name_override=None,
         persona_override=None,
@@ -115,23 +118,30 @@ async def test_orchestrator_resolves_agent_identity_from_redis():
 
     assert identity["config"].id == "agent-1"
     assert identity["name"] == "Researcher"
-    assert identity["persona"] == "Careful"
+    assert "Careful" in identity["persona"]
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_orchestrator_identity_overrides_take_precedence():
-    redis = FakeResources().redis
+    context = FakeContext()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(
+            id="agent-1",
+            name="Researcher",
+            persona="Careful",
+            is_default=True,
+        )
+    )
 
     identity = await Orchestrator()._resolve_agent_identity(
-        "ada",
-        redis,
+        context,
         agent_id=None,
         name_override="Custom",
         persona_override="Direct",
     )
 
-    assert identity["config"] is None
+    assert identity["config"].id == "agent-1"
     assert identity["name"] == "Custom"
     assert identity["persona"] == "Direct"
 
@@ -149,12 +159,10 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
         persona="Careful",
         model="agent-model",
         temperature=0.25,
-        instructions="Use memory",
+        brain="Use memory",
         enabled_tools=["fact_check"],
     )
-    await context.redis_client.hset(
-        RedisKeys.agents("ada"), "agent-1", json.dumps(agent.to_dict())
-    )
+    context.resources.postgres.upsert_agent(agent)
 
     monkeypatch.setattr(
         "knoggin_server.agent.orchestrator.ConfigManager.get",
@@ -208,9 +216,64 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert tools.hot_topic_calls == [(["Research"], True)]
     assert executor.execute_kwargs["model"] == "agent-model"
     assert executor.execute_kwargs["agent_temperature"] == 0.25
-    assert executor.execute_kwargs["agent_instructions"] == "Use memory"
+    assert "Use memory" in executor.execute_kwargs["agent_brain"]
     assert executor.execute_kwargs["enabled_tools"] == ["fact_check"]
     assert tools.closed is True
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_forwards_python_selected_maintenance_candidates(
+    monkeypatch,
+):
+    context = FakeContext()
+    tools = FakeTools()
+    await context.redis_client.set(
+        RedisKeys.project_heartbeat_counter("ada", "project-1"),
+        "10",
+    )
+    agent = AgentConfig(
+        id="agent-1",
+        name="Researcher",
+        persona="Careful",
+        enabled_tools=["update_topics"],
+    )
+    context.resources.postgres.upsert_agent(agent)
+
+    monkeypatch.setattr(
+        "knoggin_server.agent.orchestrator.ConfigManager.get",
+        staticmethod(lambda: FakeConfigManager()),
+    )
+    monkeypatch.setattr(
+        "knoggin_server.agent.orchestrator.AgentExecutor", FakeExecutor
+    )
+
+    async def fake_bootstrap_services(self, context_arg, agent_id):
+        return {
+            "topic_config": FakeTopicConfig(),
+            "tools": tools,
+        }
+
+    monkeypatch.setattr(
+        Orchestrator, "_bootstrap_services", fake_bootstrap_services
+    )
+
+    events = [
+        event
+        async for event in Orchestrator().run_stream(
+            user_query="hello",
+            user_name="ada",
+            session_id="session-1",
+            context=context,
+            agent_id="agent-1",
+        )
+    ]
+
+    assert events == [{"event": "final", "data": {"content": "done"}}]
+    candidate = FakeExecutor.instances[0].ctx.maintenance_candidates[0]
+    assert candidate.kind == "topic_evaluation"
+    assert candidate.suggested_tool == "update_topics"
+    assert "heartbeat reached 10" in candidate.reason
 
 
 @pytest.mark.runtime
@@ -220,6 +283,14 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
 ):
     context = FakeContext()
     tools = FakeTools()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(
+            id="agent-1",
+            name="Researcher",
+            persona="Careful",
+            is_default=True,
+        )
+    )
 
     monkeypatch.setattr(
         "knoggin_server.agent.orchestrator.ConfigManager.get",
@@ -276,16 +347,7 @@ async def test_orchestrator_loads_validated_document_focus_once():
         "path_prefix": "src",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
-    await context.redis_client.hset(
-        RedisKeys.sessions("ada"),
-        "session-1",
-        json.dumps(
-            {
-                "project_id": "project-1",
-                "document_focus": focus,
-            }
-        ),
-    )
+    context.resources.postgres.read_results.append([{"document_focus": focus}])
 
     class FocusDocumentService:
         async def resolve_focus_target(self, **kwargs):
@@ -320,10 +382,8 @@ async def test_orchestrator_ignores_stale_document_focus():
             raise FileNotFoundError("Document focus target not found")
 
     context.document_service = MissingFocusService()
-    await context.redis_client.hset(
-        RedisKeys.sessions("ada"),
-        "session-1",
-        json.dumps(
+    context.resources.postgres.read_results.append(
+        [
             {
                 "document_focus": {
                     "mode": "pinned",
@@ -335,7 +395,7 @@ async def test_orchestrator_ignores_stale_document_focus():
                     "created_at": "2026-06-22T12:00:00+00:00",
                 }
             }
-        ),
+        ]
     )
 
     assert await Orchestrator()._load_document_focus(context) is None

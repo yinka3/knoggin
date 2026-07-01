@@ -16,6 +16,7 @@ from common.schema.contracts import (
     UserRelationshipWrite,
 )
 from common.scoping import IDENTITY_ENTITY_ID
+from common.utils.events import emit
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.knowledge.services.entity_service import EntityManager
@@ -333,6 +334,19 @@ async def execute_graph_mutation_plan(
             )
         )
         dirty_count = len(plan.dirty_entity_ids)
+        await emit(
+            plan.scope.project_id,
+            "job",
+            "dirty_entities_marked",
+            {
+                "user_name": plan.scope.user_name,
+                "project_id": plan.scope.project_id,
+                "dirty_key": dirty_key,
+                "entity_ids": sorted(plan.dirty_entity_ids),
+                "marked_count": dirty_count,
+                "reason": "graph_write",
+            },
+        )
 
     return GraphWriteSummary(
         entities_written=len(entity_payloads),

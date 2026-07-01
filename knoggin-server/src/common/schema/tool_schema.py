@@ -257,6 +257,46 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_brain_snapshots",
+            "description": (
+                "List available persistent Brain restore points. Use this "
+                "before choosing a snapshot to inspect or restore from."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            "tags": ["identity:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_brain_snapshot",
+            "description": (
+                "Read one stored full-Brain snapshot by revision. Only listed "
+                "snapshot revisions are available."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Snapshot revision returned by list_brain_snapshots."
+                        ),
+                    },
+                },
+                "required": ["revision"],
+            },
+            "tags": ["identity:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "edit_brain",
             "description": (
                 "Update one editable section of your persistent Markdown identity. "
@@ -275,14 +315,68 @@ TOOL_SCHEMAS = [
                     },
                     "content": {
                         "type": "string",
-                        "description": "Complete replacement content for the selected section.",
+                        "description": (
+                            "Complete replacement content for the selected section."
+                        ),
                     },
                     "expected_revision": {
                         "type": "integer",
                         "description": "Revision returned by read_brain.",
                     },
+                    "change_note": {
+                        "type": "string",
+                        "maxLength": 120,
+                        "description": "Optional short note for snapshot metadata.",
+                    },
                 },
                 "required": ["section", "content", "expected_revision"],
+            },
+            "tags": ["identity", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restore_brain_section",
+            "description": (
+                "Restore one editable Brain section from a stored snapshot. "
+                "Call read_brain and list_brain_snapshots first. This creates "
+                "a new current revision and snapshot."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "enum": [
+                            "Behavioral Directives",
+                            "Project Context",
+                            "User Preferences & Lessons Learned",
+                        ],
+                    },
+                    "from_snapshot_revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Snapshot revision to restore this section from."
+                        ),
+                    },
+                    "expected_current_revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Current revision returned by read_brain.",
+                    },
+                    "change_note": {
+                        "type": "string",
+                        "maxLength": 120,
+                        "description": "Optional short note for snapshot metadata.",
+                    },
+                },
+                "required": [
+                    "section",
+                    "from_snapshot_revision",
+                    "expected_current_revision",
+                ],
             },
             "tags": ["identity", "core"],
         },
@@ -719,6 +813,7 @@ SAFE_DEFAULT_CAPABILITIES = frozenset(
 _TOOL_CAPABILITIES = {
     "update_topics": CONFIGURATION_WRITE_CAPABILITY,
     "edit_brain": IDENTITY_WRITE_CAPABILITY,
+    "restore_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
 }
 

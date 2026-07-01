@@ -5,22 +5,10 @@ import pytest
 
 from infrastructure.postgres_client import PostgresClient
 
-STORAGE_TEST_ROOT = Path(__file__).resolve().parent
 DB_URL = os.environ.get(
     "KNOGGIN_TEST_DATABASE_URL",
     "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
 )
-
-
-def pytest_collection_modifyitems(items):
-    """Attach database cleanup only to tests that opt into real Postgres."""
-    for item in items:
-        item_path = Path(item.path).resolve()
-        if (
-            item_path.is_relative_to(STORAGE_TEST_ROOT)
-            and item.get_closest_marker("requires_postgres") is not None
-        ):
-            item.add_marker(pytest.mark.usefixtures("clean_db"))
 
 
 @pytest.fixture
@@ -29,6 +17,7 @@ async def real_postgres_client():
     client = PostgresClient(dsn=DB_URL, min_size=1, max_size=2)
     await client.connect()
     try:
+        await _reset_storage_db(client)
         yield client
     finally:
         await client.close()
@@ -37,13 +26,31 @@ async def real_postgres_client():
 @pytest.fixture
 async def clean_db(real_postgres_client):
     """Wipes relational tables and the AGE graph before every test."""
-    await real_postgres_client.execute(
+    await _reset_storage_db(real_postgres_client)
+
+
+async def _reset_storage_db(client: PostgresClient):
+    """Wipe relational tables and the AGE graph, then seed baseline projects."""
+    schema_sql = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "infrastructure"
+        / "schema.sql"
+    ).read_text(encoding="utf-8")
+    await client.execute(schema_sql)
+    await client.execute(
         """
         TRUNCATE TABLE
+            project_read_scopes,
+            agent_tool_audits,
+            agent_brain_snapshots,
+            agents,
             document_chunks,
             project_documents,
             document_folder_uploads,
             project_document_scan_settings,
+            entity_merge_audits,
+            entity_merge_proposals,
             relationship_evidence_refs,
             relationships,
             hierarchy_edges,
@@ -53,17 +60,29 @@ async def clean_db(real_postgres_client):
             messages,
             entity_search,
             message_search,
-            fact_search;
+            fact_search,
+            sessions,
+            projects
+        RESTART IDENTITY CASCADE;
+        """
+    )
+    await client.execute(
+        """
+        INSERT INTO projects (project_id, user_name, name)
+        VALUES
+            ('project-1', 'ada', 'Project 1'),
+            ('project-2', 'ada', 'Project 2')
+        ON CONFLICT (project_id) DO NOTHING;
         """
     )
     # Ensure the AGE graph exists before trying to wipe it
     graph_name = "knoggin_graph"
-    row = await real_postgres_client.fetch_one(
+    row = await client.fetch_one(
         "SELECT count(*) FROM ag_graph WHERE name = %s;",
         (graph_name,),
     )
     if row["count"] == 0:
-        await real_postgres_client.execute(
+        await client.execute(
             f"SELECT create_graph('{graph_name}');"
         )
 
@@ -73,6 +92,4 @@ async def clean_db(real_postgres_client):
         "$$ MATCH (n) DETACH DELETE n RETURN n $$"
         ") AS (n agtype);"
     )
-    await real_postgres_client.execute(
-        wipe_graph_sql
-    )
+    await client.execute(wipe_graph_sql)

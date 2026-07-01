@@ -76,7 +76,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     result = await execute_tool(
         tools,
         "search_messages",
-        {"query": 1234, "limit": "5", "ignored": "drop me"},
+        {"query": 1234, "limit": "5"},
     )
     activity = await execute_tool(
         tools,
@@ -165,9 +165,13 @@ async def test_execute_tool_raises_for_unknown_or_missing_methods():
     assert "Unknown tool" in unknown.value.message
 
     with pytest.raises(ToolExecutionError) as missing:
-        await execute_tool(tools, "forget_memory", {"memory_id": "mem_1"})
+        await execute_tool(tools, "edit_brain", {
+            "section": "Role",
+            "content": "updated",
+            "expected_revision": 1,
+        })
 
-    assert missing.value.details["tool"] == "forget_memory"
+    assert missing.value.details["tool"] == "edit_brain"
     assert "Tool method not found" in missing.value.message
 
 
@@ -206,61 +210,86 @@ async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
     assert "method exploded" in exc.value.message
 
 
-class RecordingMemory:
+class RecordingPostgres:
     def __init__(self):
-        self.calls = []
+        self.rows = [
+            {
+                "brain": "## Role\nOld role\n",
+                "persona": "Careful assistant",
+                "brain_revision": 1,
+            }
+        ]
+        self.fetch_calls = []
+        self.execute_calls = []
 
-    async def save_memory_dict(self, content, topic):
-        self.calls.append(("save", content, topic))
-        return {"saved": True, "memory_id": "mem_1"}
+    async def fetch_all(self, query, params):
+        self.fetch_calls.append((query, params))
+        return self.rows
 
-    async def forget_memory_dict(self, memory_id):
-        self.calls.append(("forget", memory_id))
-        return {"forgotten": True, "memory_id": memory_id}
-
-    async def get_memory_blocks_dict(self, hot_topics):
-        self.calls.append(("blocks", hot_topics))
-        return {"Identity": [{"id": "mem_1"}]}
+    async def execute(self, query, params):
+        self.execute_calls.append((query, params))
+        self.rows[0]["brain"] = params["content"]
+        self.rows[0]["brain_revision"] += 1
+        return 1
 
 
 class MemoryToolHarness(MemoryTools):
-    def __init__(self, memory=None):
-        self.memory = memory
+    def __init__(self, postgres=None, agent_id="agent-1"):
+        self.postgres = postgres
+        self.agent_id = agent_id
+        self.user_name = "ada"
 
 
 @pytest.mark.no_network
-async def test_memory_tools_delegate_to_configured_memory_manager():
-    memory = RecordingMemory()
-    tools = MemoryToolHarness(memory)
+async def test_memory_tools_read_and_edit_brain_with_configured_postgres():
+    postgres = RecordingPostgres()
+    tools = MemoryToolHarness(postgres)
 
-    saved = await tools.save_memory("Ada prefers scoped tests", topic="Identity")
-    forgotten = await tools.forget_memory("mem_1")
-    blocks = await tools.get_memory_blocks(["Identity"])
+    brain = await tools.read_brain()
+    edited = await tools.edit_brain(
+        "Behavioral Directives",
+        "Ada prefers scoped tests",
+        expected_revision=1,
+    )
 
-    assert saved == {"saved": True, "memory_id": "mem_1"}
-    assert forgotten == {"forgotten": True, "memory_id": "mem_1"}
-    assert blocks == {"Identity": [{"id": "mem_1"}]}
-    assert memory.calls == [
-        ("save", "Ada prefers scoped tests", "Identity"),
-        ("forget", "mem_1"),
-        ("blocks", ["Identity"]),
-    ]
-
-
-@pytest.mark.no_network
-async def test_memory_tools_return_clean_defaults_without_memory_manager():
-    tools = MemoryToolHarness(memory=None)
-
-    assert await tools.save_memory("note") == {"error": "No memory manager configured"}
-    assert await tools.forget_memory("mem_1") == {
-        "error": "No memory manager configured"
+    assert brain["revision"] == 1
+    assert "Old role" in brain["content"]
+    assert edited == {
+        "success": True,
+        "section": "Behavioral Directives",
+        "revision": 2,
+        "message": "Brain section updated.",
+        "snapshot_created": False,
     }
-    assert await tools.get_memory_blocks(["Identity"]) == {}
+    assert postgres.fetch_calls
+    assert postgres.execute_calls[0][1]["agent_id"] == "agent-1"
+    assert "Ada prefers scoped tests" in postgres.execute_calls[0][1]["content"]
+
+
+@pytest.mark.no_network
+async def test_memory_tools_return_clean_defaults_without_active_agent():
+    tools = MemoryToolHarness(postgres=None, agent_id=None)
+
+    assert await tools.read_brain() == {"error": "No durable agent identity is active"}
+    assert await tools.list_brain_snapshots() == {
+        "error": "No durable agent identity is active"
+    }
+    assert await tools.read_brain_snapshot(1) == {
+        "error": "No durable agent identity is active"
+    }
+    assert await tools.edit_brain("Behavioral Directives", "note", 1) == {
+        "error": "No durable agent identity is active"
+    }
+    assert await tools.restore_brain_section(
+        "Behavioral Directives",
+        1,
+        1,
+    ) == {"error": "No durable agent identity is active"}
 
 
 @pytest.mark.no_network
 async def test_normal_memory_tools_keep_community_only_tools_unavailable():
-    tools = MemoryToolHarness(memory=RecordingMemory())
+    tools = MemoryToolHarness(postgres=RecordingPostgres())
 
     assert await tools.save_insight("community insight") == {
         "error": "save_insight is only available in community discussions."

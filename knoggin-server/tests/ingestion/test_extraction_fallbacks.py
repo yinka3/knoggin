@@ -36,7 +36,9 @@ def make_processor(llm_response):
         user_name="Ada",
         topic_config=None,
         get_next_ent_id=None,
-        connection_prompt="Return JSON matching the requested schema.",
+        connection_prompt=(
+            "Return JSON matching the requested schema for {user_name}."
+        ),
     )
 
 

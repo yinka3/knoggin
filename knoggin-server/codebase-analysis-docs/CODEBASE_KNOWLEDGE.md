@@ -30,7 +30,7 @@ Main areas:
 PostgreSQL is canonical for durable data:
 
 - users, projects, project read scopes, sessions, and messages;
-- agents and `agent_brain_revisions`;
+- agents and periodic `agent_brain_snapshots`;
 - topics via `projects.topic_config`;
 - entities, aliases, facts, relationships, hierarchy edges, and evidence refs;
 - documents, folder uploads, chunks, and document search metadata;
@@ -49,6 +49,48 @@ Redis is runtime state only:
 Redis keys are centralized in `src/infrastructure/redis_client.py`. New Redis
 state should be scoped by user/project/session where relevant and should have a
 TTL, bounded collection size, or rebuild path.
+
+## Autonomy Boundary
+
+The model may make semantic decisions and propose actions, but Python and
+PostgreSQL enforce the system's safety and ownership rules. Do not rely on
+prompt text as the only guard for permissions, invariants, validation, or
+destructive behavior.
+
+Model-owned decisions include:
+
+- judging whether retrieved context is relevant to the user request;
+- proposing Brain section updates based on lessons or durable project context;
+- proposing topic changes based on observed project activity;
+- identifying possible duplicate entities and explaining merge evidence;
+- choosing among tools that are exposed for the current run.
+
+Python-owned enforcement includes:
+
+- filtering which tools and capabilities are exposed to a run;
+- validating tool arguments against schemas before dispatch;
+- enforcing user, project, session, agent, and visible-project scopes;
+- protecting immutable engine policy, protected topics, and the identity
+  entity;
+- applying optimistic revision checks for mutable Agent Brain edits;
+- issuing and validating confirmation tokens for destructive operations;
+- deciding whether a proposed merge is rejected, confirmation-required, or
+  executable;
+- writing durable state only through Postgres-owned paths;
+- treating Redis as cache/coordination state, never as durable authority.
+
+Concrete examples:
+
+- `edit_brain` lets the model propose one editable Brain section update, but
+  Python enforces the section allow-list, size limits, and expected revision.
+- `update_topics` can apply model-proposed topic changes, but Python protects
+  `General` and `Identity`, rejects dangerous bulk changes, and scopes writes
+  to the current project.
+- `propose_entity_merge` lets the model make the semantic duplicate claim, but
+  Python verifies evidence, protected entities, scope, candidate state, and
+  confirmation before a destructive merge can happen.
+- Redis queues, heartbeats, locks, and caches may guide runtime coordination,
+  but losing Redis must not erase durable user knowledge.
 
 ## Resource Ownership
 

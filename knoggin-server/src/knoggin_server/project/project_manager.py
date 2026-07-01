@@ -16,10 +16,13 @@ from knoggin_server.community.community_job import AACJob
 from knoggin_server.ingestion.jobs.archive_job import FactArchivalJob
 from knoggin_server.ingestion.jobs.cleaner_job import EntityCleanupJob
 from knoggin_server.ingestion.jobs.dlq_job import DLQReplayJob
+from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
 from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.db.write_graph_db import write_batch_callback
-from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
+from knoggin_server.knowledge.jobs.merge_rollback_cleanup_job import (
+    MergeRollbackCleanupJob,
+)
 from knoggin_server.knowledge.services.entity_service import EntityManager
 from knoggin_server.project.state import ProjectState
 
@@ -170,6 +173,58 @@ class ProjectManager:
             allowed = [r["project_id"] for r in rows]
 
         return build_readable_project_ids(project_id, allowed)
+
+    async def get_session_ids(self, project_id: str) -> List[str]:
+        """Return durable session IDs currently associated with a project."""
+        rows = await self.pg.fetch_all(
+            """
+            SELECT session_id
+            FROM public.sessions
+            WHERE user_name = %(user_name)s
+              AND project_id = %(project_id)s
+              AND status <> 'deleted'
+            ORDER BY created_at ASC
+            """,
+            {"user_name": self.user_name, "project_id": project_id},
+        )
+        return [row["session_id"] for row in rows]
+
+    async def add_session(self, project_id: str, session_id: str) -> None:
+        """Record project/session membership when a caller manages a session row."""
+        await self.pg.execute(
+            """
+            INSERT INTO public.sessions (
+                session_id, user_name, project_id, status
+            ) VALUES (
+                %(session_id)s, %(user_name)s, %(project_id)s, 'open'
+            )
+            ON CONFLICT (session_id) DO UPDATE
+            SET project_id = EXCLUDED.project_id,
+                status = 'open',
+                last_active_at = now()
+            """,
+            {
+                "session_id": session_id,
+                "user_name": self.user_name,
+                "project_id": project_id,
+            },
+        )
+
+    async def remove_session(self, project_id: str, session_id: str) -> None:
+        """Remove durable project/session membership for explicit session cleanup."""
+        await self.pg.execute(
+            """
+            DELETE FROM public.sessions
+            WHERE user_name = %(user_name)s
+              AND project_id = %(project_id)s
+              AND session_id = %(session_id)s
+            """,
+            {
+                "user_name": self.user_name,
+                "project_id": project_id,
+                "session_id": session_id,
+            },
+        )
 
     async def _validate_allowed_project_ids(
         self, project_id: str, allowed_projects: List[str]
@@ -674,6 +729,20 @@ class ProjectManager:
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(
                 archival_job.update_settings, "developer_settings.jobs.archival"
+            )
+        )
+
+        rollback_cfg = jobs_cfg.merge_rollback
+        rollback_cleanup_job = MergeRollbackCleanupJob(
+            knowledge_store=self.resources.knowledge_store,
+            retention_hours=rollback_cfg.retention_hours,
+            fallback_interval_hours=rollback_cfg.fallback_interval_hours,
+        )
+        scheduler.register(rollback_cleanup_job)
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                rollback_cleanup_job.update_settings,
+                "developer_settings.jobs.merge_rollback",
             )
         )
 

@@ -17,7 +17,7 @@ from knoggin_server.community.community_job import AACJob
 from knoggin_server.ingestion.jobs.archive_job import FactArchivalJob
 from knoggin_server.ingestion.jobs.cleaner_job import EntityCleanupJob
 from knoggin_server.ingestion.jobs.dlq_job import DLQReplayJob
-from knoggin_server.knowledge.jobs.profile_job import ProfileRefinementJob
+from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
 from tests.fixtures.fakes import FakeRedis, FakeResources
 
 FROZEN_AT = "2024-01-01T00:00:00+00:00"

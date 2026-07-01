@@ -2,21 +2,26 @@ import json
 
 import pytest
 
-from common.exceptions import LLMProviderError
+from common.exceptions import LLMProviderError, ToolExecutionError
+from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.executor import AgentExecutor
 from knoggin_server.agent.types import (
     AgentContext,
     AgentRunConfig,
     AgentState,
+    MaintenanceCandidate,
     RetrievedEvidence,
     ToolCall,
 )
+from tests.fixtures.fakes import FakeRedis
 
 
 class FakeTools:
-    def __init__(self, *, files=None):
+    def __init__(self, *, files=None, redis=None, project_id="project-1"):
         self.document_service = object() if files is not None else None
         self.files = files or []
+        self.redis = redis
+        self.project_id = project_id
 
     async def get_document_manifest(self):
         return self.files
@@ -26,11 +31,30 @@ class FakeLLM:
     agent_model = "architect-model"
     extraction_model = "librarian-model"
 
-    def __init__(self, *, token_counts=None, summary="fallback summary", raises=False):
+    def __init__(
+        self,
+        *,
+        token_counts=None,
+        summary="fallback summary",
+        raises=False,
+        stream_events=None,
+    ):
         self.token_counts = list(token_counts or [])
         self.summary = summary
         self.raises = raises
         self.call_llm_calls = []
+        self.stream_events = list(stream_events or [])
+        self.stream_calls = []
+
+    async def stream_with_tools(self, **kwargs):
+        self.stream_calls.append(kwargs)
+        events = self.stream_events.pop(0)
+        for event in events:
+            if isinstance(event, tuple):
+                for nested_event in event:
+                    yield nested_event
+            else:
+                yield event
 
     def count_tokens(self, text):
         if self.token_counts:
@@ -64,12 +88,11 @@ class ScriptedExecutor(AgentExecutor):
         reasoning,
         current_mode,
         enabled_tools,
-        memory_context,
         documents_context,
         document_focus_context,
         directives,
         temp,
-        agent_instructions,
+        agent_brain,
         last_result,
         client_tools=None,
     ):
@@ -80,12 +103,11 @@ class ScriptedExecutor(AgentExecutor):
                 "reasoning": reasoning,
                 "current_mode": current_mode,
                 "enabled_tools": enabled_tools,
-                "memory_context": memory_context,
                 "documents_context": documents_context,
                 "document_focus_context": document_focus_context,
                 "directives": directives,
                 "temp": temp,
-                "agent_instructions": agent_instructions,
+                "agent_brain": agent_brain,
                 "last_result": last_result,
                 "client_tools": client_tools,
             }
@@ -122,6 +144,7 @@ def make_ctx(*, config=None, evidence=None):
         user_name="ada",
         user_query="What changed in profile behavior?",
         session_id="session-1",
+        project_id="project-1",
         run_id="run-1",
         hot_topics=["Identity"],
         active_topics=["Identity", "Testing"],
@@ -227,7 +250,7 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
         async for event in executor.execute(
             simulated_date="2026-02-03 04:05 UTC",
             agent_temperature=0.2,
-            agent_instructions="Use citations",
+            agent_brain="Use citations",
             agent_directives="Required:\n- override directive",
         )
     ]
@@ -263,13 +286,10 @@ async def test_execute_runs_architect_librarian_and_final_synthesis_modes():
     ]
     first_call = executor.step_calls[0]
     assert first_call["date"] == "2026-02-03 04:05 UTC"
-    assert first_call["memory_context"] == (
-        "[Identity]\n- remembers stable profile preferences"
-    )
     assert first_call["documents_context"] == "- profile-plan.md (2KB, 3 chunks)"
     assert first_call["directives"] == "Required:\n- override directive"
     assert first_call["temp"] == 0.2
-    assert first_call["agent_instructions"] == "Use citations"
+    assert first_call["agent_brain"] == "Use citations"
     assert executor.step_calls[1]["last_result"] == [
         {
             "tool": "search_messages",
@@ -436,6 +456,54 @@ async def test_execute_hides_transient_step_errors_and_resets_after_tool_success
     assert events[-1]["data"]["content"] == "final answer"
     assert executor.ctx.state.consecutive_errors == 0
     assert len(executor.step_calls) == 4
+
+
+@pytest.mark.no_network
+async def test_execute_continues_to_response_after_maintenance_failure(monkeypatch):
+    redis = FakeRedis()
+    candidate = MaintenanceCandidate(
+        id="topic_evaluation:project-1",
+        kind="topic_evaluation",
+        reason="Heartbeat reached threshold.",
+        suggested_tool="update_topics",
+    )
+    ctx = make_ctx()
+    ctx.maintenance_candidates = [candidate]
+    llm = FakeLLM(
+        stream_events=[
+            [done_with(ToolCall(name="update_topics", args={}))],
+            [done_with(ToolCall(name="submit_answer", args={"content": "draft"}))],
+            [done_with(ToolCall(name="submit_answer", args={"content": "answered"}))],
+        ]
+    )
+    executor = AgentExecutor(ctx, llm, FakeTools(redis=redis))
+
+    async def fail_maintenance_tool(*_args):
+        raise ToolExecutionError("update_topics", "topic write failed")
+
+    monkeypatch.setattr(
+        "knoggin_server.agent.executor.execute_tool",
+        fail_maintenance_tool,
+    )
+
+    events = [
+        event async for event in executor.execute(enabled_tools=["update_topics"])
+    ]
+
+    assert [event["event"] for event in events] == [
+        "tool_start",
+        "tool_error",
+        "response",
+    ]
+    assert events[-1]["data"]["content"] == "answered"
+    assert ctx.state.consecutive_errors == 0
+    assert ctx.maintenance_candidates == []
+    assert await redis.get(
+        RedisKeys.maintenance_attempts("ada", "project-1", candidate.id)
+    ) == "1"
+    assert await redis.get(
+        RedisKeys.maintenance_cooldown("ada", "project-1", candidate.id)
+    )
 
 
 @pytest.mark.no_network

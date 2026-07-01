@@ -46,7 +46,6 @@ def render_configured_prompt(
 
 
 
-
 async def enrich_facts_with_sources(
     facts: list,
     knowledge_store,

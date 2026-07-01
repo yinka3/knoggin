@@ -168,7 +168,12 @@ class RedisKeys:
             "merge_intents_index",
             "job_last_run",
             "job_lease",
+            "maintenance_attempts",
+            "maintenance_cooldown",
             "dlq",
+            "dlq_processing",
+            "dlq_state",
+            "dlq_claims",
             "dlq_parked",
             "project_profile_complete",
             "project_user_profile_ran",
@@ -206,6 +211,18 @@ class RedisKeys:
     @staticmethod
     def dlq(user: str, project_id: str) -> str:
         return f"dlq:{user}:{project_id}"
+
+    @staticmethod
+    def dlq_processing(user: str, project_id: str) -> str:
+        return f"dlq:processing:{user}:{project_id}"
+
+    @staticmethod
+    def dlq_state(user: str, project_id: str) -> str:
+        return f"dlq:state:{user}:{project_id}"
+
+    @staticmethod
+    def dlq_claims(user: str, project_id: str) -> str:
+        return f"dlq:claims:{user}:{project_id}"
 
     @staticmethod
     def dlq_parked(user: str, project_id: str) -> str:
@@ -297,6 +314,14 @@ class RedisKeys:
     @staticmethod
     def job_lease(user: str, project_id: str, job_name: str) -> str:
         return f"job_lease:{user}:{project_id}:{job_name}"
+
+    @staticmethod
+    def maintenance_attempts(user: str, project_id: str, candidate_id: str) -> str:
+        return f"maintenance_attempts:{user}:{project_id}:{candidate_id}"
+
+    @staticmethod
+    def maintenance_cooldown(user: str, project_id: str, candidate_id: str) -> str:
+        return f"maintenance_cooldown:{user}:{project_id}:{candidate_id}"
 
     @staticmethod
     def projects(user: str) -> str:

@@ -82,6 +82,19 @@ async def test_batch_processor_dlq_uses_project_key_and_real_session_id():
     entry = json.loads(raw[0])
     assert entry["session_id"] == "session-1"
     assert entry["project_id"] == "project-1"
+    assert entry["dlq_id"]
+    assert await redis.hget(
+        RedisKeys.dlq_state("ada", "project-1"), entry["dlq_id"]
+    ) == "queued"
+
+    duplicate = await processor.move_to_dead_letter(
+        [{"id": 1, "message": "hello"}],
+        "TimeoutError",
+        session_id="session-1",
+    )
+
+    assert duplicate is True
+    assert await redis.llen(RedisKeys.dlq("ada", "project-1")) == 1
 
 
 def fake_resolution_result():

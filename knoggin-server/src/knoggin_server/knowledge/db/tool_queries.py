@@ -192,6 +192,8 @@ class ToolQueries:
         sanitized = self._sanitize_fts_query(query)
         if not sanitized:
             return []
+        if not session_ids:
+            return []
 
         sql = """
         SELECT message_id, session_id, ts_rank(content_tsvector, to_tsquery('english', %s)) as score

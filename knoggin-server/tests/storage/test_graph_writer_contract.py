@@ -14,6 +14,8 @@ MESSAGE_GRAPH_FIELDS = {
     "user_name",
     "session_id",
     "project_id",
+    "user_msg_id",
+    "metadata",
     "timestamp",
 }
 
@@ -24,6 +26,8 @@ MESSAGE_SQL_PARAMS = (
     "project-1",
     "user",
     "hello graph",
+    7,
+    "{}",
     123456,
 )
 
@@ -131,6 +135,8 @@ async def test_graph_writer_save_message_logs_writes_graph_and_search_rows(
                 "user_name": "ada",
                 "session_id": "session-1",
                 "project_id": "project-1",
+                "user_msg_id": 7,
+                "metadata": "{}",
                 "timestamp": 123456,
             }
         ]

@@ -9,7 +9,6 @@ from knoggin_server.agent.tools.community_tools import (
 )
 from tests.fixtures.fakes import FakeRedis
 
-
 PERSONA = {
     "attention_bias": "Weak or missing evidence",
     "reasoning_style": "Trace claims back to primary observations",
@@ -152,12 +151,13 @@ async def test_spawn_specialist_persists_agent_and_initial_brain(monkeypatch):
     write = next(call for call in postgres.calls if call[0] == "execute")
     params = write[2]
     assert "INSERT INTO public.agents" in write[1]
-    assert "INSERT INTO public.agent_brain_revisions" in write[1]
+    assert "INSERT INTO public.agent_brain_snapshots" in write[1]
+    assert params["change_summary"] == "Spawned specialist Brain"
     assert params["project_id"] == "project-1"
     assert params["model"] == "test-agent-model"
     assert params["enabled_tools"]
     assert params["spawned_by"] == "agent-1"
-    assert "Never invent source messages." in params["instructions"]
+    assert "Never invent source messages." in params["brain"]
     assert AAC_DEFAULT_ENABLED_TOOLS
 
     assert store.spawns[0]["child_id"] == result["id"]
