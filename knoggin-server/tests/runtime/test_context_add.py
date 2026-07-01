@@ -5,7 +5,7 @@ import pytest
 
 from common.schema.primitives import Message
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.session.context import Context
+from knoggin_server.session.context import Session
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer, FakeResources
 
@@ -13,13 +13,13 @@ from tests.fixtures.fakes import FakeConfigValue, FakeConsumer, FakeResources
 @pytest.fixture
 def context(monkeypatch):
     resources = FakeResources()
-    ctx = Context("ada", ["General"], resources)
+    ctx = Session("ada", ["General"], resources)
     ctx.session_id = "session-1"
     ctx.project_id = "project-1"
     ctx.project = make_project_state("project-1", redis=resources.redis)
     ctx.consumer = FakeConsumer()
     monkeypatch.setattr(
-        Context,
+        Session,
         "current_config",
         property(lambda self: FakeConfigValue(conversation_context_turns=100)),
     )
@@ -30,7 +30,7 @@ def context(monkeypatch):
 @pytest.mark.no_network
 async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
     resources = FakeResources()
-    ctx = Context("ada", ["General"], resources)
+    ctx = Session("ada", ["General"], resources)
     ctx.session_id = "session-1"
 
     with pytest.raises(RuntimeError, match="not fully initialized"):

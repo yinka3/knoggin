@@ -4,16 +4,16 @@ from datetime import datetime, timezone
 import pytest
 
 from common.schema.primitives import Message
-from common.utils.events import DebugEventEmitter
+from common.utils.events import EventEmitter
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.project.project_manager import ProjectManager
-from knoggin_server.session.context import Context
+from knoggin_server.session.context import Session
 from knoggin_server.session.session_manager import SessionManager
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import (
     FakeConfigValue,
     FakeConsumer,
-    FakeContext,
+    FakeSession,
     FakeResources,
 )
 
@@ -32,7 +32,7 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         project_manager=project_manager,
     )
     monkeypatch.setattr(
-        Context,
+        Session,
         "current_config",
         property(lambda self: FakeConfigValue(conversation_context_turns=100)),
     )
@@ -44,7 +44,7 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         return project_state
 
     async def fake_create(**kwargs):
-        ctx = Context(kwargs["user_name"], ["General"], kwargs["resources"])
+        ctx = Session(kwargs["user_name"], ["General"], kwargs["resources"])
         ctx.session_id = kwargs["session_id"]
         ctx.project_id = kwargs["project_state"].project_id
         ctx.project = kwargs["project_state"]
@@ -78,8 +78,8 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         "_get_or_start_project",
         fake_get_or_start_project,
     )
-    monkeypatch.setattr(Context, "create", fake_create)
-    monkeypatch.setattr(DebugEventEmitter, "get", staticmethod(lambda: emitter))
+    monkeypatch.setattr(Session, "create", fake_create)
+    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: emitter))
 
     ctx = await manager.create_session(
         topics_config={"General": {"active": True}},
@@ -124,7 +124,7 @@ async def test_hard_project_delete_and_explicit_session_cleanup_are_separate():
     project_manager = ProjectManager(resources, user_name="ada")
     project = await project_manager.create_project("Scratch")
     session_id = "session-1"
-    active_sessions = {session_id: FakeContext(session_id, project["id"])}
+    active_sessions = {session_id: FakeSession(session_id, project["id"])}
     manager = SessionManager(
         resources=resources,
         user_name="ada",

@@ -8,7 +8,7 @@ from common.schema.tool_schema import (
     TOOL_SCHEMAS,
     get_schema_capability,
 )
-from knoggin_server.agent.tools.registry import TOOL_DISPATCH, ToolAuthorizationContext
+from knoggin_server.agent.tools.registry import TOOL_DISPATCH, ToolPermissions
 from knoggin_server.agent.types import AgentContext
 
 
@@ -46,7 +46,7 @@ def test_direct_destructive_merge_execution_is_not_agent_facing():
 
 @pytest.mark.no_network
 def test_destructive_capability_requires_runtime_confirmation():
-    context = ToolAuthorizationContext(
+    context = ToolPermissions(
         user_name="ada",
         agent_id="agent-1",
         project_id="project-1",
@@ -64,7 +64,7 @@ def test_destructive_capability_requires_runtime_confirmation():
     )
     assert context.authorize("read_tool", READ_CAPABILITY) is None
 
-    confirmed = ToolAuthorizationContext(
+    confirmed = ToolPermissions(
         user_name="ada",
         agent_id="agent-1",
         project_id="project-1",

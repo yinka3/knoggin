@@ -920,7 +920,7 @@ class FakeConsumer:
         self.stopped += 1
 
 
-class FakeContext:
+class FakeSession:
     def __init__(self, session_id="session-1", project_id="project-1"):
         self.session_id = session_id
         self.project_id = project_id

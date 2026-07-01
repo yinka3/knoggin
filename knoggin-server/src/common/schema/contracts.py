@@ -481,7 +481,7 @@ class FactResolutionSummary(BaseModel):
 
 @dataclass
 class ResolutionResult:
-    """Result from EntityManager batch resolution."""
+    """Result from EntityResolver batch resolution."""
 
     entity_ids: List[int]
     new_ids: Set[int]

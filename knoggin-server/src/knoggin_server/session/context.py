@@ -19,7 +19,7 @@ from common.schema.settings import RootConfig
 from common.utils.core_utils import (
     fetch_conversation_turns,
 )
-from common.utils.events import DebugEventEmitter, emit
+from common.utils.events import EventEmitter, emit
 from common.utils.tasks import BackgroundTaskGroup
 from common.utils.time_utils import parse_iso_time_or_now
 from infrastructure.redis_client import (
@@ -29,8 +29,8 @@ from infrastructure.redis_client import (
 )
 from infrastructure.resources import ResourceManager
 
-from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.batch_consumer import IngestionWorker
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 from knoggin_server.knowledge.db.write_graph_db import (
     write_batch_callback,
     write_batch_to_graph,
@@ -41,16 +41,16 @@ from knoggin_server.project.state import ProjectState
 SESSION_KEY_TTL = SESSION_RUNTIME_TTL_SECONDS
 
 
-class Context:
+class Session:
     """
-    Context represents the state and lifecycle container for an active user session.
+    Session represents the state and lifecycle container for an active user session.
 
     It serves as the root orchestration point for a session, binding together user
     state, background ingestion workers, and dynamic configuration. It deliberately
-    holds references to the ingestion pipeline (`BatchProcessor`, `BatchConsumer`)
+    holds references to the ingestion pipeline (`IngestionPipeline`, `IngestionWorker`)
     so it can gracefully orchestrate the shutdown of all asynchronous session tasks.
 
-    Initialization and wiring logic is encapsulated in SessionAssembler to decouple
+    Initialization and wiring logic is encapsulated in SessionFactory to decouple
     the construction of these services from the state container itself.
     """
 
@@ -67,9 +67,9 @@ class Context:
 
         self._max_conversation_history: int = 10000
 
-        self.batch_processor: Optional[BatchProcessor] = None
-        self.consumer: Optional[BatchConsumer] = None
-        self.task_group = BackgroundTaskGroup("ContextTasks")
+        self.batch_processor: Optional[IngestionPipeline] = None
+        self.consumer: Optional[IngestionWorker] = None
+        self.task_group = BackgroundTaskGroup("SessionTasks")
         self.config_unsubscribers: List = []
 
     @property
@@ -105,18 +105,18 @@ class Context:
         session_id: str = None,
         model: str = None,
         project_state: ProjectState = None,
-    ) -> "Context":
+    ) -> "Session":
         """Assembles and launches a new session context."""
-        from knoggin_server.session.boot import SessionAssembler
+        from knoggin_server.session.boot import SessionFactory
 
-        assembler = SessionAssembler(user_name, resources)
+        assembler = SessionFactory(user_name, resources)
         ctx = await assembler.bootstrap(project_state, session_id, model)
 
         return ctx
 
     async def add(self, msg: Message) -> Message:
         if not self.project or not self.project.scheduler or not self.consumer:
-            raise RuntimeError("Context is not fully initialized for message ingestion")
+            raise RuntimeError("Session is not fully initialized for message ingestion")
 
         msg.timestamp = self._normalize_timestamp(msg.timestamp)
 
@@ -249,7 +249,7 @@ class Context:
             RedisKeys.heartbeat_counter(self.user_name, self.session_id)
         )
         if not self.project_id:
-            raise RuntimeError("Context cannot enqueue messages without project_id")
+            raise RuntimeError("Session cannot enqueue messages without project_id")
         await self.redis_client.incr(
             RedisKeys.project_heartbeat_counter(self.user_name, self.project_id)
         )
@@ -462,4 +462,4 @@ class Context:
 
         await self.task_group.shutdown(timeout=10.0)
         await emit(self.session_id, "system", "session_shutdown", {})
-        await DebugEventEmitter.get().cleanup_scope(self.session_id)
+        await EventEmitter.get().cleanup_scope(self.session_id)

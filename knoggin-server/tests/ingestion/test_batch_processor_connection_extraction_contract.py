@@ -7,7 +7,7 @@ from common.schema.contracts import (
     UserConnectionRecord,
 )
 from common.schema.primitives import ConnectionRecord
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 from tests.ingestion.test_batch_processor_entity_resolution_contract import (
     MESSAGES,
     make_harness,
@@ -79,7 +79,7 @@ def user_relationship(*, msg_id=1, entity_name="Knoggin", name="works_on"):
 
 
 async def extract(
-    processor: BatchProcessor,
+    processor: IngestionPipeline,
     *,
     entity_ids=None,
     entity_msg_map=None,

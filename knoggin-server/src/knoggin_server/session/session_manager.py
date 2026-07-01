@@ -9,12 +9,12 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.schema.document import DocumentFocus
-from common.utils.events import DebugEventEmitter
+from common.utils.events import EventEmitter
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.project.project_manager import ProjectManager
-from knoggin_server.session.context import Context
+from knoggin_server.session.context import Session
 
 
 class SessionManager:
@@ -22,7 +22,7 @@ class SessionManager:
         self,
         resources: Any,
         user_name: str,
-        active_sessions: Dict[str, Context],
+        active_sessions: Dict[str, Session],
         project_manager: ProjectManager,
     ):
         self.resources = resources
@@ -109,7 +109,7 @@ class SessionManager:
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
-    ) -> Context:
+    ) -> Session:
         if not project_id or not project_id.strip():
             raise ValueError("create_session requires a project_id from an existing project")
 
@@ -121,7 +121,7 @@ class SessionManager:
             )
 
             try:
-                context = await Context.create(
+                context = await Session.create(
                     user_name=self.user_name,
                     resources=self.resources,
                     session_id=session_id,
@@ -166,7 +166,7 @@ class SessionManager:
             logger.info(f"Created session: {session_id}")
             return context
 
-    async def get_or_resume_session(self, session_id: str) -> Optional[Context]:
+    async def get_or_resume_session(self, session_id: str) -> Optional[Session]:
         if session_id in self.active_sessions:
             return self.active_sessions[session_id]
 
@@ -205,7 +205,7 @@ class SessionManager:
             )
 
             try:
-                context = await Context.create(
+                context = await Session.create(
                     user_name=self.user_name,
                     resources=self.resources,
                     session_id=session_id,
@@ -244,7 +244,7 @@ class SessionManager:
                 if hasattr(context, "shutdown"):
                     await context.shutdown()
             finally:
-                DebugEventEmitter.get().unregister_session(
+                EventEmitter.get().unregister_session(
                     context.project_id, session_id
                 )
                 await self.project_manager.release_project(context.project_id)

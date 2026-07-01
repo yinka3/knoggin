@@ -11,8 +11,8 @@ from common.schema.contracts import (
 )
 from common.schema.primitives import ConnectionRecord
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import FakeRedis
 from tests.ingestion.test_batch_processor_entity_resolution_contract import (
@@ -51,7 +51,7 @@ class FakeEntities:
 
 
 def make_processor():
-    return BatchProcessor(
+    return IngestionPipeline(
         project_id="project-1",
         redis_client=None,
         llm=None,
@@ -162,7 +162,7 @@ def fail_if_called(*args, **kwargs):
 def make_processor_with_real_resolution():
     embedding = FakeEmbeddingService()
     knowledge_store = FakeKnowledgeStore()
-    entities = EntityManager(
+    entities = EntityResolver(
         knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
@@ -173,7 +173,7 @@ def make_processor_with_real_resolution():
     async def get_next_ent_id():
         return next(next_ids)
 
-    processor = BatchProcessor(
+    processor = IngestionPipeline(
         project_id="project-1",
         redis_client=None,
         llm=FakeLLM(),

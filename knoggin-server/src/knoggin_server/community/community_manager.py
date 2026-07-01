@@ -24,8 +24,8 @@ from knoggin_server.agent.types import (
     RetrievedEvidence,
 )
 from knoggin_server.project.state import ProjectState
-from knoggin_server.session.boot import SessionAssembler
-from knoggin_server.session.context import Context
+from knoggin_server.session.boot import SessionFactory
+from knoggin_server.session.context import Session
 
 COMMUNITY_ENABLED_TOOLS = AAC_READ_TOOL_NAMES
 ACTIVE_DISCUSSION_TTL_SECONDS = 2 * 60 * 60
@@ -187,7 +187,7 @@ class CommunityManager:
     async def _run_loop(
         self, discussion_id: str, topic: str, initial_agent_ids: List[str]
     ) -> None:
-        assembler = SessionAssembler(self.user_name, self.resources)
+        assembler = SessionFactory(self.user_name, self.resources)
         ctx = await assembler.assemble(
             project_state=self.project_state,
             session_id=f"aac_{discussion_id}",
@@ -272,7 +272,7 @@ class CommunityManager:
         topic: str,
         history: List[Dict],
         participants: List[str],
-        ctx: Context,
+        ctx: Session,
     ) -> Optional[str]:
         """Runs a single agent turn using the core AgentExecutor."""
 

@@ -22,7 +22,7 @@ from knoggin_server.knowledge.services.entity_embedding import (
 )
 
 
-class EntityManager:
+class EntityResolver:
     def __init__(
         self,
         knowledge_store: "KnowledgeStore",
@@ -42,11 +42,11 @@ class EntityManager:
         self.project_id = require_scope_value(
             project_id,
             "project_id",
-            "EntityManager",
+            "EntityResolver",
         )
         self.readable_project_ids = require_visible_project_ids(
             readable_project_ids,
-            "EntityManager",
+            "EntityResolver",
         )
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
@@ -74,7 +74,7 @@ class EntityManager:
         self.candidate_vector_threshold = config.candidate_vector_threshold
 
         logger.info(
-            "EntityManager settings updated: "
+            "EntityResolver settings updated: "
             f"sub={self.fuzzy_substring_threshold}, "
             f"non-sub={self.fuzzy_non_substring_threshold}, "
             f"freq={self.generic_token_freq}"

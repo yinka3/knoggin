@@ -4,8 +4,8 @@ from common.conf.topics_config import TopicConfig
 from common.schema.contracts import BulkRelevanceResult, RelevanceResult
 from common.schema.primitives import FactRecord
 from common.schema.settings import EntityResolutionSettings, TopicSchema
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 from tests.fixtures.factories import make_topic_config
 
 
@@ -170,7 +170,7 @@ class FakeLLM:
 def make_harness(*, llm=None, topic_config=None):
     embedding = FakeEmbeddingService()
     knowledge_store = FakeScenarioKnowledgeStore()
-    entities = EntityManager(
+    entities = EntityResolver(
         knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
@@ -181,7 +181,7 @@ def make_harness(*, llm=None, topic_config=None):
     async def get_next_ent_id():
         return next(next_ids)
 
-    processor = BatchProcessor(
+    processor = IngestionPipeline(
         project_id="project-1",
         redis_client=None,
         llm=llm or FakeLLM(),

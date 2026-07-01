@@ -10,16 +10,16 @@ from common.utils.events import emit, emit_sync
 from common.utils.json_utils import safe_json_loads
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 
 
-class BatchConsumer:
+class IngestionWorker:
     def __init__(
         self,
         user_name: str,
         session_id: str,
         knowledge_store: KnowledgeStore,
-        processor: BatchProcessor,
+        processor: IngestionPipeline,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
         write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
@@ -59,7 +59,7 @@ class BatchConsumer:
 
     def start(self):
         if self._task is not None:
-            logger.warning("BatchConsumer already running")
+            logger.warning("IngestionWorker already running")
             return
 
         self._shutdown_requested = False
@@ -78,10 +78,10 @@ class BatchConsumer:
 
     async def stop(self):
         if self._task is None:
-            logger.warning("BatchConsumer not running")
+            logger.warning("IngestionWorker not running")
             return
 
-        logger.info("Stopping BatchConsumer...")
+        logger.info("Stopping IngestionWorker...")
         self._shutdown_requested = True
         self._wake_event.set()  # wake if waiting
 
@@ -98,11 +98,11 @@ class BatchConsumer:
 
     def _on_task_done(self, task: asyncio.Task):
         if task.cancelled():
-            logger.info("BatchConsumer task cancelled")
+            logger.info("IngestionWorker task cancelled")
             return
 
         if exc := task.exception():
-            logger.error(f"BatchConsumer task failed: {exc}")
+            logger.error(f"IngestionWorker task failed: {exc}")
 
     async def flush(self):
         """Force a partial drain of the buffer. Blocks until complete."""
@@ -137,9 +137,9 @@ class BatchConsumer:
 
     async def _run(self):
         with logger.contextualize(
-            user=self.user_name, session=self.session_id, component="BatchConsumer"
+            user=self.user_name, session=self.session_id, component="IngestionWorker"
         ):
-            logger.info(f"BatchConsumer started for {self.user_name}")
+            logger.info(f"IngestionWorker started for {self.user_name}")
 
             error_count = 0
             while not self._shutdown_requested:
@@ -161,7 +161,7 @@ class BatchConsumer:
                     error_count += 1
                     backoff = min(60, 2**error_count)
                     logger.error(
-                        f"BatchConsumer: Unexpected error during _drain_buffer: {e}. Backing off for {backoff}s..."
+                        f"IngestionWorker: Unexpected error during _drain_buffer: {e}. Backing off for {backoff}s..."
                     )
                     await asyncio.sleep(backoff)
                 finally:
@@ -169,17 +169,17 @@ class BatchConsumer:
                         self._flush_future.set_result(None)
                     self._flush_future = None
 
-        logger.info("BatchConsumer shutting down, final drain...")
+        logger.info("IngestionWorker shutting down, final drain...")
         try:
             await self._drain_buffer(flush_partial=True)
 
-            logger.info("BatchConsumer shutdown complete")
+            logger.info("IngestionWorker shutdown complete")
         except Exception as e:
-            logger.error(f"BatchConsumer shutdown sequence failed: {e}")
+            logger.error(f"IngestionWorker shutdown sequence failed: {e}")
 
     async def _drain_buffer(self, flush_partial: bool):
         with logger.contextualize(
-            user=self.user_name, session=self.session_id, component="BatchConsumer"
+            user=self.user_name, session=self.session_id, component="IngestionWorker"
         ):
             batches_count = 0
             total_processed = 0
@@ -238,7 +238,7 @@ class BatchConsumer:
                         messages, session_text, session_id=self.session_id
                     )
                 except Exception as e:
-                    logger.error(f"Fatal error during BatchProcessor computation: {e}")
+                    logger.error(f"Fatal error during IngestionPipeline computation: {e}")
                     result = BatchResult(
                         success=False, error=f"Fatal exception: {str(e)}"
                     )

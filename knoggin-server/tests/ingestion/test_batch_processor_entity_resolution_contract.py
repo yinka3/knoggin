@@ -7,9 +7,9 @@ from common.schema.contracts import BulkRelevanceResult, RelevanceResult
 from common.schema.primitives import FactRecord
 from knoggin_server.ingestion.services.pipeline_service import (
     BOOST_LLM_BATCH_SIZE,
-    BatchProcessor,
+    IngestionPipeline,
 )
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 from tests.fixtures.factories import make_topic_config
 
 MESSAGES = [
@@ -140,7 +140,7 @@ class FakeLLM:
 def make_harness():
     embedding = FakeEmbeddingService()
     knowledge_store = FakeKnowledgeStore()
-    entities = EntityManager(
+    entities = EntityResolver(
         knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
@@ -151,7 +151,7 @@ def make_harness():
     async def get_next_ent_id():
         return next(next_ids)
 
-    processor = BatchProcessor(
+    processor = IngestionPipeline(
         project_id="project-1",
         redis_client=None,
         llm=FakeLLM(),

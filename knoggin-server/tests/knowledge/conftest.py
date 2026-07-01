@@ -1,6 +1,6 @@
 import pytest
 
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 
 class FakeEmbeddingService:
@@ -182,7 +182,7 @@ class FakeEntityKnowledgeStore:
 def entity_manager_harness():
     knowledge_store = FakeEntityKnowledgeStore()
     embedding = FakeEmbeddingService()
-    entities = EntityManager(
+    entities = EntityResolver(
         knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",

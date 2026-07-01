@@ -17,7 +17,7 @@ from knoggin_server.agent.tools.memory import MemoryTools
 from knoggin_server.agent.tools.search import SearchTools
 from knoggin_server.agent.tools.topic_tools import TopicTools
 from knoggin_server.knowledge.services.document_service import DocumentService
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 TOOL_DISPATCH = {
     "search_messages": ("search_messages", ["query", "limit"]),
@@ -120,7 +120,7 @@ SPECIAL_TOOL_NAMES = frozenset(
 
 
 @dataclass(frozen=True)
-class ToolAuthorizationContext:
+class ToolPermissions:
     user_name: str
     agent_id: str
     project_id: str
@@ -155,7 +155,7 @@ def configure_tool_authorization(
     session_id: str,
     run_id: str,
     confirmation_state: str = "not_confirmed",
-) -> ToolAuthorizationContext:
+) -> ToolPermissions:
     schema_map = {
         schema["function"]["name"]: schema
         for schema in schemas
@@ -163,7 +163,7 @@ def configure_tool_authorization(
     capabilities = frozenset(
         get_schema_capability(schema) for schema in schema_map.values()
     )
-    context = ToolAuthorizationContext(
+    context = ToolPermissions(
         user_name=user_name,
         agent_id=agent_id,
         project_id=project_id,
@@ -249,7 +249,7 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
     def __init__(
         self,
         user_name: str,
-        entities: EntityManager,
+        entities: EntityResolver,
         session_id: str,
         topic_config: Optional[TopicConfig] = None,
         search_config: Optional[dict] = None,
@@ -282,7 +282,7 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         self.search_cfg = search_config or {}
         self.agent_id = agent_id or "AGENT_IDENTITY"
         self.topic_refresh_callback = topic_refresh_callback
-        self.tool_authorization: Optional[ToolAuthorizationContext] = None
+        self.tool_authorization: Optional[ToolPermissions] = None
         self.active_tool_schemas: Dict[str, dict] = {}
 
         self._http_client = httpx.AsyncClient(timeout=10.0)

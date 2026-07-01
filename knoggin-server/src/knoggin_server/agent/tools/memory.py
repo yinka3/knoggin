@@ -18,14 +18,14 @@ if TYPE_CHECKING:
 
     from infrastructure.knowledge_store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
-    from knoggin_server.knowledge.services.entity_service import EntityManager
+    from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 
 class MemoryTools:
     redis: aioredis.Redis
     knowledge_store: KnowledgeStore
     postgres: PostgresClient
-    entities: EntityManager
+    entities: EntityResolver
 
     async def read_brain(self) -> Dict:
         """Read the current durable Markdown brain and its revision."""

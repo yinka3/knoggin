@@ -80,12 +80,12 @@ def knowledge_store(monkeypatch):
     )
     monkeypatch.setattr(
         knowledge_store_module,
-        "ProjectionRebuilder",
+        "GraphBuilder",
         component_factory("projection_rebuilder"),
     )
     monkeypatch.setattr(
         knowledge_store_module,
-        "SearchIndexRebuilder",
+        "SearchIndexer",
         component_factory("search_index_rebuilder"),
     )
     monkeypatch.setattr(

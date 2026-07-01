@@ -13,7 +13,7 @@ from knoggin_server.knowledge.db.writers.age_projection_writer import (
 )
 
 
-class ProjectionRebuilder:
+class GraphBuilder:
     """Rebuilds AGE traversal projection from canonical Postgres tables."""
 
     def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):

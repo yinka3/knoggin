@@ -9,7 +9,7 @@ from common.utils.time_utils import get_now_ms
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 
 class EntityCleanupJob(BaseJob):
@@ -25,7 +25,7 @@ class EntityCleanupJob(BaseJob):
         self,
         user_name: str,
         knowledge_store: KnowledgeStore,
-        entities: EntityManager,
+        entities: EntityResolver,
         redis_client: aioredis.Redis,
         interval_hours: int = 24,
         orphan_age_hours: int = 24,

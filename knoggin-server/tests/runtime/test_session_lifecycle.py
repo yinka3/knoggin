@@ -2,11 +2,11 @@ import json
 
 import pytest
 
-from common.utils.events import DebugEventEmitter
+from common.utils.events import EventEmitter
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.session.context import Context
+from knoggin_server.session.context import Session
 from knoggin_server.session.session_manager import SessionManager
-from tests.fixtures.fakes import FakeContext, FakeProjectManager, FakeResources
+from tests.fixtures.fakes import FakeSession, FakeProjectManager, FakeResources
 
 
 @pytest.fixture
@@ -45,9 +45,9 @@ async def test_create_session_stores_metadata_and_active_context(
     manager, resources, project_manager, active_sessions = session_manager
 
     async def fake_create(**kwargs):
-        return FakeContext(session_id=kwargs["session_id"], project_id="project-1")
+        return FakeSession(session_id=kwargs["session_id"], project_id="project-1")
 
-    monkeypatch.setattr(Context, "create", fake_create)
+    monkeypatch.setattr(Session, "create", fake_create)
 
     ctx = await manager.create_session(
         topics_config={"General": {"active": True}},
@@ -81,7 +81,7 @@ async def test_create_session_releases_project_state_when_context_create_fails(
     async def failing_create(**kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(Context, "create", failing_create)
+    monkeypatch.setattr(Session, "create", failing_create)
 
     with pytest.raises(RuntimeError, match="boom"):
         await manager.create_session(
@@ -110,9 +110,9 @@ async def test_resume_session_uses_persisted_project_and_updates_last_active(
     async def fake_create(**kwargs):
         assert kwargs["session_id"] == "session-1"
         assert kwargs["model"] == "resume-model"
-        return FakeContext(session_id="session-1", project_id="project-1")
+        return FakeSession(session_id="session-1", project_id="project-1")
 
-    monkeypatch.setattr(Context, "create", fake_create)
+    monkeypatch.setattr(Session, "create", fake_create)
 
     ctx = await manager.get_or_resume_session("session-1")
 
@@ -156,7 +156,7 @@ async def test_resume_session_releases_project_state_when_context_create_fails(
     async def failing_create(**kwargs):
         raise RuntimeError("resume failed")
 
-    monkeypatch.setattr(Context, "create", failing_create)
+    monkeypatch.setattr(Session, "create", failing_create)
 
     with pytest.raises(RuntimeError, match="resume failed"):
         await manager.get_or_resume_session("session-1")
@@ -171,7 +171,7 @@ async def test_close_session_releases_project_and_shuts_context_down(
     monkeypatch, session_manager
 ):
     manager, resources, project_manager, active_sessions = session_manager
-    ctx = FakeContext(session_id="session-1", project_id="project-1")
+    ctx = FakeSession(session_id="session-1", project_id="project-1")
     active_sessions["session-1"] = ctx
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
@@ -196,7 +196,7 @@ async def test_close_session_releases_project_and_shuts_context_down(
         def unregister_session(self, project_id, session_id):
             unregister_calls.append((project_id, session_id))
 
-    monkeypatch.setattr(DebugEventEmitter, "get", staticmethod(lambda: FakeEmitter()))
+    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: FakeEmitter()))
 
     assert await manager.close_session("session-1") is True
 
@@ -217,7 +217,7 @@ async def test_delete_session_data_does_not_remove_project_documents(
     session_manager,
 ):
     manager, resources, project_manager, active_sessions = session_manager
-    ctx = FakeContext(session_id="session-1", project_id="project-1")
+    ctx = FakeSession(session_id="session-1", project_id="project-1")
     project_document_service = object()
     ctx.document_service = project_document_service
     active_sessions["session-1"] = ctx
@@ -249,7 +249,7 @@ async def test_delete_session_data_does_not_remove_project_documents(
 @pytest.mark.no_network
 async def test_document_focus_persists_reads_and_clears(session_manager):
     manager, resources, _, active_sessions = session_manager
-    ctx = FakeContext(session_id="session-1", project_id="project-1")
+    ctx = FakeSession(session_id="session-1", project_id="project-1")
 
     class FocusDocumentService:
         async def resolve_focus_target(self, **kwargs):
@@ -337,12 +337,12 @@ async def test_document_focus_survives_session_resume(
     )
 
     async def fake_create(**kwargs):
-        return FakeContext(
+        return FakeSession(
             session_id=kwargs["session_id"],
             project_id="project-1",
         )
 
-    monkeypatch.setattr(Context, "create", fake_create)
+    monkeypatch.setattr(Session, "create", fake_create)
 
     await manager.get_or_resume_session("session-1")
 

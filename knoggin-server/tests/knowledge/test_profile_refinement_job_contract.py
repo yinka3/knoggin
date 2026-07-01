@@ -569,7 +569,7 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
 
     monkeypatch.setattr(
         "knoggin_server.ingestion.jobs.profile_job."
-        "FactResolutionUtils.apply_fact_changes",
+        "FactResolver.apply_fact_changes",
         fake_apply_fact_changes,
     )
 
@@ -835,7 +835,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     )
     monkeypatch.setattr(
         "knoggin_server.ingestion.jobs.profile_job."
-        "FactResolutionUtils.apply_fact_changes",
+        "FactResolver.apply_fact_changes",
         fake_apply_fact_changes,
     )
     job._get_conversation_context = get_conversation_context

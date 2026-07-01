@@ -107,7 +107,7 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         lambda **kwargs: RecordingJob("fact_archival", **kwargs),
     )
     monkeypatch.setattr(
-        "knoggin_server.project.project_manager.MergeRollbackCleanupJob",
+        "knoggin_server.project.project_manager.MergeCleanupJob",
         lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
     )
     monkeypatch.setattr(
@@ -183,7 +183,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         lambda **kwargs: RecordingJob("fact_archival", **kwargs),
     )
     monkeypatch.setattr(
-        "knoggin_server.project.project_manager.MergeRollbackCleanupJob",
+        "knoggin_server.project.project_manager.MergeCleanupJob",
         lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
     )
     monkeypatch.setattr(

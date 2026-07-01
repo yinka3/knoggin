@@ -573,18 +573,40 @@ The contradiction detection would need to accept a pre-computed embedding rather
 
 # Naming Notes
 
-Some core class names don't match their actual responsibility. Known cases:
+Some core class names don't match their actual responsibility. None of these
+have been renamed yet. When reading or changing these classes, use the
+descriptions below as the mental model.
 
-- `Context` — is the full session runtime, not a data bag. Candidate rename:
-  `Session`.
-- `BatchConsumer` — is a Redis drain loop, not a queue consumer. Candidate
-  rename: `IngestionWorker`.
-- `BatchProcessor` — is the full NLP ingestion pipeline with mutable state.
-  Candidate rename: `IngestionPipeline`.
-- `EntityManager` — is an in-memory entity resolution cache with fuzzy and
-  vector matching. Candidate rename: `EntityResolver`.
-- `DebugEventEmitter` — is the production pipeline event system, not a debug
-  tool. Candidate rename: `EventEmitter`.
+## High priority (actively misleading)
 
-These have not been renamed yet. When reading or changing these classes, use
-the descriptions above as the mental model.
+- `Context` → `Session` — is the full live session runtime (consumer loop,
+  pipeline, Redis queue), not a passive data bag.
+- `DebugEventEmitter` → `EventEmitter` — is the production pipeline event bus.
+  The `Debug` prefix is actively misleading.
+- `EntityManager` → `EntityResolver` — is an in-memory fuzzy + vector matching
+  cache for entity deduplication, not a CRUD manager.
+
+## Medium priority (too specific / implementation-leaking)
+
+- `BatchProcessor` → `IngestionPipeline` — is a stateful NLP pipeline with
+  entity resolution, embedding, and fact writing. "Processor" undersells it.
+- `BatchConsumer` → `IngestionWorker` — is a Redis drain loop. Nothing "batch"
+  about the interface.
+- `ProjectionRebuilder` → `GraphBuilder` — builds and syncs the Apache AGE
+  graph projection from canonical Postgres state. Whether it's building fresh
+  or re-syncing is an implementation detail; the class docstring should carry
+  that nuance.
+- `SearchIndexRebuilder` → `SearchIndexer` — same reasoning; "re" is an
+  implementation detail.
+- `FactResolutionUtils` → `FactResolver` — stateless service class for
+  contradiction detection, merge, and graph mutation. `Utils` is a code smell
+  for a class with real domain logic.
+
+## Low priority (slightly verbose)
+
+- `SessionAssembler` → `SessionFactory` — wires together infrastructure,
+  services, and background jobs for a session. Factory is the standard term.
+- `ToolAuthorizationContext` → `ToolPermissions` — a resolved permission set
+  for what tools an agent can call, not a context object.
+- `MergeRollbackCleanupJob` → `MergeCleanupJob` — "Rollback" is implied by
+  "Merge Cleanup"; the word is redundant.

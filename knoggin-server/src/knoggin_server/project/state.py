@@ -11,7 +11,7 @@ from infrastructure.postgres_client import PostgresClient
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.services.document_service import DocumentService
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 
 class ProjectState:
@@ -23,7 +23,7 @@ class ProjectState:
         self,
         project_id: str,
         topic_config: TopicConfig,
-        entities: EntityManager,
+        entities: EntityResolver,
         pipeline: TextProcessor,
         scheduler: Scheduler,
         user_name: str,
@@ -79,7 +79,7 @@ class ProjectState:
         self.config_unsubscribers.clear()
         if self.scheduler:
             await self.scheduler.stop()
-        # EntityManager and others don't have explicit shutdown methods,
+        # EntityResolver and others don't have explicit shutdown methods,
         # but they will be garbage collected.
 
     async def update_topics_config(self, new_config: dict):

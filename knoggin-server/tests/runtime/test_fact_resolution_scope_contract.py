@@ -2,7 +2,7 @@ import pytest
 
 from common.schema.contracts import FactMergeResult
 from common.schema.primitives import Fact
-from knoggin_server.knowledge.services.fact_resolution import FactResolutionUtils
+from knoggin_server.knowledge.services.fact_resolution import FactResolver
 
 
 class RecordingKnowledgeStore:
@@ -46,7 +46,7 @@ async def test_fact_resolution_uses_source_session_map_for_project_context():
         ]
     )
 
-    summary = await FactResolutionUtils.apply_fact_changes(
+    summary = await FactResolver.apply_fact_changes(
         101,
         merge_result,
         existing_facts=[],
@@ -76,7 +76,7 @@ async def test_fact_resolution_rejects_missing_scope_before_noop():
     merge_result = FactMergeResult()
 
     with pytest.raises(ValueError, match="requires user_name scope"):
-        await FactResolutionUtils.apply_fact_changes(
+        await FactResolver.apply_fact_changes(
             101,
             merge_result,
             existing_facts=[],
@@ -90,7 +90,7 @@ async def test_fact_resolution_rejects_missing_scope_before_noop():
         )
 
     with pytest.raises(ValueError, match="requires project_id scope"):
-        await FactResolutionUtils.apply_fact_changes(
+        await FactResolver.apply_fact_changes(
             101,
             merge_result,
             existing_facts=[],

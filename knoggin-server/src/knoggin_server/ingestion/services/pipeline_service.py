@@ -45,7 +45,7 @@ from knoggin_server.ingestion.prompts import (
     render_configured_prompt,
 )
 from knoggin_server.ingestion.services.processor import TextProcessor
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 
 def _safe_json(obj):
@@ -62,13 +62,13 @@ def _safe_json(obj):
 BOOST_LLM_BATCH_SIZE = 15
 
 
-class BatchProcessor:
+class IngestionPipeline:
     def __init__(
         self,
         project_id: str,
         redis_client: aioredis.Redis,
         llm: LLMService,
-        entities: EntityManager,
+        entities: EntityResolver,
         processor: TextProcessor,
         cpu_executor: ThreadPoolExecutor,
         user_name: str,
@@ -82,7 +82,7 @@ class BatchProcessor:
         knowledge_store=None,
     ):
         if not project_id:
-            raise ValueError("BatchProcessor requires project_id")
+            raise ValueError("IngestionPipeline requires project_id")
         self.project_id = project_id
         self.knowledge_store = knowledge_store
         self.redis = redis_client
@@ -161,10 +161,10 @@ class BatchProcessor:
         Caller responsible for lock acquisition and publishing results.
         """
         if not session_id:
-            raise ValueError("BatchProcessor.run requires session_id")
+            raise ValueError("IngestionPipeline.run requires session_id")
 
         with logger.contextualize(
-            user=self.user_name, session=session_id, component="BatchProcessor"
+            user=self.user_name, session=session_id, component="IngestionPipeline"
         ):
             result = BatchResult()
             result.set_scope(

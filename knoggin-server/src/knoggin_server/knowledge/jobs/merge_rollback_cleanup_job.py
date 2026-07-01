@@ -8,7 +8,7 @@ from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.knowledge_store import KnowledgeStore
 
 
-class MergeRollbackCleanupJob(BaseJob):
+class MergeCleanupJob(BaseJob):
     """Expires bulky rollback states after the configured undo window."""
 
     def __init__(
@@ -53,7 +53,7 @@ class MergeRollbackCleanupJob(BaseJob):
         self.retention_hours = settings.retention_hours
         self._fallback_interval_seconds = settings.fallback_interval_hours * 3600
         logger.info(
-            "MergeRollbackCleanupJob settings updated: "
+            "MergeCleanupJob settings updated: "
             f"enabled={self.enabled}, retention_hours={self.retention_hours}, "
             f"fallback_hours={settings.fallback_interval_hours}"
         )

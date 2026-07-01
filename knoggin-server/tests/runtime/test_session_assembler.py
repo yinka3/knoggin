@@ -4,7 +4,7 @@ import pytest
 
 from common.schema.settings import DeveloperSettings, RootConfig
 from knoggin_server.project.state import ProjectState
-from knoggin_server.session.boot import SessionAssembler
+from knoggin_server.session.boot import SessionFactory
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import (
     FakeKnowledgeStore,
@@ -36,7 +36,7 @@ class RecordingEmitter:
         self.registered_sessions.append((project_id, session_id))
 
 
-class RecordingBatchProcessor:
+class RecordingIngestionPipeline:
     instances = []
 
     def __init__(self, **kwargs):
@@ -53,7 +53,7 @@ class RecordingBatchProcessor:
         self._get_next_ent_id = fn
 
 
-class RecordingBatchConsumer:
+class RecordingIngestionWorker:
     instances = []
 
     def __init__(self, **kwargs):
@@ -72,8 +72,8 @@ class RecordingBatchConsumer:
 
 @pytest.fixture
 def assembler_harness(monkeypatch):
-    RecordingBatchProcessor.instances = []
-    RecordingBatchConsumer.instances = []
+    RecordingIngestionPipeline.instances = []
+    RecordingIngestionWorker.instances = []
 
     config_manager = RecordingConfigManager()
     emitter = RecordingEmitter()
@@ -84,7 +84,7 @@ def assembler_harness(monkeypatch):
     async def get_next_ent_id():
         return 42
 
-    shared_processor = RecordingBatchProcessor(
+    shared_processor = RecordingIngestionPipeline(
         project_id="project-1",
         redis_client=resources.redis,
         llm=resources.llm_service,
@@ -113,15 +113,15 @@ def assembler_harness(monkeypatch):
         staticmethod(lambda: config_manager),
     )
     monkeypatch.setattr(
-        "knoggin_server.session.boot.DebugEventEmitter.get",
+        "knoggin_server.session.boot.EventEmitter.get",
         staticmethod(lambda: emitter),
     )
     monkeypatch.setattr(
-        "knoggin_server.session.boot.BatchConsumer",
-        RecordingBatchConsumer,
+        "knoggin_server.session.boot.IngestionWorker",
+        RecordingIngestionWorker,
     )
     return SimpleNamespace(
-        assembler=SessionAssembler("ada", resources),
+        assembler=SessionFactory("ada", resources),
         config_manager=config_manager,
         emitter=emitter,
         project_state=project_state,
@@ -153,7 +153,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
 
     assert harness.resources.redis.evals == []
 
-    assert RecordingBatchProcessor.instances == [harness.batch_processor]
+    assert RecordingIngestionPipeline.instances == [harness.batch_processor]
     processor = harness.batch_processor
     assert ctx.batch_processor is processor
     assert processor.kwargs["project_id"] == "project-1"
@@ -164,7 +164,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert processor.kwargs["topic_config"] is harness.project_state.topic_config
     assert processor.get_next_ent_id is harness.get_next_ent_id
 
-    consumer = RecordingBatchConsumer.instances[0]
+    consumer = RecordingIngestionWorker.instances[0]
     assert ctx.consumer is consumer
     assert consumer.kwargs["knowledge_store"] is harness.resources.knowledge_store
     assert consumer.kwargs["redis"] is harness.resources.redis

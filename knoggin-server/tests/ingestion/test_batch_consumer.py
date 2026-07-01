@@ -5,7 +5,7 @@ import pytest
 
 from common.schema.contracts import BatchResult
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
+from knoggin_server.ingestion.services.batch_consumer import IngestionWorker
 from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
 
 
@@ -122,7 +122,7 @@ def make_consumer(
     redis = redis or FakeRedis()
     processor = processor or FakeProcessor()
     knowledge_store = knowledge_store or FakeKnowledgeStore()
-    consumer = BatchConsumer(
+    consumer = IngestionWorker(
         user_name="ada",
         session_id="session-1",
         knowledge_store=knowledge_store,

@@ -57,7 +57,7 @@ def dlq_entry(**overrides):
 @pytest.mark.no_network
 def test_dlq_job_requires_processor_knowledge_store():
     with pytest.raises(
-        ValueError, match="requires a BatchProcessor with knowledge_store"
+        ValueError, match="requires a IngestionPipeline with knowledge_store"
     ):
         DLQReplayJob(
             entities=object(),

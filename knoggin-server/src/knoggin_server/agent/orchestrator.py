@@ -21,7 +21,7 @@ from knoggin_server.agent.types import (
 )
 
 if TYPE_CHECKING:
-    from knoggin_server.session.context import Context
+    from knoggin_server.session.context import Session
 
 
 class Orchestrator:
@@ -38,7 +38,7 @@ class Orchestrator:
         user_query: str,
         user_name: str,
         session_id: str,
-        context: Context,
+        context: Session,
         user_timezone: Optional[str] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -89,7 +89,7 @@ class Orchestrator:
                 )
             )
 
-            # Services (Context-Aware)
+            # Services (Session-Aware)
             services = await self._bootstrap_services(
                 context,
                 agent_cfg.id if agent_cfg else None,
@@ -170,7 +170,7 @@ class Orchestrator:
 
     async def _resolve_agent_identity(
         self,
-        context: Context,
+        context: Session,
         agent_id: Optional[str],
         name_override: Optional[str],
         persona_override: Optional[str],
@@ -193,7 +193,7 @@ class Orchestrator:
 
     async def _bootstrap_services(
         self,
-        context: Context,
+        context: Session,
         agent_id: Optional[str] = None,
     ) -> Dict:
         """Retrieve context services and instantiate the agent tool suite."""
@@ -233,7 +233,7 @@ class Orchestrator:
 
     async def _load_document_focus(
         self,
-        context: Context,
+        context: Session,
     ) -> Optional[dict]:
         """Load and validate Postgres-owned session focus for this run."""
         rows = await context.resources.postgres.fetch_all(

@@ -3,7 +3,7 @@ import pytest
 from common.schema.settings import CoordinationLogSettings
 from common.utils.coordination_log import CoordinationLog, format_logfmt
 from common.utils.event_persistence_policy import normalize_coordination_event
-from common.utils.events import DebugEventEmitter
+from common.utils.events import EventEmitter
 
 
 def test_policy_normalizes_approved_event_and_drops_raw_content():
@@ -128,7 +128,7 @@ async def test_debug_emitter_persists_approved_events_and_delivers_to_subscriber
         "common.utils.events.write_coordination_event",
         lambda fields: persisted.append(fields),
     )
-    emitter = DebugEventEmitter()
+    emitter = EventEmitter()
     queue = await emitter.subscribe("project-1")
 
     await emitter.emit(

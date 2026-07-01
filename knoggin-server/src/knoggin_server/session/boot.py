@@ -4,17 +4,17 @@ from typing import Callable, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.utils.events import DebugEventEmitter
+from common.utils.events import EventEmitter
 from infrastructure.resources import ResourceManager
-from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.batch_consumer import IngestionWorker
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 from knoggin_server.project.state import ProjectState
-from knoggin_server.session.context import Context
+from knoggin_server.session.context import Session
 
-class SessionAssembler:
+class SessionFactory:
     """
     Wires together the infrastructure, services, and background jobs for a session.
-    Decouples construction from the Context state container.
+    Decouples construction from the Session state container.
     """
 
     def __init__(self, user_name: str, resources: ResourceManager):
@@ -34,7 +34,7 @@ class SessionAssembler:
         project_state: ProjectState,
         session_id: Optional[str] = None,
         model: Optional[str] = None,
-    ) -> Context:
+    ) -> Session:
         """Perform the multi-phase boot sequence: assemble + launch."""
         ctx = await self.assemble(project_state, session_id, model)
         await self.launch(ctx)
@@ -45,15 +45,15 @@ class SessionAssembler:
         project_state: ProjectState,
         session_id: Optional[str] = None,
         model: Optional[str] = None,
-    ) -> Context:
+    ) -> Session:
         """
-        Wires together services and infrastructure into a Context.
+        Wires together services and infrastructure into a Session.
         Does NOT start background loops.
         """
         session_id = session_id or str(uuid.uuid4())
 
-        # Instantiate Context shell first
-        ctx = Context(
+        # Instantiate Session shell first
+        ctx = Session(
             self.user_name,
             list(project_state.topic_config.raw.keys()),
             self.resources,
@@ -89,11 +89,11 @@ class SessionAssembler:
         ctx.document_service = project_state.document_service
 
         # Register session to emitter for project event propagation
-        DebugEventEmitter.get().register_session(project_state.project_id, session_id)
+        EventEmitter.get().register_session(project_state.project_id, session_id)
 
         return ctx
 
-    async def launch(self, ctx: Context):
+    async def launch(self, ctx: Session):
         """Starts background tasks and jobs for the context."""
         if ctx.consumer:
             if ctx.consumer.get_session_context is None:
@@ -117,17 +117,17 @@ class SessionAssembler:
     def _init_batch_consumer(
         self,
         session_id: str,
-        processor: BatchProcessor,
+        processor: IngestionPipeline,
         get_session_context: Callable,
         write_to_graph: Callable,
-    ) -> BatchConsumer:
+    ) -> IngestionWorker:
         ingest_cfg = self.dev_settings.ingestion
         batch_size = ingest_cfg.batch_size
         batch_timeout = ingest_cfg.batch_timeout
         checkpoint_interval = batch_size * 4
         session_window = batch_size * 3
 
-        return BatchConsumer(
+        return IngestionWorker(
             user_name=self.user_name,
             session_id=session_id,
             knowledge_store=self.resources.knowledge_store,

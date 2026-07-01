@@ -26,8 +26,8 @@ from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 from knoggin_server.knowledge.services.entity_embedding import (
     build_entity_embedding_text,
 )
-from knoggin_server.knowledge.services.entity_service import EntityManager
-from knoggin_server.knowledge.services.fact_resolution import FactResolutionUtils
+from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.services.fact_resolution import FactResolver
 
 
 class ProfileRefinementJob(BaseJob):
@@ -43,7 +43,7 @@ class ProfileRefinementJob(BaseJob):
     def __init__(
         self,
         llm: LLMService,
-        entities: EntityManager,
+        entities: EntityResolver,
         knowledge_store: KnowledgeStore,
         executor: ThreadPoolExecutor,
         embedding_service: EmbeddingService,
@@ -556,7 +556,7 @@ class ProfileRefinementJob(BaseJob):
         }
         source_session_by_msg_id = self._source_session_by_msg_id(conversation)
 
-        fact_summary = await FactResolutionUtils.apply_fact_changes(
+        fact_summary = await FactResolver.apply_fact_changes(
             user_id,
             merge_result,
             existing_facts,
@@ -717,7 +717,7 @@ class ProfileRefinementJob(BaseJob):
                 )
 
                 # Pass local facts to avoid N+1 DB fetch
-                fact_summary = await FactResolutionUtils.apply_fact_changes(
+                fact_summary = await FactResolver.apply_fact_changes(
                     orig["ent_id"],
                     merge_result,
                     existing_facts,

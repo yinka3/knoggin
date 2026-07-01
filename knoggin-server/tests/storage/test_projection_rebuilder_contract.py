@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from common.scoping import IDENTITY_ENTITY_ID, IDENTITY_SCOPE
-from knoggin_server.knowledge.db.projection_rebuilder import ProjectionRebuilder
+from knoggin_server.knowledge.db.projection_rebuilder import GraphBuilder
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -12,7 +12,7 @@ from tests.fixtures.fakes import RecordingPostgresClient
 @pytest.mark.no_network
 async def test_projection_rebuilder_requires_project_scope_without_db_access():
     client = RecordingPostgresClient()
-    rebuilder = ProjectionRebuilder(client)
+    rebuilder = GraphBuilder(client)
 
     with pytest.raises(ValueError, match="requires project_id scope"):
         await rebuilder.rebuild_project_projection("", user_name="ada")
@@ -120,7 +120,7 @@ async def test_projection_rebuilder_replays_canonical_rows_into_age_projection()
             ],
         ],
     )
-    rebuilder = ProjectionRebuilder(client)
+    rebuilder = GraphBuilder(client)
 
     summary = await rebuilder.rebuild_project_projection(
         "project-1",

@@ -19,13 +19,13 @@ from knoggin_server.ingestion.jobs.archive_job import FactArchivalJob
 from knoggin_server.ingestion.jobs.cleaner_job import EntityCleanupJob
 from knoggin_server.ingestion.jobs.dlq_job import DLQReplayJob
 from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.db.write_graph_db import write_batch_callback
 from knoggin_server.knowledge.jobs.merge_rollback_cleanup_job import (
-    MergeRollbackCleanupJob,
+    MergeCleanupJob,
 )
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 from knoggin_server.project.state import ProjectState
 
 
@@ -476,7 +476,7 @@ class ProjectManager:
 
         # Entity Manager
         er_cfg = self.dev_settings.entity_resolution
-        entities = EntityManager(
+        entities = EntityResolver(
             project_id=project_id,
             readable_project_ids=readable_project_ids,
             knowledge_store=self.resources.knowledge_store,
@@ -506,7 +506,7 @@ class ProjectManager:
             ),
         )
 
-        project_processor = BatchProcessor(
+        project_processor = IngestionPipeline(
             project_id=project_id,
             redis_client=self.resources.redis,
             llm=self.resources.llm_service,
@@ -603,7 +603,7 @@ class ProjectManager:
                 del self.active_projects[project_id]
                 logger.info(f"Released ProjectState for project_id: {project_id}")
 
-    async def _verify_user_entity(self, entities: EntityManager) -> None:
+    async def _verify_user_entity(self, entities: EntityResolver) -> None:
         user_id = await entities.get_id(self.user_name)
         if user_id != IDENTITY_ENTITY_ID:
             raise RuntimeError(
@@ -624,7 +624,7 @@ class ProjectManager:
         )
         self._identity_initialized = True
 
-    def _init_profile_job(self, entities: EntityManager) -> ProfileRefinementJob:
+    def _init_profile_job(self, entities: EntityResolver) -> ProfileRefinementJob:
         jobs_cfg = self.dev_settings.jobs
         nlp_cfg = self.dev_settings.nlp_pipeline
         prof_cfg = jobs_cfg.profile
@@ -650,8 +650,8 @@ class ProjectManager:
     def _register_background_jobs(
         self,
         project_state: ProjectState,
-        entities: EntityManager,
-        processor: BatchProcessor,
+        entities: EntityResolver,
+        processor: IngestionPipeline,
         profile_job: ProfileRefinementJob,
     ):
         scheduler = project_state.scheduler
@@ -742,7 +742,7 @@ class ProjectManager:
         )
 
         rollback_cfg = jobs_cfg.merge_rollback
-        rollback_cleanup_job = MergeRollbackCleanupJob(
+        rollback_cleanup_job = MergeCleanupJob(
             knowledge_store=self.resources.knowledge_store,
             retention_hours=rollback_cfg.retention_hours,
             fallback_interval_hours=rollback_cfg.fallback_interval_hours,
