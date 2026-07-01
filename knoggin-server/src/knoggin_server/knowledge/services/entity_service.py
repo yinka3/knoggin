@@ -388,7 +388,10 @@ class EntityResolver:
         return embedding
 
     async def compute_embedding(
-        self, entity_id: int, resolution_text: str
+        self,
+        entity_id: int,
+        resolution_text: str,
+        precomputed: List[float],
     ) -> List[float]:
         with self._lock:
             profile = self.entity_profiles.get(entity_id)
@@ -399,14 +402,9 @@ class EntityResolver:
             logger.info(
                 f"Updating embedding for entity {entity_id}-{profile['canonical_name']}"
             )
+            self.entity_profiles[entity_id]["embedding"] = precomputed
 
-        embedding = await self.embedding_service.encode_single(resolution_text)
-
-        with self._lock:
-            if entity_id in self.entity_profiles:
-                self.entity_profiles[entity_id]["embedding"] = embedding
-
-        return embedding
+        return precomputed
 
     def merge_into(
         self,

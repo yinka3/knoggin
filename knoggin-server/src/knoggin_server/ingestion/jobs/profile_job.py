@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -198,7 +199,7 @@ class ProfileRefinementJob(BaseJob):
         ctx: JobContext,
         num_turns: int,
         user_ratio: float = 0.75,
-        up_to_msg_id: int = None,
+        up_to_msg_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch recent conversation with user/assistant ratio splitting."""
         fetch_count = int(num_turns * 2)
@@ -212,35 +213,27 @@ class ProfileRefinementJob(BaseJob):
         if not turns:
             return []
 
-        user_turns = []
-        assistant_turns = []
-
+        turns_by_role = defaultdict(list)
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
             ts = parse_iso_time_or_now(turn["timestamp"])
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             user_msg_id = int(turn["id"]) if turn["role"] == "user" else None
-
-            if user_msg_id is not None:
-                formatted = (
-                    f"[MSG_{user_msg_id}] [{date_str}] "
-                    f"[{role_label}]: {turn['content']}"
-                )
-            else:
-                formatted = f"[{date_str}] [{role_label}]: {turn['content']}"
-
-            enriched = {
+            formatted = (
+                f"[MSG_{user_msg_id}] [{date_str}] [{role_label}]: {turn['content']}"
+                if user_msg_id is not None
+                else f"[{date_str}] [{role_label}]: {turn['content']}"
+            )
+            turns_by_role[turn["role"]].append({
                 **turn,
                 "role_label": role_label,
                 "formatted": formatted,
                 "raw": turn["content"],
                 "user_msg_id": user_msg_id,
-            }
+            })
 
-            if turn["role"] == "user":
-                user_turns.append(enriched)
-            else:
-                assistant_turns.append(enriched)
+        user_turns = turns_by_role["user"]
+        assistant_turns = turns_by_role["assistant"]
 
         user_count = min(len(user_turns), int(num_turns * user_ratio))
         assistant_count = min(len(assistant_turns), num_turns - user_count)
@@ -310,14 +303,15 @@ class ProfileRefinementJob(BaseJob):
             # Avoid refining if it was updated in the last 60 seconds
             entity_ids = []
             if target_ids and candidate_ids:
-                for eid in candidate_ids:
-                    last_update = await self.redis.get(
-                        RedisKeys.last_profile_update(
-                            ctx.user_name, ctx.project_id, eid
-                        )
-                    )
+                keys = [
+                    RedisKeys.last_profile_update(ctx.user_name, ctx.project_id, eid)
+                    for eid in candidate_ids
+                ]
+                last_updates = await self.redis.mget(*keys)
+                now = get_now_unix()
+                for eid, last_update in zip(candidate_ids, last_updates):
                     if last_update:
-                        age = get_now_unix() - float(last_update)
+                        age = now - float(last_update)
                         if age < 60:
                             logger.info(
                                 f"Skipping targeted refinement for entity {eid} (refined {age:.1f}s ago)"
@@ -332,8 +326,6 @@ class ProfileRefinementJob(BaseJob):
             logger.info(
                 f"Profile refinement starting: {len(entity_ids)} entities to process{force_tag}{target_tag}"
             )
-
-            updates = []
 
             if entity_ids:
                 conversation = await self._get_conversation_context(
@@ -452,6 +444,16 @@ class ProfileRefinementJob(BaseJob):
             else:
                 return JobResult(success=True, summary="No profiles to update")
 
+    def _get_system_prompt(self, user_name: str) -> str:
+        if self.profile_prompt:
+            return render_configured_prompt(
+                self.profile_prompt,
+                prompt_name="configured extract_facts",
+                required={"user_name"},
+                user_name=user_name,
+            )
+        return get_profile_extraction_prompt(user_name)
+
     async def _refine_user_profile(
         self, ctx: JobContext, user_id: int, profile: dict, curr_msg_id: int
     ) -> bool:
@@ -470,8 +472,6 @@ class ProfileRefinementJob(BaseJob):
             logger.warning("User profile refinement: empty conversation text")
             return False
 
-        current_msg_id = curr_msg_id
-
         # Fetch existing facts from DB
         existing_facts = await self.knowledge_store.get_facts_for_entity(
             user_id,
@@ -483,15 +483,7 @@ class ProfileRefinementJob(BaseJob):
             logger.warning("Could not fetch user facts, skipping refinement")
             return False
 
-        if self.profile_prompt:
-            system_reasoning = render_configured_prompt(
-                self.profile_prompt,
-                prompt_name="configured extract_facts",
-                required={"user_name"},
-                user_name=ctx.user_name,
-            )
-        else:
-            system_reasoning = get_profile_extraction_prompt(ctx.user_name)
+        system_reasoning = self._get_system_prompt(ctx.user_name)
 
         enriched_facts = await enrich_facts_with_sources(
             existing_facts,
@@ -507,9 +499,7 @@ class ProfileRefinementJob(BaseJob):
                 "entity_name": ctx.user_name,
                 "entity_type": "person",
                 "existing_facts": enriched_facts,
-                "known_aliases": [
-                    alias for alias in profile.get("aliases", [ctx.user_name])
-                ],
+                "known_aliases": profile.get("aliases", [ctx.user_name]),
             }
         ]
         user_content = format_vp04_input(llm_input, conversation_text)
@@ -574,37 +564,19 @@ class ProfileRefinementJob(BaseJob):
             source_session_by_msg_id=source_session_by_msg_id,
         )
         if fact_summary.failed_invalidations:
-            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
-            await self.redis.sadd(dirty_key, str(user_id))
-            await emit(
-                ctx.project_id,
-                "job",
-                "dirty_entities_marked",
-                {
-                    "user_name": ctx.user_name,
-                    "project_id": ctx.project_id,
-                    "dirty_key": dirty_key,
-                    "entity_ids": [user_id],
-                    "marked_count": 1,
-                    "reason": "fact_invalidation_failed",
-                },
-            )
-            logger.warning(
-                f"Re-dirtied user entity {user_id}: {len(fact_summary.failed_invalidations)} invalidations failed"
-            )
+            await self._mark_entity_dirty(ctx, user_id, len(fact_summary.failed_invalidations))
 
-        embedding = await self._update_entity_embedding(
-            user_id,
-            ctx.user_name,
-            "person",
-            fact_summary.active_facts,
+        resolution_text = self._build_resolution_text(
+            ctx.user_name, "person", fact_summary.active_facts
         )
+        embedding = await self.entities.embedding_service.encode_single(resolution_text)
+        await self.entities.compute_embedding(user_id, resolution_text, embedding)
 
         await self.knowledge_store.update_entity_profile(
             entity_id=user_id,
             canonical_name=ctx.user_name,
             embedding=embedding,
-            last_msg_id=current_msg_id,
+            last_msg_id=curr_msg_id,
             project_id=IDENTITY_SCOPE,
         )
 
@@ -633,39 +605,9 @@ class ProfileRefinementJob(BaseJob):
     ) -> List[Dict]:
         """Process one batch of entities. Returns list of updates."""
         async with self.batch_semaphore:
-            project_id = ctx.project_id
-            llm_input = []
-            for e in batch:
-                enriched_facts = await enrich_facts_with_sources(
-                    e["existing_facts"],
-                    self.knowledge_store,
-                    self.entities.readable_project_ids,
-                    user_name=ctx.user_name,
-                )
-                if len(enriched_facts) > self.max_facts_context:
-                    enriched_facts = enriched_facts[-self.max_facts_context :]
-                llm_input.append(
-                    {
-                        "entity_name": e["entity_name"],
-                        "entity_type": e["entity_type"],
-                        "existing_facts": enriched_facts,
-                        "known_aliases": e["known_aliases"],
-                    }
-                )
+            llm_input, combined_conversation = await self._build_llm_input(batch, ctx.user_name)
 
-            combined_conversation = "\n---\n".join(
-                [e["conversation_text"] for e in batch]
-            )
-
-            if self.profile_prompt:
-                system_reasoning = render_configured_prompt(
-                    self.profile_prompt,
-                    prompt_name="configured extract_facts",
-                    required={"user_name"},
-                    user_name=ctx.user_name,
-                )
-            else:
-                system_reasoning = get_profile_extraction_prompt(ctx.user_name)
+            system_reasoning = self._get_system_prompt(ctx.user_name)
 
             user_content = format_vp04_input(llm_input, combined_conversation)
 
@@ -694,18 +636,18 @@ class ProfileRefinementJob(BaseJob):
                 )
                 return []
 
-            updates = []
             profile_map = {
                 p.canonical_name.lower(): p for p in profiles_result.profiles
             }
 
+            # Phase 1: resolve facts for each entity
+            resolved = []
             for orig in batch:
                 profile_out = profile_map.get(orig["entity_name"].lower())
                 if not profile_out:
                     continue
 
                 new_facts = profile_out.facts
-
                 if not new_facts:
                     logger.debug(f"No new facts extracted for {orig['entity_name']}")
                     continue
@@ -716,7 +658,6 @@ class ProfileRefinementJob(BaseJob):
                     ctx, orig["ent_id"], merge_result
                 )
 
-                # Pass local facts to avoid N+1 DB fetch
                 fact_summary = await FactResolver.apply_fact_changes(
                     orig["ent_id"],
                     merge_result,
@@ -727,47 +668,40 @@ class ProfileRefinementJob(BaseJob):
                     self.embedding_service,
                     self.llm,
                     user_name=ctx.user_name,
-                    project_id=project_id,
+                    project_id=ctx.project_id,
                     contradiction_sim_low=self.contradiction_sim_low,
                     contradiction_sim_high=self.contradiction_sim_high,
                     contradiction_batch_size=self.contradiction_batch_size,
                     contradiction_prompt=self.contradiction_prompt,
                     source_session_by_msg_id=source_session_by_msg_id,
                 )
+
                 if fact_summary.failed_invalidations:
-                    dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
-                    await self.redis.sadd(dirty_key, str(orig["ent_id"]))
-                    await emit(
-                        ctx.project_id,
-                        "job",
-                        "dirty_entities_marked",
-                        {
-                            "user_name": ctx.user_name,
-                            "project_id": ctx.project_id,
-                            "dirty_key": dirty_key,
-                            "entity_ids": [orig["ent_id"]],
-                            "marked_count": 1,
-                            "reason": "fact_invalidation_failed",
-                        },
-                    )
-                    logger.warning(
-                        f"Re-dirtied entity {orig['ent_id']}: {len(fact_summary.failed_invalidations)} invalidations failed"
-                    )
+                    await self._mark_entity_dirty(ctx, orig["ent_id"], len(fact_summary.failed_invalidations))
 
-                embedding = await self._update_entity_embedding(
-                    orig["ent_id"],
-                    orig["entity_name"],
-                    orig["entity_type"],
-                    fact_summary.active_facts,
+                resolved.append((orig, fact_summary))
+
+            # Phase 2: batch encode all resolution texts, then write updates
+            resolution_texts = [
+                self._build_resolution_text(
+                    orig["entity_name"], orig["entity_type"], fact_summary.active_facts
                 )
+                for orig, fact_summary in resolved
+            ]
+            embeddings = await self.embedding_service.encode(resolution_texts)
 
+            updates = []
+            for (orig, _), resolution_text, embedding in zip(resolved, resolution_texts, embeddings):
+                await self.entities.compute_embedding(
+                    orig["ent_id"], resolution_text, embedding
+                )
                 updates.append(
                     {
                         "id": orig["ent_id"],
                         "canonical_name": orig["entity_name"],
                         "embedding": embedding,
                         "last_msg_id": current_msg_id,
-                        "project_id": project_id,
+                        "project_id": ctx.project_id,
                     }
                 )
 
@@ -776,10 +710,12 @@ class ProfileRefinementJob(BaseJob):
                 orig for orig in batch if orig["ent_id"] not in updated_ids
             ]
 
-            for orig in no_update_ents:
-                await self.knowledge_store.update_entity_checkpoint(
-                    orig["ent_id"], current_msg_id, project_id=project_id
+            await asyncio.gather(*[
+                self.knowledge_store.update_entity_checkpoint(
+                    orig["ent_id"], current_msg_id, project_id=ctx.project_id
                 )
+                for orig in no_update_ents
+            ])
 
             return updates
 
@@ -803,8 +739,10 @@ class ProfileRefinementJob(BaseJob):
                 entity_ids,
             )  # if invalid, we should clear them from dirty queue too
 
+        valid_entity_ids = [ent_id for ent_id, _ in valid_entities]
+
         ents_to_facts = await self.knowledge_store.get_facts_for_entities(
-            [ent_id for ent_id, _ in valid_entities],
+            valid_entity_ids,
             visible_project_ids=self.entities.readable_project_ids,
             active_only=True,
         )
@@ -817,7 +755,7 @@ class ProfileRefinementJob(BaseJob):
 
         # Batch fetch last_profiled_msg_id for all entities to avoid N+1
         entities_data = await self.knowledge_store.get_entities_by_ids(
-            [ent_id for ent_id, _ in valid_entities],
+            valid_entity_ids,
             visible_project_ids=self.entities.readable_project_ids,
         )
         profiled_checkpoints = {
@@ -903,34 +841,67 @@ class ProfileRefinementJob(BaseJob):
 
         return all_updates, successful_entity_ids
 
-    async def _update_entity_embedding(
+    def _build_resolution_text(
         self,
-        entity_id: int,
         canonical_name: str,
         entity_type: str,
-        active_facts: Optional[List[FactRecord]] = None,
-    ) -> List[float]:
-        """Recompute entity embedding from current active facts."""
-        if active_facts is None:
-            active_facts = await self.knowledge_store.get_facts_for_entity(
-                entity_id,
-                visible_project_ids=self.entities.readable_project_ids,
-                active_only=True,
-            )
-            if active_facts is None:
-                logger.warning(
-                    "Could not fetch facts for embedding update, using name only"
-                )
-                active_facts = []
+        active_facts: List[FactRecord],
+    ) -> str:
+        """Build the text used for embedding from entity metadata and facts."""
+        return build_entity_embedding_text(canonical_name, entity_type, active_facts)
 
-        resolution_text = build_entity_embedding_text(
-            canonical_name,
-            entity_type,
-            active_facts,
+    async def _mark_entity_dirty(
+        self,
+        ctx: JobContext,
+        entity_id: int,
+        failed_count: int,
+    ) -> None:
+        """Re-add entity to the dirty queue when fact invalidation fails."""
+        dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
+        await self.redis.sadd(dirty_key, str(entity_id))
+        await emit(
+            ctx.project_id,
+            "job",
+            "dirty_entities_marked",
+            {
+                "user_name": ctx.user_name,
+                "project_id": ctx.project_id,
+                "dirty_key": dirty_key,
+                "entity_ids": [entity_id],
+                "marked_count": 1,
+                "reason": "fact_invalidation_failed",
+            },
         )
-        new_emb = await self.entities.compute_embedding(entity_id, resolution_text)
+        logger.warning(
+            f"Re-dirtied entity {entity_id}: {failed_count} invalidations failed"
+        )
 
-        return new_emb
+    async def _build_llm_input(
+        self, batch: List[Dict], user_name: str
+    ) -> Tuple[List[Dict], str]:
+        """Enrich entity facts and build LLM input for a batch."""
+        llm_input = []
+        for e in batch:
+            enriched_facts = await enrich_facts_with_sources(
+                e["existing_facts"],
+                self.knowledge_store,
+                self.entities.readable_project_ids,
+                user_name=user_name,
+            )
+            if len(enriched_facts) > self.max_facts_context:
+                enriched_facts = enriched_facts[-self.max_facts_context :]
+            llm_input.append(
+                {
+                    "entity_name": e["entity_name"],
+                    "entity_type": e["entity_type"],
+                    "existing_facts": enriched_facts,
+                    "known_aliases": e["known_aliases"],
+                }
+            )
+        combined_conversation = "\n---\n".join(
+            e["conversation_text"] for e in batch
+        )
+        return llm_input, combined_conversation
 
     async def _write_updates(self, updates: List[Dict], project_id: str):
         """Write profile updates to KnowledgeStore sequentially."""

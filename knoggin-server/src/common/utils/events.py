@@ -163,7 +163,7 @@ class EventEmitter(BaseEventEmitter):
 
     @classmethod
     def get(cls) -> "EventEmitter":
-        return _DEBUG_EMITTER
+        return _EVENT_EMITTER
 
     def register_session(self, project_id: str, session_id: str):
         if project_id not in self.project_sessions:
@@ -320,7 +320,7 @@ class CommunityEventEmitter(BaseEventEmitter):
         logger.info("Community event emitter shutdown complete")
 
 
-_DEBUG_EMITTER = EventEmitter()
+_EVENT_EMITTER = EventEmitter()
 _COMMUNITY_EMITTER = CommunityEventEmitter()
 
 
