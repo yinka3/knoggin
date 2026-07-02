@@ -7,7 +7,7 @@ more autonomous tools.
 
 ## Guiding Boundary
 
-- [ ] Document the core rule: the model may make semantic decisions, while
+- [x] Document the core rule: the model may make semantic decisions, while
   Python enforces permissions, invariants, validation, and destructive-action
   safety.
 - [x] Ensure every durable value has one authoritative source.
@@ -17,7 +17,7 @@ more autonomous tools.
 
 - [x] Choose one runtime location and storage model for mutable agent identity.
   Packaged templates should seed identities, not serve as mutable production
-  state. Postgres `agents.instructions` is the durable Brain.
+  state. Postgres `agents.brain` is the durable Brain.
 - [x] Fix the read/write path mismatch:
   - Read currently targets `templates/{agent_id}.md`.
   - Write currently targets `templates/agents/{agent_id}.md`.
@@ -46,8 +46,8 @@ more autonomous tools.
 - [x] Preserve immutable engine policy outside the editable identity.
 - [x] Add size limits for the full identity and individual sections.
 - [x] Use atomic writes or transactional database updates.
-- [ ] Record identity revisions and allow rollback. Revisions are now recorded;
-  a rollback operation remains to be added.
+- [x] Keep a Brain revision counter and periodic restore snapshots. Snapshots
+  are stored at revision 1, every 5 revisions, and every section restore.
 - [x] Decide which sections the agent may edit autonomously and which require
   user confirmation.
 
@@ -56,7 +56,10 @@ more autonomous tools.
 - [x] An agent edit is visible on its next run.
 - [x] Editing one agent cannot modify another agent's identity.
 - [x] A malformed edit cannot remove system safety policy.
-- [ ] Every edit has an actor, timestamp, previous revision, and new revision.
+- [x] Brain restore points record actor, timestamp, revision, change type,
+  changed section, deterministic summary, and restored-from revision when
+  applicable. Ordinary edits increment the live revision counter but are not
+  complete history.
 
 ## 2. Prompt Architecture
 
@@ -148,13 +151,13 @@ Implementation notes:
 - [x] Require evidence identifiers in a merge proposal, not only free-text
   reasoning and model confidence.
 - [x] Treat model confidence as advisory, never as authorization.
-- [ ] Add deterministic pre-merge checks:
+- [x] Add deterministic pre-merge checks:
   - Both entities still exist.
   - Both entities are visible in the authorized project scope.
   - Neither entity is the protected identity entity.
   - Entity types are compatible.
   - Stable identifiers do not conflict.
-  - Important facts and timelines do not conflict.
+  - Important facts and timelines require confirmation when nuanced.
   - The candidate has not changed since it was reviewed.
 - [x] Return an explicit policy result:
   - `executed`
@@ -163,10 +166,10 @@ Implementation notes:
 - [x] Require explicit user confirmation for ambiguous or destructive merges.
 - [x] Use a server-issued confirmation token tied to the exact entity IDs and
   revisions.
-- [ ] Make merges reversible where practical.
+- [x] Make merges reversible where practical.
 - [x] Preserve aliases, source facts, relationships, and provenance.
 - [x] Store a complete merge audit record, including before/after state.
-- [ ] Provide an administrative rollback path.
+- [x] Provide an administrative rollback path.
 - [x] Start with conservative automatic-merge rules and widen them only from
   observed evidence.
 
@@ -176,7 +179,7 @@ Implementation notes:
 - [x] The model cannot bypass confirmation by claiming high confidence.
 - [x] A stale proposal cannot merge entities that changed after review.
 - [x] Every completed merge can be explained and traced to evidence.
-- [ ] A mistaken merge has a documented recovery procedure.
+- [x] A mistaken merge has a documented recovery procedure.
 
 ## 6. Postgres and Redis Ownership
 
@@ -198,7 +201,7 @@ Implementation notes:
 - [x] Apply TTLs to temporary keys.
 - [x] Namespace keys consistently by user, project, and session.
 - [x] Define which Redis structures can be rebuilt from Postgres.
-- [ ] Make queue processing idempotent where Redis retries are possible.
+- [x] Make queue processing idempotent where Redis retries are possible.
 - [x] Configure an explicit Docker memory limit.
 - [x] Choose and document an eviction policy.
 - [x] Decide whether Redis persistence is disabled or best-effort.
@@ -208,7 +211,7 @@ Implementation notes:
 Implementation notes:
 
 - Postgres is the durable owner for projects, project membership/read scopes,
-  sessions, agents, agent brain revisions, topic configuration, messages,
+  sessions, agents, agent Brain snapshots, topic configuration, messages,
   documents/chunks, graph records, permissions, merge proposals/audits, and
   tool-write audits.
 - Redis is now documented in `RedisKeys` as cache/coordination only:
@@ -227,11 +230,11 @@ Implementation notes:
   from Postgres, only contains disposable work, or should move to a durable
   Postgres-backed job table.
 - Add a small structured coordination inspection log, not a full WAL. Start
-  minimal and only track event families that support a matching manual recovery
-  operation.
-  - Format: append-only JSONL with schema version, timestamp, event type,
-    user, project, session/run/job IDs, durable Postgres IDs, Redis key names,
-    short human-readable summary, and a bounded event snapshot.
+  minimal and only track event families that support inspection of Redis-backed
+  work transitions.
+  - Format: append-only logfmt/key-value lines with timestamp, event type,
+    label, retention class, user, project, session/job IDs, durable Postgres
+    IDs, Redis key names, reason codes, and bounded error metadata.
   - Rule: the log may include actual event details for inspection, but durable
     data must still live in Postgres. Log snapshots are evidence/debug context,
     not authoritative state.
@@ -239,40 +242,90 @@ Implementation notes:
     - DLQ item created/replayed/parked.
     - Dirty entities marked/cleared for profile refinement.
     - Optional next: merge proposal queued/removed and maintenance deferred.
-  - Initial manual recovery operations:
-    - Requeue a lost DLQ item when the log references durable message IDs or
-      another durable Postgres input.
-    - Re-mark dirty entities from logged entity IDs.
-    - Manually replay a specific operation only when its durable inputs still
-      exist in Postgres and the operation is idempotent or explicitly reviewed.
+  - Event-log UI goal: read-only list/filter/search plus inspect-one-entry
+    details. Recovery helpers belong to later Redis idempotency/recovery work.
   - Non-goal for now: automatic replay, rollback guarantees, ordering
-    guarantees, corruption handling, or treating the log as a source of truth.
+    guarantees, corruption handling, dashboards, analytics, or treating the log
+    as a source of truth.
 - Reuse the existing emitted event stream as the producer-side vocabulary, but
-  persist only selected recovery-grade events. See
-  `codebase-analysis-docs/EVENT_PERSISTENCE_AUDIT.md` for the event-by-event
+  persist only selected inspection-grade events. See
+  `codebase-analysis-docs/COORDINATION_EVENT_LOG_AUDIT.md` for the event-by-event
   classification.
 
 ### Storage Acceptance Criteria
 
-- [ ] Flush Redis in a development environment and confirm durable state
+- Verification helper: run `scripts/verify_storage_ownership.py --seed` for a
+  non-destructive proof setup/report, then rerun with `--flush-redis` and the
+  explicit confirmation phrase against a disposable local Redis DB to prove the
+  Redis flush criterion.
+- [x] Flush Redis in a development environment and confirm durable state
   remains intact.
-- [ ] Restart Redis and confirm sessions recover or fail cleanly.
-- [ ] Restart the full stack and confirm agents, topics, documents, and merge
+- [x] Restart Redis and confirm sessions recover or fail cleanly.
+- [x] Restart the full stack and confirm agents, topics, documents, and merge
   history remain available.
-- [ ] Verify no durable field has competing writable copies in both Postgres
+- [x] Verify no durable field has competing writable copies in both Postgres
   and Redis.
 
 ## 7. Heartbeats and Autonomous Maintenance
 
-- [ ] Keep heartbeat counters in Redis.
-- [ ] Make maintenance eligibility a Python decision.
-- [ ] Let the model decide how to handle presented maintenance candidates.
-- [ ] Ensure a heartbeat request cannot force a tool that is disabled or
+- [x] Keep heartbeat counters in Redis.
+- [x] Make maintenance eligibility a Python decision.
+- [x] Let the model decide how to handle presented maintenance candidates.
+- [x] Ensure a heartbeat request cannot force a tool that is disabled or
   unavailable.
-- [ ] Mark maintenance as handled only after successful completion.
-- [ ] Prevent normal user responses from being blocked by failed maintenance.
-- [ ] Separate topic evaluation cadence from graph merge-maintenance cadence.
-- [ ] Add bounded retries and cooldowns for failed maintenance.
+- [x] Mark maintenance as handled only after successful completion.
+- [x] Prevent normal user responses from being blocked by failed maintenance.
+- [x] Separate topic evaluation cadence from graph merge-maintenance cadence.
+- [x] Add bounded retries and cooldowns for failed maintenance.
+
+Implementation notes:
+
+- Heartbeat counters remain Redis-owned runtime state. User turns increment
+  session and project heartbeat counters; maintenance lifecycle uses additional
+  Redis-only attempt and cooldown keys.
+- Python now builds `MaintenanceCandidate` entries before an agent run. Topic
+  evaluation and graph merge scans are separate candidates with separate
+  reasons, priorities, tools, attempt counters, and cooldown state.
+- Candidate eligibility checks tool availability before presenting work to the
+  model. A heartbeat can create an eligible candidate only when `update_topics`
+  is actually available for that run; graph merge scans require
+  `check_graph_health`.
+- The executor now presents maintenance as optional context, not a mandatory
+  command. It no longer auto-adds `update_topics` or any other maintenance tool.
+- Maintenance is marked handled only after a successful relevant tool result.
+  Failed maintenance records an attempt and cooldown, removes the candidate
+  from the current run, and does not by itself terminally fail the user response.
+
+Manual verification commands:
+
+Status: passing in local manual verification.
+
+```bash
+cd knoggin-server
+uv run pytest -q \
+  tests/agent/test_maintenance_candidates.py \
+  tests/agent/test_agent_executor_step_contract.py \
+  tests/agent/test_agent_executor_tools_contract.py \
+  tests/agent/test_agent_executor_loop_contract.py \
+  tests/agent/test_orchestrator.py \
+  tests/unit/infrastructure/test_redis_keys.py
+```
+
+```bash
+cd knoggin-server
+uv run ruff check \
+  src/knoggin_server/agent/maintenance.py \
+  src/knoggin_server/agent/orchestrator.py \
+  src/knoggin_server/agent/executor.py \
+  src/knoggin_server/agent/types.py \
+  src/infrastructure/redis_client.py \
+  tests/agent/test_maintenance_candidates.py \
+  tests/agent/test_agent_executor_step_contract.py \
+  tests/agent/test_agent_executor_tools_contract.py \
+  tests/agent/test_agent_executor_loop_contract.py \
+  tests/agent/test_orchestrator.py \
+  tests/unit/infrastructure/test_redis_keys.py
+```
 
 ## 8. Verification and Cleanup
 
@@ -280,25 +333,78 @@ Testing is intentionally deferred while the architecture is being reconciled,
 but these contracts should be restored before the redesign is considered
 complete.
 
-- [ ] Update prompt contract tests to reflect the Markdown identity design.
-- [ ] Add a contract test asserting the identity body reaches the system prompt.
-- [ ] Add read/edit/read brain round-trip coverage.
-- [ ] Add schema/dispatch/implementation consistency coverage.
-- [ ] Add topic guard and per-project isolation coverage.
-- [ ] Add destructive capability and confirmation-token coverage.
-- [ ] Add merge rejection tests for identity, type conflicts, stale revisions,
+- [x] Update prompt contract tests to reflect the Markdown identity design.
+- [x] Add a contract test asserting the identity body reaches the system prompt.
+- [x] Add read/edit/read brain round-trip coverage.
+- [x] Add schema/dispatch/implementation consistency coverage.
+- [x] Add topic guard and per-project isolation coverage.
+- [x] Add destructive capability and confirmation-token coverage.
+- [x] Add merge rejection tests for identity, type conflicts, stale revisions,
   and contradictory identifiers.
-- [ ] Add Redis flush/recovery integration coverage.
-- [ ] Remove stale imports, parameters, schemas, and tests from the previous
+- [x] Add Redis flush/recovery integration coverage.
+- [x] Remove stale imports, parameters, schemas, and tests from the previous
   memory architecture.
-- [ ] Update architecture documentation after the final ownership boundaries
+- [x] Update architecture documentation after the final ownership boundaries
   are implemented.
+
+Implementation notes pending full manual test verification:
+
+- Markdown Brain prompt coverage lives in
+  `tests/agent/test_agent_prompt_contract.py`; it asserts the current Brain is
+  rendered inside `<agent_brain>` and does not reintroduce the old nested
+  `<instructions>` wrapper.
+- Brain tool coverage lives in `tests/knowledge/test_memory_service.py`; it now
+  includes an explicit read/edit/read round trip against the durable agent row,
+  plus stale revision, section allow-list, snapshot metadata, and section
+  restore checks.
+- Schema, dispatch, implementation, old memory-tool cleanup, direct merge
+  exposure, and destructive confirmation coverage live in
+  `tests/agent/test_tool_dispatch_contract.py` and
+  `tests/agent/test_autonomy_architecture_cleanup_contract.py`.
+- Topic scope and guard coverage lives in
+  `tests/runtime/test_topic_config_job_scope_contract.py` and
+  `tests/unit/common/test_topics_config.py`.
+- Merge proposal, confirmation token, stale-state, protected identity,
+  visibility, type, and stable identifier coverage lives in
+  `tests/knowledge/test_entity_merge_classification_contract.py`,
+  `tests/knowledge/test_merge_detection_job_contract.py`, and
+  `tests/storage/test_graph_writer_contract.py`.
+- Redis/Postgres ownership coverage lives in
+  `tests/storage/test_storage_ownership_verifier.py` and the manual
+  `scripts/verify_storage_ownership.py` flow documented in Section 6.
+- Stale `save_memory` / `forget_memory` tool exposure is now guarded against;
+  Brain tools are the supported agent identity interface.
+
+Manual verification commands:
+
+```bash
+cd knoggin-server
+uv run pytest -q \
+  tests/agent/test_agent_prompt_contract.py \
+  tests/knowledge/test_memory_service.py \
+  tests/agent/test_tool_dispatch_contract.py \
+  tests/agent/test_autonomy_architecture_cleanup_contract.py \
+  tests/runtime/test_topic_config_job_scope_contract.py \
+  tests/unit/common/test_topics_config.py \
+  tests/knowledge/test_entity_merge_classification_contract.py \
+  tests/knowledge/test_merge_detection_job_contract.py \
+  tests/storage/test_graph_writer_contract.py \
+  tests/storage/test_storage_ownership_verifier.py
+```
+
+```bash
+cd knoggin-server
+uv run ruff check \
+  tests/agent/test_agent_internals_contract.py \
+  tests/agent/test_autonomy_architecture_cleanup_contract.py \
+  tests/knowledge/test_memory_service.py
+```
 
 ## Suggested Order
 
-- [ ] Phase 1: Fix broken wiring between identity, prompts, schemas, and tools.
-- [ ] Phase 2: Establish single sources of truth for identities and topics.
-- [ ] Phase 3: Implement capability enforcement and destructive confirmation.
-- [ ] Phase 4: Introduce proposal-based, reversible entity merging.
-- [ ] Phase 5: Harden Redis/Postgres recovery boundaries.
-- [ ] Phase 6: Reconcile tests and remove obsolete architecture.
+- [x] Phase 1: Fix broken wiring between identity, prompts, schemas, and tools.
+- [x] Phase 2: Establish single sources of truth for identities and topics.
+- [x] Phase 3: Implement capability enforcement and destructive confirmation.
+- [x] Phase 4: Introduce proposal-based, reversible entity merging.
+- [x] Phase 5: Harden Redis/Postgres recovery boundaries.
+- [x] Phase 6: Reconcile tests and remove obsolete architecture.
