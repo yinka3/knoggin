@@ -2,7 +2,7 @@ import pytest
 
 from common.schema.contracts import ConnectionsResult, MessageConnections
 from common.schema.primitives import ConnectionRecord
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 
 
 class FakeLLM:
@@ -26,7 +26,7 @@ class FakeEntities:
 
 
 def make_processor(llm_response):
-    return BatchProcessor(
+    return IngestionPipeline(
         project_id="project-1",
         redis_client=None,
         llm=FakeLLM(llm_response),

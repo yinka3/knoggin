@@ -43,6 +43,7 @@ async def _reset_storage_db(client: PostgresClient):
         TRUNCATE TABLE
             project_read_scopes,
             agent_tool_audits,
+            fact_change_audits,
             agent_brain_snapshots,
             agents,
             document_chunks,

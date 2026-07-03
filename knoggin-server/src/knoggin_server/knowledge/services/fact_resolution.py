@@ -21,7 +21,7 @@ from knoggin_server.ingestion.prompts import get_contradiction_judgment_prompt
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 
-class FactResolutionUtils:
+class FactResolver:
     """
     Stateless utility container for complex fact resolution,
     contradiction detection, and graph mutation logic.
@@ -49,16 +49,20 @@ class FactResolutionUtils:
         contradiction_batch_size: int = 4,
         contradiction_prompt: Optional[str] = None,
         source_session_by_msg_id: Optional[Mapping[int, str]] = None,
+        audit_change_type: Optional[str] = None,
+        actor: Optional[str] = None,
+        reason: Optional[str] = None,
+        fact_change_id: Optional[str] = None,
     ) -> FactResolutionSummary:
         """
         Invalidate old facts and create new ones. Creates first, invalidates after.
         Returns the final set of active facts.
         """
         require_scope_value(
-            user_name, "user_name", "FactResolutionUtils.apply_fact_changes"
+            user_name, "user_name", "FactResolver.apply_fact_changes"
         )
         require_scope_value(
-            project_id, "project_id", "FactResolutionUtils.apply_fact_changes"
+            project_id, "project_id", "FactResolver.apply_fact_changes"
         )
         now = get_now()
 
@@ -86,8 +90,9 @@ class FactResolutionUtils:
                     type(list(valid_msg_ids)[0]).__name__ if valid_msg_ids else "empty"
                 )
                 logger.warning(
-                    f"[{session_id}] FactResolutionUtils: "
-                    f"Invalid msg_id {msg_id} (type {msg_type}) not in conversation window "
+                    f"[{session_id}] FactResolver: "
+                    f"Invalid msg_id {msg_id} (type {msg_type}) "
+                    "not in conversation window "
                     f"{valid_msg_ids} (type {valid_type})"
                 )
                 invalid_source_msg_ids.append(msg_id)
@@ -98,7 +103,7 @@ class FactResolutionUtils:
                 source_session_id = source_session_by_msg_id.get(msg_id)
                 if not source_session_id:
                     logger.warning(
-                        f"[{session_id}] FactResolutionUtils: "
+                        f"[{session_id}] FactResolver: "
                         f"No source session found for valid msg_id {msg_id}"
                     )
                     invalid_source_msg_ids.append(msg_id)
@@ -106,7 +111,7 @@ class FactResolutionUtils:
 
             embedding = await embedding_service.encode_single(content)
 
-            contradicted_ids = await FactResolutionUtils.detect_contradictions(
+            contradicted_ids = await FactResolver.detect_contradictions(
                 new_content=content,
                 new_embedding=embedding,
                 existing_facts=active_existing,
@@ -155,7 +160,7 @@ class FactResolutionUtils:
                 )
                 logger.debug(f"Created {count} facts for entity {entity_id}")
 
-                failed_invalidations = await FactResolutionUtils._invalidate_facts(
+                failed_invalidations = await FactResolver._invalidate_facts(
                     to_invalidate,
                     entity_id,
                     session_id,
@@ -176,12 +181,33 @@ class FactResolutionUtils:
                     verbose_only=True,
                 )
 
+                await FactResolver._audit_fact_changes(
+                    entity_id=entity_id,
+                    merge_result=merge_result,
+                    existing_facts=existing_facts,
+                    created_facts=facts_to_create,
+                    invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
+                    failed_invalidations=failed_invalidations,
+                    contradicted_fact_ids=FactResolver._sorted_ids(
+                        contradicted_fact_ids
+                    ),
+                    invalid_source_msg_ids=invalid_source_msg_ids,
+                    knowledge_store=knowledge_store,
+                    user_name=user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                    audit_change_type=audit_change_type,
+                    actor=actor,
+                    reason=reason,
+                    fact_change_id=fact_change_id,
+                )
+
                 return FactResolutionSummary(
                     active_facts=active_existing,
                     created_facts=facts_to_create,
-                    invalidated_fact_ids=FactResolutionUtils._sorted_ids(to_invalidate),
+                    invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
                     failed_invalidations=failed_invalidations,
-                    contradicted_fact_ids=FactResolutionUtils._sorted_ids(
+                    contradicted_fact_ids=FactResolver._sorted_ids(
                         contradicted_fact_ids
                     ),
                     invalid_source_msg_ids=invalid_source_msg_ids,
@@ -189,7 +215,8 @@ class FactResolutionUtils:
 
             except Exception as e:
                 logger.error(
-                    f"Failed to write facts for {entity_id}, skipping invalidations. Error: {e}"
+                    f"Failed to write facts for {entity_id}, "
+                    f"skipping invalidations. Error: {e}"
                 )
                 await emit(
                     session_id,
@@ -206,9 +233,9 @@ class FactResolutionUtils:
                         f for f in active_existing if f not in facts_to_create
                     ],
                     created_facts=[],
-                    invalidated_fact_ids=FactResolutionUtils._sorted_ids(to_invalidate),
-                    failed_invalidations=FactResolutionUtils._sorted_ids(to_invalidate),
-                    contradicted_fact_ids=FactResolutionUtils._sorted_ids(
+                    invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
+                    failed_invalidations=FactResolver._sorted_ids(to_invalidate),
+                    contradicted_fact_ids=FactResolver._sorted_ids(
                         contradicted_fact_ids
                     ),
                     invalid_source_msg_ids=invalid_source_msg_ids,
@@ -216,7 +243,7 @@ class FactResolutionUtils:
                     error=str(e),
                 )
         elif to_invalidate:
-            failed_invalidations = await FactResolutionUtils._invalidate_facts(
+            failed_invalidations = await FactResolver._invalidate_facts(
                 to_invalidate,
                 entity_id,
                 session_id,
@@ -237,12 +264,33 @@ class FactResolutionUtils:
                 verbose_only=True,
             )
 
+            await FactResolver._audit_fact_changes(
+                entity_id=entity_id,
+                merge_result=merge_result,
+                existing_facts=existing_facts,
+                created_facts=[],
+                invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
+                failed_invalidations=failed_invalidations,
+                contradicted_fact_ids=FactResolver._sorted_ids(
+                    contradicted_fact_ids
+                ),
+                invalid_source_msg_ids=invalid_source_msg_ids,
+                knowledge_store=knowledge_store,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                audit_change_type=audit_change_type,
+                actor=actor,
+                reason=reason,
+                fact_change_id=fact_change_id,
+            )
+
             return FactResolutionSummary(
                 active_facts=active_existing,
                 created_facts=[],
-                invalidated_fact_ids=FactResolutionUtils._sorted_ids(to_invalidate),
+                invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
                 failed_invalidations=failed_invalidations,
-                contradicted_fact_ids=FactResolutionUtils._sorted_ids(
+                contradicted_fact_ids=FactResolver._sorted_ids(
                     contradicted_fact_ids
                 ),
                 invalid_source_msg_ids=invalid_source_msg_ids,
@@ -251,13 +299,111 @@ class FactResolutionUtils:
         return FactResolutionSummary(
             active_facts=active_existing,
             created_facts=[],
-            invalidated_fact_ids=FactResolutionUtils._sorted_ids(to_invalidate),
+            invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
             failed_invalidations=[],
-            contradicted_fact_ids=FactResolutionUtils._sorted_ids(
+            contradicted_fact_ids=FactResolver._sorted_ids(
                 contradicted_fact_ids
             ),
             invalid_source_msg_ids=invalid_source_msg_ids,
         )
+
+    @staticmethod
+    def _fact_snapshot(fact: FactRecord, *, user_name: str, project_id: str) -> dict:
+        return {
+            "fact_id": fact.id,
+            "entity_id": fact.source_entity_id,
+            "user_name": user_name,
+            "project_id": project_id,
+            "content": fact.content,
+            "valid_at": fact.valid_at,
+            "invalid_at": fact.invalid_at,
+            "confidence": fact.confidence,
+            "source_msg_id": fact.source_msg_id,
+            "source_user_name": fact.source_user_name,
+            "source_session_id": fact.source_session_id,
+            "source": fact.source,
+        }
+
+    @staticmethod
+    def _skipped_payload(items) -> list[dict]:
+        return [item.model_dump(mode="json") for item in items]
+
+    @staticmethod
+    async def _audit_fact_changes(
+        *,
+        entity_id: int,
+        merge_result: FactMergeResult,
+        existing_facts: List[FactRecord],
+        created_facts: List[FactRecord],
+        invalidated_fact_ids: List[str],
+        failed_invalidations: List[str],
+        contradicted_fact_ids: List[str],
+        invalid_source_msg_ids: List[int],
+        knowledge_store: KnowledgeStore,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        audit_change_type: Optional[str],
+        actor: Optional[str],
+        reason: Optional[str],
+        fact_change_id: Optional[str],
+    ) -> None:
+        if not audit_change_type:
+            return
+        if not created_facts and not invalidated_fact_ids:
+            return
+
+        existing_by_id = {fact.id: fact for fact in existing_facts}
+        invalidated_snapshots = [
+            FactResolver._fact_snapshot(
+                existing_by_id[fact_id],
+                user_name=user_name,
+                project_id=project_id,
+            )
+            for fact_id in invalidated_fact_ids
+            if fact_id in existing_by_id
+        ]
+        source_msg_ids = sorted(
+            {
+                int(msg_id)
+                for msg_id in (
+                    [fact.source_msg_id for fact in created_facts]
+                    + [
+                        snapshot.get("source_msg_id")
+                        for snapshot in invalidated_snapshots
+                    ]
+                )
+                if msg_id is not None
+            }
+        )
+        metadata = {
+            "skipped": FactResolver._skipped_payload(merge_result.skipped),
+            "missing_targets": FactResolver._skipped_payload(
+                merge_result.missing_targets
+            ),
+            "contradicted_fact_ids": contradicted_fact_ids,
+            "failed_invalidations": failed_invalidations,
+            "invalid_source_msg_ids": invalid_source_msg_ids,
+        }
+        try:
+            await knowledge_store.create_applied_fact_change_audit(
+                fact_change_id=fact_change_id or str(uuid.uuid4()),
+                user_name=user_name,
+                project_id=project_id,
+                entity_id=entity_id,
+                actor=actor or "profile_refinement",
+                change_type=audit_change_type,
+                reason=reason or "profile_extraction",
+                session_id=session_id,
+                source_msg_ids=source_msg_ids,
+                invalidated_fact_ids=invalidated_fact_ids,
+                invalidated_fact_snapshots=invalidated_snapshots,
+                created_fact_ids=[fact.id for fact in created_facts],
+                replacement_content=None,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to audit fact changes for {entity_id}: {exc}")
 
     @staticmethod
     async def _invalidate_facts(
@@ -271,12 +417,14 @@ class FactResolutionUtils:
     ) -> List[str]:
         """Helper to batch invalidate facts and emit failures."""
         require_scope_value(
-            project_id, "project_id", "FactResolutionUtils._invalidate_facts"
+            project_id, "project_id", "FactResolver._invalidate_facts"
         )
         failed_invalidations = []
         for fact_id in fact_ids:
             try:
-                await knowledge_store.invalidate_fact(fact_id, now, project_id=project_id)
+                await knowledge_store.invalidate_fact(
+                    fact_id, now, project_id=project_id
+                )
             except Exception as e:
                 logger.warning(f"Failed to invalidate fact {fact_id}: {e}")
                 failed_invalidations.append(fact_id)
@@ -333,12 +481,17 @@ class FactResolutionUtils:
                     if new_msg_id and fact.source_msg_id:
                         if new_msg_id < fact.source_msg_id:
                             logger.debug(
-                                f"Skipping contradiction check: msg_{new_msg_id} older than msg_{fact.source_msg_id} for '{new_content[:40]}...'"
+                                "Skipping contradiction check: "
+                                f"msg_{new_msg_id} older than "
+                                f"msg_{fact.source_msg_id} "
+                                f"for '{new_content[:40]}...'"
                             )
                             continue
                         if new_msg_id == fact.source_msg_id:
                             logger.debug(
-                                f"Skipping contradiction check: msg_{new_msg_id} same as source msg for '{new_content[:40]}...'"
+                                "Skipping contradiction check: "
+                                f"msg_{new_msg_id} same as source msg "
+                                f"for '{new_content[:40]}...'"
                             )
                             continue
                     candidates.append((fact, similarity))
@@ -357,7 +510,7 @@ class FactResolutionUtils:
 
             pairs = [(fact.content, new_content) for fact, _ in batch]
 
-            judgments = await FactResolutionUtils.llm_judge_contradiction(
+            judgments = await FactResolver.llm_judge_contradiction(
                 pairs=pairs,
                 llm=llm,
                 session_id=session_id,
@@ -369,12 +522,15 @@ class FactResolutionUtils:
                     if 0 <= idx < len(batch):
                         fact, sim = batch[idx]
                         logger.info(
-                            f"LLM confirmed contradiction: '{new_content[:50]}' supersedes '{fact.content[:50]}' (sim={sim:.3f})"
+                            "LLM confirmed contradiction: "
+                            f"'{new_content[:50]}' supersedes "
+                            f"'{fact.content[:50]}' (sim={sim:.3f})"
                         )
                         to_invalidate.append(fact.id)
                     else:
                         logger.warning(
-                            f"LLM returned out-of-range contradiction index {idx} (batch size={len(batch)})"
+                            "LLM returned out-of-range contradiction index "
+                            f"{idx} (batch size={len(batch)})"
                         )
 
         await emit(
@@ -409,7 +565,8 @@ class FactResolutionUtils:
         lines = []
         lines.append("## Facts to evaluate for contradictions:")
         lines.append(
-            "Return one judgment for every numbered pair below, using exactly these indexes."
+            "Return one judgment for every numbered pair below, "
+            "using exactly these indexes."
         )
         for i, (existing, new) in enumerate(pairs, start=1):
             lines.append(f'{i}. FACT_A: "{existing}" | FACT_B: "{new}"')

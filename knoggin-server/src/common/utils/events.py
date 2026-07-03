@@ -154,7 +154,7 @@ class BaseEventEmitter:
             return stale
 
 
-class DebugEventEmitter(BaseEventEmitter):
+class EventEmitter(BaseEventEmitter):
     """Session-scoped event emitter for debug WebSocket streaming."""
 
     def __init__(self):
@@ -162,8 +162,8 @@ class DebugEventEmitter(BaseEventEmitter):
         self.project_sessions: Dict[str, Set[str]] = {}
 
     @classmethod
-    def get(cls) -> "DebugEventEmitter":
-        return _DEBUG_EMITTER
+    def get(cls) -> "EventEmitter":
+        return _EVENT_EMITTER
 
     def register_session(self, project_id: str, session_id: str):
         if project_id not in self.project_sessions:
@@ -320,7 +320,7 @@ class CommunityEventEmitter(BaseEventEmitter):
         logger.info("Community event emitter shutdown complete")
 
 
-_DEBUG_EMITTER = DebugEventEmitter()
+_EVENT_EMITTER = EventEmitter()
 _COMMUNITY_EMITTER = CommunityEventEmitter()
 
 
@@ -331,7 +331,7 @@ async def emit(
     data: Dict[str, Any] = None,
     verbose_only: bool = False,
 ):
-    await DebugEventEmitter.get().emit(session_id, component, event, data, verbose_only)
+    await EventEmitter.get().emit(session_id, component, event, data, verbose_only)
 
 
 def emit_sync(
@@ -341,7 +341,7 @@ def emit_sync(
     data: Dict[str, Any] = None,
     verbose_only: bool = False,
 ):
-    emitter = DebugEventEmitter.get()
+    emitter = EventEmitter.get()
     coro = emitter.emit(session_id, component, event, data, verbose_only)
 
     def _log_failure(task: asyncio.Future):

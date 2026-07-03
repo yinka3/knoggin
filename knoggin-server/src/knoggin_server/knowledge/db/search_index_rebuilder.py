@@ -12,7 +12,7 @@ from knoggin_server.knowledge.services.entity_embedding import (
 )
 
 
-class SearchIndexRebuilder:
+class SearchIndexer:
     """Rebuilds relational search indexes from canonical PostgreSQL rows."""
 
     def __init__(

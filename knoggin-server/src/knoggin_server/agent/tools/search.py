@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from infrastructure.knowledge_store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
     from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-    from knoggin_server.knowledge.services.entity_service import EntityManager
+    from knoggin_server.knowledge.services.entity_service import EntityResolver
     from knoggin_server.knowledge.services.document_service import DocumentService
 
 import httpx
@@ -38,7 +38,7 @@ class SearchTools:
     user_name: str
     session_id: str
     active_topics: Optional[List[str]]
-    entities: EntityManager
+    entities: EntityResolver
     readable_project_ids: Optional[List[str]]
 
     async def list_documents(

@@ -290,6 +290,33 @@ def _document_evidence_key(item: Dict) -> Optional[Tuple]:
     return None
 
 
+def _stable_evidence_key(item) -> Tuple:
+    return ("json", json.dumps(item, sort_keys=True, default=str))
+
+
+def _path_evidence_key(item: Dict) -> Tuple:
+    if isinstance(item, dict):
+        entity_a = item.get("entity_a")
+        entity_b = item.get("entity_b")
+        if entity_a is not None and entity_b is not None:
+            return ("path", entity_a, entity_b)
+    return _stable_evidence_key(item)
+
+
+def _hierarchy_evidence_key(item: Dict) -> Tuple:
+    if isinstance(item, dict) and item.get("entity") is not None:
+        return ("hierarchy", item.get("entity"))
+    return _stable_evidence_key(item)
+
+
+def _fact_evidence_key(item: Dict) -> Tuple:
+    if isinstance(item, dict):
+        fact_id = item.get("fact_id", item.get("id"))
+        if fact_id is not None:
+            return ("fact", fact_id)
+    return _stable_evidence_key(item)
+
+
 def _normalize_document_chunks(data: List[Dict]) -> List[Dict]:
     """Normalize document retrieval into the standard message shape."""
     return [
@@ -347,11 +374,14 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             )
             ev.messages = ev.messages[: cfg.max_accumulated_messages]
 
-    def _acc_extend_or_append(target, data):
+    def _acc_unique_extend_or_append(target, data, key_func):
         if isinstance(data, dict):
-            target.append(data)
+            items = [data]
         elif isinstance(data, list):
-            target.extend(data)
+            items = data
+        else:
+            items = []
+        _merge_unique(target, items, key_func)
 
     strategies = {
         "search_messages": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
@@ -368,11 +398,21 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             d if isinstance(d, list) else [],
             lambda x: (x.get("source"), x.get("target")),
         ),
-        "find_path": lambda ev, d, cfg: ev.paths.extend(
-            d if isinstance(d, list) else []
+        "find_path": lambda ev, d, cfg: _merge_unique(
+            ev.paths,
+            d if isinstance(d, list) else [],
+            _path_evidence_key,
         ),
-        "get_hierarchy": lambda ev, d, cfg: _acc_extend_or_append(ev.hierarchy, d),
-        "fact_check": lambda ev, d, cfg: _acc_extend_or_append(ev.facts, d),
+        "get_hierarchy": lambda ev, d, cfg: _acc_unique_extend_or_append(
+            ev.hierarchy,
+            d,
+            _hierarchy_evidence_key,
+        ),
+        "fact_check": lambda ev, d, cfg: _acc_unique_extend_or_append(
+            ev.facts,
+            d,
+            _fact_evidence_key,
+        ),
         "search_documents": lambda ev, d, cfg: _merge_unique(
             ev.messages,
             _normalize_document_chunks(d) if isinstance(d, list) else [],

@@ -32,6 +32,7 @@ class TextProcessor:
         llm: LLMService,
         topic_config: TopicConfig,
         get_known_aliases: Callable[[], Dict[str, int]],
+        get_alias_version: Callable[[], int],
         get_profile: Callable[[int], Optional[dict]],
         gliner: GLiNER,
         spacy: spacy.Language,
@@ -42,6 +43,7 @@ class TextProcessor:
         self.llm_client = llm
         self.topic_config = topic_config
         self.get_known_aliases = get_known_aliases
+        self.get_alias_version = get_alias_version
         self.get_profile = get_profile
         self._label_to_topics = self._build_label_to_topics()
         self._nlp = spacy
@@ -51,6 +53,10 @@ class TextProcessor:
         self.ner_prompt = ner_prompt
         self.llm_ner = True
         self._spacy_lock = threading.Lock()
+        self._phrase_matcher_cache_version: Optional[int] = None
+        self._phrase_matcher_cache: Optional[
+            Tuple[PhraseMatcher, Dict[str, int]]
+        ] = None
 
     def update_settings(self, config: TextProcessorSettings):
         """Update settings dynamically while running."""
@@ -61,7 +67,9 @@ class TextProcessor:
         logger.info(f"TextProcessor: llm_ner={self.llm_ner}")
 
         logger.info(
-            f"TextProcessor updated: gliner={self.gliner_threshold}, vp01_conf={self.vp01_min_confidence}"
+            "TextProcessor updated: "
+            f"gliner={self.gliner_threshold}, "
+            f"vp01_conf={self.vp01_min_confidence}"
         )
 
     def _build_label_to_topics(self) -> Dict[str, List[str]]:
@@ -81,7 +89,14 @@ class TextProcessor:
         return label_to_topics
 
     def _build_phrase_matcher(self) -> Tuple[PhraseMatcher, Dict[str, int]]:
-        """Build PhraseMatcher from current known aliases."""
+        """Build or reuse PhraseMatcher from current known aliases."""
+        alias_version = self.get_alias_version()
+        if (
+            self._phrase_matcher_cache is not None
+            and self._phrase_matcher_cache_version == alias_version
+        ):
+            return self._phrase_matcher_cache
+
         aliases = self.get_known_aliases()
         matcher = PhraseMatcher(self._nlp.vocab, attr="LOWER")
 
@@ -89,7 +104,9 @@ class TextProcessor:
             patterns = [self._nlp.make_doc(alias) for alias in aliases.keys()]
             matcher.add("KNOWN", patterns)
 
-        return matcher, aliases
+        self._phrase_matcher_cache_version = alias_version
+        self._phrase_matcher_cache = (matcher, aliases)
+        return self._phrase_matcher_cache
 
     def run_gliner(self, text: str) -> List[Tuple[str, str]]:
         all_labels = list(self._label_to_topics.keys())
@@ -113,19 +130,19 @@ class TextProcessor:
                 logger.debug("  -> Filtered (pronoun)")
                 continue
 
-            # Trust specific labels from the schema even if they are common dictionary words.
+            # Trust specific schema labels even for common dictionary words.
             # (e.g. "Notion" is a common word but a valid company entity)
             if e["label"] and e["label"].lower() != "general":
                 filtered.append(e)
                 continue
 
-            # If capitalized at all, it's a strong signal of a proper noun in middle of text
+            # Capitalization is a strong proper-noun signal mid-text.
             if any(c.isupper() for c in span):
                 filtered.append(e)
                 continue
 
             # Using spacy POS tagging as a tie-breaker for lower-case mentions
-            # Note: GLiNER span might not align perfectly with spacy tokens, so we tag the span itself
+            # GLiNER spans may not align with spacy tokens, so tag the span.
             temp_doc = None
             with self._spacy_lock:
                 temp_doc = self._nlp(span)
@@ -172,7 +189,7 @@ class TextProcessor:
         issues: Optional[List[ValidationIssue]] = None,
     ) -> List[Tuple[int, str, str, str]]:
         """
-        Extracts entities via PhraseMatcher (known) + GLiNER (labeled) + VP-01 (catch-all).
+        Extracts entities via known aliases, GLiNER, and VP-01.
         Returns: List[(msg_id, name, type, topic)]
         """
         if not messages:
@@ -309,7 +326,9 @@ class TextProcessor:
             if trace is not None:
                 trace.fallbacks.append({"stage": "ner", "fallback": "llm_disabled"})
             logger.info(
-                f"Extracted {len(output)} mentions: {len(known_ents)} known, {len(gliner_ents) - len(gliner_filtered)} gliner (LLM NER disabled)"
+                f"Extracted {len(output)} mentions: {len(known_ents)} known, "
+                f"{len(gliner_ents) - len(gliner_filtered)} gliner "
+                "(LLM NER disabled)"
             )
             await emit(
                 session_id,
@@ -458,7 +477,8 @@ class TextProcessor:
                     )
         else:
             logger.warning(
-                "VP-01 extraction returned no valid entities; using known/GLiNER mentions"
+                "VP-01 extraction returned no valid entities; "
+                "using known/GLiNER mentions"
             )
             if trace is not None and not any(
                 fb.get("stage") == "ner"
@@ -511,5 +531,6 @@ class TextProcessor:
         """Rebuild label-to-topics map after TopicConfig change."""
         self._label_to_topics = self._build_label_to_topics()
         logger.info(
-            f"TextProcessor label mappings refreshed: {len(self._label_to_topics)} labels"
+            "TextProcessor label mappings refreshed: "
+            f"{len(self._label_to_topics)} labels"
         )

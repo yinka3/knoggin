@@ -54,6 +54,11 @@ def knowledge_store(monkeypatch):
         knowledge_store_module, "FactWriter", component_factory("fact_writer")
     )
     monkeypatch.setattr(
+        knowledge_store_module,
+        "FactAuditWriter",
+        component_factory("fact_audit_writer"),
+    )
+    monkeypatch.setattr(
         knowledge_store_module, "GraphWriter", component_factory("graph_writer")
     )
     monkeypatch.setattr(
@@ -80,12 +85,12 @@ def knowledge_store(monkeypatch):
     )
     monkeypatch.setattr(
         knowledge_store_module,
-        "ProjectionRebuilder",
+        "GraphBuilder",
         component_factory("projection_rebuilder"),
     )
     monkeypatch.setattr(
         knowledge_store_module,
-        "SearchIndexRebuilder",
+        "SearchIndexer",
         component_factory("search_index_rebuilder"),
     )
     monkeypatch.setattr(
@@ -203,6 +208,24 @@ def test_knowledge_store_community_property(knowledge_store):
             "fact_writer",
             ("fid", "2025-01-01"),
             {"project_id": "test"},
+        ),
+        (
+            "remove_fact_with_audit",
+            "fact_writer",
+            (),
+            {"fact_change_id": "change-1", "user_name": "ada"},
+        ),
+        (
+            "replace_facts_with_audit",
+            "fact_writer",
+            (),
+            {"fact_change_id": "change-1", "user_name": "ada"},
+        ),
+        (
+            "create_applied_fact_change_audit",
+            "fact_audit_writer",
+            (),
+            {"fact_change_id": "change-1", "user_name": "ada"},
         ),
         (
             "delete_old_invalidated_facts",
@@ -516,6 +539,7 @@ async def test_knowledge_store_facade_delegates_correctly(
     component_method_name = {
         "expire_merge_rollback_states": "expire_rollback_states",
         "rebuild_project_search_indexes": "rebuild_project_indexes",
+        "create_applied_fact_change_audit": "create_applied_audit",
     }.get(method_name, method_name)
     assert result == f"{component_method_name}-result"
     assert components[component_name].calls == [

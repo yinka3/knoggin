@@ -321,6 +321,45 @@ ON public.entity_merge_audits(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS entity_merge_audits_rollback_expiry_idx
 ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
 
+CREATE TABLE IF NOT EXISTS public.fact_change_audits (
+    fact_change_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    entity_id BIGINT NOT NULL,
+    session_id TEXT,
+    actor TEXT NOT NULL,
+    change_type TEXT NOT NULL,
+    reason TEXT,
+    source_msg_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    invalidated_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    invalidated_fact_snapshots JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    replacement_content TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'applied',
+    failure_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fact_change_audits_change_type CHECK (
+        change_type IN (
+            'manual_remove',
+            'manual_correction',
+            'fact_merge',
+            'bad_extraction_report',
+            'profile_extraction',
+            'admin_recovery'
+        )
+    ),
+    CONSTRAINT fact_change_audits_status CHECK (
+        status IN ('applying', 'applied', 'failed')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS fact_change_audits_entity_idx
+ON public.fact_change_audits(user_name, project_id, entity_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS fact_change_audits_project_idx
+ON public.fact_change_audits(user_name, project_id, created_at DESC);
+
 -- Durable authorization and outcome trail for every model-initiated write.
 CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     audit_id UUID PRIMARY KEY,

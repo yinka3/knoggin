@@ -79,7 +79,7 @@ class FakeExecutor:
         yield {"event": "final", "data": {"content": "done"}}
 
 
-class FakeContext:
+class FakeSession:
     def __init__(self):
         self.resources = FakeResources()
         self.redis_client = self.resources.redis
@@ -98,7 +98,7 @@ def reset_fake_executor():
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_orchestrator_resolves_agent_identity_from_redis():
-    context = FakeContext()
+    context = FakeSession()
     agent = AgentConfig(
         id="agent-1",
         name="Researcher",
@@ -124,7 +124,7 @@ async def test_orchestrator_resolves_agent_identity_from_redis():
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_orchestrator_identity_overrides_take_precedence():
-    context = FakeContext()
+    context = FakeSession()
     context.resources.postgres.upsert_agent(
         AgentConfig(
             id="agent-1",
@@ -151,7 +151,7 @@ async def test_orchestrator_identity_overrides_take_precedence():
 async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_config(
     monkeypatch,
 ):
-    context = FakeContext()
+    context = FakeSession()
     tools = FakeTools()
     agent = AgentConfig(
         id="agent-1",
@@ -226,7 +226,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
 async def test_orchestrator_forwards_python_selected_maintenance_candidates(
     monkeypatch,
 ):
-    context = FakeContext()
+    context = FakeSession()
     tools = FakeTools()
     await context.redis_client.set(
         RedisKeys.project_heartbeat_counter("ada", "project-1"),
@@ -281,7 +281,7 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
 async def test_orchestrator_explicit_hot_topics_override_config_and_are_validated(
     monkeypatch,
 ):
-    context = FakeContext()
+    context = FakeSession()
     tools = FakeTools()
     context.resources.postgres.upsert_agent(
         AgentConfig(
@@ -337,7 +337,7 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_orchestrator_loads_validated_document_focus_once():
-    context = FakeContext()
+    context = FakeSession()
     focus = {
         "mode": "pinned",
         "target_type": "subtree",
@@ -375,7 +375,7 @@ async def test_orchestrator_loads_validated_document_focus_once():
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_orchestrator_ignores_stale_document_focus():
-    context = FakeContext()
+    context = FakeSession()
 
     class MissingFocusService:
         async def resolve_focus_target(self, **kwargs):

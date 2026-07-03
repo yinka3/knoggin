@@ -6,7 +6,7 @@ from common.schema.settings import MergeRollbackSettings
 from common.utils.time_utils import frozen_time, get_now
 from infrastructure.job.base import JobContext
 from knoggin_server.knowledge.jobs.merge_rollback_cleanup_job import (
-    MergeRollbackCleanupJob,
+    MergeCleanupJob,
 )
 
 
@@ -29,7 +29,7 @@ class RecordingKnowledgeStore:
 @pytest.mark.no_network
 async def test_merge_rollback_cleanup_job_expires_old_available_state():
     store = RecordingKnowledgeStore(expire_result=2)
-    job = MergeRollbackCleanupJob(
+    job = MergeCleanupJob(
         store,
         retention_hours=5,
         fallback_interval_hours=1,
@@ -53,7 +53,7 @@ async def test_merge_rollback_cleanup_job_expires_old_available_state():
 
 @pytest.mark.no_network
 async def test_merge_rollback_cleanup_job_settings_update_cadence_and_window():
-    job = MergeRollbackCleanupJob(RecordingKnowledgeStore())
+    job = MergeCleanupJob(RecordingKnowledgeStore())
 
     job.update_settings(
         MergeRollbackSettings(

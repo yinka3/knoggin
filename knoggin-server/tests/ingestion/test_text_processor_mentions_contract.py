@@ -60,6 +60,19 @@ class FakeMatcher:
         ]
 
 
+class RecordingPhraseMatcher:
+    instances = []
+
+    def __init__(self, vocab, attr):
+        self.vocab = vocab
+        self.attr = attr
+        self.patterns = []
+        RecordingPhraseMatcher.instances.append(self)
+
+    def add(self, label, patterns):
+        self.patterns.extend(pattern.text for pattern in patterns)
+
+
 class FakeLLM:
     extraction_model = "fake-ner-model"
 
@@ -119,6 +132,7 @@ def make_processor(
     known_matches = known_matches or {}
     gliner_matches = gliner_matches or {}
     llm = FakeLLM(llm_response, raise_error=llm_raises)
+    alias_version = 0
 
     async def get_profile(entity_id):
         return profiles.get(entity_id)
@@ -127,6 +141,7 @@ def make_processor(
         llm=llm,
         topic_config=topic_config or make_topic_config_with_tools(),
         get_known_aliases=lambda: known_aliases,
+        get_alias_version=lambda: alias_version,
         get_profile=get_profile,
         gliner=object(),
         spacy=FakeNLP(),
@@ -150,6 +165,48 @@ async def extract(processor, *, messages=None, trace=None, issues=None):
         trace=trace,
         issues=issues,
     )
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+def test_build_phrase_matcher_reuses_cache_until_alias_version_changes(monkeypatch):
+    known_aliases = {"bob": 102}
+    alias_version = 1
+
+    async def get_profile(_entity_id):
+        return None
+
+    monkeypatch.setattr(
+        "knoggin_server.ingestion.services.processor.PhraseMatcher",
+        RecordingPhraseMatcher,
+    )
+    RecordingPhraseMatcher.instances.clear()
+
+    processor = TextProcessor(
+        llm=FakeLLM(),
+        topic_config=make_topic_config_with_tools(),
+        get_known_aliases=lambda: known_aliases,
+        get_alias_version=lambda: alias_version,
+        get_profile=get_profile,
+        gliner=object(),
+        spacy=FakeNLP(),
+    )
+
+    first = processor._build_phrase_matcher()
+    second = processor._build_phrase_matcher()
+
+    assert first is second
+    assert len(RecordingPhraseMatcher.instances) == 1
+    assert RecordingPhraseMatcher.instances[0].patterns == ["bob"]
+
+    known_aliases["bobby"] = 102
+    alias_version = 2
+
+    third = processor._build_phrase_matcher()
+
+    assert third is not first
+    assert len(RecordingPhraseMatcher.instances) == 2
+    assert RecordingPhraseMatcher.instances[1].patterns == ["bob", "bobby"]
 
 
 @pytest.mark.ingestion

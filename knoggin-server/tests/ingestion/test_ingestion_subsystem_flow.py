@@ -12,10 +12,10 @@ from common.schema.contracts import (
 )
 from common.schema.primitives import ConnectionRecord, EntityRecord
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.ingestion.services.batch_consumer import BatchConsumer
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.batch_consumer import IngestionWorker
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 from knoggin_server.ingestion.services.processor import TextProcessor
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import FakeRedis
 
@@ -261,7 +261,7 @@ async def make_harness(
     events = []
     knowledge_store = IntegratedKnowledgeStore(events)
     embedding = FakeEmbeddingService()
-    entities = EntityManager(
+    entities = EntityResolver(
         knowledge_store=knowledge_store,
         embedding_service=embedding,
         project_id="project-1",
@@ -276,6 +276,7 @@ async def make_harness(
         llm=llm,
         topic_config=make_topic_config(),
         get_known_aliases=entities.get_known_aliases,
+        get_alias_version=entities.get_alias_version,
         get_profile=entities.get_profile,
         gliner=object(),
         spacy=FakeNLP(),
@@ -291,7 +292,7 @@ async def make_harness(
     async def get_next_ent_id():
         return next(next_ids)
 
-    batch_processor = BatchProcessor(
+    batch_processor = IngestionPipeline(
         project_id="project-1",
         redis_client=redis,
         llm=llm,
@@ -311,7 +312,7 @@ async def make_harness(
 
     batch_processor.move_to_dead_letter = record_dead_letter
     write_to_graph = GraphWriteRecorder(events, response=write_response)
-    consumer = BatchConsumer(
+    consumer = IngestionWorker(
         user_name="ada",
         session_id="session-1",
         knowledge_store=knowledge_store,

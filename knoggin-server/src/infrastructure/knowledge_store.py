@@ -8,14 +8,15 @@ from common.scoping import require_scope_value
 from infrastructure.postgres_client import PostgresClient
 from knoggin_server.community.community_store import CommunityStore
 from knoggin_server.knowledge.db.id_allocator import IdAllocator
-from knoggin_server.knowledge.db.projection_rebuilder import ProjectionRebuilder
+from knoggin_server.knowledge.db.projection_rebuilder import GraphBuilder
 from knoggin_server.knowledge.db.readers.entity_reader import EntityReader
 from knoggin_server.knowledge.db.readers.fact_reader import FactReader
 from knoggin_server.knowledge.db.readers.graph_reader import GraphReader
 from knoggin_server.knowledge.db.readers.merge_audit_reader import MergeAuditReader
-from knoggin_server.knowledge.db.search_index_rebuilder import SearchIndexRebuilder
+from knoggin_server.knowledge.db.search_index_rebuilder import SearchIndexer
 from knoggin_server.knowledge.db.tool_queries import ToolQueries
 from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
+from knoggin_server.knowledge.db.writers.fact_audit_writer import FactAuditWriter
 from knoggin_server.knowledge.db.writers.fact_writer import FactWriter
 from knoggin_server.knowledge.db.writers.graph_writer import GraphWriter
 from knoggin_server.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
@@ -36,6 +37,7 @@ class KnowledgeStore:
         self._id_allocator = IdAllocator(self._postgres_client)
         self._entity_writer = EntityWriter(self._postgres_client)
         self._fact_writer = FactWriter(self._postgres_client)
+        self._fact_audit_writer = FactAuditWriter(self._postgres_client)
         self._graph_writer = GraphWriter(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
@@ -43,8 +45,8 @@ class KnowledgeStore:
         self._graph_reader = GraphReader(self._postgres_client)
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._tools = ToolQueries(self._postgres_client)
-        self._projection_rebuilder = ProjectionRebuilder(self._postgres_client)
-        self._search_index_rebuilder = SearchIndexRebuilder(
+        self._projection_rebuilder = GraphBuilder(self._postgres_client)
+        self._search_index_rebuilder = SearchIndexer(
             self._postgres_client,
             embedding_service,
         )
@@ -109,6 +111,15 @@ class KnowledgeStore:
         return await self._fact_writer.invalidate_fact(
             fact_id, invalid_at, project_id=project_id
         )
+
+    async def remove_fact_with_audit(self, **kwargs) -> dict:
+        return await self._fact_writer.remove_fact_with_audit(**kwargs)
+
+    async def replace_facts_with_audit(self, **kwargs) -> dict:
+        return await self._fact_writer.replace_facts_with_audit(**kwargs)
+
+    async def create_applied_fact_change_audit(self, **kwargs) -> None:
+        return await self._fact_audit_writer.create_applied_audit(**kwargs)
 
     async def update_entity_profile(
         self,

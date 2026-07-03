@@ -29,7 +29,7 @@ The current code already has several useful properties:
 
 - Facts are durable Postgres rows with `valid_at`, `invalid_at`, source message
   pointers, and project/user scope.
-- `FactResolutionUtils.apply_fact_changes()` creates new facts before
+- `FactResolver.apply_fact_changes()` creates new facts before
   invalidating older ones.
 - Fact creation failure skips invalidation, avoiding data loss when writes fail.
 - Invalid source message IDs are stripped if they are not in the valid
@@ -215,8 +215,9 @@ This powers both Correct Memory and Merge Facts.
 
 ## Fact Change Audit
 
-Add a lightweight audit table for user/admin corrections and profile extraction
-changes.
+The lightweight audit table for user/admin corrections and profile extraction
+changes is now implemented. The remaining audit-related work is a reader/history
+surface and conservative manual rollback.
 
 The goal is not full historical version control. The goal is to answer:
 
@@ -227,7 +228,7 @@ The goal is not full historical version control. The goal is to answer:
 - Which new facts were created?
 - Can this batch still be undone?
 
-Suggested table:
+Implemented table shape, with rollback columns still to add:
 
 ```sql
 CREATE TABLE public.fact_change_audits (
@@ -244,11 +245,13 @@ CREATE TABLE public.fact_change_audits (
     invalidated_fact_snapshots JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     replacement_content TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     status TEXT NOT NULL DEFAULT 'applied',
-    rollback_status TEXT,
+    rollback_status TEXT NOT NULL DEFAULT 'not_requested',
+    rollback_actor TEXT,
+    rollback_reason TEXT,
     rollback_failure_reason TEXT,
     rolled_back_at TIMESTAMPTZ,
-    rolled_back_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -256,16 +259,15 @@ CREATE TABLE public.fact_change_audits (
 Recommended `change_type` values:
 
 - `profile_extraction`
-- `user_remove`
-- `user_correction`
+- `manual_remove`
+- `manual_correction`
 - `fact_merge`
 - `bad_extraction_report`
 - `admin_recovery`
 
 Store `invalidated_fact_snapshots` for any fact invalidated by the batch. This
-keeps rollback possible even if the archival job later deletes invalidated facts.
-If this feels too heavy, support rollback only before archival and store IDs
-only for the MVP.
+keeps manual rollback possible even if the archival job later deletes
+invalidated facts.
 
 ## Rollback
 
@@ -276,17 +278,26 @@ Normal user correction should use Replace Facts.
 
 Rollback is for undoing a bad fact-change batch.
 
+The first rollback implementation should be medium complexity: manual/admin
+changes only. Do not roll back `profile_extraction` audits in the first slice.
+Repair bad automated extraction forward with `bad_extraction_report` or
+`manual_correction`.
+
 ### Rollbackable Conditions
 
 A fact change is rollbackable if:
 
 - The audit row exists.
 - It belongs to the authorized `user_name`, `project_id`, and `entity_id`.
+- `status = 'applied'`.
+- `change_type` is one of `manual_remove`, `manual_correction`, `fact_merge`,
+  `bad_extraction_report`, or eligible `admin_recovery`.
+- `change_type` is not `profile_extraction`.
 - It has not already been rolled back.
-- No later successful fact-change audit exists for the same entity, unless an
-  admin explicitly forces recovery.
-- Facts created by the batch still exist, or can be treated as already inactive.
-- Facts invalidated by the batch still exist, or full snapshots are available.
+- No later successful fact-change audit exists for the same entity.
+- Facts created by the batch still exist and are still active.
+- Facts invalidated by the batch are still invalidated, or full snapshots are
+  available for safe restoration.
 
 ### Rollback Actions
 
@@ -305,7 +316,7 @@ For a simple rollback:
 If rollback cannot be completed, mark:
 
 ```text
-rollback_status = failed
+rollback_status = rollback_failed
 rollback_failure_reason = ...
 ```
 
@@ -406,7 +417,8 @@ Mitigation:
 
 - Refuse rollback if a later successful fact-change audit exists for the same
   entity.
-- Allow admin force only with explicit reason.
+- Make a new correction against the current active facts instead.
+- Add force rollback only as a later admin-only design, if needed.
 
 ### Archived Invalidated Facts
 
@@ -441,10 +453,8 @@ Mitigation:
 
 ### Phase 1: Document And Schema
 
-- Add `fact_change_audits` to `schema.sql`.
-- Add indexes for `(user_name, project_id, entity_id, created_at DESC)`.
-- Decide whether MVP stores full invalidated fact snapshots or expires rollback
-  at archival.
+Status: complete for the audit table and indexes. Rollback status columns remain
+to add.
 
 Acceptance criteria:
 
@@ -453,10 +463,8 @@ Acceptance criteria:
 
 ### Phase 2: Service Boundary
 
-- Add a fact recovery/correction service.
-- Implement `replace_facts(...)`.
-- Implement `remove_fact(...)` as scoped invalidation plus audit.
-- Keep destructive operations out of agent tools.
+Status: complete for manual remove/replace/merge/bad-extraction service
+operations. Destructive operations remain out of agent tools.
 
 Acceptance criteria:
 
@@ -465,10 +473,8 @@ Acceptance criteria:
 
 ### Phase 3: Profile Extraction Audit
 
-- Update `FactResolutionUtils.apply_fact_changes()` or its caller to create an
-  audit row for profile extraction changes.
-- Capture created fact IDs, invalidated fact IDs, contradiction-driven
-  invalidations, skipped changes, and missing targets.
+Status: complete. Profile extraction writes audit rows for created/invalidated
+facts and stores skipped/missing/failed details in metadata.
 
 Acceptance criteria:
 
@@ -484,7 +490,8 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- A failed profile extraction can be undone as a batch.
+- The latest eligible manual/admin fact change can be undone as a batch.
+- `profile_extraction` rollback is rejected with a clear reason.
 - Rollback is idempotent.
 - Rollback failure is recorded, not hidden.
 
@@ -521,11 +528,13 @@ Add focused tests for:
 
 Start with:
 
-1. `fact_change_audits`.
-2. `remove_fact`.
-3. `replace_facts`.
+1. `fact_change_audits`. Done.
+2. `remove_fact`. Done.
+3. `replace_facts`. Done.
 4. user-facing bad extraction report that records the report and optionally
-   invalidates/corrects the visible fact.
+   invalidates/corrects the visible fact. Service path done; public surface
+   remains later.
+5. manual rollback for latest eligible audit. Next.
 
 Delay:
 

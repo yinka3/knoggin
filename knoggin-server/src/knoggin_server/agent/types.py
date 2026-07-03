@@ -57,13 +57,16 @@ class AgentRunConfig:
         ("spawn_specialist", 2),
         ("request_replanning", 2),
     )
+    _limits_dict: Dict[str, int] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "_limits_dict", dict(self.tool_limits))
 
     def get_tool_limit(self, tool_name: str, default: int = 6) -> int:
-        limits_dict = dict(self.tool_limits)
-        if tool_name in limits_dict:
-            return limits_dict[tool_name]
+        if tool_name in self._limits_dict:
+            return self._limits_dict[tool_name]
 
-        for key, limit in limits_dict.items():
+        for key, limit in self._limits_dict.items():
             if key.endswith("*") and tool_name.startswith(key[:-1]):
                 return limit
         return default

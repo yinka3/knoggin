@@ -19,7 +19,7 @@ from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.events import emit
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 
 def _resolve_scope(
@@ -52,7 +52,7 @@ def _normalize_embedding(value) -> Optional[list[float]]:
 async def build_graph_mutation_plan(
     batch: BatchResult,
     knowledge_store: KnowledgeStore,
-    entities: EntityManager,
+    entities: EntityResolver,
     session_id: str,
     project_id: str,
     user_name: str = None,
@@ -362,7 +362,7 @@ async def execute_graph_mutation_plan(
 async def write_batch_to_graph(
     batch: BatchResult,
     knowledge_store: KnowledgeStore,
-    entities: EntityManager,
+    entities: EntityResolver,
     session_id: str,
     project_id: str,
     user_name: str = None,
@@ -410,7 +410,7 @@ async def write_batch_to_graph(
 async def write_batch_callback(
     batch: BatchResult,
     knowledge_store: KnowledgeStore,
-    entities: EntityManager,
+    entities: EntityResolver,
     session_id: str,
     project_id: str,
     user_name: str = None,

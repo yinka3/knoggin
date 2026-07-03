@@ -1,14 +1,28 @@
-# Coordination Event Log Audit
+# Coordination Event Log Policy And Search Plan
 
-This audit defines which emitted events belong in the read-only coordination
-event log. The event log is for inspection: list entries, filter/search them,
-and inspect one entry's safe metadata. It is not a replay system, dashboard,
-analytics stream, WAL, or source of truth.
+This document is now a policy/reference note for the implemented coordination
+event log, plus the remaining plan for a read-only search interface.
 
-The short version: reuse the current event vocabulary, but do not log the whole
-event stream. The live emitter remains for UI/debug streaming. The coordination
-log is a filtered sink for Redis-backed work transitions that help a human
-understand what happened.
+The coordination log is for inspection: list entries, filter/search them, and
+inspect one entry's safe metadata. It is not a replay system, analytics stream,
+WAL, dashboard, or source of truth.
+
+## Current State
+
+Implemented:
+
+- `src/common/utils/event_persistence_policy.py`
+- `src/common/utils/coordination_log.py`
+- `src/common/utils/events.py` coordination-log sink integration
+- `CoordinationLogSettings`
+- `tests/unit/common/test_coordination_log.py`
+
+The live event emitter remains the producer-side API. Events are emitted for
+live subscribers first, then a policy checks whether the event should be
+persisted into `logs/coordination.log`.
+
+The log remains evidence, not authority. Any future recovery command must verify
+referenced Postgres rows and operation safety before acting.
 
 ## Decision Rule
 
@@ -30,20 +44,19 @@ Do not log by default when:
 - The event can be recomputed cheaply from Postgres.
 - The event is high-volume and has no direct inspection value.
 
-`verbose_only=True` events default to non-loggable unless they are converted
-into a scrubbed, bounded event first.
+`verbose_only=True` events are intentionally non-loggable unless converted into
+a scrubbed, bounded event first.
 
 ## Log Shape
 
-Keep the existing `emit(...)`, `emit_sync(...)`, and `emit_community(...)`
-calls as the producer-side API.
-
-The sink flow is:
+Current sink flow:
 
 1. Event is emitted normally for live subscribers.
-2. A policy checks `(component, event)` and payload shape.
+2. `event_persistence_policy.normalize_coordination_event(...)` checks
+   `(component, event)` and payload shape.
 3. Approved events are normalized into stable key/value fields.
-4. The normalized event is appended to `logs/coordination.log`.
+4. `coordination_log.write_coordination_event(...)` appends logfmt to
+   `logs/coordination.log`.
 
 Example line:
 
@@ -51,7 +64,7 @@ Example line:
 ts=2026-06-26T12:00:00Z label=RECOVERY retention=recovery component=pipeline event=pipeline.dlq_enqueued user=user project_id=project session_id=session dlq_key=dlq:user:project message_ids=123,124 stage=graph_write attempt=1 error="bounded error text"
 ```
 
-Useful inspection examples:
+Useful shell inspection:
 
 ```bash
 rg "label=RECOVERY" logs/coordination.log
@@ -59,43 +72,36 @@ rg "event=job.merge_queue_marked" logs/coordination.log
 rg "entity_ids=.*42" logs/coordination.log
 ```
 
-The coordination log is evidence, not authority. Any future recovery command
-must verify referenced Postgres rows and operation safety before acting.
+## Approved Events
 
-## Logged In Phase 5
+These events are approved by policy. Unknown fields and content-adjacent fields
+are still dropped by the safe-field allowlist.
 
-| Event | Why log | Required safe metadata |
-| --- | --- | --- |
-| `pipeline.dlq_enqueued` | Captures when a Redis DLQ item is created. | DLQ key, DLQ ID, user, project, session, bounded error, stage, attempt, message IDs. |
-| `job.dlq_parked` | Captures when an item leaves the retry path. | Parked key, DLQ ID, project, stage, attempt, reason, bounded error. |
-| `job.dlq_retry_success` | Captures successful retry. | DLQ key, DLQ ID, project, stage, attempt. |
-| `job.dlq_retry_failed` | Captures retry loop progress and requeue. | DLQ key, DLQ ID, project, stage, attempt, max attempts. |
-| `job.dlq_reprocess_success` | Captures full reprocess success. | DLQ key, DLQ ID, project, message IDs, entity IDs/counts, stage, attempt. |
-| `job.dlq_graph_write_success` | Captures graph-write retry success. | DLQ key, DLQ ID, project, entity IDs/counts, stage, attempt. |
-| `job.dirty_entities_marked` | Shows profile work was queued or re-queued. | Dirty key, project, entity IDs, count, reason. |
-| `job.dirty_entities_cleared` | Shows profile work was handled and removed. | Dirty key, project, entity IDs, count, reason. |
-| `job.merge_queue_marked` | Shows merge-maintenance candidates were queued. | Merge key, project, entity IDs, count, reason. |
-| `job.merge_queue_removed` | Shows merge candidates were removed after review/execution. | Merge key, project, entity IDs, count, reason, proposal ID when available. |
-
-## Candidate Events For Later
-
-These can be added when the event payloads are scrubbed and the event-log UI has
-a reason to show them.
-
-| Event | Why maybe | Recommendation |
-| --- | --- | --- |
-| `pipeline.dlq_write_failed` | Redis DLQ write failed, so the normal failure queue may not contain the item. | Include message IDs, stage, source buffer key, and bounded error only. |
-| `pipeline.graph_write_failed` | Graph write failed before or during DLQ routing. | Include message IDs, entity IDs/counts, stage, and bounded error. |
-| `job.invalidation_failures` | Fact invalidation failed after fact resolution. | Include failed fact IDs and project ID, not fact content. |
-| `job.facts_write_failed` | Fact creation failed before invalidations. | Include entity ID, fact count, source message IDs, and bounded error. |
-| `entities.entity_merged` | Destructive graph action worth cross-checking. | Prefer durable merge audit rows; log only entity/proposal/audit IDs. |
-| `job.maintenance_deferred` | Explains why autonomous maintenance did not run. | Log later if the event-log screen needs cooldown/eligibility inspection. |
-| `pipeline.buffer_invalid_entries` | Indicates malformed Redis buffer entries. | Log only key name and bounded bad-entry metadata, not raw messages. |
-| `pipeline.drain_complete` | Batch-level summary can explain abnormal drains. | Log only when `dlq_count > 0`, `partial_flush=True`, or abnormal state exists. |
-| `job.profile_refinement_failed` | Dirty IDs may remain after profile job failure. | Include dirty key, entity IDs/counts, and bounded error. |
-| `job.profiles_refined` | Durable entity profiles changed. | Log only IDs/counts if the inspection screen needs it. |
-| `job.user_profile_refined` | Durable identity profile changed. | Usually better as a normal audit/product event, not coordination inspection. |
-| `job.failed` / `job.timeout` | Scheduler failures can explain missing maintenance. | Persist only for maintenance jobs, not every scheduler heartbeat. |
+| Event | Why log |
+| --- | --- |
+| `pipeline.dlq_enqueued` | Captures when a Redis DLQ item is created. |
+| `pipeline.dlq_write_failed` | Captures when Redis DLQ write failed and normal retry evidence may be missing. |
+| `pipeline.graph_write_failed` | Captures graph write failure before or during DLQ routing. |
+| `pipeline.buffer_invalid_entries` | Captures malformed Redis buffer entries with bounded metadata only. |
+| `pipeline.drain_complete` | Captures abnormal batch drain summaries when emitted. |
+| `job.dlq_parked` | Captures when an item leaves the retry path. |
+| `job.dlq_retry_success` | Captures successful retry. |
+| `job.dlq_retry_failed` | Captures retry loop progress and requeue. |
+| `job.dlq_reprocess_success` | Captures full reprocess success. |
+| `job.dlq_graph_write_success` | Captures graph-write retry success. |
+| `job.dirty_entities_marked` | Shows profile work was queued or re-queued. |
+| `job.dirty_entities_cleared` | Shows profile work was handled and removed. |
+| `job.merge_queue_marked` | Shows merge-maintenance candidates were queued. |
+| `job.merge_queue_removed` | Shows merge candidates were removed after review/execution. |
+| `job.invalidation_failures` | Captures failed fact invalidations without fact content. |
+| `job.facts_write_failed` | Captures failed fact creation before invalidation. |
+| `job.maintenance_deferred` | Explains why autonomous maintenance did not run when emitted. |
+| `job.profile_refinement_failed` | Captures profile job failure where dirty IDs may remain. |
+| `job.profiles_refined` | Captures durable profile update counts; names/content are dropped. |
+| `job.user_profile_refined` | Captures identity profile update counts. |
+| `job.failed` | Captures scheduler job failure metadata. |
+| `job.timeout` | Captures scheduler timeout metadata. |
+| `entities.entity_merged` | Captures destructive merge identifiers when emitted. |
 
 ## Do Not Log
 
@@ -121,12 +127,70 @@ events that do not belong in the coordination event log.
 | Community reasoning/message events | Community records belong in durable community tables when needed, and some include content. |
 | `entities.entities_removed` | In-memory/cache removal signal, not durable recovery data. |
 
-## Placement
+## Remaining Work: Search Interface
 
-Keep policy separate from the emitter implementation:
+The remaining useful implementation is a read-only coordination-log search
+interface. Keep it separate from recovery actions.
 
-- `src/common/utils/event_persistence_policy.py`
-- `src/common/utils/coordination_log.py`
+Recommended shape:
 
-`events.py` should stay focused on event delivery. The policy owns filtering,
-field normalization, and redaction decisions.
+- Add a small parser for logfmt coordination entries.
+- Add a read-only service, likely `common/utils/coordination_log_reader.py`.
+- Support filters:
+  - `event`
+  - `component`
+  - `project_id`
+  - `user`
+  - `session_id`
+  - `entity_id`
+  - `entity_ids contains`
+  - `message_id` / `message_ids contains`
+  - `dlq_id`
+  - `job`
+  - `reason`
+  - `since` / `until`
+  - free-text substring search across the raw line
+- Return newest-first results with `limit` and a cursor or offset.
+- Include the raw log line plus parsed safe fields.
+- Reject or cap expensive unbounded scans.
+- Treat malformed lines as skippable, not fatal.
+
+Suggested API boundary:
+
+```python
+class CoordinationLogReader:
+    def __init__(self, path: str): ...
+
+    def search(
+        self,
+        *,
+        event: str | None = None,
+        component: str | None = None,
+        project_id: str | None = None,
+        user: str | None = None,
+        entity_id: str | None = None,
+        message_id: str | None = None,
+        dlq_id: str | None = None,
+        job: str | None = None,
+        reason: str | None = None,
+        text: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]: ...
+```
+
+Tests to add:
+
+- Parses quoted logfmt fields.
+- Filters by exact fields.
+- Filters by contained `entity_ids` and `message_ids`.
+- Returns newest-first entries.
+- Applies `limit` and `offset`.
+- Skips malformed lines.
+- Does not expose content fields because they should never be present in the log.
+
+## Open Follow-Up
+
+The policy is still a general safe-field allowlist, not a per-event schema
+validator. That is acceptable for now because the log is inspection-only, but a
+future hardening pass could require specific fields for each approved event.

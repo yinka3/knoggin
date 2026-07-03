@@ -36,6 +36,20 @@ def make_executor(*, config=None, state=None, redis=None):
 
 
 @pytest.mark.no_network
+def test_agent_run_config_uses_cached_tool_limits_with_wildcard_and_default():
+    config = AgentRunConfig(
+        tool_limits=(
+            ("search_messages", 2),
+            ("read_*", 4),
+        )
+    )
+
+    assert config.get_tool_limit("search_messages") == 2
+    assert config.get_tool_limit("read_document") == 4
+    assert config.get_tool_limit("unknown_tool", default=7) == 7
+
+
+@pytest.mark.no_network
 async def test_execute_tools_success_records_state_and_accumulates_evidence(
     monkeypatch,
 ):

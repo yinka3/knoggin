@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from knoggin_server.knowledge.db.search_index_rebuilder import SearchIndexRebuilder
+from knoggin_server.knowledge.db.search_index_rebuilder import SearchIndexer
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -80,7 +80,7 @@ def make_client():
 async def test_search_index_rebuilder_replaces_all_derived_indexes():
     client = make_client()
     embedding = RecordingEmbeddingService()
-    rebuilder = SearchIndexRebuilder(client, embedding)
+    rebuilder = SearchIndexer(client, embedding)
 
     summary = await rebuilder.rebuild_project_indexes(
         "project-1",
@@ -135,7 +135,7 @@ async def test_search_index_rebuilder_replaces_all_derived_indexes():
 @pytest.mark.no_network
 async def test_search_index_rebuilder_embedding_failure_preserves_existing_rows():
     client = make_client()
-    rebuilder = SearchIndexRebuilder(
+    rebuilder = SearchIndexer(
         client,
         RecordingEmbeddingService(fail=True),
     )
@@ -159,7 +159,7 @@ async def test_search_index_rebuilder_rejects_wrong_embedding_dimension():
     client = make_client()
     embedding = RecordingEmbeddingService()
     embedding.embedding_dim = 3
-    rebuilder = SearchIndexRebuilder(client, embedding)
+    rebuilder = SearchIndexer(client, embedding)
 
     with pytest.raises(RuntimeError, match="1024-dimensional"):
         await rebuilder.rebuild_project_indexes(
@@ -192,7 +192,7 @@ async def test_search_index_rebuilder_rejects_malformed_embedding_results(
             return result
 
     client = make_client()
-    rebuilder = SearchIndexRebuilder(client, MalformedEmbeddingService())
+    rebuilder = SearchIndexer(client, MalformedEmbeddingService())
 
     with pytest.raises(RuntimeError, match=match):
         await rebuilder.rebuild_project_indexes(
@@ -217,7 +217,7 @@ async def test_search_index_rebuilder_database_failure_exits_transaction():
         None,
         RuntimeError("message insert failed"),
     ]
-    rebuilder = SearchIndexRebuilder(client, RecordingEmbeddingService())
+    rebuilder = SearchIndexer(client, RecordingEmbeddingService())
 
     with pytest.raises(RuntimeError, match="message insert failed"):
         await rebuilder.rebuild_project_indexes(

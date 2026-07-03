@@ -65,8 +65,10 @@ def test_commit_new_aliases_adds_lowercase_aliases_and_is_idempotent(
 ):
     entities, _, _ = entity_manager_harness
     seed_entity(entities, 101, "Robert Chen")
+    alias_version = entities.get_alias_version()
 
     entities.commit_new_aliases(101, ["Bobby", "RC"])
+    first_update_version = entities.get_alias_version()
     entities.commit_new_aliases(101, ["Bobby", "RC"])
 
     aliases = entities.get_known_aliases()
@@ -77,6 +79,8 @@ def test_commit_new_aliases_adds_lowercase_aliases_and_is_idempotent(
         "bobby",
         "rc",
     }
+    assert first_update_version == alias_version + 1
+    assert entities.get_alias_version() == first_update_version
 
 
 @pytest.mark.storage
@@ -106,6 +110,7 @@ def test_merge_into_moves_secondary_names_and_preserves_primary_profile(
     entities, _, _ = entity_manager_harness
     seed_entity(entities, 101, "Robert Chen", aliases=["Bob"])
     seed_entity(entities, 202, "Rob Chen", aliases=["Robbie"])
+    alias_version = entities.get_alias_version()
 
     entities.merge_into(101, 202)
 
@@ -123,6 +128,7 @@ def test_merge_into_moves_secondary_names_and_preserves_primary_profile(
     assert entities.get_mentions_for_id(202) == []
     assert 202 not in entities.get_profiles()
     assert entities.get_profiles()[101]["canonical_name"] == "Robert Chen"
+    assert entities.get_alias_version() == alias_version + 1
 
 
 @pytest.mark.storage
@@ -159,4 +165,3 @@ def test_remove_entities_cleans_aliases_added_by_alias_maintenance(
     assert "rc" not in aliases
     assert aliases["knoggin"] == 202
     assert entities.get_mentions_for_id(101) == []
-

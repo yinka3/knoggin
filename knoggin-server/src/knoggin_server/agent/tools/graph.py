@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 if TYPE_CHECKING:
     from infrastructure.knowledge_store import KnowledgeStore
     from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-    from knoggin_server.knowledge.services.entity_service import EntityManager
+    from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 from common.utils.data_utils import cosine_similarity
 
@@ -13,7 +13,7 @@ from common.utils.data_utils import cosine_similarity
 class GraphTools:
     # Attributes provided by the composed Tools class
     knowledge_store: KnowledgeStore
-    entities: EntityManager
+    entities: EntityResolver
     embedding_service: EmbeddingService
     active_topics: Optional[List[str]]
     search_cfg: Dict

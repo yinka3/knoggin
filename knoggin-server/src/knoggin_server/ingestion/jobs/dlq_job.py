@@ -23,9 +23,9 @@ from knoggin_server.ingestion.dlq_state import (
     serialize_dlq_entry,
 )
 from knoggin_server.ingestion.services.pipeline_service import (
-    BatchProcessor,
+    IngestionPipeline,
 )
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 
 class DLQReplayJob(BaseJob):
@@ -66,8 +66,8 @@ class DLQReplayJob(BaseJob):
 
     def __init__(
         self,
-        entities: EntityManager,
-        processor: BatchProcessor,
+        entities: EntityResolver,
+        processor: IngestionPipeline,
         write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
         redis_client: aioredis.Redis,
         interval: int = 60,
@@ -78,7 +78,7 @@ class DLQReplayJob(BaseJob):
         self.processor = processor
         if self.processor.knowledge_store is None:
             raise ValueError(
-                "DLQReplayJob requires a BatchProcessor with knowledge_store"
+                "DLQReplayJob requires a IngestionPipeline with knowledge_store"
             )
         self.write_to_graph = write_to_graph
         self.redis = redis_client

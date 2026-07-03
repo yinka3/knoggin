@@ -49,6 +49,7 @@ class FakeEntities:
         }
         self.user_id = user_id
         self.embedding_calls = []
+        self.embedding_service = FakeEmbedding()
 
     async def get_id(self, name):
         return self.user_id if name == "ada" else None
@@ -57,9 +58,17 @@ class FakeEntities:
         profile = self.entity_profiles[entity_id]
         return [profile["canonical_name"], *profile.get("aliases", [])]
 
-    async def compute_embedding(self, entity_id, resolution_text):
+    async def compute_embedding(self, entity_id, resolution_text, embedding=None):
         self.embedding_calls.append((entity_id, resolution_text))
-        return [float(entity_id), 0.5]
+        return embedding or [float(entity_id), 0.5]
+
+
+class FakeEmbedding:
+    async def encode(self, texts):
+        return [[float(index + 2), 0.5] for index, _ in enumerate(texts)]
+
+    async def encode_single(self, text):
+        return [1.0, 0.5]
 
 
 class FakeKnowledgeStore:
@@ -161,7 +170,7 @@ def make_job(
         entities=entities or FakeEntities(),
         knowledge_store=knowledge_store or FakeKnowledgeStore(),
         executor=None,
-        embedding_service=object(),
+        embedding_service=FakeEmbedding(),
         redis_client=redis or FakeRedis(),
         msg_window=msg_window,
         volume_threshold=volume_threshold,
@@ -557,7 +566,9 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
             ]
         )
     )
-    job = make_job(redis=redis, knowledge_store=knowledge_store, entities=entities, llm=llm)
+    job = make_job(
+        redis=redis, knowledge_store=knowledge_store, entities=entities, llm=llm
+    )
     apply_calls = []
 
     async def fake_apply_fact_changes(*args, **kwargs):
@@ -569,7 +580,7 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
 
     monkeypatch.setattr(
         "knoggin_server.ingestion.jobs.profile_job."
-        "FactResolutionUtils.apply_fact_changes",
+        "FactResolver.apply_fact_changes",
         fake_apply_fact_changes,
     )
 
@@ -629,6 +640,9 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
         "contradiction_batch_size": 2,
         "contradiction_prompt": "judge contradictions",
         "source_session_by_msg_id": {7: "session-7"},
+        "audit_change_type": "profile_extraction",
+        "actor": "profile_refinement",
+        "reason": "profile_extraction",
     }
 
 
@@ -788,7 +802,9 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
             ]
         )
     )
-    job = make_job(redis=redis, knowledge_store=knowledge_store, entities=entities, llm=llm)
+    job = make_job(
+        redis=redis, knowledge_store=knowledge_store, entities=entities, llm=llm
+    )
     job.max_facts_context = 1
     apply_calls = []
     enriched_calls = []
@@ -835,7 +851,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     )
     monkeypatch.setattr(
         "knoggin_server.ingestion.jobs.profile_job."
-        "FactResolutionUtils.apply_fact_changes",
+        "FactResolver.apply_fact_changes",
         fake_apply_fact_changes,
     )
     job._get_conversation_context = get_conversation_context
@@ -885,6 +901,9 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
         "contradiction_batch_size": 2,
         "contradiction_prompt": "judge contradictions",
         "source_session_by_msg_id": {7: "session-7"},
+        "audit_change_type": "profile_extraction",
+        "actor": "profile_refinement",
+        "reason": "user_profile_extraction",
     }
 
     assert await redis.smembers(RedisKeys.dirty_entities("ada", "project-1")) == {"1"}

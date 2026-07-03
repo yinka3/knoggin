@@ -3,7 +3,7 @@ import pytest
 from common.schema.settings import CoordinationLogSettings
 from common.utils.coordination_log import CoordinationLog, format_logfmt
 from common.utils.event_persistence_policy import normalize_coordination_event
-from common.utils.events import DebugEventEmitter
+from common.utils.events import EventEmitter
 
 
 def test_policy_normalizes_approved_event_and_drops_raw_content():
@@ -57,6 +57,45 @@ def test_policy_rejects_disallowed_and_verbose_events():
         )
         is None
     )
+
+
+def test_policy_allows_candidate_failure_events_with_safe_fields_only():
+    record = normalize_coordination_event(
+        ts="2026-06-29T12:00:00Z",
+        scope_id="project-1",
+        component="job",
+        event="facts_write_failed",
+        data={
+            "entity_id": 42,
+            "fact_count": 3,
+            "failed_fact_ids": ["fact-1", "fact-2"],
+            "error": "write failed",
+            "content": "raw fact text must not be logged",
+        },
+    )
+
+    assert record is not None
+    assert record.fields["event"] == "job.facts_write_failed"
+    assert record.fields["entity_id"] == 42
+    assert record.fields["fact_count"] == 3
+    assert record.fields["failed_fact_ids"] == "fact-1,fact-2"
+    assert record.fields["error"] == "write failed"
+    assert "content" not in record.fields
+
+
+def test_policy_normalizes_scheduler_failure_name_to_job_field():
+    record = normalize_coordination_event(
+        ts="2026-06-29T12:00:00Z",
+        scope_id="project-1",
+        component="job",
+        event="timeout",
+        data={"name": "profile_refinement", "summary": "ignored"},
+    )
+
+    assert record is not None
+    assert record.fields["event"] == "job.timeout"
+    assert record.fields["job"] == "profile_refinement"
+    assert "summary" not in record.fields
 
 
 def test_logfmt_quotes_values_without_breaking_searchable_keys():
@@ -128,7 +167,7 @@ async def test_debug_emitter_persists_approved_events_and_delivers_to_subscriber
         "common.utils.events.write_coordination_event",
         lambda fields: persisted.append(fields),
     )
-    emitter = DebugEventEmitter()
+    emitter = EventEmitter()
     queue = await emitter.subscribe("project-1")
 
     await emitter.emit(

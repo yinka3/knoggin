@@ -22,7 +22,7 @@ from knoggin_server.knowledge.services.entity_embedding import (
 )
 
 
-class EntityManager:
+class EntityResolver:
     def __init__(
         self,
         knowledge_store: "KnowledgeStore",
@@ -42,16 +42,17 @@ class EntityManager:
         self.project_id = require_scope_value(
             project_id,
             "project_id",
-            "EntityManager",
+            "EntityResolver",
         )
         self.readable_project_ids = require_visible_project_ids(
             readable_project_ids,
-            "EntityManager",
+            "EntityResolver",
         )
         self.embedding_service = embedding_service
         self.entity_profiles = LRUCache(maxsize=1000000)
         self._name_to_id = LRUCache(maxsize=3000000)
         self._id_to_names = LRUCache(maxsize=1000000)
+        self._alias_version = 0
         self._lock = threading.RLock()
         self._resolution_lock = asyncio.Lock()
 
@@ -65,6 +66,13 @@ class EntityManager:
     def resolution_lock(self) -> asyncio.Lock:
         return self._resolution_lock
 
+    def get_alias_version(self) -> int:
+        with self._lock:
+            return self._alias_version
+
+    def _bump_alias_version(self) -> None:
+        self._alias_version += 1
+
     def update_settings(self, config: EntityResolutionSettings):
         """Update resolution thresholds on the fly."""
         self.fuzzy_substring_threshold = config.fuzzy_substring_threshold
@@ -74,7 +82,7 @@ class EntityManager:
         self.candidate_vector_threshold = config.candidate_vector_threshold
 
         logger.info(
-            "EntityManager settings updated: "
+            "EntityResolver settings updated: "
             f"sub={self.fuzzy_substring_threshold}, "
             f"non-sub={self.fuzzy_non_substring_threshold}, "
             f"freq={self.generic_token_freq}"
@@ -94,6 +102,7 @@ class EntityManager:
         }
 
         with self._lock:
+            aliases_changed = False
             self.entity_profiles[eid] = profile
 
             if canonical:
@@ -102,6 +111,7 @@ class EntityManager:
                 if eid not in self._id_to_names:
                     self._id_to_names[eid] = set()
                 self._id_to_names[eid].add(lower_canonical)
+                aliases_changed = True
 
             aliases = entity.get("aliases") or []
             for a in aliases:
@@ -110,6 +120,10 @@ class EntityManager:
                 if eid not in self._id_to_names:
                     self._id_to_names[eid] = set()
                 self._id_to_names[eid].add(lower_a)
+                aliases_changed = True
+
+            if aliases_changed:
+                self._bump_alias_version()
 
         return profile
 
@@ -232,9 +246,14 @@ class EntityManager:
         with self._lock:
             if entity_id not in self.entity_profiles:
                 return
+            aliases_changed = False
             for mention in aliases:
                 mention_lower = mention.lower()
                 existing_id = self._name_to_id.get(mention_lower)
+                if existing_id == entity_id and mention_lower in self._id_to_names.get(
+                    entity_id, set()
+                ):
+                    continue
                 if existing_id and existing_id != entity_id:
                     logger.warning(
                         f"Alias collision: '{mention}' belongs to {existing_id}, "
@@ -245,6 +264,9 @@ class EntityManager:
                 if entity_id not in self._id_to_names:
                     self._id_to_names[entity_id] = set()
                 self._id_to_names[entity_id].add(mention_lower)
+                aliases_changed = True
+            if aliases_changed:
+                self._bump_alias_version()
 
     @cached(cache=TTLCache(maxsize=1, ttl=300))
     def _build_generic_tokens(self) -> set:
@@ -316,11 +338,13 @@ class EntityManager:
         vector_results = []
         if vector:
             try:
-                vector_results = await self.knowledge_store.search_entities_by_embedding(
-                    vector,
-                    limit=5,
-                    score_threshold=self.candidate_vector_threshold,
-                    visible_project_ids=self.readable_project_ids,
+                vector_results = (
+                    await self.knowledge_store.search_entities_by_embedding(
+                        vector,
+                        limit=5,
+                        score_threshold=self.candidate_vector_threshold,
+                        visible_project_ids=self.readable_project_ids,
+                    )
                 )
             except Exception as e:
                 logger.warning(f"Vector search failed, using fuzzy only: {e}")
@@ -385,11 +409,26 @@ class EntityManager:
                 self._name_to_id[mention_lower] = entity_id
                 self._id_to_names[entity_id].add(mention_lower)
 
+            self._bump_alias_version()
+
         return embedding
 
     async def compute_embedding(
-        self, entity_id: int, resolution_text: str
+        self,
+        entity_id: int,
+        resolution_text: str,
+        precomputed: Optional[List[float]] = None,
     ) -> List[float]:
+        with self._lock:
+            profile = self.entity_profiles.get(entity_id)
+            if not profile:
+                logger.warning(f"Cannot update profile for unknown entity {entity_id}")
+                return []
+
+        embedding = precomputed
+        if embedding is None:
+            embedding = await self.embedding_service.encode_single(resolution_text)
+
         with self._lock:
             profile = self.entity_profiles.get(entity_id)
             if not profile:
@@ -399,12 +438,7 @@ class EntityManager:
             logger.info(
                 f"Updating embedding for entity {entity_id}-{profile['canonical_name']}"
             )
-
-        embedding = await self.embedding_service.encode_single(resolution_text)
-
-        with self._lock:
-            if entity_id in self.entity_profiles:
-                self.entity_profiles[entity_id]["embedding"] = embedding
+            self.entity_profiles[entity_id]["embedding"] = embedding
 
         return embedding
 
@@ -417,11 +451,13 @@ class EntityManager:
         """Transfer secondary aliases to primary and remove secondary indexes."""
         with self._lock:
             secondary_aliases = list(self._id_to_names.get(secondary_id, set()))
+            aliases_changed = bool(secondary_aliases)
 
             for alias in secondary_aliases:
                 self._name_to_id[alias] = primary_id
 
             secondary_names = self._id_to_names.pop(secondary_id, set())
+            aliases_changed = aliases_changed or bool(secondary_names)
             if primary_id not in self._id_to_names:
                 self._id_to_names[primary_id] = set()
             self._id_to_names[primary_id].update(secondary_names)
@@ -431,6 +467,9 @@ class EntityManager:
 
             if secondary_id in self.entity_profiles:
                 del self.entity_profiles[secondary_id]
+
+            if aliases_changed:
+                self._bump_alias_version()
 
             logger.info(
                 f"Merged entity {secondary_id} into {primary_id}, "
@@ -539,16 +578,24 @@ class EntityManager:
 
         removed = 0
         with self._lock:
+            aliases_changed = False
             for eid in entity_ids:
                 if eid in self.entity_profiles:
                     del self.entity_profiles[eid]
                     removed += 1
 
                 to_remove = list(self._id_to_names.get(eid, set()))
+                aliases_changed = aliases_changed or bool(to_remove)
                 for alias in to_remove:
                     self._name_to_id.pop(alias, None)
 
-                self._id_to_names.pop(eid, None)
+                aliases_changed = (
+                    self._id_to_names.pop(eid, None) is not None
+                    or aliases_changed
+                )
+
+            if aliases_changed:
+                self._bump_alias_version()
 
         if removed > 0:
             logger.info(f"Removed {removed} entities from entities")

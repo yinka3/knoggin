@@ -4,7 +4,7 @@ import pytest
 from common.schema.primitives import FactRecord
 from common.utils.time_utils import get_now
 from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 from tests.knowledge.test_retrieval_embedding_smoke import load_local_embedding_service
 
 
@@ -33,7 +33,7 @@ def profile_fact(content, *, fact_id, source_msg_id):
 @pytest.mark.no_network
 async def test_real_embedding_profile_refinement_updates_profile_vector_from_facts():
     service = await load_local_embedding_service()
-    entities = EntityManager(
+    entities = EntityResolver(
         knowledge_store=object(),
         embedding_service=service,
         project_id="project-1",

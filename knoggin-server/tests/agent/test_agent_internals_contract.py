@@ -186,7 +186,14 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
         "find_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
+    update_accumulators(
+        ctx,
+        "find_path",
+        {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
+    )
     update_accumulators(ctx, "get_hierarchy", {"data": {"entity": "Knoggin"}})
+    update_accumulators(ctx, "get_hierarchy", {"data": {"entity": "Knoggin"}})
+    update_accumulators(ctx, "fact_check", {"data": {"resolution": "exact"}})
     update_accumulators(ctx, "fact_check", {"data": {"resolution": "exact"}})
     update_accumulators(
         ctx,

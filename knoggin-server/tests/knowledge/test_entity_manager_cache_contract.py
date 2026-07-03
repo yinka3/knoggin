@@ -6,6 +6,7 @@ import pytest
 def test_populate_cache_loads_profiles_names_and_aliases(entity_manager_harness):
     entities, _, _ = entity_manager_harness
 
+    assert entities.get_alias_version() == 0
     profile = entities._populate_cache(
         {
             "id": 101,
@@ -33,6 +34,7 @@ def test_populate_cache_loads_profiles_names_and_aliases(entity_manager_harness)
         "bob",
         "bobby",
     }
+    assert entities.get_alias_version() == 1
 
 
 @pytest.mark.storage
@@ -162,6 +164,7 @@ async def test_register_entity_updates_profile_aliases_and_embedding(
 ):
     entities, _, embedding = entity_manager_harness
 
+    assert entities.get_alias_version() == 0
     vector = await entities.register_entity(
         404,
         "Notion",
@@ -184,6 +187,7 @@ async def test_register_entity_updates_profile_aliases_and_embedding(
     assert entities.get_known_aliases()["notion"] == 404
     assert entities.get_known_aliases()["workspace notes"] == 404
     assert set(entities.get_mentions_for_id(404)) == {"notion", "workspace notes"}
+    assert entities.get_alias_version() == 1
 
 
 @pytest.mark.storage
@@ -229,6 +233,7 @@ async def test_compute_embedding_updates_known_profile_and_skips_unknown(
             "embedding": [0.0],
         }
     )
+    alias_version = entities.get_alias_version()
 
     vector = await entities.compute_embedding(
         101,
@@ -244,6 +249,7 @@ async def test_compute_embedding_updates_known_profile_and_skips_unknown(
     assert embedding.single_calls == [
         "Knoggin (project). Context: Builds a memory graph."
     ]
+    assert entities.get_alias_version() == alias_version
 
 
 @pytest.mark.storage
@@ -272,6 +278,7 @@ def test_remove_entities_clears_profiles_names_and_aliases_only_for_removed_ids(
             "project_id": "project-1",
         }
     )
+    alias_version = entities.get_alias_version()
 
     removed = entities.remove_entities([101])
 
@@ -283,3 +290,4 @@ def test_remove_entities_clears_profiles_names_and_aliases_only_for_removed_ids(
     assert aliases["memory project"] == 202
     assert entities.get_mentions_for_id(101) == []
     assert set(entities.get_mentions_for_id(202)) == {"knoggin", "memory project"}
+    assert entities.get_alias_version() == alias_version + 1

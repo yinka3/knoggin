@@ -28,6 +28,10 @@ CONTENT_KEYS = frozenset(
 APPROVED_EVENTS = frozenset(
     {
         ("pipeline", "dlq_enqueued"),
+        ("pipeline", "dlq_write_failed"),
+        ("pipeline", "graph_write_failed"),
+        ("pipeline", "buffer_invalid_entries"),
+        ("pipeline", "drain_complete"),
         ("job", "dlq_parked"),
         ("job", "dlq_retry_success"),
         ("job", "dlq_retry_failed"),
@@ -37,6 +41,15 @@ APPROVED_EVENTS = frozenset(
         ("job", "dirty_entities_cleared"),
         ("job", "merge_queue_marked"),
         ("job", "merge_queue_removed"),
+        ("job", "invalidation_failures"),
+        ("job", "facts_write_failed"),
+        ("job", "maintenance_deferred"),
+        ("job", "profile_refinement_failed"),
+        ("job", "profiles_refined"),
+        ("job", "user_profile_refined"),
+        ("job", "failed"),
+        ("job", "timeout"),
+        ("entities", "entity_merged"),
     }
 )
 
@@ -46,6 +59,7 @@ SAFE_FIELDS = frozenset(
         "user_name",
         "project_id",
         "session_id",
+        "name",
         "job",
         "stage",
         "attempt",
@@ -57,6 +71,8 @@ SAFE_FIELDS = frozenset(
         "dlq_key",
         "dlq_id",
         "park_key",
+        "source_buffer_key",
+        "buffer_key",
         "dirty_key",
         "merge_key",
         "message_id",
@@ -69,12 +85,19 @@ SAFE_FIELDS = frozenset(
         "duplicate_id",
         "audit_id",
         "proposal_id",
+        "failed_fact_ids",
         "entity_count",
+        "fact_count",
+        "facts_created",
+        "facts_invalidated",
         "msg_count",
         "message_count",
+        "dlq_count",
         "count",
         "cleared_count",
         "marked_count",
+        "partial_flush",
+        "status",
     }
 )
 
@@ -127,6 +150,8 @@ def normalize_coordination_event(
 
 
 def _normalize_field_name(key: str) -> str:
+    if key == "name":
+        return "job"
     if key == "user_name":
         return "user"
     if key == "msg_ids":

@@ -17,13 +17,13 @@ from knoggin_server.ingestion.jobs.archive_job import FactArchivalJob
 from knoggin_server.ingestion.jobs.cleaner_job import EntityCleanupJob
 from knoggin_server.ingestion.jobs.dlq_job import DLQReplayJob
 from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
-from knoggin_server.ingestion.services.pipeline_service import BatchProcessor
+from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.db.write_graph_db import write_batch_callback
 from knoggin_server.knowledge.jobs.merge_rollback_cleanup_job import (
-    MergeRollbackCleanupJob,
+    MergeCleanupJob,
 )
-from knoggin_server.knowledge.services.entity_service import EntityManager
+from knoggin_server.knowledge.services.entity_service import EntityResolver
 from knoggin_server.project.state import ProjectState
 
 
@@ -82,7 +82,7 @@ class ProjectManager:
                 %(access_mode)s, %(status)s, %(topic_config)s
             ) RETURNING created_at, updated_at
         """
-        rows = await self.pg.fetch_all(query, {
+        await self.pg.fetch_all(query, {
             "project_id": project_id,
             "user_name": self.user_name,
             "name": name,
@@ -270,40 +270,56 @@ class ProjectManager:
         if meta["status"] == ProjectStatus.DELETED.value:
             raise ValueError(f"Deleted project '{project_id}' cannot be updated")
 
-        updates = []
-        params = {"user_name": self.user_name, "project_id": project_id}
+        col_values = {}
 
         if name is not None:
             if not name.strip():
                 raise ValueError("update_project requires a non-empty project name")
-            updates.append("name = %(name)s")
-            params["name"] = name.strip()
+            col_values["name"] = name.strip()
         if description is not None:
-            updates.append("description = %(description)s")
-            params["description"] = description
+            col_values["description"] = description
 
         if allowed_projects is not None:
             active_state = self.active_projects.get(project_id)
             if active_state and active_state.active_runtime_sessions_count > 0:
                 raise RuntimeError(
-                    f"Project '{project_id}' has active runtime sessions and cannot change its readable project scope"
+                    f"Project '{project_id}' has active runtime sessions and "
+                    "cannot change its readable project scope"
                 )
-            validated_allowed = await self._validate_allowed_project_ids(project_id, allowed_projects)
+            validated_allowed = await self._validate_allowed_project_ids(
+                project_id, allowed_projects
+            )
             if active_state:
                 await active_state.shutdown()
                 del self.active_projects[project_id]
 
             # Replace read scopes
-            await self.pg.execute("DELETE FROM public.project_read_scopes WHERE user_name = %(user_name)s AND project_id = %(project_id)s", params)
+            await self.pg.execute(
+                "DELETE FROM public.project_read_scopes "
+                "WHERE user_name = %(user_name)s "
+                "AND project_id = %(project_id)s",
+                {"user_name": self.user_name, "project_id": project_id},
+            )
             for allowed_id in validated_allowed:
-                await self.pg.execute("""
+                await self.pg.execute(
+                    """
                     INSERT INTO public.project_read_scopes (user_name, project_id, readable_project_id)
                     VALUES (%(user_name)s, %(project_id)s, %(readable)s)
-                """, {"user_name": self.user_name, "project_id": project_id, "readable": allowed_id})
-        if updates:
-            updates.append("updated_at = now()")
-            set_clause = ", ".join(updates)
-            await self.pg.execute(f"UPDATE public.projects SET {set_clause} WHERE user_name = %(user_name)s AND project_id = %(project_id)s", params)
+                    """,
+                    {
+                        "user_name": self.user_name,
+                        "project_id": project_id,
+                        "readable": allowed_id,
+                    },
+                )
+
+        if col_values:
+            fields = ", ".join(f"{column} = %s" for column in col_values)
+            await self.pg.execute(
+                f"UPDATE public.projects SET {fields}, updated_at = now()"
+                " WHERE user_name = %s AND project_id = %s",
+                [*col_values.values(), self.user_name, project_id],
+            )
 
         return await self.get_project(project_id)
 
@@ -467,7 +483,7 @@ class ProjectManager:
 
         # Entity Manager
         er_cfg = self.dev_settings.entity_resolution
-        entities = EntityManager(
+        entities = EntityResolver(
             project_id=project_id,
             readable_project_ids=readable_project_ids,
             knowledge_store=self.resources.knowledge_store,
@@ -489,6 +505,7 @@ class ProjectManager:
                 llm=self.resources.llm_service,
                 topic_config=t_config,
                 get_known_aliases=entities.get_known_aliases,
+                get_alias_version=entities.get_alias_version,
                 get_profile=entities.get_profile,
                 gliner=self.resources.gliner,
                 spacy=self.resources.spacy,
@@ -497,7 +514,7 @@ class ProjectManager:
             ),
         )
 
-        project_processor = BatchProcessor(
+        project_processor = IngestionPipeline(
             project_id=project_id,
             redis_client=self.resources.redis,
             llm=self.resources.llm_service,
@@ -594,7 +611,7 @@ class ProjectManager:
                 del self.active_projects[project_id]
                 logger.info(f"Released ProjectState for project_id: {project_id}")
 
-    async def _verify_user_entity(self, entities: EntityManager) -> None:
+    async def _verify_user_entity(self, entities: EntityResolver) -> None:
         user_id = await entities.get_id(self.user_name)
         if user_id != IDENTITY_ENTITY_ID:
             raise RuntimeError(
@@ -615,7 +632,7 @@ class ProjectManager:
         )
         self._identity_initialized = True
 
-    def _init_profile_job(self, entities: EntityManager) -> ProfileRefinementJob:
+    def _init_profile_job(self, entities: EntityResolver) -> ProfileRefinementJob:
         jobs_cfg = self.dev_settings.jobs
         nlp_cfg = self.dev_settings.nlp_pipeline
         prof_cfg = jobs_cfg.profile
@@ -641,8 +658,8 @@ class ProjectManager:
     def _register_background_jobs(
         self,
         project_state: ProjectState,
-        entities: EntityManager,
-        processor: BatchProcessor,
+        entities: EntityResolver,
+        processor: IngestionPipeline,
         profile_job: ProfileRefinementJob,
     ):
         scheduler = project_state.scheduler
@@ -733,7 +750,7 @@ class ProjectManager:
         )
 
         rollback_cfg = jobs_cfg.merge_rollback
-        rollback_cleanup_job = MergeRollbackCleanupJob(
+        rollback_cleanup_job = MergeCleanupJob(
             knowledge_store=self.resources.knowledge_store,
             retention_hours=rollback_cfg.retention_hours,
             fallback_interval_hours=rollback_cfg.fallback_interval_hours,

@@ -206,6 +206,9 @@ class FakeRedis:
         self._purge_expired(key)
         return self.strings.get(key)
 
+    async def mget(self, *keys):
+        return [await self.get(key) for key in keys]
+
     async def set(self, key, value, ex=None, nx=False):
         self._purge_expired(key)
         if nx and key in self.strings:
@@ -920,7 +923,7 @@ class FakeConsumer:
         self.stopped += 1
 
 
-class FakeContext:
+class FakeSession:
     def __init__(self, session_id="session-1", project_id="project-1"):
         self.session_id = session_id
         self.project_id = project_id

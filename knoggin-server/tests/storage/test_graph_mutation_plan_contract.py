@@ -57,7 +57,7 @@ class FakeKnowledgeStore:
         return True
 
 
-class FakeEntityManagerForPlan:
+class FakeEntityResolverForPlan:
     def __init__(self, project_id="project-1"):
         self.project_id = project_id
         self.entity_profiles = {
@@ -139,7 +139,7 @@ def user_connection(entity_name, msg_id=8, confidence=0.7, context="user link"):
 @pytest.mark.no_network
 async def test_graph_mutation_plan_uses_batch_scope_over_fallback_scope():
     batch = scoped_batch(new_entity_ids={2})
-    entities = FakeEntityManagerForPlan()
+    entities = FakeEntityResolverForPlan()
     knowledge_store = FakeKnowledgeStore()
 
     plan = await build_graph_mutation_plan(
@@ -161,7 +161,7 @@ async def test_graph_mutation_plan_uses_batch_scope_over_fallback_scope():
 @pytest.mark.no_network
 async def test_graph_mutation_plan_uses_fallback_scope_when_batch_scope_absent():
     batch = BatchResult(new_entity_ids={2})
-    entities = FakeEntityManagerForPlan(project_id=None)
+    entities = FakeEntityResolverForPlan(project_id=None)
     knowledge_store = FakeKnowledgeStore()
 
     plan = await build_graph_mutation_plan(
@@ -190,7 +190,7 @@ async def test_graph_mutation_plan_requires_complete_scope():
         await build_graph_mutation_plan(
             batch,
             FakeKnowledgeStore(),
-            FakeEntityManagerForPlan(),
+            FakeEntityResolverForPlan(),
             session_id="session-1",
             project_id=None,
             user_name="ada",
@@ -225,7 +225,7 @@ async def test_graph_mutation_plan_builds_writes_and_filters_zombies():
             )
         ],
     )
-    entities = FakeEntityManagerForPlan()
+    entities = FakeEntityResolverForPlan()
     knowledge_store = FakeKnowledgeStore(validation_result={3, 4})
 
     plan = await build_graph_mutation_plan(
@@ -298,7 +298,7 @@ async def test_graph_mutation_plan_builds_writes_and_filters_zombies():
 @pytest.mark.no_network
 async def test_graph_mutation_plan_treats_unknown_validation_as_valid():
     batch = scoped_batch(entity_ids=[3], alias_updated_ids={3})
-    entities = FakeEntityManagerForPlan()
+    entities = FakeEntityResolverForPlan()
     knowledge_store = FakeKnowledgeStore(validation_result=None)
 
     plan = await build_graph_mutation_plan(
@@ -346,7 +346,7 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
         ],
     )
     knowledge_store = FakeKnowledgeStore()
-    entities = FakeEntityManagerForPlan()
+    entities = FakeEntityResolverForPlan()
     redis = FakeRedis()
     profile_key = RedisKeys.project_profile_complete("ada", "project-1")
     await redis.set(profile_key, "done")
@@ -411,7 +411,7 @@ async def test_write_batch_to_graph_marks_skipped_work_unit_metadata():
     summary = await write_batch_to_graph(
         batch,
         FakeKnowledgeStore(),
-        FakeEntityManagerForPlan(),
+        FakeEntityResolverForPlan(),
         session_id="session-1",
         project_id="project-1",
         user_name="ada",
@@ -447,7 +447,7 @@ async def test_write_batch_to_graph_marks_success_and_attaches_summary_metadata(
     summary = await write_batch_to_graph(
         batch,
         knowledge_store,
-        FakeEntityManagerForPlan(),
+        FakeEntityResolverForPlan(),
         session_id="fallback-session",
         project_id="fallback-project",
         user_name="fallback-user",
@@ -499,7 +499,7 @@ async def test_write_batch_to_graph_marks_failed_plan_when_execution_raises(monk
         await write_graph_db.write_batch_to_graph(
             batch,
             FakeKnowledgeStore(),
-            FakeEntityManagerForPlan(),
+            FakeEntityResolverForPlan(),
             session_id="session-1",
             project_id="project-1",
             user_name="ada",
@@ -517,7 +517,7 @@ async def test_write_batch_callback_returns_success_for_no_graph_writes():
     assert await write_batch_callback(
         BatchResult(),
         knowledge_store,
-        FakeEntityManagerForPlan(),
+        FakeEntityResolverForPlan(),
         session_id="session-1",
         project_id="project-1",
         user_name="ada",
@@ -529,7 +529,7 @@ async def test_write_batch_callback_returns_success_for_no_graph_writes():
 @pytest.mark.no_network
 async def test_write_batch_callback_removes_phantom_new_entities_on_failure():
     batch = scoped_batch(new_entity_ids={2})
-    entities = FakeEntityManagerForPlan()
+    entities = FakeEntityResolverForPlan()
     knowledge_store = FakeKnowledgeStore(fail_on_write=True)
 
     success, error = await write_batch_callback(

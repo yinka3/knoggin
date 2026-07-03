@@ -217,7 +217,7 @@ async def test_run_loop_rotates_participants_persists_messages_and_stops_on_end(
         return "Second contribution [[END_DISCUSSION]]"
 
     monkeypatch.setattr(
-        "knoggin_server.community.community_manager.SessionAssembler",
+        "knoggin_server.community.community_manager.SessionFactory",
         FakeAssembler,
     )
     manager._get_agent_config = get_agent_config
@@ -280,7 +280,7 @@ async def test_run_loop_stops_when_active_discussion_key_changes(monkeypatch):
         return "Only first turn"
 
     monkeypatch.setattr(
-        "knoggin_server.community.community_manager.SessionAssembler",
+        "knoggin_server.community.community_manager.SessionFactory",
         FakeAssembler,
     )
     manager._get_agent_config = get_agent_config
