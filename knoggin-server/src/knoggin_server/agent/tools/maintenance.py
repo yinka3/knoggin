@@ -1,9 +1,10 @@
 from typing import Dict, List, Optional
+
 from loguru import logger
 
-from common.utils.data_utils import cosine_similarity
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.services.entity_merge_service import EntityMergeService
+from knoggin_server.knowledge.entity.merge_service import EntityMergeService
+
 
 class MaintenanceTools:
     """Agent tools for maintaining the knowledge graph."""
@@ -20,7 +21,11 @@ class MaintenanceTools:
 
             dirty_raw = await self.redis.srandmember(merge_key, 50)
             if not dirty_raw:
-                return {"message": "Graph is healthy. No duplicate candidates found at this time."}
+                return {
+                    "message": (
+                        "Graph is healthy. No duplicate candidates found at this time."
+                    )
+                }
 
             dirty_ids = {int(eid) for eid in dirty_raw}
             candidates = []
@@ -35,10 +40,16 @@ class MaintenanceTools:
                     continue
 
                 for sim_id, score in similar:
-                    if sim_id == eid or sim_id in [c["primary_id"] for c in candidates] or sim_id in [c["secondary_id"] for c in candidates]:
+                    primary_ids = [c["primary_id"] for c in candidates]
+                    secondary_ids = [c["secondary_id"] for c in candidates]
+                    if (
+                        sim_id == eid
+                        or sim_id in primary_ids
+                        or sim_id in secondary_ids
+                    ):
                         continue
 
-                    if score >= 0.65: # Show all potential matches to the agent
+                    if score >= 0.65:
                         primary = min(eid, sim_id)
                         secondary = max(eid, sim_id)
 
@@ -46,25 +57,36 @@ class MaintenanceTools:
                         profile_p = await self.entities.get_profile(primary)
                         profile_s = await self.entities.get_profile(secondary)
 
-                        name_p = profile_p.get("canonical_name", str(primary)) if profile_p else str(primary)
-                        name_s = profile_s.get("canonical_name", str(secondary)) if profile_s else str(secondary)
+                        name_p = (
+                            profile_p.canonical_name if profile_p else str(primary)
+                        )
+                        name_s = (
+                            profile_s.canonical_name if profile_s else str(secondary)
+                        )
 
-                        candidates.append({
-                            "primary_id": primary,
-                            "primary_name": name_p,
-                            "secondary_id": secondary,
-                            "secondary_name": name_s,
-                            "similarity_score": round(score, 3)
-                        })
+                        candidates.append(
+                            {
+                                "primary_id": primary,
+                                "primary_name": name_p,
+                                "secondary_id": secondary,
+                                "secondary_name": name_s,
+                                "similarity_score": round(score, 3),
+                            }
+                        )
 
             if not candidates:
-                return {"message": "Graph is healthy. Scanned entities but found no high-confidence duplicates."}
+                return {
+                    "message": (
+                        "Graph is healthy. Scanned entities but found no "
+                        "high-confidence duplicates."
+                    )
+                }
 
             # Return top 5 to avoid overwhelming the agent
             candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
             return {
                 "message": f"Found {len(candidates)} potential duplicates.",
-                "suggestions": candidates[:5]
+                "suggestions": candidates[:5],
             }
 
         except Exception as e:

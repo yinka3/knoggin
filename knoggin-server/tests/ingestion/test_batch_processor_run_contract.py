@@ -12,7 +12,7 @@ from common.schema.contracts import (
 from common.schema.primitives import ConnectionRecord
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import FakeRedis
 from tests.ingestion.test_batch_processor_entity_resolution_contract import (
@@ -291,10 +291,10 @@ async def test_batch_processor_run_with_real_resolution_builds_graph_write_resul
     assert result.work_unit.status == "succeeded"
     assert result.work_unit.trace.summary == "4 entities, 3 relationships"
     assert result.has_graph_writes() is True
-    assert (await entities.get_profile(1001))["canonical_name"] == "Alice"
-    assert (await entities.get_profile(102))["canonical_name"] == "Robert Chen"
-    assert (await entities.get_profile(1002))["canonical_name"] == "Knoggin"
-    assert (await entities.get_profile(1003))["canonical_name"] == "Notion"
+    assert (await entities.get_profile(1001)).canonical_name == "Alice"
+    assert (await entities.get_profile(102)).canonical_name == "Robert Chen"
+    assert (await entities.get_profile(1002)).canonical_name == "Knoggin"
+    assert (await entities.get_profile(1003)).canonical_name == "Notion"
     assert set(embedding.batch_calls[0]) == {"Alice", "Bob", "Knoggin", "Notion"}
 
 

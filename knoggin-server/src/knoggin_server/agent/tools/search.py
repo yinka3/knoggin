@@ -11,9 +11,9 @@ if TYPE_CHECKING:
 
     from infrastructure.knowledge_store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
-    from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-    from knoggin_server.knowledge.services.entity_service import EntityResolver
+    from knoggin_server.knowledge.entity.resolver import EntityResolver
     from knoggin_server.knowledge.services.document_service import DocumentService
+    from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 import httpx
 from loguru import logger

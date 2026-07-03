@@ -4,7 +4,8 @@ import pytest
 
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.tools.maintenance import MaintenanceTools
-from knoggin_server.knowledge.services.entity_merge_service import EntityMergeService
+from knoggin_server.knowledge.entity.merge_service import EntityMergeService
+from knoggin_server.knowledge.entity.profile import EntityProfile
 from tests.fixtures.fakes import FakeRedis
 from tests.knowledge.test_entity_merge_classification_contract import (
     RecordingKnowledgeStore,
@@ -23,7 +24,7 @@ class MaintenanceHarness(MaintenanceTools):
         self.entities = SimpleNamespace(get_profile=self._get_profile)
 
     async def _get_profile(self, entity_id):
-        return {"canonical_name": f"Entity {entity_id}"}
+        return EntityProfile(canonical_name=f"Entity {entity_id}")
 
 
 class SimilarityStore:
@@ -199,7 +200,7 @@ async def test_confirm_executes_canonical_merge_and_updates_runtime_queue(monkey
         events.append((args, kwargs))
 
     monkeypatch.setattr(
-        "knoggin_server.knowledge.services.entity_merge_service.emit",
+        "knoggin_server.knowledge.entity.merge_service.emit",
         fake_emit,
     )
     reviewed_snapshot = {

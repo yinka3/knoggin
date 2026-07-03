@@ -19,7 +19,7 @@ from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.events import emit
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 
 
 def _resolve_scope(
@@ -79,7 +79,8 @@ async def build_graph_mutation_plan(
 
         if validation_result is None:
             logger.warning(
-                f"Could not validate {len(existing_candidates)} entities, assuming valid"
+                "Could not validate "
+                f"{len(existing_candidates)} entities, assuming valid"
             )
             valid_existing_ids = set(existing_candidates)
         else:
@@ -105,7 +106,7 @@ async def build_graph_mutation_plan(
         if entity_id == IDENTITY_ENTITY_ID:
             return None
 
-        profile = entities.entity_profiles.get(entity_id)
+        profile = entities.get_cached_profile(entity_id)
         if not profile:
             return None
 
@@ -113,17 +114,15 @@ async def build_graph_mutation_plan(
         return EntityWrite(
             id=entity_id,
             is_new=entity_id in new_entity_ids,
-            canonical_name=profile["canonical_name"],
-            type=profile.get("type", ""),
+            canonical_name=profile.canonical_name,
+            type=profile.entity_type,
             confidence=1.0,
-            topic=profile.get("topic", "General"),
+            topic=profile.topic,
             embedding=_normalize_embedding(embedding),
             aliases=list(entities.get_mentions_for_id(entity_id)),
             user_name=scope.user_name,
-            session_id=profile.get("session_id") or scope.session_id,
-            project_id=(
-                profile.get("project_id") or entities.project_id or scope.project_id
-            ),
+            session_id=profile.session_id or scope.session_id,
+            project_id=profile.project_id or entities.project_id or scope.project_id,
         )
 
     for entity_id in new_entity_ids:
@@ -143,17 +142,17 @@ async def build_graph_mutation_plan(
 
     entity_lookup = {}
     for entity_id in safe_entity_ids:
-        profile = entities.entity_profiles.get(entity_id)
+        profile = entities.get_cached_profile(entity_id)
         if not profile:
             continue
-        canonical = profile.get("canonical_name")
+        canonical = profile.canonical_name
         if not canonical:
             continue
         entry = {
             "id": entity_id,
             "canonical_name": canonical,
-            "type": profile.get("type"),
-            "topic": profile.get("topic", "General"),
+            "type": profile.entity_type,
+            "topic": profile.topic,
         }
         entity_lookup[canonical.lower()] = entry
         for mention in entities.get_mentions_for_id(entity_id):
@@ -221,7 +220,9 @@ async def build_graph_mutation_plan(
         for pair in msg_result.user_connections:
             target_name = pair.entity_name
             target_lookup_name = target_name.lower() if target_name else None
-            target = entity_lookup.get(target_lookup_name) if target_lookup_name else None
+            target = (
+                entity_lookup.get(target_lookup_name) if target_lookup_name else None
+            )
 
             if not target:
                 logger.warning(
@@ -393,7 +394,8 @@ async def write_batch_to_graph(
         raise
 
     plan.work_unit.mark_succeeded(
-        f"{summary.entities_written} entities, {summary.relationships_written} relationships"
+        f"{summary.entities_written} entities, "
+        f"{summary.relationships_written} relationships"
     )
     _attach_graph_work_summary(batch, plan, summary)
 
@@ -441,7 +443,7 @@ async def write_batch_callback(
             # We must aggressively purge these newly created entities from the cache.
             # If we leave them, the live pipeline might resolve future mentions to these
             # "phantom" IDs before the DLQ can retry. This would cause the live pipeline
-            # to trip the zombie check (trying to write facts to an ID that doesn't exist in the DB).
+            # to trip the zombie check against an ID missing from the DB.
             entities.remove_entities(list(batch.new_entity_ids))
             logger.info(
                 f"Cleaned {len(batch.new_entity_ids)} phantom entities from entities"

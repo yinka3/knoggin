@@ -6,8 +6,8 @@ from loguru import logger
 from common.schema.settings import ArchivalSettings
 from common.utils.events import emit
 from common.utils.time_utils import get_now
-from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
 
 

@@ -6,6 +6,7 @@ from common.schema.contracts import ExtractionTrace, NERResult
 from common.schema.primitives import EntityRecord
 from common.schema.settings import TopicSchema
 from knoggin_server.ingestion.services.processor import TextProcessor
+from knoggin_server.knowledge.entity.profile import EntityProfile
 from tests.fixtures.factories import make_topic_config
 
 MESSAGES = [
@@ -113,7 +114,7 @@ def make_entity(name, *, msg_id=1, typ="project", topic="General", confidence=0.
 
 
 def make_profile(canonical_name, *, typ="person", topic="Identity"):
-    return {"canonical_name": canonical_name, "type": typ, "topic": topic}
+    return EntityProfile(canonical_name=canonical_name, entity_type=typ, topic=topic)
 
 
 def make_processor(

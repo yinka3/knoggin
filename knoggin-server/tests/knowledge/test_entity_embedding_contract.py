@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from knoggin_server.knowledge.services.entity_embedding import (
+from knoggin_server.knowledge.entity.embedding import (
     build_entity_embedding_text,
 )
 

@@ -127,19 +127,43 @@ def test_merge_into_moves_secondary_names_and_preserves_primary_profile(
     }
     assert entities.get_mentions_for_id(202) == []
     assert 202 not in entities.get_profiles()
-    assert entities.get_profiles()[101]["canonical_name"] == "Robert Chen"
+    assert entities.get_profiles()[101].canonical_name == "Robert Chen"
     assert entities.get_alias_version() == alias_version + 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_merge_into_without_secondary_aliases_does_not_bump_alias_version(
+    entity_manager_harness,
+):
+    entities, _, _ = entity_manager_harness
+    seed_entity(entities, 101, "Robert Chen")
+    alias_version = entities.get_alias_version()
+
+    entities.merge_into(101, 999)
+
+    assert entities.get_alias_version() == alias_version
+    assert entities.get_profiles()[101].canonical_name == "Robert Chen"
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_find_alias_collisions_targeted_detects_stale_conflicting_cache_state(
     entity_manager_harness,
+    monkeypatch,
 ):
     entities, _, _ = entity_manager_harness
     seed_entity(entities, 101, "Robert Chen", aliases=["Bob"])
     seed_entity(entities, 202, "Bob Smith")
-    entities._id_to_names[202].add("bob")
+
+    original_get_mentions = entities.get_mentions_for_id
+
+    def stale_mentions(entity_id):
+        if entity_id == 202:
+            return [*original_get_mentions(entity_id), "bob"]
+        return original_get_mentions(entity_id)
+
+    monkeypatch.setattr(entities, "get_mentions_for_id", stale_mentions)
 
     collisions = await entities.find_alias_collisions_targeted({202})
 

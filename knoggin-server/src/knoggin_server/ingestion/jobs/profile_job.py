@@ -23,11 +23,12 @@ from knoggin_server.ingestion.prompts import (
     get_profile_extraction_prompt,
     render_configured_prompt,
 )
-from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-from knoggin_server.knowledge.services.entity_embedding import (
+from knoggin_server.knowledge.entity.embedding import (
     build_entity_embedding_text,
 )
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.profile import EntityProfile
+from knoggin_server.knowledge.entity.resolver import EntityResolver
+from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 from knoggin_server.knowledge.services.fact_resolution import FactResolver
 
 
@@ -185,7 +186,7 @@ class ProfileRefinementJob(BaseJob):
             logger.warning(f"User entity {ctx.user_name} not found in entities")
             return False
 
-        profile = self.entities.entity_profiles.get(user_id)
+        profile = self.entities.get_cached_profile(user_id)
         if not profile:
             logger.warning(f"User profile {user_id} not found")
             return False
@@ -459,7 +460,7 @@ class ProfileRefinementJob(BaseJob):
         return get_profile_extraction_prompt(user_name)
 
     async def _refine_user_profile(
-        self, ctx: JobContext, user_id: int, profile: dict, curr_msg_id: int
+        self, ctx: JobContext, user_id: int, profile: EntityProfile, curr_msg_id: int
     ) -> bool:
         """Execute user profile refinement."""
         conversation = await self._get_conversation_context(
@@ -503,7 +504,8 @@ class ProfileRefinementJob(BaseJob):
                 "entity_name": ctx.user_name,
                 "entity_type": "person",
                 "existing_facts": enriched_facts,
-                "known_aliases": profile.get("aliases", [ctx.user_name]),
+                "known_aliases": self.entities.get_mentions_for_id(user_id)
+                or [ctx.user_name],
             }
         ]
         user_content = format_vp04_input(llm_input, conversation_text)
@@ -751,7 +753,7 @@ class ProfileRefinementJob(BaseJob):
 
         valid_entities = []
         for ent_id in entity_ids:
-            profile = self.entities.entity_profiles.get(ent_id)
+            profile = self.entities.get_cached_profile(ent_id)
             if profile:
                 valid_entities.append((ent_id, profile))
 
@@ -805,8 +807,8 @@ class ProfileRefinementJob(BaseJob):
             entity_inputs.append(
                 {
                     "ent_id": ent_id,
-                    "entity_name": profile.get("canonical_name", "Unknown"),
-                    "entity_type": profile.get("type", "unknown"),
+                    "entity_name": profile.canonical_name or "Unknown",
+                    "entity_type": profile.entity_type or "unknown",
                     "existing_facts": existing_facts,
                     "known_aliases": self.entities.get_mentions_for_id(ent_id),
                     "conversation_text": "\n".join(

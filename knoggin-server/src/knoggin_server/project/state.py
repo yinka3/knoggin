@@ -9,9 +9,9 @@ from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.postgres_client import PostgresClient
 from knoggin_server.ingestion.services.processor import TextProcessor
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 from knoggin_server.knowledge.services.document_service import DocumentService
 from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 
 class ProjectState:

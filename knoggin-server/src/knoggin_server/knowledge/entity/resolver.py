@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from cachetools import LRUCache, TTLCache, cached
+from cachetools import TTLCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
 
@@ -15,11 +15,15 @@ from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.core_utils import is_substring_match
 from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
-from infrastructure.knowledge_store import KnowledgeStore
-from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-from knoggin_server.knowledge.services.entity_embedding import (
+from knoggin_server.knowledge.entity.embedding import (
     build_entity_embedding_text,
 )
+from knoggin_server.knowledge.entity.index import EntityIndex
+from knoggin_server.knowledge.entity.profile import EntityProfile
+from knoggin_server.knowledge.services.embedding_service import EmbeddingService
+
+if TYPE_CHECKING:
+    from infrastructure.knowledge_store import KnowledgeStore
 
 
 class EntityResolver:
@@ -49,9 +53,7 @@ class EntityResolver:
             "EntityResolver",
         )
         self.embedding_service = embedding_service
-        self.entity_profiles = LRUCache(maxsize=1000000)
-        self._name_to_id = LRUCache(maxsize=3000000)
-        self._id_to_names = LRUCache(maxsize=1000000)
+        self._index = EntityIndex()
         self._alias_version = 0
         self._lock = threading.RLock()
         self._resolution_lock = asyncio.Lock()
@@ -88,43 +90,12 @@ class EntityResolver:
             f"freq={self.generic_token_freq}"
         )
 
-    def _populate_cache(self, entity: dict) -> dict:
+    def _populate_cache(self, entity: dict) -> EntityProfile:
         """Hydrate internal indexes from a KnowledgeStore entity record."""
-        eid = entity["id"]
-        canonical = entity.get("canonical_name")
-
-        profile = {
-            "canonical_name": canonical,
-            "type": entity.get("type"),
-            "topic": entity.get("topic", "General"),
-            "project_id": entity.get("project_id"),
-            "embedding": entity.get("embedding"),
-        }
-
         with self._lock:
-            aliases_changed = False
-            self.entity_profiles[eid] = profile
-
-            if canonical:
-                lower_canonical = canonical.lower()
-                self._name_to_id[lower_canonical] = eid
-                if eid not in self._id_to_names:
-                    self._id_to_names[eid] = set()
-                self._id_to_names[eid].add(lower_canonical)
-                aliases_changed = True
-
-            aliases = entity.get("aliases") or []
-            for a in aliases:
-                lower_a = a.lower()
-                self._name_to_id[lower_a] = eid
-                if eid not in self._id_to_names:
-                    self._id_to_names[eid] = set()
-                self._id_to_names[eid].add(lower_a)
-                aliases_changed = True
-
+            profile, aliases_changed = self._index.populate(entity)
             if aliases_changed:
                 self._bump_alias_version()
-
         return profile
 
     async def get_id(self, name: str) -> Optional[int]:
@@ -134,7 +105,7 @@ class EntityResolver:
         lower_name = name.lower()
 
         with self._lock:
-            stored_id = self._name_to_id.get(lower_name)
+            stored_id = self._index.get_entity_id_for_name(lower_name)
             if stored_id is not None:
                 return stored_id
         found = await self.knowledge_store.get_entities_by_names(
@@ -146,9 +117,9 @@ class EntityResolver:
             return entity["id"]
         return None
 
-    async def get_profile(self, entity_id: int) -> Optional[dict]:
+    async def get_profile(self, entity_id: int) -> Optional[EntityProfile]:
         with self._lock:
-            profile = self.entity_profiles.get(entity_id)
+            profile = self._index.get_profile(entity_id)
             if profile:
                 return profile
 
@@ -160,24 +131,39 @@ class EntityResolver:
             return self._populate_cache(entity)
         return None
 
-    def get_profiles(self) -> Dict[int, Dict]:
+    def get_cached_profile(self, entity_id: int) -> Optional[EntityProfile]:
+        """Return a cached profile without hydrating from storage."""
         with self._lock:
-            return dict(list(self.entity_profiles.items()))
+            return self._index.get_profile(entity_id)
+
+    def has_cached_entity(self, entity_id: int) -> bool:
+        """Return whether an entity is currently present in the local cache."""
+        with self._lock:
+            return self._index.has_entity(entity_id)
+
+    def iter_cached_entity_ids(self) -> List[int]:
+        """Return entity IDs currently present in the local cache."""
+        with self._lock:
+            return self._index.iter_profile_ids()
+
+    def get_profiles(self) -> Dict[int, EntityProfile]:
+        with self._lock:
+            return self._index.get_profiles()
 
     def get_mentions_for_id(self, entity_id: int) -> List[str]:
         with self._lock:
-            return list(self._id_to_names.get(entity_id, set()))
+            return self._index.get_mentions(entity_id)
 
     def get_known_aliases(self) -> Dict[str, int]:
         with self._lock:
-            return dict(list(self._name_to_id.items()))
+            return self._index.get_aliases()
 
     async def get_embedding_for_id(self, entity_id: int) -> List[float]:
         """Retrieve embedding from graph by ID."""
         with self._lock:
-            profile = self.entity_profiles.get(entity_id)
-            if profile and profile.get("embedding"):
-                return profile["embedding"]
+            profile = self._index.get_profile(entity_id)
+            if profile and profile.embedding:
+                return profile.embedding
         return await self.knowledge_store.get_entity_embedding(
             entity_id,
             visible_project_ids=self.readable_project_ids,
@@ -226,14 +212,14 @@ class EntityResolver:
             return None, False, []
 
         with self._lock:
-            entity_id = self._name_to_id.get(canonical_name.lower())
+            entity_id = self._index.get_entity_id_for_name(canonical_name)
             logger.debug(f"validate_existing: '{canonical_name}' -> id={entity_id}")
             if entity_id is None:
                 return None, False, []
 
             new_aliases = []
             for mention in mentions:
-                if mention.lower() not in self._name_to_id:
+                if self._index.get_entity_id_for_name(mention) is None:
                     new_aliases.append(mention)
 
             return entity_id, len(new_aliases) > 0, new_aliases
@@ -244,27 +230,20 @@ class EntityResolver:
             return
 
         with self._lock:
-            if entity_id not in self.entity_profiles:
+            if not self._index.has_entity(entity_id):
                 return
-            aliases_changed = False
+            safe_aliases = []
             for mention in aliases:
                 mention_lower = mention.lower()
-                existing_id = self._name_to_id.get(mention_lower)
-                if existing_id == entity_id and mention_lower in self._id_to_names.get(
-                    entity_id, set()
-                ):
-                    continue
+                existing_id = self._index.get_entity_id_for_name(mention_lower)
                 if existing_id and existing_id != entity_id:
                     logger.warning(
                         f"Alias collision: '{mention}' belongs to {existing_id}, "
                         f"skipping for {entity_id}"
                     )
                     continue
-                self._name_to_id[mention_lower] = entity_id
-                if entity_id not in self._id_to_names:
-                    self._id_to_names[entity_id] = set()
-                self._id_to_names[entity_id].add(mention_lower)
-                aliases_changed = True
+                safe_aliases.append(mention)
+            aliases_changed = self._index.commit_aliases(entity_id, safe_aliases)
             if aliases_changed:
                 self._bump_alias_version()
 
@@ -274,14 +253,13 @@ class EntityResolver:
         token_to_entities = defaultdict(set)
 
         with self._lock:
-            profiles_snapshot = dict(self.entity_profiles)
+            profiles_snapshot = self._index.get_profiles()
             aliases_snapshot = {
-                eid: list(self._id_to_names.get(eid, set()))
-                for eid in profiles_snapshot
+                eid: self._index.get_mentions(eid) for eid in profiles_snapshot
             }
 
         for ent_id, profile in profiles_snapshot.items():
-            canonical = profile.get("canonical_name", "").lower()
+            canonical = profile.canonical_lower
             for token in canonical.split():
                 token_to_entities[token].add(ent_id)
 
@@ -306,10 +284,11 @@ class EntityResolver:
         mention_lower = mention.lower()
 
         with self._lock:
-            if mention_lower in self._name_to_id:
-                candidate_scores[self._name_to_id[mention_lower]] = 1.0
+            exact_id = self._index.get_entity_id_for_name(mention_lower)
+            if exact_id is not None:
+                candidate_scores[exact_id] = 1.0
 
-            choices = list(self._name_to_id.keys())
+            choices = self._index.iter_aliases()
             scorer = fuzz.ratio if len(mention_lower) < 4 else fuzz.WRatio
             results = process.extract(
                 mention_lower,
@@ -320,7 +299,7 @@ class EntityResolver:
             )
 
             for alias, fuzz_score, _ in results:
-                eid = self._name_to_id.get(alias)
+                eid = self._index.get_entity_id_for_name(alias)
                 if eid is not None:
                     normalized = fuzz_score / 100.0
                     candidate_scores[eid] = max(
@@ -357,7 +336,7 @@ class EntityResolver:
             valid_scores = {
                 eid: score
                 for eid, score in candidate_scores.items()
-                if eid in self.entity_profiles
+                if self._index.has_entity(eid)
             }
         return sorted(valid_scores.items(), key=lambda x: x[1], reverse=True)
 
@@ -384,32 +363,35 @@ class EntityResolver:
                 f"Adding entity {entity_id}-{canonical_name} to entities indexes."
             )
 
-            self.entity_profiles[entity_id] = {
-                "canonical_name": canonical_name,
-                "type": entity_type,
-                "topic": topic or "General",
-                "project_id": project_id,
-                "embedding": embedding,
-            }
+            profile = EntityProfile.registered(
+                canonical_name=canonical_name,
+                entity_type=entity_type,
+                topic=topic,
+                project_id=project_id,
+                embedding=embedding,
+                session_id=session_id,
+            )
 
-            if entity_id not in self._id_to_names:
-                self._id_to_names[entity_id] = set()
-            self._id_to_names[entity_id].add(canonical_name.lower())
-
-            self._name_to_id[canonical_name.lower()] = entity_id
+            safe_mentions = []
             for mention in mentions:
                 mention_lower = mention.lower()
-                existing_id = self._name_to_id.get(mention_lower)
+                existing_id = self._index.get_entity_id_for_name(mention_lower)
                 if existing_id and existing_id != entity_id:
                     logger.warning(
                         f"Alias collision: '{mention}' belongs to {existing_id}, "
                         f"skipping for {entity_id}"
                     )
                     continue
-                self._name_to_id[mention_lower] = entity_id
-                self._id_to_names[entity_id].add(mention_lower)
+                safe_mentions.append(mention)
 
-            self._bump_alias_version()
+            aliases_changed = self._index.register(
+                entity_id,
+                profile,
+                canonical_name,
+                safe_mentions,
+            )
+            if aliases_changed:
+                self._bump_alias_version()
 
         return embedding
 
@@ -420,7 +402,7 @@ class EntityResolver:
         precomputed: Optional[List[float]] = None,
     ) -> List[float]:
         with self._lock:
-            profile = self.entity_profiles.get(entity_id)
+            profile = self._index.get_profile(entity_id)
             if not profile:
                 logger.warning(f"Cannot update profile for unknown entity {entity_id}")
                 return []
@@ -430,15 +412,15 @@ class EntityResolver:
             embedding = await self.embedding_service.encode_single(resolution_text)
 
         with self._lock:
-            profile = self.entity_profiles.get(entity_id)
+            profile = self._index.get_profile(entity_id)
             if not profile:
                 logger.warning(f"Cannot update profile for unknown entity {entity_id}")
                 return []
 
             logger.info(
-                f"Updating embedding for entity {entity_id}-{profile['canonical_name']}"
+                f"Updating embedding for entity {entity_id}-{profile.canonical_name}"
             )
-            self.entity_profiles[entity_id]["embedding"] = embedding
+            self._index.update_embedding(entity_id, embedding)
 
         return embedding
 
@@ -450,30 +432,17 @@ class EntityResolver:
     ):
         """Transfer secondary aliases to primary and remove secondary indexes."""
         with self._lock:
-            secondary_aliases = list(self._id_to_names.get(secondary_id, set()))
-            aliases_changed = bool(secondary_aliases)
-
-            for alias in secondary_aliases:
-                self._name_to_id[alias] = primary_id
-
-            secondary_names = self._id_to_names.pop(secondary_id, set())
-            aliases_changed = aliases_changed or bool(secondary_names)
-            if primary_id not in self._id_to_names:
-                self._id_to_names[primary_id] = set()
-            self._id_to_names[primary_id].update(secondary_names)
-
-            if primary_profile_updates and primary_id in self.entity_profiles:
-                self.entity_profiles[primary_id].update(primary_profile_updates)
-
-            if secondary_id in self.entity_profiles:
-                del self.entity_profiles[secondary_id]
-
-            if aliases_changed:
+            aliases_transferred = self._index.merge_into(
+                primary_id,
+                secondary_id,
+                primary_profile_updates,
+            )
+            if aliases_transferred:
                 self._bump_alias_version()
 
             logger.info(
                 f"Merged entity {secondary_id} into {primary_id}, "
-                f"transferred {len(secondary_aliases)} aliases"
+                f"transferred {aliases_transferred} aliases"
             )
             emit_sync(
                 self.project_id,
@@ -482,7 +451,7 @@ class EntityResolver:
                 {
                     "primary_id": primary_id,
                     "secondary_id": secondary_id,
-                    "aliases_transferred": len(secondary_aliases),
+                    "aliases_transferred": aliases_transferred,
                 },
             )
 
@@ -501,11 +470,11 @@ class EntityResolver:
 
         for eid, profile in profiles.items():
             names = list(self.get_mentions_for_id(eid))
-            names.append(profile["canonical_name"].lower())
+            names.append(profile.canonical_lower)
 
             for name in names:
                 with self._lock:
-                    mapped_id = self._name_to_id.get(name.lower())
+                    mapped_id = self._index.get_entity_id_for_name(name)
                 if mapped_id and mapped_id != eid:
                     pair = tuple(sorted((eid, mapped_id)))
                     if pair not in collisions:
@@ -523,14 +492,14 @@ class EntityResolver:
         top_id, _ = candidates[0]
 
         profile = await self.get_profile(top_id)
-        return profile["canonical_name"] if profile else None
+        return profile.canonical_name if profile else None
 
     async def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
         """Detect potential entity merges using vector search + fuzzy matching."""
         # With lazy loading, scan memory or the specifically passed IDs.
         # If dirty_ids is None, we scan the current memory cache.
         with self._lock:
-            scan_targets = dirty_ids if dirty_ids else list(self.entity_profiles.keys())
+            scan_targets = dirty_ids if dirty_ids else self._index.iter_profile_ids()
 
         if not scan_targets:
             logger.debug("Merge detection skipped: No entities to check.")
@@ -578,22 +547,7 @@ class EntityResolver:
 
         removed = 0
         with self._lock:
-            aliases_changed = False
-            for eid in entity_ids:
-                if eid in self.entity_profiles:
-                    del self.entity_profiles[eid]
-                    removed += 1
-
-                to_remove = list(self._id_to_names.get(eid, set()))
-                aliases_changed = aliases_changed or bool(to_remove)
-                for alias in to_remove:
-                    self._name_to_id.pop(alias, None)
-
-                aliases_changed = (
-                    self._id_to_names.pop(eid, None) is not None
-                    or aliases_changed
-                )
-
+            removed, aliases_changed = self._index.remove(entity_ids)
             if aliases_changed:
                 self._bump_alias_version()
 
@@ -621,7 +575,7 @@ class EntityResolver:
             if not primary_profile:
                 continue
 
-            primary_name = primary_profile["canonical_name"]
+            primary_name = primary_profile.canonical_name
 
             neighbors = await self.knowledge_store.search_similar_entities(
                 primary_id,
@@ -642,7 +596,7 @@ class EntityResolver:
                 if not neighbor_profile:
                     continue
 
-                neighbor_name = neighbor_profile["canonical_name"]
+                neighbor_name = neighbor_profile.canonical_name
                 score = fuzz.WRatio(primary_name, neighbor_name)
                 is_substring = is_substring_match(primary_name, neighbor_name)
 
@@ -651,12 +605,14 @@ class EntityResolver:
                 ) or score >= self.fuzzy_non_substring_threshold
 
                 if not passes_threshold:
-                    emb_a = primary_profile.get(
-                        "embedding"
-                    ) or await self.get_embedding_for_id(primary_id)
-                    emb_b = neighbor_profile.get(
-                        "embedding"
-                    ) or await self.get_embedding_for_id(neighbor_id)
+                    emb_a = (
+                        primary_profile.embedding
+                        or await self.get_embedding_for_id(primary_id)
+                    )
+                    emb_b = (
+                        neighbor_profile.embedding
+                        or await self.get_embedding_for_id(neighbor_id)
+                    )
                     if emb_a and emb_b:
                         cos_sim = cosine_similarity(emb_a, emb_b)
                         if cos_sim >= 0.90:
@@ -730,10 +686,10 @@ class EntityResolver:
         if not profile_a or not profile_b:
             return None
 
-        type_a = profile_a.get("type")
-        type_b = profile_b.get("type")
-        topic_a = profile_a.get("topic", "General")
-        topic_b = profile_b.get("topic", "General")
+        type_a = profile_a.entity_type
+        type_b = profile_b.entity_type
+        topic_a = profile_a.topic
+        topic_b = profile_b.topic
 
         is_cross_topic = topic_a != topic_b
         if is_cross_topic:
@@ -765,8 +721,8 @@ class EntityResolver:
         return {
             "primary_id": id_a,
             "secondary_id": id_b,
-            "primary_name": profile_a.get("canonical_name", "Unknown"),
-            "secondary_name": profile_b.get("canonical_name", "Unknown"),
+            "primary_name": profile_a.canonical_name or "Unknown",
+            "secondary_name": profile_b.canonical_name or "Unknown",
             "primary_type": type_a,
             "secondary_type": type_b,
             "topic_a": topic_a,

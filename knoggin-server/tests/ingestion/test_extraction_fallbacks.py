@@ -3,6 +3,7 @@ import pytest
 from common.schema.contracts import ConnectionsResult, MessageConnections
 from common.schema.primitives import ConnectionRecord
 from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
+from knoggin_server.knowledge.entity.profile import EntityProfile
 
 
 class FakeLLM:
@@ -19,8 +20,8 @@ class FakeEntities:
 
     async def get_profile(self, ent_id):
         profiles = {
-            1: {"canonical_name": "Alice", "type": "person"},
-            2: {"canonical_name": "Bob", "type": "person"},
+            1: EntityProfile(canonical_name="Alice", entity_type="person"),
+            2: EntityProfile(canonical_name="Bob", entity_type="person"),
         }
         return profiles.get(ent_id)
 

@@ -258,7 +258,6 @@ class EntityResolutionSettings(BaseModel):
     candidate_vector_threshold: float = Field(0.85, ge=0.0, le=1.0)
     resolution_threshold: float = Field(0.85, ge=0.0, le=1.0)
     common_word_frequency_threshold: float = Field(1e-5, ge=0.0)
-    context_support_epsilon: float = Field(1e-6, ge=0.0)
     sparse_context_verbs: List[str] = Field(
         default_factory=lambda: list(DEFAULT_SPARSE_CONTEXT_VERBS)
     )

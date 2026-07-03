@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 
 from common.utils.time_utils import get_now
-from knoggin_server.knowledge.services.entity_merge_service import EntityMergeService
+from knoggin_server.knowledge.entity.merge_service import EntityMergeService
 from tests.fixtures.fakes import RecordingPostgresClient
 
 

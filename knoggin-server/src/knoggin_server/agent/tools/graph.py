@@ -4,8 +4,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
     from infrastructure.knowledge_store import KnowledgeStore
+    from knoggin_server.knowledge.entity.resolver import EntityResolver
     from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-    from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 from common.utils.data_utils import cosine_similarity
 
@@ -24,14 +24,14 @@ class GraphTools:
     async def get_connections(self, entity_name: str) -> List[Dict]:
         """
         Get the full relationship network for an entity.
-        Returns all connections (up to 50) with evidence — the actual messages that established each connection.
-        Use when you need comprehensive relationship details beyond the top 5 from search_entity.
+        Returns all connections (up to 50) with evidence.
+        Use for comprehensive relationship details beyond search_entity.
 
         Args:
             entity_name: The entity to find connections for.
 
         Returns:
-            List of connections with target entity, connection strength, and hydrated evidence messages.
+            Connections with target entity, strength, and hydrated evidence.
         """
         canonical = await self._resolve_entity_name(entity_name)
         if not canonical:
@@ -52,7 +52,9 @@ class GraphTools:
 
         # Try looking without topic filtering to see if it's "hidden"
         hidden_results = await self.knowledge_store.get_related_entities(
-            [canonical], active_topics=None, visible_project_ids=self.readable_project_ids
+            [canonical],
+            active_topics=None,
+            visible_project_ids=self.readable_project_ids,
         )
 
         if hidden_results:
@@ -60,7 +62,10 @@ class GraphTools:
                 {
                     "hidden": True,
                     "count": len(hidden_results),
-                    "message": f"{len(hidden_results)} connection(s) exist through inactive topics",
+                    "message": (
+                        f"{len(hidden_results)} connection(s) exist through "
+                        "inactive topics"
+                    ),
                 }
             ]
 
@@ -100,8 +105,8 @@ class GraphTools:
 
     async def fact_check(self, entity_name: str, query: str) -> Dict:
         """
-        Retrieve and verify stored facts about a specific entity from the knowledge graph.
-        Uses a resolution cascade: exact lookup → vector search → message search fallback.
+        Retrieve and verify stored facts about an entity.
+        Uses exact lookup, vector search, then message search fallback.
 
         Args:
             entity_name: The entity to look up facts for.
@@ -120,7 +125,7 @@ class GraphTools:
             )
 
             profile = await self.entities.get_profile(entity_id)
-            canonical = profile["canonical_name"] if profile else entity_name
+            canonical = profile.canonical_name if profile else entity_name
 
             return {
                 "resolution": "exact",
@@ -172,7 +177,7 @@ class GraphTools:
             results = []
             for eid in candidate_ids:
                 profile = await self.entities.get_profile(eid)
-                canonical = profile["canonical_name"] if profile else str(eid)
+                canonical = profile.canonical_name if profile else str(eid)
 
                 results.append(
                     {
@@ -190,7 +195,8 @@ class GraphTools:
     async def find_path(self, entity_a: str, entity_b: str) -> List[Dict]:
         """
         Trace the connection chain between two specific entities.
-        Use for 'how is X connected to Y' or 'what links X to Y'. Returns the shortest path showing each hop.
+        Use for 'how is X connected to Y' or 'what links X to Y'.
+        Returns the shortest path showing each hop.
         Requires both entities to exist in memory.
 
         Args:
@@ -199,7 +205,7 @@ class GraphTools:
 
         Returns:
             Step-by-step path showing each entity in the chain with evidence.
-            If path exists only through inactive topics: [{"hidden": True, "message": "..."}]
+            Hidden-path marker if only inactive topics connect the entities.
             Empty list if no connection found.
         """
         canonical_a = await self._resolve_entity_name(entity_a)
@@ -272,7 +278,9 @@ class GraphTools:
                             "topic_a": topic_a,
                             "topic_b": topic_b,
                             "status": "LOCKED",
-                            "locked_reason": f"Inactive topic(s): {', '.join(inactive_topics)}",
+                            "locked_reason": (
+                                f"Inactive topic(s): {', '.join(inactive_topics)}"
+                            ),
                             "evidence": [],
                         }
                     )

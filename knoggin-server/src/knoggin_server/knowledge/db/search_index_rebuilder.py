@@ -6,10 +6,10 @@ from loguru import logger
 
 from common.scoping import IDENTITY_ENTITY_ID
 from infrastructure.postgres_client import PostgresClient
-from knoggin_server.knowledge.services.embedding_service import EmbeddingService
-from knoggin_server.knowledge.services.entity_embedding import (
+from knoggin_server.knowledge.entity.embedding import (
     build_entity_embedding_text,
 )
+from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 
 class SearchIndexer:

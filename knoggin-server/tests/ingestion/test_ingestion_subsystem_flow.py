@@ -15,7 +15,7 @@ from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.batch_consumer import IngestionWorker
 from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 from knoggin_server.ingestion.services.processor import TextProcessor
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import FakeRedis
 

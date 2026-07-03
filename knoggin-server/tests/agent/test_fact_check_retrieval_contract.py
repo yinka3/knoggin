@@ -4,6 +4,7 @@ import pytest
 
 from common.schema.primitives import FactRecord
 from knoggin_server.agent.tools.graph import GraphTools
+from knoggin_server.knowledge.entity.profile import EntityProfile
 
 
 def fact(
@@ -50,7 +51,7 @@ async def test_fact_check_exact_entity_returns_all_facts_with_canonical_name():
 
         async def get_profile(self, entity_id):
             assert entity_id == 2
-            return {"canonical_name": "Ada Lovelace"}
+            return EntityProfile(canonical_name="Ada Lovelace")
 
     class FakeKnowledgeStore:
         def __init__(self):
@@ -94,7 +95,7 @@ async def test_fact_check_vector_candidates_use_visible_projects_and_profiles():
             return None
 
         async def get_profile(self, entity_id):
-            return {"canonical_name": f"Entity {entity_id}"}
+            return EntityProfile(canonical_name=f"Entity {entity_id}")
 
     class FakeEmbeddingService:
         def __init__(self):
@@ -183,7 +184,7 @@ async def test_fact_check_trims_large_vector_fact_sets_by_query_similarity():
             return None
 
         async def get_profile(self, entity_id):
-            return {"canonical_name": "Large Entity"}
+            return EntityProfile(canonical_name="Large Entity")
 
     class FakeEmbeddingService:
         def __init__(self):

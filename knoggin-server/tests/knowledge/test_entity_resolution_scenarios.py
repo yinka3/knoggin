@@ -5,7 +5,8 @@ from common.schema.contracts import BulkRelevanceResult, RelevanceResult
 from common.schema.primitives import FactRecord
 from common.schema.settings import EntityResolutionSettings, TopicSchema
 from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.profile import EntityProfile
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 from tests.fixtures.factories import make_topic_config
 
 
@@ -276,9 +277,13 @@ def make_fact(entity_id, content):
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_alice_openai_and_design_alice_stay_separate_with_irrelevant_facts():
-    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM(relevance=False))
+    processor, entities, knowledge_store, embedding = make_harness(
+        llm=FakeLLM(relevance=False)
+    )
     await seed_entity(entities, knowledge_store, 601, "OpenAI Alice")
-    knowledge_store.vector_results[vector_for(embedding, "Design Alice")] = [(601, 0.83)]
+    knowledge_store.vector_results[vector_for(embedding, "Design Alice")] = [
+        (601, 0.83)
+    ]
     knowledge_store.relevant_facts_by_entity[601] = [
         make_fact(601, "OpenAI Alice works on research model evaluations.")
     ]
@@ -295,13 +300,15 @@ async def test_alice_openai_and_design_alice_stay_separate_with_irrelevant_facts
     assert result.entity_ids == [1001]
     assert result.new_ids == {1001}
     assert result.alias_ids == set()
-    assert (await entities.get_profile(601))["canonical_name"] == "OpenAI Alice"
+    assert (await entities.get_profile(601)).canonical_name == "OpenAI Alice"
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_bobby_chen_reuses_robert_chen_when_context_supports_nickname_drift():
-    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM(relevance=True))
+    processor, entities, knowledge_store, embedding = make_harness(
+        llm=FakeLLM(relevance=True)
+    )
     await seed_entity(entities, knowledge_store, 102, "Robert Chen", aliases=["Bob"])
     knowledge_store.vector_results[vector_for(embedding, "Bobby Chen")] = [(102, 0.82)]
     knowledge_store.relevant_facts_by_entity[102] = [
@@ -343,8 +350,10 @@ async def test_sparse_bob_does_not_reuse_known_alias_without_supporting_context(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_descriptive_knoggin_mentions_reuse_project_with_supporting_context():
-    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM(relevance=True))
+async def test_weak_descriptive_knoggin_support_does_not_authorize_reuse():
+    processor, entities, knowledge_store, embedding = make_harness(
+        llm=FakeLLM(relevance=True)
+    )
     await seed_entity(
         entities,
         knowledge_store,
@@ -354,8 +363,12 @@ async def test_descriptive_knoggin_mentions_reuse_project_with_supporting_contex
         entity_type="project",
         topic="General",
     )
-    knowledge_store.vector_results[vector_for(embedding, "the memory project")] = [(301, 0.82)]
-    knowledge_store.vector_results[vector_for(embedding, "that graph thing")] = [(301, 0.82)]
+    knowledge_store.vector_results[vector_for(embedding, "the memory project")] = [
+        (301, 0.82)
+    ]
+    knowledge_store.vector_results[vector_for(embedding, "that graph thing")] = [
+        (301, 0.82)
+    ]
     knowledge_store.relevant_facts_by_entity[301] = [
         make_fact(301, "Knoggin is a personal memory graph project.")
     ]
@@ -373,10 +386,10 @@ async def test_descriptive_knoggin_mentions_reuse_project_with_supporting_contex
         "session-1",
     )
 
-    assert result.entity_ids == [301]
-    assert result.new_ids == set()
-    assert result.entity_msg_map == {301: [6, 7]}
-    assert result.alias_updates == {301: ["the memory project", "that graph thing"]}
+    assert result.entity_ids == [301, 1001]
+    assert result.new_ids == {1001}
+    assert result.entity_msg_map == {301: [6], 1001: [7]}
+    assert result.alias_updates == {301: ["the memory project"]}
 
 
 @pytest.mark.storage
@@ -640,7 +653,7 @@ async def test_unknown_labels_are_neutral_for_schema_compatibility():
     compatibility = processor._is_schema_compatible(
         "unknown-label",
         "General",
-        {"canonical_name": "Linear", "type": "tool", "topic": "General"},
+        EntityProfile(canonical_name="Linear", entity_type="tool", topic="General"),
     )
 
     assert compatibility == "neutral"
@@ -655,12 +668,10 @@ async def test_entity_resolution_settings_update_caution_gate_knobs():
         EntityResolutionSettings(
             resolution_threshold=0.72,
             common_word_frequency_threshold=2e-5,
-            context_support_epsilon=2e-6,
             sparse_context_verbs=["Answered", "PONGED"],
         )
     )
 
     assert processor.resolution_threshold == 0.72
     assert processor.common_word_frequency_threshold == 2e-5
-    assert processor.context_support_epsilon == 2e-6
     assert processor.sparse_context_verbs == {"answered", "ponged"}

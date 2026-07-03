@@ -1,6 +1,6 @@
 import pytest
 
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 
 
 class FakeEmbeddingService:

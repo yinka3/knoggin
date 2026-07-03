@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 import spacy
 from gliner import GLiNER
@@ -24,6 +24,7 @@ from knoggin_server.ingestion.prompts import (
     ner_reasoning_prompt,
     render_configured_prompt,
 )
+from knoggin_server.knowledge.entity.profile import EntityProfile
 
 
 class TextProcessor:
@@ -33,7 +34,7 @@ class TextProcessor:
         topic_config: TopicConfig,
         get_known_aliases: Callable[[], Dict[str, int]],
         get_alias_version: Callable[[], int],
-        get_profile: Callable[[int], Optional[dict]],
+        get_profile: Callable[[int], Awaitable[Optional[EntityProfile]]],
         gliner: GLiNER,
         spacy: spacy.Language,
         gliner_threshold: float = 0.85,
@@ -272,15 +273,14 @@ class TextProcessor:
             tracked_known_matches.add(match_key)
 
             profile = await self.get_profile(eid)
-            profile = profile or {}
 
             covered_texts[msg_id].add(span_text.lower())
             resolved.append(
                 (
                     msg_id,
                     span_text,
-                    profile.get("type", "unknown"),
-                    profile.get("topic") or "General",
+                    profile.entity_type if profile else "unknown",
+                    profile.topic if profile else "General",
                 )
             )
 

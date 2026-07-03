@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
     from infrastructure.knowledge_store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
-    from knoggin_server.knowledge.services.entity_service import EntityResolver
+    from knoggin_server.knowledge.entity.resolver import EntityResolver
 
 
 class MemoryTools:

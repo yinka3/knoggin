@@ -4,7 +4,7 @@ import pytest
 from common.schema.primitives import FactRecord
 from common.utils.time_utils import get_now
 from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 from tests.knowledge.test_retrieval_embedding_smoke import load_local_embedding_service
 
 
@@ -39,13 +39,17 @@ async def test_real_embedding_profile_refinement_updates_profile_vector_from_fac
         project_id="project-1",
         readable_project_ids=["project-1"],
     )
-    entities.entity_profiles[42] = {
-        "canonical_name": "Knoggin profile refinement",
-        "type": "concept",
-        "topic": "Testing",
-        "project_id": "project-1",
-        "embedding": [],
-    }
+    entities._populate_cache(
+        {
+            "id": 42,
+            "canonical_name": "Knoggin profile refinement",
+            "aliases": [],
+            "type": "concept",
+            "topic": "Testing",
+            "project_id": "project-1",
+            "embedding": [],
+        }
+    )
     job = ProfileRefinementJob(
         llm=object(),
         entities=entities,
@@ -104,7 +108,7 @@ async def test_real_embedding_profile_refinement_updates_profile_vector_from_fac
 
     assert profile_vector
     assert all(isinstance(value, float) for value in profile_vector)
-    assert entities.entity_profiles[42]["embedding"] == profile_vector
+    assert entities.get_cached_profile(42).embedding == profile_vector
     assert cosine(profile_query_vector, profile_vector) > cosine(
         profile_query_vector,
         unrelated_vector,

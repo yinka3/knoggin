@@ -6,10 +6,10 @@ from loguru import logger
 from common.schema.settings import CleanerSettings
 from common.utils.events import emit
 from common.utils.time_utils import get_now_ms
-from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 
 
 class EntityCleanupJob(BaseJob):

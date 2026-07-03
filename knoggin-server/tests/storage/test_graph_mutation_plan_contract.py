@@ -19,6 +19,7 @@ from knoggin_server.knowledge.db.write_graph_db import (
     write_batch_callback,
     write_batch_to_graph,
 )
+from knoggin_server.knowledge.entity.profile import EntityProfile
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -60,29 +61,29 @@ class FakeKnowledgeStore:
 class FakeEntityResolverForPlan:
     def __init__(self, project_id="project-1"):
         self.project_id = project_id
-        self.entity_profiles = {
-            2: {
-                "canonical_name": "Ada Lovelace",
-                "type": "person",
-                "topic": "Identity",
-                "session_id": "profile-session",
-                "project_id": "profile-project",
-            },
-            3: {
-                "canonical_name": "Grace Hopper",
-                "type": "person",
-                "topic": "Work",
-            },
-            4: {
-                "canonical_name": "Compiler",
-                "type": "concept",
-                "topic": "Work",
-            },
-            5: {
-                "canonical_name": "Zombie",
-                "type": "concept",
-                "topic": "Archive",
-            },
+        self.profiles = {
+            2: EntityProfile(
+                canonical_name="Ada Lovelace",
+                entity_type="person",
+                topic="Identity",
+                session_id="profile-session",
+                project_id="profile-project",
+            ),
+            3: EntityProfile(
+                canonical_name="Grace Hopper",
+                entity_type="person",
+                topic="Work",
+            ),
+            4: EntityProfile(
+                canonical_name="Compiler",
+                entity_type="concept",
+                topic="Work",
+            ),
+            5: EntityProfile(
+                canonical_name="Zombie",
+                entity_type="concept",
+                topic="Archive",
+            ),
         }
         self.mentions = {
             2: ["Ada", "Analyst"],
@@ -100,6 +101,12 @@ class FakeEntityResolverForPlan:
 
     def get_mentions_for_id(self, entity_id):
         return list(self.mentions.get(entity_id, []))
+
+    def get_cached_profile(self, entity_id):
+        return self.profiles.get(entity_id)
+
+    def has_cached_entity(self, entity_id):
+        return entity_id in self.profiles
 
     async def get_embedding_for_id(self, entity_id):
         return self.embeddings.get(entity_id)
@@ -463,7 +470,9 @@ async def test_write_batch_to_graph_marks_success_and_attaches_summary_metadata(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_write_batch_to_graph_marks_failed_plan_when_execution_raises(monkeypatch):
+async def test_write_batch_to_graph_marks_failed_plan_when_execution_raises(
+    monkeypatch,
+):
     scope = EngineScope(user_name="ada", session_id="session-1", project_id="project-1")
     batch = BatchResult(scope=scope, new_entity_ids={2})
     observed_plan = GraphMutationPlan(

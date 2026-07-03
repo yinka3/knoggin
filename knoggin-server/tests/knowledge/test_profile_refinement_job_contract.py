@@ -9,6 +9,7 @@ from common.utils.time_utils import frozen_time
 from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
+from knoggin_server.knowledge.entity.profile import EntityProfile
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -38,15 +39,16 @@ def fact_record(
 
 
 class FakeEntities:
-    def __init__(self, profiles=None, user_id=1):
+    def __init__(self, profiles=None, aliases=None, user_id=1):
         self.readable_project_ids = ["project-1"]
-        self.entity_profiles = profiles or {
-            1: {"canonical_name": "ada", "type": "person", "aliases": ["ada"]},
-            2: {"canonical_name": "Widget", "type": "concept"},
-            3: {"canonical_name": "Backend", "type": "project"},
-            4: {"canonical_name": "Tests", "type": "concept"},
-            5: {"canonical_name": "Profiles", "type": "concept"},
+        self.profiles = profiles or {
+            1: EntityProfile(canonical_name="ada", entity_type="person"),
+            2: EntityProfile(canonical_name="Widget", entity_type="concept"),
+            3: EntityProfile(canonical_name="Backend", entity_type="project"),
+            4: EntityProfile(canonical_name="Tests", entity_type="concept"),
+            5: EntityProfile(canonical_name="Profiles", entity_type="concept"),
         }
+        self.aliases = aliases or {1: ["ada"]}
         self.user_id = user_id
         self.embedding_calls = []
         self.embedding_service = FakeEmbedding()
@@ -55,8 +57,16 @@ class FakeEntities:
         return self.user_id if name == "ada" else None
 
     def get_mentions_for_id(self, entity_id):
-        profile = self.entity_profiles[entity_id]
-        return [profile["canonical_name"], *profile.get("aliases", [])]
+        profile = self.profiles[entity_id]
+        return list(
+            dict.fromkeys([profile.canonical_name, *self.aliases.get(entity_id, [])])
+        )
+
+    def get_cached_profile(self, entity_id):
+        return self.profiles.get(entity_id)
+
+    def has_cached_entity(self, entity_id):
+        return entity_id in self.profiles
 
     async def compute_embedding(self, entity_id, resolution_text, embedding=None):
         self.embedding_calls.append((entity_id, resolution_text))
@@ -412,7 +422,9 @@ async def test_execute_empty_conversation_returns_failure_without_profile_comple
 @pytest.mark.no_network
 async def test_run_updates_clears_missing_profiles_without_fetching_facts():
     knowledge_store = FakeKnowledgeStore()
-    entities = FakeEntities(profiles={1: {"canonical_name": "ada", "type": "person"}})
+    entities = FakeEntities(
+        profiles={1: EntityProfile(canonical_name="ada", entity_type="person")}
+    )
     job = make_job(entities=entities, knowledge_store=knowledge_store)
 
     updates, clear_ids = await job._run_updates(
@@ -675,7 +687,7 @@ async def test_maybe_refine_user_gates_and_sets_short_ttl():
     job = make_job(redis=redis)
 
     async def no_update_refine(ctx, user_id, profile, curr_msg_id):
-        assert (ctx.user_name, user_id, profile["canonical_name"], curr_msg_id) == (
+        assert (ctx.user_name, user_id, profile.canonical_name, curr_msg_id) == (
             "ada",
             1,
             "ada",
@@ -755,7 +767,7 @@ async def test_refine_user_profile_skips_incomplete_or_weak_inputs(case_name):
         await job._refine_user_profile(
             job_context(),
             user_id=1,
-            profile={"canonical_name": "ada", "aliases": ["ada"]},
+            profile=EntityProfile(canonical_name="ada", entity_type="person"),
             curr_msg_id=9,
         )
         is False
@@ -770,7 +782,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     events = patch_profile_events(monkeypatch)
     redis = FakeRedis()
     knowledge_store = FakeKnowledgeStore()
-    entities = FakeEntities()
+    entities = FakeEntities(aliases={1: ["ada", "Ada Lovelace"]})
     old_fact = fact_record(
         "Ada previously allowed broad profile updates",
         fact_id="old-1",
@@ -859,7 +871,7 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     result = await job._refine_user_profile(
         job_context(),
         user_id=1,
-        profile={"canonical_name": "ada", "aliases": ["ada", "Ada Lovelace"]},
+        profile=EntityProfile(canonical_name="ada", entity_type="person"),
         curr_msg_id=12,
     )
 

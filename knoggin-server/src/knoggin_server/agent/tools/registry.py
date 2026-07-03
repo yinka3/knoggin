@@ -16,8 +16,8 @@ from knoggin_server.agent.tools.maintenance import MaintenanceTools
 from knoggin_server.agent.tools.memory import MemoryTools
 from knoggin_server.agent.tools.search import SearchTools
 from knoggin_server.agent.tools.topic_tools import TopicTools
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 from knoggin_server.knowledge.services.document_service import DocumentService
-from knoggin_server.knowledge.services.entity_service import EntityResolver
 
 TOOL_DISPATCH = {
     "search_messages": ("search_messages", ["query", "limit"]),

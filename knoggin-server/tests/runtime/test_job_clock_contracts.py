@@ -18,6 +18,7 @@ from knoggin_server.ingestion.jobs.archive_job import FactArchivalJob
 from knoggin_server.ingestion.jobs.cleaner_job import EntityCleanupJob
 from knoggin_server.ingestion.jobs.dlq_job import DLQReplayJob
 from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
+from knoggin_server.knowledge.entity.profile import EntityProfile
 from tests.fixtures.fakes import FakeRedis, FakeResources
 
 FROZEN_AT = "2024-01-01T00:00:00+00:00"
@@ -103,14 +104,17 @@ class ArchivalKnowledgeStore:
 
 
 class ProfileEntities:
-    entity_profiles = {
-        1: {"canonical_name": "ada", "type": "person"},
-        2: {"canonical_name": "Recent", "type": "concept"},
-        3: {"canonical_name": "Ready", "type": "concept"},
+    profiles = {
+        1: EntityProfile(canonical_name="ada", entity_type="person"),
+        2: EntityProfile(canonical_name="Recent", entity_type="concept"),
+        3: EntityProfile(canonical_name="Ready", entity_type="concept"),
     }
 
     async def get_id(self, name):
         return 1
+
+    def get_cached_profile(self, entity_id):
+        return self.profiles.get(entity_id)
 
 
 @pytest.mark.runtime

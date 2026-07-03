@@ -20,10 +20,10 @@ from knoggin_server.ingestion.jobs.profile_job import ProfileRefinementJob
 from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.db.write_graph_db import write_batch_callback
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 from knoggin_server.knowledge.jobs.merge_rollback_cleanup_job import (
     MergeCleanupJob,
 )
-from knoggin_server.knowledge.services.entity_service import EntityResolver
 from knoggin_server.project.state import ProjectState
 
 
@@ -527,7 +527,6 @@ class ProjectManager:
             get_next_ent_id=self.resources.knowledge_store.allocate_entity_id,
             resolution_threshold=er_cfg.resolution_threshold,
             common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
-            context_support_epsilon=er_cfg.context_support_epsilon,
             sparse_context_verbs=er_cfg.sparse_context_verbs,
         )
 

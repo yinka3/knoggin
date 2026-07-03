@@ -25,7 +25,7 @@ from knoggin_server.ingestion.dlq_state import (
 from knoggin_server.ingestion.services.pipeline_service import (
     IngestionPipeline,
 )
-from knoggin_server.knowledge.services.entity_service import EntityResolver
+from knoggin_server.knowledge.entity.resolver import EntityResolver
 
 
 class DLQReplayJob(BaseJob):
@@ -348,7 +348,7 @@ class DLQReplayJob(BaseJob):
         forcing the DLQ to fall back to a safer full reprocessing retry.
         """
         valid_ids = [
-            eid for eid in result.entity_ids if eid in self.entities.entity_profiles
+            eid for eid in result.entity_ids if self.entities.has_cached_entity(eid)
         ]
 
         removed_count = len(result.entity_ids) - len(valid_ids)

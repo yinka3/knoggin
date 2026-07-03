@@ -1,459 +1,945 @@
-# Document Source Integration Design
+# Source Integration Design
 
 **Status**: Design Proposal  
 **Date**: 2026-06-23  
-**Purpose**: Extend the ingestion pipeline to support document extraction (PDF, DOCX) alongside conversational messages
+**Updated**: 2026-07-02
+**Purpose**: Extend ingestion beyond conversational messages so Knoggin can record and process messages, documents, and webhook-driven inputs through one provenance-aware source model.
 
 ---
 
 ## Executive Summary
 
-The system currently ingests conversational messages and extracts entities/relationships from them. This design extends the pipeline to support **document sources** (PDFs, DOCX files) by:
+Knoggin currently treats conversational messages as the primary ingestion unit.
+This proposal generalizes that boundary without turning the core memory system
+into a large event-sourcing framework.
 
-1. **Replacing `message_id` with `source_id`** - A unified identifier for both messages and document chunks
-2. **Using LlamaIndex SentenceSplitter** - Leverage existing dependency for document chunking
-3. **Minimal core changes** - The extraction pipeline is already source-agnostic
+The main shift is:
 
-**Integration Complexity**: ✅ **LOW** - Mostly additive changes, no major refactoring needed
+```text
+message-first ingestion
+```
+
+to:
+
+```text
+source-first ingestion
+```
+
+Supported source types should start small:
+
+```text
+message
+doc
+webhook
+```
+
+These three are enough to cover the current product direction:
+
+- `message`: normal chat/conversation input.
+- `doc`: uploaded PDFs, DOCX files, and extracted document chunks.
+- `webhook`: external automation, API callbacks, polling jobs, custom app events, game moves, and provider-specific integrations.
+
+The core principle is:
+
+```text
+Sources audit what Knoggin saw.
+Extraction creates observations and memory candidates.
+Facts represent current active memory.
+Audit explains how memory changed.
+```
+
+This keeps the ingestion layer simple. The generic source record should not
+carry heavy semantic responsibility. It should preserve provenance, scope,
+content, timing, and metadata so later extraction, correction, and audit flows
+can explain where memory came from.
 
 ---
 
 ## Current Architecture
 
 ### Message Flow
-```
-User Message → Buffer → BatchConsumer → TextProcessor → EntityManager → Graph
-                                ↓
+
+```text
+User Message -> Buffer -> BatchConsumer -> TextProcessor -> EntityManager -> Graph
+                                |
                          extract_mentions()
                          (msg_id, name, type, topic)
 ```
 
-### Key Identifier: `message_id`
-- **Primary Key**: `(user_name, session_id, message_id)` in `messages` table
-- **Source Attribution**: Used in `EntityRecord.msg_id`, `ConnectionRecord.msg_id`, `FactRecord.source_msg_id`
-- **Batch Tracking**: `ExtractionTrace.message_ids` tracks which messages were processed
-- **Evidence Grounding**: `relationship_evidence_refs` links relationships to source messages
+### Current Message-Specific Identifier
+
+`message_id` is currently used for several jobs:
+
+- Primary message identity: `(user_name, session_id, message_id)` in the `messages` table.
+- Source attribution: `EntityRecord.msg_id`, `ConnectionRecord.msg_id`, and `FactRecord.source_msg_id`.
+- Batch tracking: `ExtractionTrace.message_ids`.
+- Evidence grounding: relationship evidence references link relationships to source messages.
+
+The extraction code mostly treats message IDs as opaque identifiers. That makes
+generalizing the identifier practical.
 
 ---
 
 ## Proposed Architecture
 
-### Unified Source Model
+### Core Model
+
+Introduce a small source/event abstraction used by all ingestion paths.
 
 ```python
-# New abstraction
-source_id: str  # "msg_123" or "doc_abc_chunk_5"
-source_type: Literal["message", "document"]
-
-# Examples:
-"msg_42"                    # Message with ID 42
-"doc_abc123_chunk_0"        # Document chunk 0 from file abc123
-"doc_xyz789_sent_12-15"     # Sentences 12-15 from file xyz789
+source_event_id: str
+source_id: str  # extraction-facing alias for source_event_id during migration
+source_type: Literal["message", "doc", "webhook"]
+event_type: str
 ```
 
-### Extended Flow
+Examples:
+
+```text
+source_type = "message"
+event_type = "message.created"
+
+source_type = "doc"
+event_type = "doc.chunk.processed"
+
+source_type = "webhook"
+event_type = "stripe.invoice.paid"
+
+source_type = "webhook"
+event_type = "github.issue.closed"
+
+source_type = "webhook"
+event_type = "game.move.applied"
 ```
-Message OR Document → Buffer → BatchConsumer → TextProcessor → EntityManager → Graph
-                                        ↓
-                                 extract_mentions()
-                                 (source_id, name, type, topic)
+
+The broad shape:
+
+```text
+Message / Doc / Webhook
+        |
+        v
+Source record
+        |
+        v
+Extraction pipeline
+        |
+        v
+Entities / Relationships / Facts / Audit
+```
+
+Use `source_event_id` as the durable database reference. `source_id` can remain
+as an extraction-facing name while the pipeline is being renamed from
+message-oriented inputs to source-oriented inputs.
+
+### Session As Process Context
+
+Sessions should remain important. A session can represent a user conversation,
+a document ingestion run, or an automated webhook process.
+
+```text
+Project
+  Session A: user chat with Knoggin
+  Session B: webhook automation run
+  Session C: document ingestion run
+```
+
+This keeps automation and interaction cleanly separated while still allowing
+them to share project-visible memory when permitted.
+
+Minimum scope for source records:
+
+```text
+user_name
+project_id
+session_id
+source_type
+visibility / visible_project scope where applicable
 ```
 
 ---
 
-## Integration Analysis
+## Source Record
 
-### ✅ What Works Without Changes
+The generic source record should be small and provenance-focused.
 
-#### 1. **Extraction Prompts Are Source-Agnostic**
-- [`extract_entities.j2`](../src/common/templates/pipeline/extract_entities.j2) references `msg_id` only as an identifier
-- [`extract_relationships.j2`](../src/common/templates/pipeline/extract_relationships.j2) same - just needs an ID for evidence grounding
-- **Change needed**: Terminology only (`msg_id` → `source_id`)
-
-#### 2. **Processing Logic Is ID-Based**
-- [`TextProcessor.extract_mentions()`](../src/knoggin_server/ingestion/services/processor.py#L163-L500) returns tuples: `(msg_id, name, type, topic)`
-- No message-specific calculations (no `msg_id + 1`, no ordering assumptions)
-- Uses `msg_id` only for:
-  - **Validation**: `if entity.msg_id not in valid_msg_ids` (set membership)
-  - **Grouping**: `covered_texts[msg_id]` (dict keys)
-  - **Tracking**: `entity_msg_map[ent_id].append(msg_id)` (list append)
-- **All of these work identically with string `source_id`**
-
-#### 3. **No Message-Specific Assumptions**
-Checked for problematic patterns:
-- ❌ No arithmetic on IDs
-- ❌ No sequential ordering requirements
-- ❌ No message-specific metadata extraction
-- ✅ IDs are treated as opaque identifiers
-
----
-
-## Implementation Plan
-
-### Phase 1: Schema Extension (1-2 days)
-
-#### Database Changes
 ```sql
--- Add source_id to existing tables
-ALTER TABLE entities ADD COLUMN source_id TEXT;
-ALTER TABLE relationships ADD COLUMN source_id TEXT;
-ALTER TABLE facts ADD COLUMN source_id TEXT;
-
--- New table for document sources
-CREATE TABLE document_sources (
-    source_id TEXT PRIMARY KEY,
-    file_id TEXT NOT NULL,
-    chunk_index INT NOT NULL,
-    content TEXT NOT NULL,
+CREATE TABLE source_events (
+    id UUID PRIMARY KEY,
     user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
-    timestamp_ms BIGINT,
-    metadata JSONB
+    session_id TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    external_id TEXT,
+    idempotency_key TEXT,
+    content TEXT,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    occurred_at TIMESTAMPTZ,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    content_hash TEXT,
+    CONSTRAINT source_events_source_type_check CHECK (
+        source_type IN ('message', 'doc', 'webhook')
+    )
+);
+```
+
+Recommended indexes:
+
+```sql
+CREATE INDEX source_events_scope_idx
+ON source_events(user_name, project_id, session_id, observed_at DESC);
+
+CREATE INDEX source_events_type_idx
+ON source_events(user_name, project_id, source_type, event_type);
+
+CREATE UNIQUE INDEX source_events_idempotency_idx
+ON source_events(user_name, project_id, source_type, idempotency_key)
+WHERE idempotency_key IS NOT NULL;
+```
+
+Notes:
+
+- `observed_at` is when Knoggin saw the input.
+- `occurred_at` is when the source claims the event happened, if known.
+- `external_id` is the provider's ID, such as a Stripe event ID or GitHub delivery ID.
+- `idempotency_key` prevents duplicate webhook/polling ingestion.
+- `metadata` carries source-specific details without widening the core schema.
+
+---
+
+## Source Types
+
+### `message`
+
+Messages are the current baseline. Existing messages can be represented as
+source records with:
+
+```text
+source_type = "message"
+event_type = "message.created"
+content = message content
+metadata.role = user | assistant | system
+metadata.message_id = existing message id
+```
+
+The existing `messages` table can remain the durable conversation table. The
+source event gives the extraction layer a generic provenance pointer.
+
+### `doc`
+
+Documents need more provenance than a single `source_id` string can express.
+The document path should preserve the hierarchy:
+
+```text
+document file
+  -> document chunk
+    -> source event
+      -> extracted observation/fact evidence
+```
+
+Recommended durable records:
+
+```sql
+CREATE TABLE documents (
+    id UUID PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    storage_uri TEXT,
+    content_hash TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Backfill existing data
-UPDATE entities SET source_id = 'msg_' || source_msg_id WHERE source_msg_id IS NOT NULL;
-UPDATE relationships SET source_id = 'msg_' || message_id WHERE message_id IS NOT NULL;
-UPDATE facts SET source_id = 'msg_' || source_msg_id WHERE source_msg_id IS NOT NULL;
+CREATE TABLE document_chunks (
+    id UUID PRIMARY KEY,
+    document_id UUID NOT NULL REFERENCES documents(id),
+    chunk_index INT NOT NULL,
+    content TEXT NOT NULL,
+    page_start INT,
+    page_end INT,
+    char_start INT,
+    char_end INT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(document_id, chunk_index)
+);
 ```
 
-#### Pydantic Model Changes
-```python
-# primitives.py
-class EntityRecord(Entity):
-    source_id: str  # New unified field
-    msg_id: Optional[int] = None  # Deprecated, keep for migration
-    
-    @property
-    def source_type(self) -> str:
-        return "message" if self.source_id.startswith("msg_") else "document"
+For each chunk processed for memory extraction, create a source event:
 
-# Same for ConnectionRecord, FactRecord
+```text
+source_type = "doc"
+event_type = "doc.chunk.processed"
+content = chunk content
+metadata.document_id = document id
+metadata.chunk_id = chunk id
+metadata.chunk_index = chunk index
+metadata.page_start = page start if available
+metadata.page_end = page end if available
 ```
+
+This avoids making `doc_abc_chunk_0` the entire provenance story. The chunk is
+the extraction unit, but the original document remains the durable source.
+
+### `webhook`
+
+Webhook is intentionally broad. It should cover:
+
+- Provider webhooks: Stripe, GitHub, Slack, Linear, etc.
+- Custom automation calls.
+- Polling jobs that normalize external state into events.
+- Game or simulation actions.
+- Internal app integrations.
+
+Examples:
+
+```json
+{
+  "source_type": "webhook",
+  "event_type": "stripe.invoice.paid",
+  "external_id": "evt_123",
+  "idempotency_key": "stripe:evt_123",
+  "content": "Invoice in_456 was paid.",
+  "metadata": {
+    "provider": "stripe",
+    "invoice_id": "in_456",
+    "raw_payload_ref": "..."
+  }
+}
+```
+
+```json
+{
+  "source_type": "webhook",
+  "event_type": "game.move.applied",
+  "external_id": "move_89",
+  "idempotency_key": "game:session_7:move_89",
+  "content": "Player A captured the east tower.",
+  "metadata": {
+    "provider": "custom",
+    "game_id": "session_7",
+    "turn": 12
+  }
+}
+```
+
+Webhook ingestion should require duplicate protection from the start because
+providers retry deliveries and polling jobs may observe the same external
+object repeatedly.
 
 ---
 
-### Phase 2: Document Chunking (2-3 days)
+## Extraction Integration
 
-#### Simple Function Using LlamaIndex
+### Updated Flow
+
+```text
+Source event -> BatchConsumer -> TextProcessor -> EntityManager -> Graph
+                                |
+                         extract_mentions()
+                         (source_id, name, type, topic)
+```
+
+### Prompt and Processor Terminology
+
+Update prompt and processor terminology from messages to sources where the code
+is operating on extraction inputs.
+
+```diff
+- msg_id MUST be one of the message IDs shown as [MSG <id>] in the input.
++ source_id MUST be one of the source IDs shown as [SOURCE <id>] in the input.
+```
+
+```diff
+- Messages section
++ Sources section
+```
+
+The extraction input formatter can render source-specific labels:
+
+```python
+def format_source_input(sources: list[dict]) -> str:
+    lines = []
+
+    for src in sources:
+        source_id = src["source_id"]
+        source_type = src["source_type"]
+        content = src["content"]
+
+        if source_type == "message":
+            role = src.get("metadata", {}).get("role", "user").upper()
+            lines.append(f"[SOURCE {source_id}] [MESSAGE:{role}]: {content}")
+        elif source_type == "doc":
+            lines.append(f"[SOURCE {source_id}] [DOC]: {content}")
+        else:
+            event_type = src.get("event_type", "webhook")
+            lines.append(f"[SOURCE {source_id}] [WEBHOOK:{event_type}]: {content}")
+
+    return "\n".join(lines)
+```
+
+### Records Produced By Extraction
+
+Entity, relationship, and fact records should use generic source attribution:
+
+```python
+class EntityRecord(Entity):
+    source_event_id: str
+    source_type: str
+    msg_id: int | None = None
+
+class ConnectionRecord(Connection):
+    source_event_id: str
+    source_type: str
+    msg_id: int | None = None
+
+class FactRecord(Fact):
+    source_event_id: str
+    source_type: str
+    source_msg_id: int | None = None
+```
+
+For a transitional implementation, `source_id` can be used instead of
+`source_event_id`, but the durable target should be an actual source event
+identifier rather than an encoded string.
+
+---
+
+## Document Chunking
+
+Documents should be chunked for extraction separately from RAG retrieval.
+
+Recommended baseline:
 
 ```python
 from llama_index.core.node_parser import SentenceSplitter
-from typing import List, Dict
+
 
 def chunk_document_for_extraction(
     text: str,
-    file_id: str,
-    chunk_size: int = 200,  # Tokens per chunk (smaller than RAG chunks)
-    overlap: int = 30,      # Token overlap
-) -> List[Dict]:
-    """
-    Chunk document into extraction-ready sources using LlamaIndex.
-    
-    Returns:
-        List of source dicts compatible with existing pipeline:
-        [{
-            'source_id': 'doc_abc_chunk_0',
-            'content': 'chunk text...',
-            'file_id': 'abc',
-            'type': 'document',
-        }]
-    """
-    # Use LlamaIndex's sentence-aware splitter
+    document_id: str,
+    chunk_size: int = 200,
+    overlap: int = 30,
+) -> list[dict]:
     splitter = SentenceSplitter(
         chunk_size=chunk_size,
         chunk_overlap=overlap,
         paragraph_separator="\n\n",
-        secondary_chunking_regex="[.!?]\\s+"  # Sentence boundaries
+        secondary_chunking_regex="[.!?]\\s+",
     )
-    
+
     chunks = splitter.split_text(text)
-    
+
     return [
         {
-            'source_id': f"doc_{file_id}_chunk_{i}",
-            'content': chunk,
-            'file_id': file_id,
-            'chunk_index': i,
-            'type': 'document',
+            "document_id": document_id,
+            "chunk_index": i,
+            "content": chunk,
+            "metadata": {},
         }
         for i, chunk in enumerate(chunks)
     ]
 ```
 
-#### Why LlamaIndex SentenceSplitter?
-- ✅ Already in dependencies (used in FileRAG)
-- ✅ Token-aware (respects actual token counts)
-- ✅ Sentence-boundary aware (won't split mid-sentence)
-- ✅ Handles edge cases (abbreviations, quotes, etc.)
-- ✅ Battle-tested by thousands of projects
-
-#### Recommended Parameters
+Recommended parameters:
 
 ```python
-# For RAG (current FileRAG usage):
+# RAG / semantic document search
 SentenceSplitter(chunk_size=512, chunk_overlap=50)
-# Larger chunks for semantic search
 
-# For Entity Extraction (new usage):
+# Entity/fact extraction
 SentenceSplitter(chunk_size=200, chunk_overlap=30)
-# Smaller chunks for focused extraction
-# More overlap to catch cross-chunk entities
+```
+
+The smaller extraction chunks reduce unrelated context and make source
+attribution cleaner. Overlap helps preserve entities or facts that cross chunk
+boundaries.
+
+Document metadata can be represented as a synthetic chunk:
+
+```text
+event_type = "doc.metadata.processed"
+metadata.chunk_kind = "metadata"
 ```
 
 ---
 
-### Phase 3: Pipeline Integration (2-3 days)
-
-#### Update TextProcessor
-
-```python
-# processor.py - extract_mentions()
-async def extract_mentions(
-    self,
-    user_name: str,
-    sources: List[Dict],  # Changed from 'messages'
-    session_id: str,
-    trace: Optional[ExtractionTrace] = None,
-    issues: Optional[List[ValidationIssue]] = None,
-) -> List[Tuple[str, str, str, str]]:  # Changed from (int, ...) to (str, ...)
-    """
-    Extracts entities from sources (messages or documents).
-    Returns: List[(source_id, name, type, topic)]
-    """
-    # ... existing logic works with minimal changes
-    # Just replace msg_id with source_id throughout
-```
-
-#### Update Prompt Input Formatting
-
-```python
-# core_utils.py - format_vp01_input()
-def format_vp01_input(
-    sources: List[Dict],  # Changed from 'messages'
-    known_ents: List[Tuple[str, int]],
-    gliner_ents: List[Tuple[str, str, str]],  # (source_id, span, label)
-    ambiguous: List[Tuple[str, str, str, List[str]]],
-    covered_texts: Dict[str, set],
-    label_block: str,
-) -> str:
-    """Format sources for VP-01 extraction."""
-    lines = []
-    
-    for src in sources:
-        source_id = src.get('source_id') or f"msg_{src['id']}"
-        source_type = src.get('type', 'message')
-        
-        if source_type == 'message':
-            role = src.get('role', 'user').upper()
-            lines.append(f"[SOURCE {source_id}] [{role}]: {src['content']}")
-        else:  # document
-            lines.append(f"[SOURCE {source_id}] [DOCUMENT]: {src['content']}")
-    
-    # ... rest of formatting logic
-```
-
-#### Update Prompt Templates
-
-```diff
-# extract_entities.j2
-- msg_id MUST be one of the message IDs shown as [MSG <id>] in the input.
-+ source_id MUST be one of the source IDs shown as [SOURCE <id>] in the input.
-
-# extract_relationships.j2
-- msg_id MUST be one of the message IDs shown in the Messages section.
-+ source_id MUST be one of the source IDs shown in the Sources section.
-```
-
----
-
-### Phase 4: Document Ingestion Flow (3-5 days)
-
-#### New Document Consumer
+## Document Ingestion Flow
 
 ```python
 async def ingest_document_for_extraction(
     file_path: str,
-    file_id: str,
+    file_name: str,
     user_name: str,
     session_id: str,
     project_id: str,
 ) -> BatchResult:
     """
-    Ingest document and extract entities/relationships.
-    Integrates with existing pipeline.
+    Ingest a document and process its chunks through the normal extraction
+    pipeline with document-level provenance preserved.
     """
-    # 1. Extract text (using existing MarkItDown)
     from markitdown import MarkItDown
+
     md = MarkItDown()
     text = md.convert(file_path).text_content
-    
-    # 2. Chunk for extraction
+
+    document = await document_writer.create_document(
+        user_name=user_name,
+        project_id=project_id,
+        session_id=session_id,
+        file_name=file_name,
+        file_type="pdf",
+        content_hash=hash_text(text),
+    )
+
     chunks = chunk_document_for_extraction(
         text=text,
-        file_id=file_id,
+        document_id=document["id"],
         chunk_size=200,
-        overlap=30
+        overlap=30,
     )
-    
-    # 3. Format as sources (compatible with existing pipeline)
-    sources = [
-        {
-            'id': chunk['source_id'],  # For backward compat
-            'source_id': chunk['source_id'],
-            'message': chunk['content'],  # Alias for 'content'
-            'content': chunk['content'],
-            'role': 'document',
-            'type': 'document',
-            'file_id': chunk['file_id'],
-        }
-        for chunk in chunks
-    ]
-    
-    # 4. Process through existing BatchProcessor
-    result = await processor.run(
-        messages=sources,  # Existing parameter name
-        session_text="",   # Documents don't have conversation context
-        session_id=session_id
+
+    chunk_rows = await document_writer.create_chunks(document["id"], chunks)
+
+    sources = []
+    for chunk in chunk_rows:
+        source_event = await source_event_writer.create_source_event(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            source_type="doc",
+            event_type="doc.chunk.processed",
+            content=chunk["content"],
+            metadata={
+                "document_id": document["id"],
+                "chunk_id": chunk["id"],
+                "chunk_index": chunk["chunk_index"],
+                "file_name": file_name,
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+            },
+        )
+
+        sources.append(
+            {
+                "source_id": source_event["id"],
+                "source_event_id": source_event["id"],
+                "source_type": "doc",
+                "event_type": "doc.chunk.processed",
+                "content": chunk["content"],
+                "metadata": source_event["metadata"],
+            }
+        )
+
+    return await processor.run(
+        sources=sources,
+        session_text="",
+        session_id=session_id,
     )
-    
-    return result
 ```
+
+Implementation can keep the current `messages=` parameter temporarily, but the
+target API should accept `sources=`.
 
 ---
 
-## Potential Issues & Solutions
+## Webhook Ingestion Flow
 
-### Issue 1: Session Context for Documents
-**Problem**: Documents don't have conversational context like messages do  
-**Solution**: Pass empty `session_text=""` for document batches
+Webhook ingestion should normalize arbitrary external payloads into source
+events, then optionally send a text representation through extraction.
 
-### Issue 2: Mixed Batches (Messages + Documents)
-**Problem**: Can we process messages and documents in the same batch?  
-**Solution**: Yes! The pipeline doesn't care - just ensure `source_id` is unique across both
+```python
+async def ingest_webhook_event(
+    *,
+    user_name: str,
+    project_id: str,
+    session_id: str,
+    provider: str,
+    event_type: str,
+    external_id: str,
+    content: str,
+    payload: dict,
+) -> dict:
+    source_event = await source_event_writer.create_source_event(
+        user_name=user_name,
+        project_id=project_id,
+        session_id=session_id,
+        source_type="webhook",
+        event_type=event_type,
+        external_id=external_id,
+        idempotency_key=f"{provider}:{external_id}",
+        content=content,
+        metadata={
+            "provider": provider,
+            "payload": payload,
+        },
+    )
 
-### Issue 3: Entity Resolution Across Sources
-**Problem**: Same entity mentioned in message and document  
-**Solution**: Existing `EntityManager` already handles this via semantic similarity
+    return await processor.run(
+        sources=[
+            {
+                "source_id": source_event["id"],
+                "source_event_id": source_event["id"],
+                "source_type": "webhook",
+                "event_type": event_type,
+                "content": content,
+                "metadata": source_event["metadata"],
+            }
+        ],
+        session_text="",
+        session_id=session_id,
+    )
+```
 
-### Issue 4: Fact Source Attribution
-**Problem**: Facts need to reference document chunks, not just messages  
-**Solution**: `FactRecord.source_id` replaces `source_msg_id` - works for both
+For v1, webhook extraction can be conservative. Knoggin does not need a complex
+source ranking system. Contradictions can be corrected through normal user/admin
+memory correction flows.
 
-### Issue 5: Document Metadata Preservation
-**Problem**: Need to track which file a chunk came from  
-**Solution**: Store `file_id` in chunk metadata, link via `document_sources` table
+---
+
+## What Works With Minimal Changes
+
+### Extraction Prompts Are Mostly Source-Agnostic
+
+The entity and relationship prompts mostly need an ID for evidence grounding.
+They can use `source_id` instead of `msg_id`.
+
+### Processing Logic Is ID-Based
+
+`TextProcessor.extract_mentions()` currently returns tuples shaped like:
+
+```python
+(msg_id, name, type, topic)
+```
+
+The target shape is:
+
+```python
+(source_id, name, type, topic)
+```
+
+The current processing uses IDs for:
+
+- validation against the set of provided IDs;
+- grouping extracted spans by input;
+- tracking which source produced an entity or relationship;
+- linking evidence back to the input.
+
+Those operations work with UUID/string source IDs.
+
+### Message-Specific Assumptions Are Limited
+
+The current pipeline does not appear to rely on:
+
+- arithmetic on IDs;
+- sequential message ordering for identity;
+- message-only metadata during core extraction.
+
+That makes a gradual migration practical.
+
+---
+
+## Important Boundaries
+
+### Source Events Are Not Semantic Truth
+
+A source event should not claim too much.
+
+It means:
+
+```text
+Knoggin observed this input from this source in this scope.
+```
+
+It does not mean:
+
+```text
+Everything in this input is true.
+```
+
+Facts still need the existing correction, invalidation, and audit paths.
+
+### Do Not Collapse Document Provenance
+
+Avoid making this the whole provenance story:
+
+```text
+source_id = "doc_abc_chunk_0"
+```
+
+Prefer:
+
+```text
+source_event_id -> document_chunk_id -> document_id
+```
+
+That allows later citation UI to show:
+
+```text
+Contract.pdf, chunk 12, page 4 if available.
+```
+
+### Webhook Needs Idempotency
+
+Webhook providers retry. Polling jobs can re-observe the same external object.
+Duplicate protection is part of the minimum viable design, not an optimization.
+
+---
+
+## Potential Issues And Solutions
+
+### Session Context For Non-Message Inputs
+
+Problem: Documents and webhooks do not have conversational context.
+
+Solution: Use the session as process context and pass empty `session_text` for
+standalone ingestion runs.
+
+### Mixed Source Batches
+
+Problem: Can messages, docs, and webhooks be processed in the same batch?
+
+Solution: The pipeline can support this if `source_id` values are unique.
+Start with separate batches for operational simplicity.
+
+### Entity Resolution Across Sources
+
+Problem: The same entity can appear in messages, documents, and webhooks.
+
+Solution: Existing entity resolution should handle this, but provenance should
+preserve which source introduced or supported each observation.
+
+### Fact Source Attribution
+
+Problem: Facts need to reference sources beyond messages.
+
+Solution: Add `source_event_id` or transitional `source_id` to facts,
+relationships, and entity evidence records. Keep message-specific fields only
+for migration.
+
+### Document Updates
+
+Problem: A document can be replaced or uploaded in a newer version.
+
+Solution: Treat a changed document as a new document record with its own chunks.
+Later, add explicit supersession metadata if needed.
+
+### Webhook Payload Size
+
+Problem: Raw webhook payloads can be large or sensitive.
+
+Solution: Store a normalized text `content` for extraction and keep raw payloads
+behind a reference or filtered metadata policy.
 
 ---
 
 ## Testing Strategy
 
 ### Unit Tests
-```python
-def test_chunk_document():
-    """Test document chunking produces valid sources."""
-    text = "Sentence one. Sentence two. Sentence three."
-    chunks = chunk_document_for_extraction(text, "test_file", chunk_size=50)
-    
-    assert len(chunks) > 0
-    assert all('source_id' in c for c in chunks)
-    assert all(c['source_id'].startswith('doc_test_file') for c in chunks)
 
-def test_extract_mentions_with_documents():
-    """Test entity extraction from document chunks."""
+```python
+def test_source_event_accepts_supported_types():
+    assert SourceType.MESSAGE == "message"
+    assert SourceType.DOC == "doc"
+    assert SourceType.WEBHOOK == "webhook"
+
+
+def test_chunk_document_preserves_document_reference():
+    text = "Sentence one. Sentence two. Sentence three."
+    chunks = chunk_document_for_extraction(text, "doc-123", chunk_size=50)
+
+    assert len(chunks) > 0
+    assert all(c["document_id"] == "doc-123" for c in chunks)
+    assert all("chunk_index" in c for c in chunks)
+
+
+async def test_extract_mentions_with_doc_source():
     sources = [
-        {'source_id': 'doc_abc_chunk_0', 'content': 'Alice works at Apple.', 'type': 'document'}
+        {
+            "source_id": "source-1",
+            "source_type": "doc",
+            "event_type": "doc.chunk.processed",
+            "content": "Alice works at Apple.",
+            "metadata": {"document_id": "doc-123", "chunk_index": 0},
+        }
     ]
+
     mentions = await processor.extract_mentions(user_name, sources, session_id)
-    
-    assert ('doc_abc_chunk_0', 'Alice', 'person', 'General') in mentions
-    assert ('doc_abc_chunk_0', 'Apple', 'organization', 'General') in mentions
+
+    assert ("source-1", "Alice", "person", "General") in mentions
+    assert ("source-1", "Apple", "organization", "General") in mentions
+
+
+async def test_webhook_idempotency():
+    first = await source_event_writer.create_source_event(
+        user_name=user_name,
+        project_id=project_id,
+        session_id=session_id,
+        source_type="webhook",
+        event_type="stripe.invoice.paid",
+        idempotency_key="stripe:evt_123",
+        content="Invoice in_456 was paid.",
+    )
+
+    second = await source_event_writer.create_source_event(
+        user_name=user_name,
+        project_id=project_id,
+        session_id=session_id,
+        source_type="webhook",
+        event_type="stripe.invoice.paid",
+        idempotency_key="stripe:evt_123",
+        content="Invoice in_456 was paid.",
+    )
+
+    assert second["id"] == first["id"]
 ```
 
 ### Integration Tests
+
 ```python
-async def test_document_ingestion_flow():
-    """Test full document ingestion pipeline."""
-    # Create test PDF
+async def test_document_ingestion_flow_preserves_provenance():
     test_pdf = create_test_pdf("Alice met Bob at the Louvre.")
-    
-    # Ingest
+
     result = await ingest_document_for_extraction(
-        test_pdf, "test_doc", user_name, session_id, project_id
+        test_pdf,
+        "test.pdf",
+        user_name,
+        session_id,
+        project_id,
     )
-    
-    # Verify entities extracted
+
     assert result.success
-    assert len(result.entity_ids) >= 3  # Alice, Bob, Louvre
-    
-    # Verify source attribution
-    entities = await graph.get_entities(result.entity_ids)
-    assert all(e['source_id'].startswith('doc_test_doc') for e in entities)
+
+    facts = await knowledge_store.list_facts_for_project(
+        user_name=user_name,
+        project_id=project_id,
+    )
+
+    assert all(f["source_event_id"] for f in facts)
+
+
+async def test_webhook_ingestion_flow_extracts_from_normalized_content():
+    result = await ingest_webhook_event(
+        user_name=user_name,
+        project_id=project_id,
+        session_id=session_id,
+        provider="custom",
+        event_type="game.move.applied",
+        external_id="move-1",
+        content="Player A captured the east tower.",
+        payload={"move_id": "move-1"},
+    )
+
+    assert result.success
 ```
 
 ---
 
 ## Migration Path
 
-### Step 1: Add `source_id` columns (nullable)
+### Step 1: Add Source Events
+
+Add `source_events` and start writing message source events for new messages.
+
+### Step 2: Add Generic Source Attribution
+
+Add nullable generic source columns:
+
 ```sql
-ALTER TABLE entities ADD COLUMN source_id TEXT;
--- Keep msg_id for backward compatibility
+ALTER TABLE entities ADD COLUMN source_event_id UUID;
+ALTER TABLE relationships ADD COLUMN source_event_id UUID;
+ALTER TABLE facts ADD COLUMN source_event_id UUID;
 ```
 
-### Step 2: Backfill existing data
-```sql
-UPDATE entities SET source_id = 'msg_' || msg_id WHERE msg_id IS NOT NULL;
+Keep current message-specific fields during the transition.
+
+### Step 3: Backfill Existing Messages
+
+For existing messages, create `source_events` rows with:
+
+```text
+source_type = "message"
+event_type = "message.created"
+metadata.message_id = old message id
 ```
 
-### Step 3: Update code to populate `source_id`
-```python
-# New records get source_id
-entity = EntityRecord(
-    source_id=f"msg_{msg_id}",  # or f"doc_{file_id}_chunk_{i}"
-    msg_id=msg_id,  # Still populate for backward compat
-    ...
-)
+Then backfill entity, relationship, and fact source references where possible.
+
+### Step 4: Rename Pipeline Concepts
+
+Gradually rename internal extraction inputs:
+
+```text
+messages -> sources
+msg_id -> source_id / source_event_id
+message_ids -> source_ids
 ```
 
-### Step 4: Gradual deprecation of `msg_id`
-- Phase 1: Both fields populated
-- Phase 2: Code uses `source_id`, `msg_id` optional
-- Phase 3: Remove `msg_id` (future)
+Avoid broad compatibility shims if the system remains unreleased, but keep the
+changes staged enough to verify behavior.
+
+### Step 5: Add Document And Webhook Adapters
+
+Add adapters that normalize each input type into source events:
+
+```text
+message adapter
+doc adapter
+webhook adapter
+```
+
+Each adapter should be thin. The extraction and memory layers should not need
+provider-specific logic.
 
 ---
 
 ## Performance Considerations
 
 ### Document Chunking
-- **Cost**: Minimal - LlamaIndex is fast
-- **Memory**: Chunks processed in batches (same as messages)
-- **Optimization**: Cache chunked documents if re-processing
 
-### Extraction
-- **No change**: Same LLM calls as messages
-- **Batch size**: Keep same limits (8 sources per batch)
+- LlamaIndex `SentenceSplitter` is already available and appropriate for v1.
+- Cache chunked documents if reprocessing becomes common.
+- Keep extraction chunk size smaller than RAG chunk size.
+
+### Webhook Volume
+
+- Use idempotency keys to avoid duplicate extraction.
+- Consider queueing webhook extraction when provider volume is high.
+- Store normalized content separately from raw payloads.
 
 ### Storage
-- **Minimal increase**: `source_id` is just a string
-- **Index**: Add index on `source_id` for lookups
+
+- `source_events` will grow faster than active facts.
+- Index by scope, source type, event type, and idempotency key.
+- Keep raw source/event history separate from active memory retrieval paths so
+  agents do not drown in low-level event noise.
 
 ---
 
 ## Open Questions
 
-1. **Should we support mixed message+document batches?**
-   - **Recommendation**: Yes, but start with separate batches for simplicity
+1. **Should source events replace message IDs everywhere or only extraction evidence?**
+   Recommendation: start with extraction evidence and fact attribution, then
+   expand if the model holds.
 
-2. **How to handle document updates?**
-   - **Recommendation**: Treat as new document (new `file_id`), mark old entities as stale
+2. **Should document chunks be used for both RAG and extraction?**
+   Recommendation: keep separate chunking profiles. RAG chunks can be larger;
+   extraction chunks should be smaller and more provenance-focused.
 
-3. **Citation UI: How to show document sources to users?**
-   - **Recommendation**: Store `file_id` + `chunk_index`, link back to original file
+3. **How should citation UI render document evidence?**
+   Recommendation: render file name and chunk/page metadata from
+   `document_chunks`, not from encoded source IDs.
 
-4. **Should we extract from document metadata (title, author)?**
-   - **Recommendation**: Yes, treat metadata as a special chunk with `source_id = "doc_{file_id}_metadata"`
+4. **Should webhook sources automatically create facts?**
+   Recommendation: only for conservative/simple cases. Otherwise store source
+   events and allow extraction/correction flows to manage active memory.
+
+5. **Should contradictions trigger ranking or conflict logic now?**
+   Recommendation: no. Keep v1 simple. Let users/admins correct active memory
+   through existing fact correction and audit flows.
 
 ---
 
@@ -461,24 +947,34 @@ entity = EntityRecord(
 
 | Phase | Tasks | Duration |
 |-------|-------|----------|
-| **Phase 1** | Schema changes, model updates, backfill | 1-2 days |
-| **Phase 2** | Document chunking function, testing | 2-3 days |
-| **Phase 3** | Pipeline integration, prompt updates | 2-3 days |
-| **Phase 4** | Document ingestion flow, end-to-end testing | 3-5 days |
-| **Testing** | Integration tests, quality validation | 2-3 days |
+| Phase 1 | Add `source_events`, model types, and message source writes | 1-2 days |
+| Phase 2 | Add document/document_chunk provenance tables and chunking | 2-3 days |
+| Phase 3 | Rename extraction inputs from messages to sources | 2-3 days |
+| Phase 4 | Add document ingestion adapter and tests | 3-5 days |
+| Phase 5 | Add webhook ingestion adapter, idempotency, and tests | 2-4 days |
+| Testing | Integration tests and extraction quality checks | 2-3 days |
 
-**Total: 10-16 days** for full production-ready implementation
+**Total: 12-20 days** for a production-ready first pass.
 
 ---
 
 ## Conclusion
 
-The integration is **straightforward** because:
-1. ✅ Extraction pipeline treats IDs as opaque identifiers
-2. ✅ No message-specific logic in core processing
-3. ✅ LlamaIndex already in dependencies
-4. ✅ Prompts only need terminology changes
+The integration should be generalized beyond documents, but still kept small.
 
-The hardest part is **document chunking strategy**, but using LlamaIndex's `SentenceSplitter` with appropriate parameters (200 tokens, 30 overlap) provides a solid starting point that can be tuned based on extraction quality.
+The target model is:
 
-**Recommendation**: Start with simple token-based chunking, monitor extraction quality, and iterate on chunk size if needed.
+```text
+Session = process/context
+Source event = observed input
+Source types = message | doc | webhook
+Document = durable file
+Document chunk = extraction/citation unit
+Fact = active memory
+Audit = why memory changed
+```
+
+This preserves the low-complexity advantage of the original proposal while
+fixing the biggest gap: document chunks should not be the whole provenance
+story. They should be extraction units that point back to durable document
+records, and extracted memory should point back to source events.

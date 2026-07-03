@@ -480,6 +480,44 @@ class FactResolutionSummary(BaseModel):
 
 
 @dataclass
+class CandidateSuggestion:
+    """Advisory entity-resolution candidate preserved for later review."""
+
+    msg_id: int
+    mention: str
+    mention_type: str
+    mention_topic: str
+    candidate_id: int
+    candidate_name: str
+    base_score: float
+    support_score: float
+    reasons: List[str] = field(default_factory=list)
+    created_entity_id: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CandidateSuggestion":
+        return cls(
+            msg_id=int(data.get("msg_id", 0)),
+            mention=str(data.get("mention") or ""),
+            mention_type=str(data.get("mention_type") or ""),
+            mention_topic=str(data.get("mention_topic") or ""),
+            candidate_id=int(data.get("candidate_id", 0)),
+            candidate_name=str(data.get("candidate_name") or ""),
+            base_score=float(data.get("base_score") or 0.0),
+            support_score=float(data.get("support_score") or 0.0),
+            reasons=list(data.get("reasons") or []),
+            created_entity_id=(
+                int(data["created_entity_id"])
+                if data.get("created_entity_id") is not None
+                else None
+            ),
+        )
+
+
+@dataclass
 class ResolutionResult:
     """Result from EntityResolver batch resolution."""
 
@@ -488,6 +526,7 @@ class ResolutionResult:
     alias_ids: Set[int]
     entity_msg_map: Dict[int, List[int]]
     alias_updates: Dict[int, List[str]]
+    candidate_suggestions: List[CandidateSuggestion] = field(default_factory=list)
 
 
 @dataclass
@@ -502,6 +541,7 @@ class BatchResult:
     new_entity_ids: Set[int] = field(default_factory=set)
     alias_updated_ids: Set[int] = field(default_factory=set)
     alias_updates: Dict[int, List[str]] = field(default_factory=dict)
+    candidate_suggestions: List[CandidateSuggestion] = field(default_factory=list)
     relationship_observations: List[MessageConnections] = field(default_factory=list)
     user_relationship_observations: List[MessageUserConnections] = field(
         default_factory=list
@@ -562,6 +602,9 @@ class BatchResult:
             "new_entity_ids": list(self.new_entity_ids),
             "alias_updated_ids": list(self.alias_updated_ids),
             "alias_updates": {str(k): v for k, v in self.alias_updates.items()},
+            "candidate_suggestions": [
+                suggestion.to_dict() for suggestion in self.candidate_suggestions
+            ],
             "relationship_observations": [
                 item.model_dump(mode="json") for item in self.relationship_observations
             ],
@@ -601,6 +644,10 @@ class BatchResult:
                 for k, v in data.get("alias_updates", {}).items()
                 if str(k).isdigit()
             },
+            candidate_suggestions=[
+                CandidateSuggestion.from_dict(item)
+                for item in data.get("candidate_suggestions", [])
+            ],
             relationship_observations=[
                 MessageConnections.model_validate(item)
                 for item in data.get("relationship_observations", [])
