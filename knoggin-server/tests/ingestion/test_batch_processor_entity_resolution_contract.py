@@ -6,8 +6,8 @@ from common.exceptions import LLMProviderError
 from common.schema.contracts import BulkRelevanceResult, RelevanceResult
 from common.schema.primitives import FactRecord
 from knoggin_server.ingestion.services.pipeline_service import (
+    CANDIDATE_RELEVANCE_LLM_BATCH_SIZE,
     IngestionPipeline,
-    SUPPORT_LLM_BATCH_SIZE,
 )
 from knoggin_server.knowledge.entity.resolver import EntityResolver
 from tests.fixtures.factories import make_topic_config
@@ -85,9 +85,7 @@ class FakeKnowledgeStore:
         )
         return list(self.vector_results.get(tuple(vector), []))
 
-    async def get_neighbor_ids_batch(
-        self, candidate_ids, *, visible_project_ids
-    ):
+    async def get_neighbor_ids_batch(self, candidate_ids, *, visible_project_ids):
         self.neighbor_calls.append(list(candidate_ids))
         return {
             candidate_id: set(self.neighbors_by_entity.get(candidate_id, set()))
@@ -205,7 +203,6 @@ async def test_collect_candidate_support_scores_empty_input_returns_empty_scores
     scores = await processor._collect_candidate_support_scores(
         [],
         {1: "Alice is working on Knoggin."},
-        batch_matched_ids=set(),
     )
 
     assert scores == {}
@@ -223,7 +220,6 @@ async def test_collect_candidate_support_scores_without_facts_preserves_base_sco
     scores = await processor._collect_candidate_support_scores(
         [(101, 0.8, 1)],
         {1: "Alice is working on Knoggin."},
-        batch_matched_ids=set(),
     )
 
     assert scores == {101: pytest.approx(0.8)}
@@ -242,7 +238,6 @@ async def test_collect_candidate_support_scores_relevant_fact_adds_llm_support()
     scores = await processor._collect_candidate_support_scores(
         [(101, 0.8, 1)],
         {1: "Alice is working on the memory graph project."},
-        batch_matched_ids=set(),
     )
 
     assert scores == {101: pytest.approx(0.85)}
@@ -261,7 +256,6 @@ async def test_collect_candidate_support_scores_irrelevant_fact_keeps_base_score
     scores = await processor._collect_candidate_support_scores(
         [(101, 0.8, 1)],
         {1: "Alice is buying lunch."},
-        batch_matched_ids=set(),
     )
 
     assert scores == {101: pytest.approx(0.8)}
@@ -280,7 +274,6 @@ async def test_collect_candidate_support_scores_llm_failure_falls_back_to_base_s
     scores = await processor._collect_candidate_support_scores(
         [(101, 0.8, 1)],
         {1: "Alice is working on the memory graph project."},
-        batch_matched_ids=set(),
     )
 
     assert scores == {101: pytest.approx(0.8)}
@@ -299,7 +292,6 @@ async def test_candidate_support_empty_llm_response_uses_base_score():
     scores = await processor._collect_candidate_support_scores(
         [(101, 0.8, 1)],
         {1: "Alice is working on the memory graph project."},
-        batch_matched_ids=set(),
     )
 
     assert scores == {101: pytest.approx(0.8)}
@@ -308,38 +300,36 @@ async def test_candidate_support_empty_llm_response_uses_base_score():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_collect_candidate_support_scores_graph_neighbor_overlap_adds_support():
+async def test_collect_candidate_support_scores_ignores_graph_neighbor_overlap():
     processor, _, knowledge_store, _ = make_harness()
     knowledge_store.neighbors_by_entity[101] = {201}
 
     scores = await processor._collect_candidate_support_scores(
-        [(101, 0.8, 1)],
-        {1: "Alice is working on Knoggin."},
-        batch_matched_ids={201},
+        [(101, 0.8, 1)], {1: "Alice is working on Knoggin."}
     )
 
-    assert scores == {101: pytest.approx(0.83)}
+    assert scores == {101: pytest.approx(0.8)}
+    assert knowledge_store.neighbor_calls == []
     assert processor.llm.calls == []
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_candidate_support_graph_neighbor_signal_caps_at_point_zero_five():
+async def test_candidate_support_does_not_query_graph_neighbors():
     processor, _, knowledge_store, _ = make_harness()
     knowledge_store.neighbors_by_entity[101] = {201, 202, 203}
 
     scores = await processor._collect_candidate_support_scores(
-        [(101, 0.7, 1)],
-        {1: "Alice is working on Knoggin."},
-        batch_matched_ids={201, 202, 203},
+        [(101, 0.7, 1)], {1: "Alice is working on Knoggin."}
     )
 
-    assert scores == {101: pytest.approx(0.75)}
+    assert scores == {101: pytest.approx(0.7)}
+    assert knowledge_store.neighbor_calls == []
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_candidate_support_fact_and_neighbor_signals_combine():
+async def test_candidate_support_uses_fact_signal_without_neighbor_signal():
     processor, _, knowledge_store, _ = make_harness()
     knowledge_store.relevant_facts_by_entity[101] = [
         make_fact(101, "Knoggin is a memory graph project.")
@@ -347,12 +337,11 @@ async def test_candidate_support_fact_and_neighbor_signals_combine():
     knowledge_store.neighbors_by_entity[101] = {201}
 
     scores = await processor._collect_candidate_support_scores(
-        [(101, 0.8, 1)],
-        {1: "Alice is working on the memory graph project."},
-        batch_matched_ids={201},
+        [(101, 0.8, 1)], {1: "Alice is working on the memory graph project."}
     )
 
-    assert scores == {101: pytest.approx(0.88)}
+    assert scores == {101: pytest.approx(0.85)}
+    assert knowledge_store.neighbor_calls == []
 
 
 @pytest.mark.ingestion
@@ -367,7 +356,6 @@ async def test_candidate_support_duplicate_candidate_rows_keep_max_score():
             1: "First mention of the candidate.",
             2: "Second mention of the candidate.",
         },
-        batch_matched_ids=set(),
     )
     reversed_scores = await reversed_processor._collect_candidate_support_scores(
         [(101, 0.9, 2), (101, 0.7, 1)],
@@ -375,13 +363,12 @@ async def test_candidate_support_duplicate_candidate_rows_keep_max_score():
             1: "First mention of the candidate.",
             2: "Second mention of the candidate.",
         },
-        batch_matched_ids=set(),
     )
 
     assert scores == {101: pytest.approx(0.9)}
     assert reversed_scores == {101: pytest.approx(0.9)}
-    assert knowledge_store.neighbor_calls == [[101]]
-    assert reversed_knowledge_store.neighbor_calls == [[101]]
+    assert knowledge_store.neighbor_calls == []
+    assert reversed_knowledge_store.neighbor_calls == []
 
 
 @pytest.mark.ingestion
@@ -392,7 +379,6 @@ async def test_collect_candidate_support_scores_missing_message_text_keeps_base_
     scores = await processor._collect_candidate_support_scores(
         [(101, 0.8, 99)],
         {1: "Known message text."},
-        batch_matched_ids=set(),
     )
 
     assert scores == {101: pytest.approx(0.8)}
@@ -410,7 +396,6 @@ async def test_candidate_support_fact_search_failure_uses_base_score():
     scores = await processor._collect_candidate_support_scores(
         [(101, 0.8, 1)],
         {1: "Alice is working on the memory graph project."},
-        batch_matched_ids=set(),
     )
 
     assert scores == {101: pytest.approx(0.8)}
@@ -422,9 +407,10 @@ async def test_candidate_support_fact_search_failure_uses_base_score():
 @pytest.mark.no_network
 async def test_collect_candidate_support_scores_batches_large_fact_relevance_requests():
     processor, _, knowledge_store, _ = make_harness()
-    processor.llm = FakeLLM(relevance=[True] * SUPPORT_LLM_BATCH_SIZE)
+    processor.llm = FakeLLM(relevance=[True] * CANDIDATE_RELEVANCE_LLM_BATCH_SIZE)
     candidate_pairs = [
-        (1000 + index, 0.8, 1) for index in range(SUPPORT_LLM_BATCH_SIZE + 1)
+        (1000 + index, 0.8, 1)
+        for index in range(CANDIDATE_RELEVANCE_LLM_BATCH_SIZE + 1)
     ]
     for candidate_id, _, _ in candidate_pairs:
         knowledge_store.relevant_facts_by_entity[candidate_id] = [
@@ -434,14 +420,12 @@ async def test_collect_candidate_support_scores_batches_large_fact_relevance_req
     scores = await processor._collect_candidate_support_scores(
         candidate_pairs,
         {1: "The message is related to every candidate fact."},
-        batch_matched_ids=set(),
     )
 
     assert len(processor.llm.calls) == 2
-    assert len(knowledge_store.fact_searches) == SUPPORT_LLM_BATCH_SIZE + 1
+    assert len(knowledge_store.fact_searches) == CANDIDATE_RELEVANCE_LLM_BATCH_SIZE + 1
     assert scores == {
-        candidate_id: pytest.approx(0.85)
-        for candidate_id, _, _ in candidate_pairs
+        candidate_id: pytest.approx(0.85) for candidate_id, _, _ in candidate_pairs
     }
 
 
@@ -456,7 +440,6 @@ async def test_collect_candidate_support_scores_embeds_each_unique_message_once(
             1: "Shared message text.",
             2: "Different message text.",
         },
-        batch_matched_ids=set(),
     )
 
     assert scores == {
@@ -684,7 +667,7 @@ async def test_resolve_mentions_records_alias_updates_for_existing_match():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_resolve_mentions_graph_neighbor_support_does_not_authorize_reuse():
+async def test_resolve_mentions_batch_neighbor_overlap_does_not_affect_support():
     processor, entities, knowledge_store, embedding = make_harness()
     await seed_entity(entities, 301, "Knoggin", entity_type="project", topic="General")
     await seed_entity(entities, 401, "Ada Lovelace")
@@ -706,6 +689,13 @@ async def test_resolve_mentions_graph_neighbor_support_does_not_authorize_reuse(
     assert result.new_ids == {1001}
     assert result.entity_msg_map == {401: [1], 1001: [1]}
     assert (await entities.get_profile(301)).canonical_name == "Knoggin"
+    assert knowledge_store.neighbor_calls == []
+    assert len(result.candidate_suggestions) == 1
+    suggestion = result.candidate_suggestions[0]
+    assert suggestion.candidate_id == 301
+    assert suggestion.base_score == pytest.approx(0.83)
+    assert suggestion.support_score == pytest.approx(0.83)
+    assert "advisory_context_support" not in suggestion.reasons
 
 
 @pytest.mark.ingestion

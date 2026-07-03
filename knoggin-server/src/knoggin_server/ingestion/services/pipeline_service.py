@@ -61,7 +61,7 @@ def _safe_json(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-SUPPORT_LLM_BATCH_SIZE = 15
+CANDIDATE_RELEVANCE_LLM_BATCH_SIZE = 15
 
 
 class IngestionPipeline:
@@ -412,7 +412,6 @@ class IngestionPipeline:
             entity_msg_map: Dict[int, List[int]] = {}
             created_in_batch: Dict[str, int] = {}
             alias_updates: Dict[int, List[str]] = {}
-            batch_matched_ids: Set[int] = set()
             candidate_suggestions: List[CandidateSuggestion] = []
 
             # Precompute embeddings for unique mention names
@@ -448,8 +447,6 @@ class IngestionPipeline:
                 if candidates:
                     top_id, top_score = candidates[0]
                     entry = ("candidate", top_id, top_score)
-                    if top_score >= self.resolution_threshold:
-                        batch_matched_ids.add(top_id)
                 else:
                     entry = ("new", None)
 
@@ -470,7 +467,7 @@ class IngestionPipeline:
             support_scores = {}
             if pairs_for_support:
                 support_scores = await self._collect_candidate_support_scores(
-                    pairs_for_support, msg_text_map, batch_matched_ids
+                    pairs_for_support, msg_text_map
                 )
 
             for i, (msg_id, name, typ, topic) in enumerate(mentions):
@@ -512,19 +509,16 @@ class IngestionPipeline:
                     )
 
                     if can_consider:
-                        if (
-                            self._should_accept_candidate(
-                                name,
-                                typ,
-                                topic,
-                                message_text,
-                                profile,
-                                top_id,
-                                compatibility,
-                            )
+                        if self._should_accept_candidate(
+                            name,
+                            typ,
+                            topic,
+                            message_text,
+                            profile,
+                            top_id,
+                            compatibility,
                         ):
                             ent_id = top_id
-                            batch_matched_ids.add(ent_id)
 
                             existing_id, aliases_added, new_aliases = (
                                 self.entities.validate_existing(
@@ -573,7 +567,6 @@ class IngestionPipeline:
                             )
                             new_ids.add(ent_id)
                             created_in_batch[canonical_lower] = ent_id
-                            batch_matched_ids.add(ent_id)
                             for suggestion in candidate_suggestions:
                                 if (
                                     suggestion.msg_id == msg_id
@@ -842,25 +835,20 @@ class IngestionPipeline:
         self,
         candidate_pairs: List[Tuple[int, float, int]],
         msg_text_map: Dict[int, str],
-        batch_matched_ids: Set[int],
     ) -> Dict[int, float]:
         """
-        Collect advisory support scores from fact and graph-neighbor signals.
+        Collect advisory support scores from candidate-specific fact signals.
 
         The returned score must never authorize entity reuse on its own. It is
-        supporting evidence for diagnostics and future candidate review.
+        supporting evidence for diagnostics and future candidate review. Batch
+        context is used only for efficient reads and LLM calls, not as evidence.
         """
         if not candidate_pairs:
             return {}
 
         results = {}
 
-        # Vector Embed Messages and Query Neighbors
-        all_candidate_ids = list({cid for cid, _, _ in candidate_pairs})
-        neighbors_by_entity = await self.entities.get_neighbor_ids_batch(
-            all_candidate_ids
-        )
-
+        # Vector embed each unique message once for fact relevance lookup.
         unique_msg_ids = list({msg_id for _, _, msg_id in candidate_pairs})
         msg_embeddings = {}
         if unique_msg_ids:
@@ -908,12 +896,16 @@ class IngestionPipeline:
                 pair_keys.append((cid, b_score))
 
         if llm_pairs:
-            for chunk_start in range(0, len(llm_pairs), SUPPORT_LLM_BATCH_SIZE):
+            for chunk_start in range(
+                0,
+                len(llm_pairs),
+                CANDIDATE_RELEVANCE_LLM_BATCH_SIZE,
+            ):
                 chunk_pairs = llm_pairs[
-                    chunk_start : chunk_start + SUPPORT_LLM_BATCH_SIZE
+                    chunk_start : chunk_start + CANDIDATE_RELEVANCE_LLM_BATCH_SIZE
                 ]
                 chunk_keys = pair_keys[
-                    chunk_start : chunk_start + SUPPORT_LLM_BATCH_SIZE
+                    chunk_start : chunk_start + CANDIDATE_RELEVANCE_LLM_BATCH_SIZE
                 ]
 
                 lines = []
@@ -961,21 +953,10 @@ class IngestionPipeline:
                             results.get(candidate_id, base_score), base_score
                         )
 
-        # Signal 4: Connection co-occurrence
-        processed_candidates = set()
-        for candidate_id, base_score, msg_id in candidate_pairs:
-            if candidate_id in processed_candidates:
-                continue
-            processed_candidates.add(candidate_id)
-
-            score = results.get(candidate_id, base_score)
-
-            if batch_matched_ids:
-                neighbors = neighbors_by_entity.get(candidate_id, set())
-                overlap = batch_matched_ids & neighbors
-                if overlap:
-                    score += min(len(overlap) * 0.03, 0.05)
-            results[candidate_id] = max(results.get(candidate_id, 0), score)
+        for candidate_id, base_score, _msg_id in candidate_pairs:
+            results[candidate_id] = max(
+                results.get(candidate_id, base_score), base_score
+            )
 
         return results
 

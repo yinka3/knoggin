@@ -132,7 +132,8 @@ class IngestionWorker:
         self.session_window = config.session_window
 
         logger.info(
-            f"Consumer ingestion settings updated: batch={self.batch_size}, timeout={self.batch_timeout}"
+            "Consumer ingestion settings updated: "
+            f"batch={self.batch_size}, timeout={self.batch_timeout}"
         )
 
     async def _run(self):
@@ -161,7 +162,8 @@ class IngestionWorker:
                     error_count += 1
                     backoff = min(60, 2**error_count)
                     logger.error(
-                        f"IngestionWorker: Unexpected error during _drain_buffer: {e}. Backing off for {backoff}s..."
+                        "IngestionWorker: Unexpected error during _drain_buffer: "
+                        f"{e}. Backing off for {backoff}s..."
                     )
                     await asyncio.sleep(backoff)
                 finally:
@@ -214,9 +216,7 @@ class IngestionWorker:
                     messages.append(parsed)
 
                 if invalid_count:
-                    logger.warning(
-                        f"Skipping {invalid_count} corrupt buffer entries"
-                    )
+                    logger.warning(f"Skipping {invalid_count} corrupt buffer entries")
                     await emit(
                         self.session_id,
                         "pipeline",
@@ -238,7 +238,9 @@ class IngestionWorker:
                         messages, session_text, session_id=self.session_id
                     )
                 except Exception as e:
-                    logger.error(f"Fatal error during IngestionPipeline computation: {e}")
+                    logger.error(
+                        f"Fatal error during IngestionPipeline computation: {e}"
+                    )
                     result = BatchResult(
                         success=False, error=f"Fatal exception: {str(e)}"
                     )
@@ -253,7 +255,8 @@ class IngestionWorker:
                     )
                     if not dlq_success:
                         logger.critical(
-                            f"DLQ write failed. Leaving {len(messages)} messages in buffer for retry."
+                            "DLQ write failed. Leaving "
+                            f"{len(messages)} messages in buffer for retry."
                         )
                         await emit(
                             self.session_id,
@@ -294,7 +297,8 @@ class IngestionWorker:
                         )
                         if not dlq_success:
                             logger.critical(
-                                "DLQ write failed after message log failure. Leaving messages in buffer."
+                                "DLQ write failed after message log failure. "
+                                "Leaving messages in buffer."
                             )
                             break
                         dlq_count += len(messages)
@@ -303,6 +307,35 @@ class IngestionWorker:
                         all_msg_ids.extend([m["id"] for m in messages])
                         await self.redis.ltrim(self._buffer_key, len(raw), -1)
                         continue
+
+                    if result.candidate_suggestions:
+                        if result.scope is None:
+                            result.set_scope(
+                                self.user_name,
+                                self.session_id,
+                                self.processor.project_id,
+                            )
+                        try:
+                            await asyncio.wait_for(
+                                self.knowledge_store.save_candidate_suggestions(
+                                    result.scope,
+                                    result.candidate_suggestions,
+                                ),
+                                timeout=30.0,
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to save candidate suggestions: {e}")
+                            await emit(
+                                self.session_id,
+                                "pipeline",
+                                "candidate_suggestions_save_failed",
+                                {
+                                    "error": str(e),
+                                    "suggestion_count": len(
+                                        result.candidate_suggestions
+                                    ),
+                                },
+                            )
 
                     has_writes = result.has_graph_writes()
                     if has_writes:
@@ -334,7 +367,8 @@ class IngestionWorker:
                         )
                         if not dlq_success:
                             logger.critical(
-                                f"DLQ write failed after graph failure. Leaving {len(messages)} messages in buffer for retry."
+                                "DLQ write failed after graph failure. Leaving "
+                                f"{len(messages)} messages in buffer for retry."
                             )
                             await emit(
                                 self.session_id,

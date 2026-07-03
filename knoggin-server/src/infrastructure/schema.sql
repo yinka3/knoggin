@@ -360,6 +360,33 @@ ON public.fact_change_audits(user_name, project_id, entity_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS fact_change_audits_project_idx
 ON public.fact_change_audits(user_name, project_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS public.ingestion_candidate_suggestions (
+    suggestion_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    msg_id BIGINT NOT NULL,
+    mention TEXT NOT NULL,
+    mention_type TEXT NOT NULL,
+    mention_topic TEXT NOT NULL,
+    candidate_id BIGINT NOT NULL,
+    candidate_name TEXT NOT NULL,
+    base_score DOUBLE PRECISION NOT NULL,
+    support_score DOUBLE PRECISION NOT NULL,
+    reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_entity_id BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_project_idx
+ON public.ingestion_candidate_suggestions(user_name, project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_candidate_idx
+ON public.ingestion_candidate_suggestions(user_name, project_id, candidate_id);
+
+CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_created_entity_idx
+ON public.ingestion_candidate_suggestions(user_name, project_id, created_entity_id);
+
 -- Durable authorization and outcome trail for every model-initiated write.
 CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     audit_id UUID PRIMARY KEY,

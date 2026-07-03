@@ -192,9 +192,7 @@ class DLQReplayJob(BaseJob):
         claims_key = RedisKeys.dlq_claims(ctx.user_name, ctx.project_id)
 
         while True:
-            raw_item = await self.redis.lmove(
-                dlq_key, processing_key, "LEFT", "RIGHT"
-            )
+            raw_item = await self.redis.lmove(dlq_key, processing_key, "LEFT", "RIGHT")
             if not raw_item:
                 return None, None, None
 
@@ -220,9 +218,7 @@ class DLQReplayJob(BaseJob):
             )
             return entry, raw_item, dlq_id
 
-    async def _ack_completed(
-        self, ctx: JobContext, raw_item: str, dlq_id: str
-    ) -> None:
+    async def _ack_completed(self, ctx: JobContext, raw_item: str, dlq_id: str) -> None:
         await self.redis.lrem(
             RedisKeys.dlq_processing(ctx.user_name, ctx.project_id), 1, raw_item
         )
@@ -475,6 +471,8 @@ class DLQReplayJob(BaseJob):
                 f"DLQ: Message log retry succeeded for {len(messages)} messages"
             )
 
+            await self._save_candidate_suggestions_for_replay(result)
+
             has_writes = result.has_graph_writes()
 
             if has_writes:
@@ -506,6 +504,33 @@ class DLQReplayJob(BaseJob):
             self._attach_replay_unit(result, replay_unit)
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
+
+    async def _save_candidate_suggestions_for_replay(self, result: BatchResult) -> None:
+        if not result.candidate_suggestions:
+            return
+        if result.scope is None:
+            logger.warning("Skipping candidate suggestion replay without batch scope")
+            return
+        try:
+            await self.processor.knowledge_store.save_candidate_suggestions(
+                result.scope,
+                result.candidate_suggestions,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save replay candidate suggestions: {e}")
+            await emit(
+                result.scope.project_id,
+                "job",
+                "candidate_suggestions_save_failed",
+                {
+                    "user_name": result.scope.user_name,
+                    "project_id": result.scope.project_id,
+                    "session_id": result.scope.session_id,
+                    "suggestion_count": len(result.candidate_suggestions),
+                    "error": str(e),
+                    "source": "dlq_replay",
+                },
+            )
 
     async def _retry_processing(self, entry: dict, ctx: JobContext) -> bool:
         """Full reprocess with stored context — LLM cost."""
@@ -541,6 +566,8 @@ class DLQReplayJob(BaseJob):
                 self._attach_replay_unit(result, replay_unit)
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 return False
+
+            await self._save_candidate_suggestions_for_replay(result)
 
             has_writes = result.has_graph_writes()
             if has_writes:
@@ -627,9 +654,7 @@ class DLQReplayJob(BaseJob):
                 if not entry or not isinstance(entry, dict):
                     consecutive_failures = 0
                     logger.error("DLQ: Corrupt entry, parking")
-                    did_park = await self._park_claimed(
-                        ctx, raw_item, entry, dlq_id
-                    )
+                    did_park = await self._park_claimed(ctx, raw_item, entry, dlq_id)
                     parked += int(did_park)
                     continue
 
@@ -640,9 +665,7 @@ class DLQReplayJob(BaseJob):
 
                 if not entry.get("session_id"):
                     consecutive_failures = 0
-                    did_park = await self._park_claimed(
-                        ctx, raw_item, entry, dlq_id
-                    )
+                    did_park = await self._park_claimed(ctx, raw_item, entry, dlq_id)
                     parked += int(did_park)
                     logger.error("DLQ: Malformed entry missing session_id, parking")
                     await emit(
@@ -713,9 +736,7 @@ class DLQReplayJob(BaseJob):
                         )
                 else:
                     consecutive_failures = 0
-                    did_park = await self._park_claimed(
-                        ctx, raw_item, entry, dlq_id
-                    )
+                    did_park = await self._park_claimed(ctx, raw_item, entry, dlq_id)
                     parked += int(did_park)
 
                     reason = (

@@ -3,9 +3,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from common.schema.tool_schema import get_filtered_schemas
 from common.utils.time_utils import get_now_unix
 from infrastructure.redis_client import RedisKeys
+from knoggin_server.agent.tools.registry import (
+    get_active_tool_names,
+    get_tool_schemas,
+)
 from knoggin_server.agent.types import MaintenanceCandidate
 
 TOPIC_EVALUATION_CANDIDATE = "topic_evaluation"
@@ -15,9 +18,7 @@ DEFAULT_MAINTENANCE_COOLDOWN_SECONDS = 3600
 
 
 def active_tool_names(enabled_tools: list[str] | None) -> frozenset[str]:
-    return frozenset(
-        schema["function"]["name"] for schema in get_filtered_schemas(enabled_tools)
-    )
+    return get_active_tool_names(get_tool_schemas(enabled_tools))
 
 
 def candidate_id(kind: str, project_id: str) -> str:

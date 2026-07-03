@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
+from common.schema.contracts import CandidateSuggestion, EngineScope
 from common.schema.primitives import FactRecord
 from common.scoping import require_scope_value
 from infrastructure.postgres_client import PostgresClient
@@ -15,6 +16,9 @@ from knoggin_server.knowledge.db.readers.graph_reader import GraphReader
 from knoggin_server.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from knoggin_server.knowledge.db.search_index_rebuilder import SearchIndexer
 from knoggin_server.knowledge.db.tool_queries import ToolQueries
+from knoggin_server.knowledge.db.writers.candidate_suggestion_writer import (
+    CandidateSuggestionWriter,
+)
 from knoggin_server.knowledge.db.writers.entity_writer import EntityWriter
 from knoggin_server.knowledge.db.writers.fact_audit_writer import FactAuditWriter
 from knoggin_server.knowledge.db.writers.fact_writer import FactWriter
@@ -36,6 +40,9 @@ class KnowledgeStore:
         self._postgres_client = PostgresClient(dsn=dsn)
         self._id_allocator = IdAllocator(self._postgres_client)
         self._entity_writer = EntityWriter(self._postgres_client)
+        self._candidate_suggestion_writer = CandidateSuggestionWriter(
+            self._postgres_client
+        )
         self._fact_writer = FactWriter(self._postgres_client)
         self._fact_audit_writer = FactAuditWriter(self._postgres_client)
         self._graph_writer = GraphWriter(self._postgres_client)
@@ -69,6 +76,15 @@ class KnowledgeStore:
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         return await self._graph_writer.save_message_logs(messages)
+
+    async def save_candidate_suggestions(
+        self,
+        scope: EngineScope,
+        suggestions: List[CandidateSuggestion],
+    ) -> int:
+        return await self._candidate_suggestion_writer.save_candidate_suggestions(
+            scope, suggestions
+        )
 
     async def allocate_entity_id(self) -> int:
         return await self._id_allocator.allocate_entity_id()

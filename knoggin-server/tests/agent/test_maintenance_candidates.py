@@ -7,10 +7,27 @@ from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.maintenance import (
     GRAPH_MERGE_SCAN_CANDIDATE,
     TOPIC_EVALUATION_CANDIDATE,
+    active_tool_names,
     build_maintenance_candidates,
     candidate_id,
 )
 from tests.fixtures.fakes import FakeRedis
+
+
+@pytest.mark.no_network
+def test_active_tool_names_uses_default_schema_filtering():
+    default_tools = active_tool_names(None)
+
+    assert "update_topics" in default_tools
+    assert "check_graph_health" in default_tools
+    assert active_tool_names(["search_messages"]) == frozenset(
+        {
+            "request_clarification",
+            "request_replanning",
+            "submit_answer",
+            "search_messages",
+        }
+    )
 
 
 @pytest.mark.no_network

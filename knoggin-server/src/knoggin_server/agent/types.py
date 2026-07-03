@@ -3,6 +3,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 from common.schema.agent_stream import StreamUsage
+from knoggin_server.agent.tools.registry import get_default_tool_limits
+
+
+def _default_tool_limits() -> Tuple[Tuple[str, int], ...]:
+    return tuple(get_default_tool_limits().items())
 
 
 @dataclass(frozen=True)
@@ -30,32 +35,8 @@ class AgentRunConfig:
     max_consecutive_errors: int = 3
     empty_result_replan_threshold: int = 3
     tool_timeout: float = 30.0
-    tool_limits: Tuple[Tuple[str, int], ...] = (
-        ("search_messages", 6),
-        ("get_connections", 8),
-        ("search_entity", 8),
-        ("fact_check", 6),
-        ("get_recent_activity", 8),
-        ("find_path", 8),
-        ("get_hierarchy", 8),
-        ("list_documents", 4),
-        ("list_folder_uploads", 4),
-        ("get_folder_upload_summary", 6),
-        ("list_folder_tree", 6),
-        ("get_document_info", 6),
-        ("read_document", 6),
-        ("search_documents", 8),
-        ("web_search", 8),
-        ("news_search", 8),
-        ("update_topics", 1),
-        ("read_brain", 4),
-        ("list_brain_snapshots", 4),
-        ("read_brain_snapshot", 4),
-        ("edit_brain", 2),
-        ("restore_brain_section", 2),
-        ("save_insight", 4),
-        ("spawn_specialist", 2),
-        ("request_replanning", 2),
+    tool_limits: Tuple[Tuple[str, int], ...] = field(
+        default_factory=_default_tool_limits
     )
     _limits_dict: Dict[str, int] = field(init=False, repr=False, compare=False)
 

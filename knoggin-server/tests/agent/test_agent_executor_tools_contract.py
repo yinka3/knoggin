@@ -144,6 +144,36 @@ async def test_execute_tools_success_records_state_and_accumulates_evidence(
 
 
 @pytest.mark.no_network
+async def test_update_topics_success_refreshes_active_topics(monkeypatch):
+    executor = make_executor()
+    executor.ctx.active_topics = ["General"]
+
+    async def fake_execute_tool(*_args):
+        return {
+            "data": {
+                "success": True,
+                "active_topics": ["General", "Research"],
+            }
+        }
+
+    monkeypatch.setattr(
+        "knoggin_server.agent.executor.execute_tool",
+        fake_execute_tool,
+    )
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall(name="update_topics", args={})],
+            results,
+        )
+    ]
+
+    assert events[-1]["event"] == "tool_end"
+    assert executor.ctx.active_topics == ["General", "Research"]
+
+
+@pytest.mark.no_network
 async def test_execute_tools_global_limit_blocks_all_calls(monkeypatch):
     state = AgentState(call_count=2)
     executor = make_executor(config=AgentRunConfig(max_calls=2), state=state)

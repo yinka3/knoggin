@@ -41,6 +41,9 @@ These pieces belong in the core system:
 - agent orchestration, prompt assembly, bounded tool loops, tool registry,
   tool authorization, and write-tool auditing;
 - graph/search retrieval tools that return evidence;
+- Agent Brain persistence, revisioning, snapshots, and guarded edit/restore
+  tools. The Brain is core to Knoggin's agent identity model, even though its
+  implementation should remain modular and auditable;
 - merge proposal, audit, confirmation, and rollback boundaries;
 - scheduler/job infrastructure required by ingestion and refinement.
 
@@ -56,7 +59,6 @@ These are valuable features, but they should not define the core memory kernel:
 - web/news search;
 - community-agent discussions;
 - specialist spawning;
-- autonomous agent Brain editing beyond behavior-critical identity;
 - topic auto-management;
 - maintenance UX and inspection tools;
 - DLQ inspection UI;
@@ -65,6 +67,21 @@ These are valuable features, but they should not define the core memory kernel:
 Document RAG should be framed as a useful way to submit project context, not as
 the center of the memory system. It can help answer questions, but it should not
 hide weak conversation-memory behavior.
+
+Agent tools are now classified by layer in the registry:
+`core_memory`, `core_brain`, `feature_external`, `feature_project_admin`,
+`feature_maintenance`, `feature_community`, and `runtime_special`. This is
+groundwork for later decoupling and does not change tool availability.
+
+Tool module metadata now owns default per-tool limits and post-tool
+bookkeeping hooks for topic updates and maintenance candidates. The executor
+still dispatches the same tools with the same schemas; this only moves
+ownership of feature-specific bookkeeping out of the core loop.
+
+Agent-facing schema selection now runs through the tool module registry. The
+schema definitions still live in the shared schema files, but modules own which
+schema names belong to their layer. Low-level tag and capability filtering
+remain behavior-compatible.
 
 ## Ingestion Boundary
 

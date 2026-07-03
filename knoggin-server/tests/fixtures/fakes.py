@@ -246,11 +246,7 @@ class FakeRedis:
             return None
         src = str(src).upper()
         dest = str(dest).upper()
-        value = (
-            self.lists[source].pop(0)
-            if src == "LEFT"
-            else self.lists[source].pop()
-        )
+        value = self.lists[source].pop(0) if src == "LEFT" else self.lists[source].pop()
         if dest == "LEFT":
             self.lists[destination].insert(0, value)
         else:
@@ -345,6 +341,7 @@ class FakeRedis:
         if desc:
             items = list(reversed(items))
         if kwargs.get("byscore"):
+
             def parse_bound(value):
                 exclusive = isinstance(value, str) and value.startswith("(")
                 raw = value[1:] if exclusive else value
@@ -360,9 +357,7 @@ class FakeRedis:
             def in_range(score):
                 if desc:
                     below_start = (
-                        score < start_score
-                        if start_exclusive
-                        else score <= start_score
+                        score < start_score if start_exclusive else score <= start_score
                     )
                     above_end = (
                         score > end_score if end_exclusive else score >= end_score
@@ -414,15 +409,14 @@ class FakeRedis:
         self._purge_expired(key)
         removed = 0
         for member in members:
-            removed += int(
-                self.zsets.get(key, {}).pop(str(member), None) is not None
-            )
+            removed += int(self.zsets.get(key, {}).pop(str(member), None) is not None)
         return removed
 
 
 class FakeKnowledgeStore:
     def __init__(self):
         self.saved_message_logs = []
+        self.saved_candidate_suggestions = []
         self.recent_project_messages = []
         self.identity_calls = []
         self.next_entity_id = 2
@@ -466,6 +460,10 @@ class FakeKnowledgeStore:
     async def save_message_logs(self, messages):
         self.saved_message_logs.append(messages)
         return True
+
+    async def save_candidate_suggestions(self, scope, suggestions):
+        self.saved_candidate_suggestions.append((scope, list(suggestions)))
+        return len(suggestions)
 
     async def get_recent_project_messages(
         self, user_name, project_id, limit, before_message_id=None
@@ -585,9 +583,7 @@ class FakePostgresClient:
             for session in self.sessions.values()
             if session.get("project_id") == row.get("project_id")
         )
-        result["allowed_projects"] = sorted(
-            self.project_read_scopes.get(key, set())
-        )
+        result["allowed_projects"] = sorted(self.project_read_scopes.get(key, set()))
         return result
 
     def _fetch_write_against_stores(self, query, params):
@@ -635,9 +631,7 @@ class FakePostgresClient:
                 ]
             elif "and project_id = any(%(requested)s)" in normalized:
                 requested = set(params.get("requested") or [])
-                rows = [
-                    row for row in rows if row.get("project_id") in requested
-                ]
+                rows = [row for row in rows if row.get("project_id") in requested]
             elif "and project_id = any(%(allowed)s)" in normalized:
                 allowed = set(params.get("allowed") or [])
                 rows = [
@@ -693,9 +687,7 @@ class FakePostgresClient:
             if row.get("user_name") == params.get("user_name")
         ]
         if "and agent_id = %(agent_id)s" in normalized:
-            rows = [
-                row for row in rows if row["agent_id"] == params.get("agent_id")
-            ]
+            rows = [row for row in rows if row["agent_id"] == params.get("agent_id")]
         elif "lower(name) = lower(%(name)s)" in normalized:
             wanted = str(params.get("name", "")).lower()
             rows = [row for row in rows if row["name"].lower() == wanted]
@@ -705,13 +697,7 @@ class FakePostgresClient:
             ids = set(params.get("agent_ids") or [])
             rows = [row for row in rows if row["agent_id"] in ids]
             if "count(*)" in normalized:
-                return [
-                    {
-                        "count": sum(
-                            1 for row in rows if row.get("is_spawned")
-                        )
-                    }
-                ]
+                return [{"count": sum(1 for row in rows if row.get("is_spawned"))}]
         return rows[:1] if "limit 1" in normalized else rows
 
     def _execute_against_stores(self, query, params):
@@ -797,9 +783,7 @@ class FakePostgresClient:
                 if row.get("project_id") != project_id
             }
             self.messages = [
-                row
-                for row in self.messages
-                if row.get("project_id") != project_id
+                row for row in self.messages if row.get("project_id") != project_id
             ]
             return
 
@@ -878,9 +862,7 @@ class FakeResources:
     redis_manager: Any = None
     knowledge_store: FakeKnowledgeStore = field(default_factory=FakeKnowledgeStore)
     postgres: FakePostgresClient = field(default_factory=FakePostgresClient)
-    document_storage_root: Path = field(
-        default_factory=lambda: Path("data/documents")
-    )
+    document_storage_root: Path = field(default_factory=lambda: Path("data/documents"))
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from common.schema.contracts import BatchResult
+from common.schema.contracts import BatchResult, CandidateSuggestion
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.batch_consumer import IngestionWorker
 from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
@@ -41,16 +41,29 @@ class RecordingContext:
 
 
 class RecordingKnowledgeStore(FakeKnowledgeStore):
-    def __init__(self, events=None, *, raise_on_save=False):
+    def __init__(
+        self,
+        events=None,
+        *,
+        raise_on_save=False,
+        raise_on_candidate_suggestions=False,
+    ):
         super().__init__()
         self.events = events if events is not None else []
         self.raise_on_save = raise_on_save
+        self.raise_on_candidate_suggestions = raise_on_candidate_suggestions
 
     async def save_message_logs(self, messages):
         self.events.append("save_message_logs")
         if self.raise_on_save:
             raise RuntimeError("message log down")
         return await super().save_message_logs(messages)
+
+    async def save_candidate_suggestions(self, scope, suggestions):
+        self.events.append("save_candidate_suggestions")
+        if self.raise_on_candidate_suggestions:
+            raise RuntimeError("candidate suggestions down")
+        return await super().save_candidate_suggestions(scope, suggestions)
 
 
 class RecordingWriteToGraph:
@@ -102,6 +115,28 @@ async def push_messages(redis, key, *messages):
 
 def graph_write_result():
     return BatchResult(new_entity_ids={101})
+
+
+def suggestion_result(*, graph_writes=False):
+    result = BatchResult(
+        candidate_suggestions=[
+            CandidateSuggestion(
+                msg_id=1,
+                mention="workspace notes tool",
+                mention_type="tool",
+                mention_topic="General",
+                candidate_id=501,
+                candidate_name="Notion",
+                base_score=0.82,
+                support_score=0.87,
+                reasons=["candidate_rejected"],
+                created_entity_id=1001,
+            )
+        ]
+    )
+    if graph_writes:
+        result.new_entity_ids.add(1001)
+    return result
 
 
 def failed_result(error="boom"):
@@ -211,7 +246,9 @@ async def test_batch_consumer_dlqs_message_log_failures_and_drains_processed_bat
         async def save_message_logs(self, messages):
             raise RuntimeError("graph down")
 
-    consumer, redis, processor, _ = make_consumer(knowledge_store=FailingKnowledgeStore())
+    consumer, redis, processor, _ = make_consumer(
+        knowledge_store=FailingKnowledgeStore()
+    )
     await redis.rpush(
         consumer._buffer_key,
         json.dumps({"id": 1, "message": "hello", "timestamp": "ts", "role": "user"}),
@@ -295,6 +332,83 @@ async def test_batch_consumer_success_with_graph_writes_calls_write_to_graph():
 
     assert write_to_graph.calls == [processor.result]
     assert events == ["save_message_logs", "write_to_graph"]
+    assert await redis.get(consumer._checkpoint_key) == "1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_persists_candidate_suggestions_before_graph_write():
+    events = []
+    write_to_graph = RecordingWriteToGraph(events)
+    knowledge_store = RecordingKnowledgeStore(events)
+    processor = FakeProcessor(suggestion_result(graph_writes=True))
+    consumer, redis, _, _ = make_consumer(
+        processor=processor,
+        knowledge_store=knowledge_store,
+        write_to_graph=write_to_graph,
+    )
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert events == [
+        "save_message_logs",
+        "save_candidate_suggestions",
+        "write_to_graph",
+    ]
+    assert write_to_graph.calls == [processor.result]
+    scope, suggestions = knowledge_store.saved_candidate_suggestions[0]
+    assert scope.user_name == "ada"
+    assert scope.project_id == "project-1"
+    assert scope.session_id == "session-1"
+    assert suggestions == processor.result.candidate_suggestions
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_candidate_suggestions_do_not_trigger_graph_write():
+    write_to_graph = RecordingWriteToGraph()
+    processor = FakeProcessor(suggestion_result(graph_writes=False))
+    consumer, redis, _, knowledge_store = make_consumer(
+        processor=processor,
+        write_to_graph=write_to_graph,
+    )
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert knowledge_store.saved_candidate_suggestions
+    assert write_to_graph.calls == []
+    assert await redis.get(consumer._checkpoint_key) == "1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_candidate_suggestion_failure_does_not_block_graph_write():
+    events = []
+    knowledge_store = RecordingKnowledgeStore(
+        events, raise_on_candidate_suggestions=True
+    )
+    processor = FakeProcessor(suggestion_result(graph_writes=True))
+    write_to_graph = RecordingWriteToGraph(events)
+    consumer, redis, _, _ = make_consumer(
+        processor=processor,
+        knowledge_store=knowledge_store,
+        write_to_graph=write_to_graph,
+    )
+    message = make_message(1)
+    await push_messages(redis, consumer._buffer_key, message)
+
+    await consumer._drain_buffer(flush_partial=True)
+
+    assert write_to_graph.calls == [processor.result]
+    assert await redis.llen(consumer._buffer_key) == 0
+    assert processor.dlq_calls == []
+    assert events == [
+        "save_message_logs",
+        "save_candidate_suggestions",
+        "write_to_graph",
+    ]
     assert await redis.get(consumer._checkpoint_key) == "1"
 
 
