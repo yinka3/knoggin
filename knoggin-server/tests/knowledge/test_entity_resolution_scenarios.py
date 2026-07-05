@@ -486,7 +486,12 @@ async def test_openai_and_chatgpt_are_related_not_duplicate_entities():
     )
     knowledge_store.hierarchy_edges.add((701, 702))
 
-    result = await entities._classify_pair(701, 702, 98, {})
+    result = await entities._classify_pair(
+        701,
+        702,
+        {"fuzz_score": 98, "reasons": ["name_similarity"]},
+        {},
+    )
 
     assert result is None
 

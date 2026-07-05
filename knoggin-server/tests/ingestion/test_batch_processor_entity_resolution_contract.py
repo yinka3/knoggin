@@ -501,6 +501,29 @@ async def test_resolve_mentions_reuses_exact_known_alias_candidate():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_resolve_mentions_does_not_auto_reuse_ambiguous_exact_alias():
+    processor, entities, _, _ = make_harness()
+    await seed_entity(entities, 102, "Robert Chen", aliases=["Bob"])
+    await seed_entity(entities, 202, "Bob Smith", aliases=["Bob"])
+
+    result = await processor._resolve_mentions(
+        [(1, "Bob", "person", "Identity")],
+        {1: "Bob."},
+        "session-1",
+    )
+
+    assert result.entity_ids == [1001]
+    assert result.new_ids == {1001}
+    assert result.alias_ids == set()
+    assert result.entity_msg_map == {1001: [1]}
+    assert {suggestion.candidate_id for suggestion in result.candidate_suggestions} == {
+        102,
+        202,
+    }
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_resolve_mentions_does_not_reuse_entity_from_readable_project():
     processor, entities, _, _ = make_harness()
     await entities.register_entity(

@@ -660,6 +660,18 @@ class IngestionPipeline:
         if not mention:
             return False
 
+        get_ids_for_name = getattr(
+            self.entities,
+            "get_entity_ids_for_name",
+            getattr(self.entities, "get_ids_for_name", None),
+        )
+        if get_ids_for_name:
+            owners = get_ids_for_name(mention)
+            if owners and candidate_id not in owners:
+                return False
+            if len(owners) > 1:
+                return False
+
         canonical = (profile.canonical_name or "").strip().casefold()
         if mention == canonical:
             return True

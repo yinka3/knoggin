@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from cachetools import LRUCache
 
@@ -18,24 +18,33 @@ class EntityIndex:
         names_by_id_maxsize: int = 1000000,
     ):
         self._profiles = LRUCache(maxsize=profile_maxsize)
-        self._name_to_id = LRUCache(maxsize=name_maxsize)
+        self._name_to_ids = LRUCache(maxsize=name_maxsize)
         self._id_to_names = LRUCache(maxsize=names_by_id_maxsize)
 
-    def _set_alias_owner(self, entity_id: int, alias: str) -> bool:
-        alias_lower = alias.lower()
-        aliases_changed = False
-        previous_owner = self._name_to_id.get(alias_lower)
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        return str(name or "").strip().casefold()
 
-        if previous_owner != entity_id:
-            self._name_to_id[alias_lower] = entity_id
-            if previous_owner in self._id_to_names:
-                self._id_to_names[previous_owner].discard(alias_lower)
+    def _add_alias_owner(self, entity_id: int, alias: str) -> bool:
+        alias_key = self._normalize_name(alias)
+        if not alias_key:
+            return False
+
+        aliases_changed = False
+        owners = self._name_to_ids.get(alias_key)
+
+        if owners is None:
+            owners = set()
+            self._name_to_ids[alias_key] = owners
+
+        if entity_id not in owners:
+            owners.add(entity_id)
             aliases_changed = True
 
         if entity_id not in self._id_to_names:
             self._id_to_names[entity_id] = set()
-        if alias_lower not in self._id_to_names[entity_id]:
-            self._id_to_names[entity_id].add(alias_lower)
+        if alias_key not in self._id_to_names[entity_id]:
+            self._id_to_names[entity_id].add(alias_key)
             aliases_changed = True
 
         return aliases_changed
@@ -49,10 +58,10 @@ class EntityIndex:
         self._profiles[eid] = profile
 
         if canonical:
-            aliases_changed = self._set_alias_owner(eid, canonical) or aliases_changed
+            aliases_changed = self._add_alias_owner(eid, canonical) or aliases_changed
 
         for alias in entity.get("aliases") or []:
-            aliases_changed = self._set_alias_owner(eid, alias) or aliases_changed
+            aliases_changed = self._add_alias_owner(eid, alias) or aliases_changed
 
         return profile, aliases_changed
 
@@ -65,14 +74,17 @@ class EntityIndex:
     ) -> bool:
         self._profiles[entity_id] = profile
 
-        aliases_changed = self._set_alias_owner(entity_id, canonical_name)
+        aliases_changed = self._add_alias_owner(entity_id, canonical_name)
 
         for mention in mentions:
-            mention_lower = mention.lower()
-            if self._name_to_id.get(mention_lower) not in (None, entity_id):
+            mention_key = self._normalize_name(mention)
+            if not mention_key:
+                continue
+            owners = self._name_to_ids.get(mention_key, set())
+            if owners and owners != {entity_id}:
                 continue
             aliases_changed = (
-                self._set_alias_owner(entity_id, mention) or aliases_changed
+                self._add_alias_owner(entity_id, mention) or aliases_changed
             )
 
         return aliases_changed
@@ -86,15 +98,18 @@ class EntityIndex:
             self._id_to_names[entity_id] = set()
 
         for alias in aliases:
-            alias_lower = alias.lower()
-            if self._name_to_id.get(alias_lower) not in (None, entity_id):
+            alias_key = self._normalize_name(alias)
+            if not alias_key:
+                continue
+            owners = self._name_to_ids.get(alias_key, set())
+            if owners and owners != {entity_id}:
                 continue
             if (
-                self._name_to_id.get(alias_lower) == entity_id
-                and alias_lower in self._id_to_names[entity_id]
+                owners == {entity_id}
+                and alias_key in self._id_to_names[entity_id]
             ):
                 continue
-            aliases_changed = self._set_alias_owner(entity_id, alias) or aliases_changed
+            aliases_changed = self._add_alias_owner(entity_id, alias) or aliases_changed
 
         return aliases_changed
 
@@ -116,8 +131,13 @@ class EntityIndex:
             self._id_to_names[primary_id] = set()
 
         for alias in secondary_names:
-            self._name_to_id[alias] = primary_id
-        self._id_to_names[primary_id].update(secondary_names)
+            owners = self._name_to_ids.get(alias)
+            if owners is None:
+                owners = set()
+                self._name_to_ids[alias] = owners
+            owners.discard(secondary_id)
+            owners.add(primary_id)
+            self._id_to_names[primary_id].add(alias)
 
         if primary_profile_updates and primary_id in self._profiles:
             self._profiles[primary_id].apply_updates(primary_profile_updates)
@@ -137,7 +157,14 @@ class EntityIndex:
             to_remove = list(self._id_to_names.get(entity_id, set()))
             aliases_changed = aliases_changed or bool(to_remove)
             for alias in to_remove:
-                self._name_to_id.pop(alias, None)
+                owners = self._name_to_ids.get(alias)
+                if owners is None:
+                    continue
+                owners.discard(entity_id)
+                if owners:
+                    self._name_to_ids[alias] = owners
+                else:
+                    self._name_to_ids.pop(alias, None)
 
             aliases_changed = (
                 self._id_to_names.pop(entity_id, None) is not None
@@ -159,13 +186,33 @@ class EntityIndex:
         return list(self._id_to_names.get(entity_id, set()))
 
     def get_aliases(self) -> Dict[str, int]:
-        return dict(list(self._name_to_id.items()))
+        aliases = {}
+        for alias, owners in self._name_to_ids.items():
+            if len(owners) == 1:
+                aliases[alias] = next(iter(owners))
+        return aliases
+
+    def get_ambiguous_aliases(self) -> Dict[str, Set[int]]:
+        return {
+            alias: set(owners)
+            for alias, owners in self._name_to_ids.items()
+            if len(owners) > 1
+        }
 
     def get_entity_id_for_name(self, name: str) -> Optional[int]:
-        return self._name_to_id.get(name.lower())
+        owners = self.get_entity_ids_for_name(name)
+        if len(owners) == 1:
+            return next(iter(owners))
+        return None
+
+    def get_entity_ids_for_name(self, name: str) -> Set[int]:
+        alias_key = self._normalize_name(name)
+        if not alias_key:
+            return set()
+        return set(self._name_to_ids.get(alias_key, set()))
 
     def iter_profile_ids(self) -> List[int]:
         return list(self._profiles.keys())
 
     def iter_aliases(self) -> List[str]:
-        return list(self._name_to_id.keys())
+        return list(self._name_to_ids.keys())

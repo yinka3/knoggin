@@ -31,7 +31,18 @@ class CandidateEntities:
         return list(self.candidates)
 
 
-def merge_candidate(primary_id, secondary_id, *, fuzz_score=92, facts_a=None):
+def merge_candidate(
+    primary_id,
+    secondary_id,
+    *,
+    fuzz_score=92,
+    cosine_score=None,
+    fact_support=None,
+    fact_support_pairs=None,
+    shared_neighbor_count=0,
+    facts_a=None,
+    reasons=None,
+):
     return {
         "primary_id": primary_id,
         "secondary_id": secondary_id,
@@ -44,8 +55,11 @@ def merge_candidate(primary_id, secondary_id, *, fuzz_score=92, facts_a=None):
         "facts_a": facts_a or [],
         "facts_b": [],
         "fuzz_score": fuzz_score,
-        "shared_neighbor_count": 0,
-        "reasons": ["name_similarity"],
+        "cosine_score": cosine_score,
+        "fact_support": fact_support,
+        "fact_support_pairs": fact_support_pairs or [],
+        "shared_neighbor_count": shared_neighbor_count,
+        "reasons": reasons or ["name_similarity"],
     }
 
 
@@ -73,6 +87,9 @@ async def test_graph_health_reports_ranked_project_scoped_candidates():
         "topic_a": "People",
         "topic_b": "People",
         "fuzz_score": 96,
+        "cosine_score": None,
+        "fact_support": None,
+        "fact_support_pairs": [],
         "shared_neighbor_count": 0,
         "reasons": ["name_similarity"],
         "evidence_facts": [],
@@ -106,6 +123,79 @@ async def test_graph_health_scans_resolver_cache_without_merge_queue():
 
     assert result["suggestions"][0]["primary_id"] == 2
     assert entities.calls == [None]
+
+
+@pytest.mark.no_network
+async def test_graph_health_exposes_merge_candidate_diagnostics():
+    fact = {"fact_id": "fact-2", "content": "Entity 2 works at Acme."}
+    support_pairs = [
+        {
+            "fact_a_id": "fact-2",
+            "fact_b_id": "fact-3",
+            "label": "entailment",
+            "scores": {"entailment": 0.91},
+        }
+    ]
+    entities = CandidateEntities(
+        [
+            merge_candidate(
+                2,
+                3,
+                fuzz_score=0,
+                cosine_score=0.98,
+                fact_support="entailment",
+                fact_support_pairs=support_pairs,
+                facts_a=[fact],
+                reasons=["vector_similarity"],
+            )
+        ]
+    )
+    tools = MaintenanceHarness(redis=FakeRedis(), entities=entities)
+
+    result = await tools.check_graph_health()
+
+    suggestion = result["suggestions"][0]
+    assert suggestion["cosine_score"] == pytest.approx(0.98)
+    assert suggestion["fact_support"] == "entailment"
+    assert suggestion["fact_support_pairs"] == support_pairs
+    assert suggestion["evidence_facts"] == [
+        {
+            "side": "primary",
+            "fact_id": "fact-2",
+            "content": "Entity 2 works at Acme.",
+        }
+    ]
+
+
+@pytest.mark.no_network
+async def test_graph_health_ranking_uses_entailment_then_name_then_vector_strength():
+    entities = CandidateEntities(
+        [
+            merge_candidate(
+                10,
+                11,
+                fuzz_score=0,
+                cosine_score=0.99,
+                fact_support="insufficient_facts",
+                reasons=["vector_similarity"],
+            ),
+            merge_candidate(20, 21, fuzz_score=96, cosine_score=0.70),
+            merge_candidate(
+                30,
+                31,
+                fuzz_score=80,
+                cosine_score=0.82,
+                fact_support="entailment",
+            ),
+        ]
+    )
+    tools = MaintenanceHarness(redis=FakeRedis(), entities=entities)
+
+    result = await tools.check_graph_health()
+
+    assert [item["primary_id"] for item in result["suggestions"]] == [30, 20, 10]
+    assert result["suggestions"][2]["fuzz_score"] == 0
+    assert result["suggestions"][2]["cosine_score"] == pytest.approx(0.99)
 
 
 @pytest.mark.no_network

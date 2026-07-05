@@ -7,6 +7,8 @@ class FakeEmbeddingService:
     def __init__(self):
         self.batch_calls = []
         self.single_calls = []
+        self.text_pair_calls = []
+        self.text_pair_labels = []
         self.fail_single_texts = set()
         self.fail_single = False
 
@@ -23,6 +25,32 @@ class FakeEmbeddingService:
     def vector_for(self, text):
         total = sum(ord(ch) for ch in text)
         return [float(total % 97), float(len(text)), float(total % 13)]
+
+    async def classify_text_pairs(self, pairs, batch_size=None):
+        self.text_pair_calls.append(list(pairs))
+        labels = list(self.text_pair_labels)
+        results = []
+        for index, pair in enumerate(pairs):
+            label = labels[index] if index < len(labels) else "neutral"
+            results.append(
+                type(
+                    "TextPairClassification",
+                    (),
+                    {
+                        "premise": pair[0],
+                        "hypothesis": pair[1],
+                        "label": label,
+                        "scores": {
+                            "entailment": 1.0 if label == "entailment" else 0.0,
+                            "contradiction": (
+                                1.0 if label == "contradiction" else 0.0
+                            ),
+                            "neutral": 1.0 if label == "neutral" else 0.0,
+                        },
+                    },
+                )()
+            )
+        return results
 
 
 class FakeEntityKnowledgeStore:

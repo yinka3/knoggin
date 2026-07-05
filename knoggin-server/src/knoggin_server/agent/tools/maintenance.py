@@ -33,8 +33,11 @@ class MaintenanceTools:
                     )
                 }
 
-            # Return top 5 to avoid overwhelming the agent
-            candidates.sort(key=lambda x: x.get("fuzz_score", 0), reverse=True)
+            # Return top 5 to avoid overwhelming the agent.
+            candidates.sort(
+                key=self._merge_candidate_rank_key,
+                reverse=True,
+            )
             return {
                 "message": f"Found {len(candidates)} potential duplicates.",
                 "suggestions": [
@@ -46,6 +49,16 @@ class MaintenanceTools:
         except Exception as e:
             logger.error(f"Error checking graph health: {e}")
             return {"error": str(e)}
+
+    @staticmethod
+    def _merge_candidate_rank_key(candidate: Dict) -> tuple:
+        fact_support = str(candidate.get("fact_support") or "").casefold()
+        return (
+            1 if fact_support == "entailment" else 0,
+            candidate.get("fuzz_score") or 0,
+            candidate.get("cosine_score") or 0,
+            candidate.get("shared_neighbor_count") or 0,
+        )
 
     @staticmethod
     def _format_merge_candidate(candidate: Dict) -> Dict:
@@ -65,7 +78,7 @@ class MaintenanceTools:
                     }
                 )
 
-        return {
+        formatted = {
             "primary_id": candidate.get("primary_id"),
             "primary_name": candidate.get("primary_name"),
             "primary_type": candidate.get("primary_type"),
@@ -79,6 +92,15 @@ class MaintenanceTools:
             "reasons": list(candidate.get("reasons", [])),
             "evidence_facts": facts,
         }
+        if "cosine_score" in candidate:
+            formatted["cosine_score"] = candidate.get("cosine_score")
+        if "fact_support" in candidate:
+            formatted["fact_support"] = candidate.get("fact_support")
+        if "fact_support_pairs" in candidate:
+            formatted["fact_support_pairs"] = list(
+                candidate.get("fact_support_pairs") or []
+            )
+        return formatted
 
     async def propose_entity_merge(
         self,

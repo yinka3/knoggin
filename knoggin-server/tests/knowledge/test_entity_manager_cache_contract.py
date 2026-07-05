@@ -38,7 +38,7 @@ def test_entity_index_populate_register_and_alias_views_are_coherent():
     assert index.get_profile(101) == profile
     assert index.has_entity(202) is True
     assert set(index.iter_profile_ids()) == {101, 202}
-    assert index.get_entity_id_for_name("Bob") == 101
+    assert index.get_entity_id_for_name(" Bob ") == 101
     assert index.get_entity_id_for_name("memory project") == 202
     assert set(index.get_mentions(101)) == {"robert chen", "bob"}
     assert index.get_aliases()["knoggin"] == 202
@@ -69,7 +69,7 @@ def test_entity_index_alias_collisions_and_idempotent_commits():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_entity_index_populate_remaps_alias_owner_coherently():
+def test_entity_index_populate_preserves_shared_alias_ambiguity():
     index = EntityIndex()
     index.populate(
         {
@@ -88,9 +88,32 @@ def test_entity_index_populate_remaps_alias_owner_coherently():
     )
 
     assert changed is True
-    assert index.get_entity_id_for_name("bob") == 202
-    assert "bob" not in set(index.get_mentions(101))
+    assert index.get_entity_id_for_name("bob") is None
+    assert index.get_entity_ids_for_name(" BOB ") == {101, 202}
+    assert index.get_ambiguous_aliases()["bob"] == {101, 202}
+    assert "bob" not in index.get_aliases()
+    assert "bob" in set(index.get_mentions(101))
     assert "bob" in set(index.get_mentions(202))
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_entity_index_normalizes_aliases_and_ignores_blanks():
+    index = EntityIndex()
+
+    _, changed = index.populate(
+        {
+            "id": 101,
+            "canonical_name": " Bob ",
+            "aliases": ["BOB", " ", ""],
+        }
+    )
+
+    assert changed is True
+    assert index.get_entity_id_for_name("bob") == 101
+    assert index.get_entity_ids_for_name(" BOB ") == {101}
+    assert set(index.iter_aliases()) == {"bob"}
+    assert set(index.get_mentions(101)) == {"bob"}
 
 
 @pytest.mark.storage
@@ -236,7 +259,7 @@ def test_populate_cache_profile_only_update_does_not_bump_alias_version(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_populate_cache_alias_remap_bumps_alias_version(entity_manager_harness):
+def test_populate_cache_shared_alias_bumps_alias_version(entity_manager_harness):
     entities, _, _ = entity_manager_harness
     entities._populate_cache(
         {
@@ -256,8 +279,10 @@ def test_populate_cache_alias_remap_bumps_alias_version(entity_manager_harness):
     )
 
     assert entities.get_alias_version() == alias_version + 1
-    assert entities.get_known_aliases()["bob"] == 202
-    assert "bob" not in set(entities.get_mentions_for_id(101))
+    assert "bob" not in entities.get_known_aliases()
+    assert entities.get_entity_ids_for_name("bob") == {101, 202}
+    assert "bob" in set(entities.get_mentions_for_id(101))
+    assert "bob" in set(entities.get_mentions_for_id(202))
 
 
 @pytest.mark.storage
@@ -303,6 +328,24 @@ async def test_get_id_fetches_unknown_name_with_project_scope(entity_manager_har
     ]
     assert entities.get_known_aliases()["knoggin"] == 202
     assert entities.get_known_aliases()["memory project"] == 202
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_get_id_returns_none_when_storage_name_match_is_ambiguous(
+    entity_manager_harness,
+):
+    entities, knowledge_store, _ = entity_manager_harness
+    knowledge_store.add_entity(101, "Robert Chen", aliases=["Bob"])
+    knowledge_store.add_entity(202, "Bob Smith", aliases=["Bob"])
+
+    entity_id = await entities.get_id("Bob")
+
+    assert entity_id is None
+    assert entities.get_entity_ids_for_name("Bob") == {101, 202}
+    assert "bob" not in entities.get_known_aliases()
+    assert "bob" in set(entities.get_mentions_for_id(101))
+    assert "bob" in set(entities.get_mentions_for_id(202))
 
 
 @pytest.mark.storage

@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from cachetools import TTLCache, cached
+from cachetools import LRUCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
 
@@ -25,6 +25,11 @@ from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 if TYPE_CHECKING:
     from infrastructure.knowledge_store import KnowledgeStore
+
+
+VECTOR_MERGE_SIM_THRESHOLD = 0.90
+VECTOR_MERGE_SPARSE_FACT_SIM_THRESHOLD = 0.97
+MERGE_FACT_NLI_PAIR_LIMIT = 8
 
 
 @dataclass
@@ -69,7 +74,7 @@ class EntityCandidate:
 
     @property
     def has_direct_name_evidence(self) -> bool:
-        return "exact" in self.signals
+        return "exact" in self.signals and "ambiguous_alias" not in self.signals
 
 
 class EntityResolver:
@@ -148,19 +153,18 @@ class EntityResolver:
         if not name:
             return None
 
-        lower_name = name.lower()
-
         with self._lock:
-            stored_id = self._index.get_entity_id_for_name(lower_name)
+            stored_id = self._index.get_entity_id_for_name(name)
             if stored_id is not None:
                 return stored_id
         found = await self.knowledge_store.get_entities_by_names(
             [name], visible_project_ids=self.readable_project_ids
         )
         if found:
-            entity = found[0]
-            self._populate_cache(entity)
-            return entity["id"]
+            for entity in found:
+                self._populate_cache(entity)
+            with self._lock:
+                return self._index.get_entity_id_for_name(name)
         return None
 
     async def get_profile(self, entity_id: int) -> Optional[EntityProfile]:
@@ -203,6 +207,13 @@ class EntityResolver:
     def get_known_aliases(self) -> Dict[str, int]:
         with self._lock:
             return self._index.get_aliases()
+
+    def get_ids_for_name(self, name: str) -> set[int]:
+        return self.get_entity_ids_for_name(name)
+
+    def get_entity_ids_for_name(self, name: str) -> set[int]:
+        with self._lock:
+            return self._index.get_entity_ids_for_name(name)
 
     async def get_embedding_for_id(self, entity_id: int) -> List[float]:
         """Retrieve embedding from graph by ID."""
@@ -265,7 +276,8 @@ class EntityResolver:
 
             new_aliases = []
             for mention in mentions:
-                if self._index.get_entity_id_for_name(mention) is None:
+                owners = self._index.get_entity_ids_for_name(mention)
+                if not owners:
                     new_aliases.append(mention)
 
             return entity_id, len(new_aliases) > 0, new_aliases
@@ -280,11 +292,10 @@ class EntityResolver:
                 return
             safe_aliases = []
             for mention in aliases:
-                mention_lower = mention.lower()
-                existing_id = self._index.get_entity_id_for_name(mention_lower)
-                if existing_id and existing_id != entity_id:
+                owners = self._index.get_entity_ids_for_name(mention)
+                if owners and owners != {entity_id}:
                     logger.warning(
-                        f"Alias collision: '{mention}' belongs to {existing_id}, "
+                        f"Alias collision: '{mention}' belongs to {sorted(owners)}, "
                         f"skipping for {entity_id}"
                     )
                     continue
@@ -293,8 +304,8 @@ class EntityResolver:
             if aliases_changed:
                 self._bump_alias_version()
 
-    @cached(cache=TTLCache(maxsize=1, ttl=300))
-    def _build_generic_tokens(self) -> set:
+    @cached(cache=LRUCache(maxsize=5))
+    def _build_generic_tokens(self, alias_version: int) -> set:
         """Tokens appearing in N+ distinct entities are generic."""
         token_to_entities = defaultdict(set)
 
@@ -327,14 +338,18 @@ class EntityResolver:
             return []
 
         candidates: Dict[int, EntityCandidate] = {}
-        mention_lower = mention.lower()
+        mention_lower = mention.strip().casefold()
 
         with self._lock:
-            exact_id = self._index.get_entity_id_for_name(mention_lower)
-            if exact_id is not None:
-                candidates.setdefault(
+            exact_ids = self._index.get_entity_ids_for_name(mention_lower)
+            exact_is_ambiguous = len(exact_ids) > 1
+            for exact_id in exact_ids:
+                candidate = candidates.setdefault(
                     exact_id, EntityCandidate(exact_id)
-                ).add_signal("exact", 1.0)
+                )
+                candidate.add_signal("exact", 1.0)
+                if exact_is_ambiguous:
+                    candidate.add_signal("ambiguous_alias", 1.0)
 
             choices = self._index.iter_aliases()
             scorer = fuzz.ratio if len(mention_lower) < 4 else fuzz.WRatio
@@ -347,19 +362,22 @@ class EntityResolver:
             )
 
             for alias, fuzz_score, _ in results:
-                eid = self._index.get_entity_id_for_name(alias)
-                if eid is not None:
+                owner_ids = self._index.get_entity_ids_for_name(alias)
+                if owner_ids:
                     normalized = fuzz_score / 100.0
-                    candidate = candidates.get(eid)
-                    if (
-                        normalized == 1.0
-                        and candidate
-                        and "exact" in candidate.signals
-                    ):
-                        continue
-                    candidates.setdefault(
-                        eid, EntityCandidate(eid)
-                    ).add_signal("fuzzy", normalized)
+                    alias_is_ambiguous = len(owner_ids) > 1
+                    for eid in owner_ids:
+                        candidate = candidates.get(eid)
+                        if (
+                            normalized == 1.0
+                            and candidate
+                            and "exact" in candidate.signals
+                        ):
+                            continue
+                        candidate = candidates.setdefault(eid, EntityCandidate(eid))
+                        candidate.add_signal("fuzzy", normalized)
+                        if alias_is_ambiguous:
+                            candidate.add_signal("ambiguous_alias", normalized)
 
         vector = precomputed_embedding
         if vector is None:
@@ -435,11 +453,10 @@ class EntityResolver:
 
             safe_mentions = []
             for mention in mentions:
-                mention_lower = mention.lower()
-                existing_id = self._index.get_entity_id_for_name(mention_lower)
-                if existing_id and existing_id != entity_id:
+                owners = self._index.get_entity_ids_for_name(mention)
+                if owners and owners != {entity_id}:
                     logger.warning(
-                        f"Alias collision: '{mention}' belongs to {existing_id}, "
+                        f"Alias collision: '{mention}' belongs to {sorted(owners)}, "
                         f"skipping for {entity_id}"
                     )
                     continue
@@ -535,8 +552,8 @@ class EntityResolver:
 
             for name in names:
                 with self._lock:
-                    mapped_id = self._index.get_entity_id_for_name(name)
-                if mapped_id and mapped_id != eid:
+                    mapped_ids = self._index.get_entity_ids_for_name(name)
+                for mapped_id in mapped_ids - {eid}:
                     pair = tuple(sorted((eid, mapped_id)))
                     if pair not in collisions:
                         collisions.append(pair)
@@ -550,8 +567,13 @@ class EntityResolver:
         if not candidates:
             return None
 
-        profile = await self.get_profile(candidates[0].entity_id)
-        return profile.canonical_name if profile else None
+        for candidate in candidates:
+            if "exact" in candidate.signals and "ambiguous_alias" in candidate.signals:
+                continue
+            profile = await self.get_profile(candidate.entity_id)
+            if profile:
+                return profile.canonical_name
+        return None
 
     async def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
         """Detect potential entity merges using vector search + fuzzy matching."""
@@ -569,7 +591,7 @@ class EntityResolver:
             f"Scanning {len(scan_targets)} entities against graph."
         )
 
-        generic_tokens = self._build_generic_tokens()
+        generic_tokens = self._build_generic_tokens(self.get_alias_version())
         candidate_pairs = await self._collect_candidate_pairs(
             scan_targets, generic_tokens
         )
@@ -590,8 +612,12 @@ class EntityResolver:
 
         candidates = []
         for (id_a, id_b), candidate_meta in candidate_pairs.items():
-            fuzz_score = candidate_meta["fuzz_score"]
-            result = await self._classify_pair(id_a, id_b, fuzz_score, facts_by_entity)
+            result = await self._classify_pair(
+                id_a,
+                id_b,
+                candidate_meta,
+                facts_by_entity,
+            )
             if result:
                 result["reasons"] = list(candidate_meta["reasons"])
                 candidates.append(result)
@@ -674,7 +700,7 @@ class EntityResolver:
                     )
                     if emb_a and emb_b:
                         cos_sim = cosine_similarity(emb_a, emb_b)
-                        if cos_sim >= 0.90:
+                        if cos_sim >= VECTOR_MERGE_SIM_THRESHOLD:
                             logger.info(
                                 "Cosine-first candidate: "
                                 f"({primary_id}, {neighbor_id}) "
@@ -684,6 +710,7 @@ class EntityResolver:
                             seen_pairs[pair_key] = {
                                 "fuzz_score": 0,
                                 "is_substring": False,
+                                "cosine_score": cos_sim,
                                 "reasons": ["vector_similarity"],
                             }
                             continue
@@ -708,6 +735,7 @@ class EntityResolver:
         return {
             pair: {
                 "fuzz_score": metadata["fuzz_score"],
+                "cosine_score": metadata.get("cosine_score"),
                 "reasons": metadata["reasons"],
             }
             for pair, metadata in seen_pairs.items()
@@ -717,7 +745,7 @@ class EntityResolver:
         self,
         id_a: int,
         id_b: int,
-        fuzz_score: int,
+        candidate_meta: dict,
         facts_by_entity: Dict[int, List[FactRecord]],
     ) -> Optional[dict]:
         """
@@ -749,6 +777,16 @@ class EntityResolver:
         type_b = profile_b.entity_type
         topic_a = profile_a.topic
         topic_b = profile_b.topic
+        fuzz_score = candidate_meta["fuzz_score"]
+        cosine_score = candidate_meta.get("cosine_score")
+        reasons = set(candidate_meta.get("reasons") or [])
+        vector_only = "vector_similarity" in reasons and "name_similarity" not in reasons
+
+        type_compatible = self._merge_type_compatible(type_a, type_b)
+        topic_compatible = self._merge_topic_compatible(topic_a, topic_b)
+
+        if vector_only and not (type_compatible and topic_compatible):
+            return None
 
         is_cross_topic = topic_a != topic_b
         if is_cross_topic:
@@ -777,6 +815,24 @@ class EntityResolver:
             if not high_confidence:
                 return None
 
+        facts_a = facts_by_entity.get(id_a, [])
+        facts_b = facts_by_entity.get(id_b, [])
+        fact_support, fact_support_pairs = await self._classify_fact_support(
+            facts_a,
+            facts_b,
+        )
+
+        if vector_only:
+            if fact_support == "contradiction":
+                return None
+            if fact_support == "neutral":
+                return None
+            if fact_support == "insufficient_facts" and (
+                cosine_score is None
+                or cosine_score < VECTOR_MERGE_SPARSE_FACT_SIM_THRESHOLD
+            ):
+                return None
+
         return {
             "primary_id": id_a,
             "secondary_id": id_b,
@@ -786,8 +842,75 @@ class EntityResolver:
             "secondary_type": type_b,
             "topic_a": topic_a,
             "topic_b": topic_b,
-            "facts_a": facts_by_entity.get(id_a, []),
-            "facts_b": facts_by_entity.get(id_b, []),
+            "facts_a": facts_a,
+            "facts_b": facts_b,
             "fuzz_score": fuzz_score,
+            "cosine_score": cosine_score,
+            "fact_support": fact_support,
+            "fact_support_pairs": fact_support_pairs,
             "shared_neighbor_count": len(shared_neighbors),
         }
+
+    @staticmethod
+    def _merge_type_compatible(type_a: str, type_b: str) -> bool:
+        norm_a = (type_a or "").strip().casefold()
+        norm_b = (type_b or "").strip().casefold()
+        return not norm_a or not norm_b or norm_a == norm_b
+
+    @staticmethod
+    def _merge_topic_compatible(topic_a: str, topic_b: str) -> bool:
+        norm_a = (topic_a or "General").strip().casefold()
+        norm_b = (topic_b or "General").strip().casefold()
+        return norm_a == norm_b or "general" in {norm_a, norm_b}
+
+    async def _classify_fact_support(
+        self,
+        facts_a: List[FactRecord],
+        facts_b: List[FactRecord],
+    ) -> Tuple[str, List[dict]]:
+        pairs = self._fact_text_pairs(facts_a, facts_b)
+        if not pairs:
+            return "insufficient_facts", []
+
+        try:
+            classifications = await self.embedding_service.classify_text_pairs(
+                [(left.content, right.content) for left, right in pairs]
+            )
+        except Exception as exc:
+            logger.warning(f"Merge fact NLI support failed: {exc}")
+            return "neutral", []
+
+        support_pairs = []
+        labels = []
+        for (left, right), classification in zip(pairs, classifications):
+            label = str(classification.label or "").casefold()
+            labels.append(label)
+            support_pairs.append(
+                {
+                    "fact_a_id": left.id,
+                    "fact_b_id": right.id,
+                    "label": label,
+                    "scores": dict(classification.scores or {}),
+                }
+            )
+
+        if "contradiction" in labels:
+            return "contradiction", support_pairs
+        if "entailment" in labels:
+            return "entailment", support_pairs
+        return "neutral", support_pairs
+
+    @staticmethod
+    def _fact_text_pairs(
+        facts_a: List[FactRecord],
+        facts_b: List[FactRecord],
+    ) -> List[Tuple[FactRecord, FactRecord]]:
+        active_a = [fact for fact in facts_a if str(fact.content or "").strip()]
+        active_b = [fact for fact in facts_b if str(fact.content or "").strip()]
+        pairs = []
+        for fact_a in active_a:
+            for fact_b in active_b:
+                pairs.append((fact_a, fact_b))
+                if len(pairs) >= MERGE_FACT_NLI_PAIR_LIMIT:
+                    return pairs
+        return pairs

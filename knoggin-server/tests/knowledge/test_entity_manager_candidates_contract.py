@@ -40,6 +40,24 @@ async def test_exact_alias_match_returns_score_one(entity_manager_harness):
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_ambiguous_exact_alias_returns_candidates_without_direct_evidence(
+    entity_manager_harness,
+):
+    entities, _, _ = entity_manager_harness
+    await seed_entity(entities, 101, "Robert Chen", aliases=["Bob"])
+    await seed_entity(entities, 202, "Bob Smith", aliases=["Bob"])
+
+    candidates = await entities.get_candidate_ids(" Bob ")
+
+    assert {candidate.entity_id for candidate in candidates} == {101, 202}
+    for candidate in candidates:
+        assert candidate.score == pytest.approx(1.0)
+        assert candidate.signals == {"exact", "ambiguous_alias"}
+        assert candidate.has_direct_name_evidence is False
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_fuzzy_match_above_threshold_is_returned(entity_manager_harness):
     entities, _, _ = entity_manager_harness
     await seed_entity(entities, 202, "Knoggin", entity_type="project", topic="General")
