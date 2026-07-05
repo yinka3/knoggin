@@ -132,9 +132,14 @@ class ResourceManager:
                 reranker_model = os.getenv(
                     "KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"
                 )
+                nli_model = os.getenv(
+                    "KNOGGIN_NLI_MODEL",
+                    "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
+                )
                 instance.embedding = EmbeddingService(
                     embedding_model=embedding_model,
                     reranker_model=reranker_model,
+                    nli_model=nli_model,
                     device=device,
                 )
                 instance.knowledge_store = KnowledgeStore(

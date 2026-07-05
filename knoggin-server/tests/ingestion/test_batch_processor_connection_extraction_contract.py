@@ -278,6 +278,31 @@ async def test_extract_connections_rejects_unknown_relationship_entity():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_extract_connections_rejects_relationship_msg_id_without_entity_sources():
+    response = ConnectionsResult(connections=[relationship(msg_id=2)])
+    processor, entities = make_processor(response)
+    await seed_connection_entities(entities)
+    trace = ExtractionTrace()
+    issues = []
+
+    relationships, user_relationships = await extract(
+        processor,
+        entity_msg_map={101: [1], 102: [1], 103: [2]},
+        trace=trace,
+        issues=issues,
+    )
+
+    assert relationships == []
+    assert user_relationships == []
+    assert trace.relationships_seen == 1
+    assert trace.relationships_rejected == 1
+    assert [issue.code for issue in issues] == [
+        "invalid_relationship_evidence_msg_id"
+    ]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_extract_connections_rejects_invalid_user_connection_msg_id():
     response = ConnectionsResult(user_connections=[user_relationship(msg_id=999)])
     processor, entities = make_processor(response)
@@ -320,6 +345,31 @@ async def test_extract_connections_rejects_unknown_user_connection_entity():
     assert trace.user_relationships_seen == 1
     assert trace.user_relationships_rejected == 1
     assert [issue.code for issue in issues] == ["invalid_user_connection_entity"]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_connections_rejects_user_connection_without_entity_source():
+    response = ConnectionsResult(user_connections=[user_relationship(msg_id=2)])
+    processor, entities = make_processor(response)
+    await seed_connection_entities(entities)
+    trace = ExtractionTrace()
+    issues = []
+
+    relationships, user_relationships = await extract(
+        processor,
+        entity_msg_map={101: [1], 102: [1], 103: [1]},
+        trace=trace,
+        issues=issues,
+    )
+
+    assert relationships == []
+    assert user_relationships == []
+    assert trace.user_relationships_seen == 1
+    assert trace.user_relationships_rejected == 1
+    assert [issue.code for issue in issues] == [
+        "invalid_user_connection_evidence_msg_id"
+    ]
 
 
 @pytest.mark.ingestion

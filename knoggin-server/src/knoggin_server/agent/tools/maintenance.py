@@ -15,64 +15,15 @@ class MaintenanceTools:
         Returns a list of potential duplicates for the agent to review.
         """
         try:
-            merge_key = RedisKeys.merge_queue(self.user_name, self.project_id)
-            if not self.redis:
-                return {"message": "Redis client not available"}
+            dirty_ids = None
+            if self.redis:
+                merge_key = RedisKeys.merge_queue(self.user_name, self.project_id)
+                dirty_raw = await self.redis.srandmember(merge_key, 50)
+                dirty_ids = {int(eid) for eid in dirty_raw} if dirty_raw else None
 
-            dirty_raw = await self.redis.srandmember(merge_key, 50)
-            if not dirty_raw:
-                return {
-                    "message": (
-                        "Graph is healthy. No duplicate candidates found at this time."
-                    )
-                }
-
-            dirty_ids = {int(eid) for eid in dirty_raw}
-            candidates = []
-
-            for eid in dirty_ids:
-                similar = await self.knowledge_store.search_similar_entities(
-                    eid,
-                    limit=3,
-                    visible_project_ids=[self.project_id],
-                )
-                if not similar:
-                    continue
-
-                for sim_id, score in similar:
-                    primary_ids = [c["primary_id"] for c in candidates]
-                    secondary_ids = [c["secondary_id"] for c in candidates]
-                    if (
-                        sim_id == eid
-                        or sim_id in primary_ids
-                        or sim_id in secondary_ids
-                    ):
-                        continue
-
-                    if score >= 0.65:
-                        primary = min(eid, sim_id)
-                        secondary = max(eid, sim_id)
-
-                        # Get canonical names
-                        profile_p = await self.entities.get_profile(primary)
-                        profile_s = await self.entities.get_profile(secondary)
-
-                        name_p = (
-                            profile_p.canonical_name if profile_p else str(primary)
-                        )
-                        name_s = (
-                            profile_s.canonical_name if profile_s else str(secondary)
-                        )
-
-                        candidates.append(
-                            {
-                                "primary_id": primary,
-                                "primary_name": name_p,
-                                "secondary_id": secondary,
-                                "secondary_name": name_s,
-                                "similarity_score": round(score, 3),
-                            }
-                        )
+            candidates = await self.entities.detect_merge_entity_candidates(
+                dirty_ids=dirty_ids
+            )
 
             if not candidates:
                 return {
@@ -83,15 +34,51 @@ class MaintenanceTools:
                 }
 
             # Return top 5 to avoid overwhelming the agent
-            candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
+            candidates.sort(key=lambda x: x.get("fuzz_score", 0), reverse=True)
             return {
                 "message": f"Found {len(candidates)} potential duplicates.",
-                "suggestions": candidates[:5],
+                "suggestions": [
+                    self._format_merge_candidate(candidate)
+                    for candidate in candidates[:5]
+                ],
             }
 
         except Exception as e:
             logger.error(f"Error checking graph health: {e}")
             return {"error": str(e)}
+
+    @staticmethod
+    def _format_merge_candidate(candidate: Dict) -> Dict:
+        facts = []
+        for side, key in (("primary", "facts_a"), ("secondary", "facts_b")):
+            for fact in candidate.get(key, []) or []:
+                fact_id = getattr(fact, "id", None)
+                content = getattr(fact, "content", None)
+                if isinstance(fact, dict):
+                    fact_id = fact.get("id") or fact.get("fact_id")
+                    content = fact.get("content")
+                facts.append(
+                    {
+                        "side": side,
+                        "fact_id": fact_id,
+                        "content": content,
+                    }
+                )
+
+        return {
+            "primary_id": candidate.get("primary_id"),
+            "primary_name": candidate.get("primary_name"),
+            "primary_type": candidate.get("primary_type"),
+            "secondary_id": candidate.get("secondary_id"),
+            "secondary_name": candidate.get("secondary_name"),
+            "secondary_type": candidate.get("secondary_type"),
+            "topic_a": candidate.get("topic_a"),
+            "topic_b": candidate.get("topic_b"),
+            "fuzz_score": candidate.get("fuzz_score", 0),
+            "shared_neighbor_count": candidate.get("shared_neighbor_count", 0),
+            "reasons": list(candidate.get("reasons", [])),
+            "evidence_facts": facts,
+        }
 
     async def propose_entity_merge(
         self,

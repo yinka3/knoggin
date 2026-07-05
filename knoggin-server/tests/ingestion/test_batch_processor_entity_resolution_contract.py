@@ -607,6 +607,39 @@ async def test_resolve_mentions_creates_new_entity_when_candidate_below_threshol
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_resolve_mentions_does_not_auto_reuse_descriptive_vector_candidate():
+    processor, entities, knowledge_store, embedding = make_harness()
+    await seed_entity(entities, 202, "Linear", entity_type="tool", topic="General")
+    knowledge_store.vector_results[vector_for(embedding, "work tracker")] = [
+        (202, 0.92)
+    ]
+    messages = [
+        {
+            "id": 3,
+            "message": "Work tracker.",
+            "timestamp": "2026-01-01T00:02:00+00:00",
+            "role": "user",
+        }
+    ]
+
+    result = await processor._resolve_mentions(
+        [(3, "work tracker", "tool", "General")],
+        messages,
+        "session-1",
+    )
+
+    assert result.entity_ids == [1001]
+    assert result.new_ids == {1001}
+    assert result.entity_msg_map == {1001: [3]}
+    assert len(result.candidate_suggestions) == 1
+    suggestion = result.candidate_suggestions[0]
+    assert suggestion.candidate_id == 202
+    assert suggestion.base_score == pytest.approx(0.92)
+    assert "below_resolution_threshold" not in suggestion.reasons
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_resolve_mentions_deduplicates_repeated_new_name_within_batch():
     processor, entities, _, _ = make_harness()
 
@@ -623,6 +656,48 @@ async def test_resolve_mentions_deduplicates_repeated_new_name_within_batch():
     assert result.new_ids == {1001}
     assert result.entity_msg_map == {1001: [1, 2]}
     assert (await entities.get_profile(1001)).canonical_name == "Alice"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_resolve_mentions_does_not_dedupe_same_name_with_different_type():
+    processor, entities, _, _ = make_harness()
+
+    result = await processor._resolve_mentions(
+        [
+            (1, "Apple", "organization", "General"),
+            (2, "apple", "object", "General"),
+        ],
+        MESSAGES,
+        "session-1",
+    )
+
+    assert result.entity_ids == [1001, 1002]
+    assert result.new_ids == {1001, 1002}
+    assert result.entity_msg_map == {1001: [1], 1002: [2]}
+    assert (await entities.get_profile(1001)).canonical_name == "Apple"
+    assert (await entities.get_profile(1002)).canonical_name == "apple"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_resolve_mentions_does_not_dedupe_same_name_with_different_topic():
+    processor, entities, _, _ = make_harness()
+
+    result = await processor._resolve_mentions(
+        [
+            (1, "Ada", "person", "Identity"),
+            (2, "ada", "person", "General"),
+        ],
+        MESSAGES,
+        "session-1",
+    )
+
+    assert result.entity_ids == [1001, 1002]
+    assert result.new_ids == {1001, 1002}
+    assert result.entity_msg_map == {1001: [1], 1002: [2]}
+    assert (await entities.get_profile(1001)).canonical_name == "Ada"
+    assert (await entities.get_profile(1002)).canonical_name == "ada"
 
 
 @pytest.mark.ingestion

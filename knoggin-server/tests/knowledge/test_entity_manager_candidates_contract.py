@@ -34,6 +34,8 @@ async def test_exact_alias_match_returns_score_one(entity_manager_harness):
     candidates = await entities.get_candidate_ids("Bob")
 
     assert candidates == [(101, 1.0)]
+    assert candidates[0].signals == {"exact"}
+    assert candidates[0].has_direct_name_evidence is True
 
 
 @pytest.mark.storage
@@ -47,6 +49,8 @@ async def test_fuzzy_match_above_threshold_is_returned(entity_manager_harness):
     assert candidates
     assert candidates[0][0] == 202
     assert 0.85 <= candidates[0][1] < 1.0
+    assert candidates[0].signals == {"fuzzy"}
+    assert candidates[0].has_direct_name_evidence is False
 
 
 @pytest.mark.storage
@@ -87,6 +91,8 @@ async def test_vector_candidate_is_included_when_similarity_finds_it(
     candidates = await entities.get_candidate_ids("project planning app")
 
     assert candidates == [(404, 0.91)]
+    assert candidates[0].signals == {"vector"}
+    assert candidates[0].vector_score == pytest.approx(0.91)
     assert knowledge_store.vector_searches[-1]["vector"] == vector
 
 
@@ -103,6 +109,9 @@ async def test_duplicate_exact_and_vector_candidates_keep_max_score(
     candidates = await entities.get_candidate_ids("planning app")
 
     assert candidates == [(404, 1.0)]
+    assert candidates[0].signals == {"exact", "vector"}
+    assert candidates[0].exact_score == pytest.approx(1.0)
+    assert candidates[0].vector_score == pytest.approx(0.88)
 
 
 @pytest.mark.storage
@@ -131,6 +140,7 @@ async def test_precomputed_mention_embedding_is_reused(entity_manager_harness):
     )
 
     assert candidates == [(505, 0.93)]
+    assert candidates[0].signals == {"vector"}
     assert embedding.single_calls == []
     assert knowledge_store.vector_searches[-1]["vector"] == precomputed
 

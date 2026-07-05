@@ -725,7 +725,11 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "check_graph_health",
-            "description": "Check if there are any duplicate entities in the graph that need merging. Use this during routine maintenance.",
+            "description": (
+                "Check for duplicate-entity candidates using the system merge "
+                "detector. Use this during routine maintenance before proposing "
+                "any merge."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {},

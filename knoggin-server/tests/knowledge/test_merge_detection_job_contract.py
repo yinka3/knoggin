@@ -1,11 +1,8 @@
-from types import SimpleNamespace
-
 import pytest
 
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.agent.tools.maintenance import MaintenanceTools
 from knoggin_server.knowledge.entity.merge_service import EntityMergeService
-from knoggin_server.knowledge.entity.profile import EntityProfile
 from tests.fixtures.fakes import FakeRedis
 from tests.knowledge.test_entity_merge_classification_contract import (
     RecordingKnowledgeStore,
@@ -15,47 +12,72 @@ from tests.knowledge.test_entity_merge_classification_contract import (
 
 
 class MaintenanceHarness(MaintenanceTools):
-    def __init__(self, *, redis, knowledge_store, postgres=None):
+    def __init__(self, *, redis, entities, knowledge_store=None, postgres=None):
         self.user_name = "ada"
         self.project_id = "project-1"
         self.redis = redis
-        self.knowledge_store = knowledge_store
+        self.knowledge_store = knowledge_store or RecordingKnowledgeStore()
         self.postgres = postgres or RecordingPostgres()
-        self.entities = SimpleNamespace(get_profile=self._get_profile)
-
-    async def _get_profile(self, entity_id):
-        return EntityProfile(canonical_name=f"Entity {entity_id}")
+        self.entities = entities
 
 
-class SimilarityStore:
-    def __init__(self, results):
-        self.results = results
+class CandidateEntities:
+    def __init__(self, candidates):
+        self.candidates = list(candidates)
         self.calls = []
 
-    async def search_similar_entities(
-        self, entity_id, *, limit, visible_project_ids
-    ):
-        self.calls.append((entity_id, limit, visible_project_ids))
-        return self.results.get(entity_id, [])
+    async def detect_merge_entity_candidates(self, dirty_ids=None):
+        self.calls.append(dirty_ids)
+        return list(self.candidates)
+
+
+def merge_candidate(primary_id, secondary_id, *, fuzz_score=92, facts_a=None):
+    return {
+        "primary_id": primary_id,
+        "secondary_id": secondary_id,
+        "primary_name": f"Entity {primary_id}",
+        "secondary_name": f"Entity {secondary_id}",
+        "primary_type": "person",
+        "secondary_type": "person",
+        "topic_a": "People",
+        "topic_b": "People",
+        "facts_a": facts_a or [],
+        "facts_b": [],
+        "fuzz_score": fuzz_score,
+        "shared_neighbor_count": 0,
+        "reasons": ["name_similarity"],
+    }
 
 
 @pytest.mark.no_network
 async def test_graph_health_reports_ranked_project_scoped_candidates():
     redis = FakeRedis()
     await redis.sadd(RedisKeys.merge_queue("ada", "project-1"), "2", "4")
-    store = SimilarityStore({2: [(3, 0.92)], 4: [(5, 0.70)]})
-    tools = MaintenanceHarness(redis=redis, knowledge_store=store)
+    entities = CandidateEntities(
+        [
+            merge_candidate(4, 5, fuzz_score=88),
+            merge_candidate(2, 3, fuzz_score=96),
+        ]
+    )
+    tools = MaintenanceHarness(redis=redis, entities=entities)
 
     result = await tools.check_graph_health()
 
     assert result["suggestions"][0] == {
         "primary_id": 2,
         "primary_name": "Entity 2",
+        "primary_type": "person",
         "secondary_id": 3,
         "secondary_name": "Entity 3",
-        "similarity_score": 0.92,
+        "secondary_type": "person",
+        "topic_a": "People",
+        "topic_b": "People",
+        "fuzz_score": 96,
+        "shared_neighbor_count": 0,
+        "reasons": ["name_similarity"],
+        "evidence_facts": [],
     }
-    assert all(call[2] == ["project-1"] for call in store.calls)
+    assert entities.calls == [{2, 4}]
 
 
 @pytest.mark.no_network
@@ -65,13 +87,25 @@ async def test_graph_health_does_not_mutate_merge_queue():
     await redis.sadd(key, "2")
     tools = MaintenanceHarness(
         redis=redis,
-        knowledge_store=SimilarityStore({2: []}),
+        entities=CandidateEntities([]),
     )
 
     result = await tools.check_graph_health()
 
     assert "healthy" in result["message"].lower()
     assert await redis.smembers(key) == {"2"}
+
+
+@pytest.mark.no_network
+async def test_graph_health_scans_resolver_cache_without_merge_queue():
+    redis = FakeRedis()
+    entities = CandidateEntities([merge_candidate(2, 3)])
+    tools = MaintenanceHarness(redis=redis, entities=entities)
+
+    result = await tools.check_graph_health()
+
+    assert result["suggestions"][0]["primary_id"] == 2
+    assert entities.calls == [None]
 
 
 @pytest.mark.no_network
@@ -85,6 +119,7 @@ async def test_agent_merge_tool_only_creates_proposal(monkeypatch):
     monkeypatch.setattr(EntityMergeService, "propose", fake_propose)
     tools = MaintenanceHarness(
         redis=FakeRedis(),
+        entities=CandidateEntities([]),
         knowledge_store=RecordingKnowledgeStore(),
     )
 

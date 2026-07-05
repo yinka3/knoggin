@@ -410,7 +410,7 @@ class IngestionPipeline:
             new_ids = set()
             alias_ids = set()
             entity_msg_map: Dict[int, List[int]] = {}
-            created_in_batch: Dict[str, int] = {}
+            created_in_batch: Dict[Tuple[str, str, str], int] = {}
             alias_updates: Dict[int, List[str]] = {}
             candidate_suggestions: List[CandidateSuggestion] = []
 
@@ -433,10 +433,10 @@ class IngestionPipeline:
                     mention_candidates.append(None)
                     continue
 
-                canonical_lower = name.strip().lower()
+                dedupe_key = self._mention_dedupe_key(name, typ, topic)
 
-                if canonical_lower in first_pass_results:
-                    mention_candidates.append(first_pass_results[canonical_lower])
+                if dedupe_key in first_pass_results:
+                    mention_candidates.append(first_pass_results[dedupe_key])
                     continue
 
                 precomputed = embedding_map.get(name)
@@ -445,12 +445,11 @@ class IngestionPipeline:
                 )
 
                 if candidates:
-                    top_id, top_score = candidates[0]
-                    entry = ("candidate", top_id, top_score)
+                    entry = ("candidates", candidates)
                 else:
                     entry = ("new", None)
 
-                first_pass_results[canonical_lower] = entry
+                first_pass_results[dedupe_key] = entry
                 mention_candidates.append(entry)
 
             # Second pass: collect advisory support signals for candidates.
@@ -459,10 +458,12 @@ class IngestionPipeline:
             pairs_for_support = []
 
             for i, entry in enumerate(mention_candidates):
-                if entry and entry[0] == "candidate":
-                    _, top_id, top_score = entry
+                if entry and entry[0] == "candidates":
                     msg_id = mentions[i][0]
-                    pairs_for_support.append((top_id, top_score, msg_id))
+                    for candidate in entry[1]:
+                        pairs_for_support.append(
+                            (candidate.entity_id, candidate.score, msg_id)
+                        )
 
             support_scores = {}
             if pairs_for_support:
@@ -478,47 +479,41 @@ class IngestionPipeline:
                 if entry is None:
                     continue
 
-                canonical_lower = name.strip().lower()
+                dedupe_key = self._mention_dedupe_key(name, typ, topic)
                 ent_id = None
 
-                # Batch dedup
-                if entry[0] == "batch_dedup":
-                    ent_id = entry[1]
-                    entity_ids.append(ent_id)
-                    if ent_id not in entity_msg_map:
-                        entity_msg_map[ent_id] = []
-                    entity_msg_map[ent_id].append(msg_id)
-                    continue
-
                 # Candidate match
-                if entry[0] == "candidate":
-                    top_id = entry[1]
-                    base_score = entry[2]
-                    support_score = support_scores.get(top_id, base_score)
-                    profile = await self.entities.get_profile(top_id)
+                if entry[0] == "candidates":
                     message_text = msg_text_map.get(msg_id, "")
-                    compatibility = (
-                        self._is_schema_compatible(typ, topic, profile)
-                        if profile
-                        else "missing_profile"
-                    )
-                    can_consider = (
-                        base_score >= self.resolution_threshold
-                        and profile
-                        and profile.project_id in {self.project_id, IDENTITY_SCOPE}
-                    )
+                    rejected_candidates = []
 
-                    if can_consider:
-                        if self._should_accept_candidate(
+                    for candidate in entry[1]:
+                        candidate_id = candidate.entity_id
+                        base_score = candidate.score
+                        support_score = support_scores.get(candidate_id, base_score)
+                        profile = await self.entities.get_profile(candidate_id)
+                        compatibility = (
+                            self._is_schema_compatible(typ, topic, profile)
+                            if profile
+                            else "missing_profile"
+                        )
+                        can_consider = (
+                            base_score >= self.resolution_threshold
+                            and profile
+                            and profile.project_id in {self.project_id, IDENTITY_SCOPE}
+                        )
+
+                        if can_consider and self._should_accept_candidate(
                             name,
                             typ,
                             topic,
                             message_text,
                             profile,
-                            top_id,
+                            candidate_id,
                             compatibility,
+                            candidate.has_direct_name_evidence,
                         ):
-                            ent_id = top_id
+                            ent_id = candidate_id
 
                             existing_id, aliases_added, new_aliases = (
                                 self.entities.validate_existing(
@@ -533,26 +528,45 @@ class IngestionPipeline:
                                 if existing_id not in alias_updates:
                                     alias_updates[existing_id] = []
                                 alias_updates[existing_id].extend(new_aliases)
+                            break
 
-                    if ent_id is None and profile:
-                        candidate_suggestions.append(
-                            self._build_candidate_suggestion(
-                                msg_id=msg_id,
-                                mention=name,
-                                mention_type=typ,
-                                mention_topic=topic,
-                                candidate_id=top_id,
-                                profile=profile,
-                                base_score=base_score,
-                                support_score=support_score,
-                                compatibility=compatibility,
-                                message_text=message_text,
+                        if profile:
+                            rejected_candidates.append(
+                                (
+                                    candidate_id,
+                                    profile,
+                                    base_score,
+                                    support_score,
+                                    compatibility,
+                                )
                             )
-                        )
+
+                    if ent_id is None:
+                        for (
+                            candidate_id,
+                            profile,
+                            base_score,
+                            support_score,
+                            compatibility,
+                        ) in rejected_candidates:
+                            candidate_suggestions.append(
+                                self._build_candidate_suggestion(
+                                    msg_id=msg_id,
+                                    mention=name,
+                                    mention_type=typ,
+                                    mention_topic=topic,
+                                    candidate_id=candidate_id,
+                                    profile=profile,
+                                    base_score=base_score,
+                                    support_score=support_score,
+                                    compatibility=compatibility,
+                                    message_text=message_text,
+                                )
+                            )
 
                 if ent_id is None:
-                    if canonical_lower in created_in_batch:
-                        ent_id = created_in_batch[canonical_lower]
+                    if dedupe_key in created_in_batch:
+                        ent_id = created_in_batch[dedupe_key]
                     else:
                         try:
                             ent_id = await self.get_next_ent_id()
@@ -566,7 +580,7 @@ class IngestionPipeline:
                                 session_id=session_id,
                             )
                             new_ids.add(ent_id)
-                            created_in_batch[canonical_lower] = ent_id
+                            created_in_batch[dedupe_key] = ent_id
                             for suggestion in candidate_suggestions:
                                 if (
                                     suggestion.msg_id == msg_id
@@ -602,6 +616,7 @@ class IngestionPipeline:
         profile: EntityProfile,
         candidate_id: int,
         compatibility: Optional[str] = None,
+        has_direct_name_evidence: Optional[bool] = None,
     ) -> bool:
         compatibility = compatibility or self._is_schema_compatible(
             mention_type, mention_topic, profile
@@ -609,10 +624,16 @@ class IngestionPipeline:
         if compatibility == "incompatible":
             return False
 
-        if not self._candidate_needs_context_confirmation(
-            name, mention_type, message_text, profile, compatibility
-        ):
+        direct_name_evidence = (
+            has_direct_name_evidence
+            if has_direct_name_evidence is not None
+            else self._has_direct_name_evidence(name, profile, candidate_id)
+        )
+        if direct_name_evidence:
             return True
+
+        if compatibility != "compatible":
+            return False
 
         return self._has_contextual_support(
             name,
@@ -621,6 +642,34 @@ class IngestionPipeline:
             compatibility,
             candidate_id,
         )
+
+    def _mention_dedupe_key(
+        self, name: str, mention_type: str, topic: str
+    ) -> Tuple[str, str, str]:
+        normalized_topic = self.topic_config.normalize_topic(topic or "General")
+        return (
+            name.strip().casefold(),
+            (mention_type or "").strip().casefold(),
+            normalized_topic or "General",
+        )
+
+    def _has_direct_name_evidence(
+        self, name: str, profile: EntityProfile, candidate_id: int
+    ) -> bool:
+        mention = name.strip().casefold()
+        if not mention:
+            return False
+
+        canonical = (profile.canonical_name or "").strip().casefold()
+        if mention == canonical:
+            return True
+
+        aliases = {
+            alias.strip().casefold()
+            for alias in self.entities.get_mentions_for_id(candidate_id)
+            if alias and alias.strip()
+        }
+        return mention in aliases
 
     def _build_candidate_suggestion(
         self,
@@ -717,30 +766,6 @@ class IngestionPipeline:
 
         return "neutral"
 
-    def _candidate_needs_context_confirmation(
-        self,
-        name: str,
-        mention_type: str,
-        message_text: str,
-        profile: EntityProfile,
-        compatibility: str,
-    ) -> bool:
-        if compatibility == "incompatible":
-            return True
-
-        if (
-            compatibility == "neutral"
-            and mention_type
-            and profile.entity_type
-            and mention_type.strip().lower()
-            != (profile.entity_type or "").strip().lower()
-        ):
-            return True
-
-        return self._is_sparse_context(
-            name, message_text, mention_type
-        ) or self._is_common_word_mention(name)
-
     def _is_sparse_context(
         self, name: str, message_text: str, mention_type: str
     ) -> bool:
@@ -787,12 +812,6 @@ class IngestionPipeline:
         candidate_id: int,
     ) -> bool:
         canonical = profile.canonical_name or ""
-        if (
-            compatibility == "compatible"
-            and name.strip().lower() == canonical.strip().lower()
-        ):
-            return True
-
         mentions = self.entities.get_mentions_for_id(candidate_id)
         if self._is_acronym_alias(name, canonical, mentions):
             return True
@@ -1000,19 +1019,24 @@ class IngestionPipeline:
 
         candidates = []
         valid_entity_names = set()
+        entity_source_msgs_by_name: Dict[str, set] = {}
         for ent_id in entity_ids:
             profile = await self.entities.get_profile(ent_id)
             if profile:
                 canonical_name = profile.canonical_name
                 mentions = self.entities.get_mentions_for_id(ent_id)
+                source_msgs = set(entity_msg_map.get(ent_id, []))
                 valid_entity_names.add(canonical_name.lower())
                 valid_entity_names.update(mention.lower() for mention in mentions)
+                entity_source_msgs_by_name[canonical_name.lower()] = source_msgs
+                for mention in mentions:
+                    entity_source_msgs_by_name[mention.lower()] = source_msgs
                 candidates.append(
                     {
                         "canonical_name": canonical_name,
                         "type": profile.entity_type,
                         "mentions": mentions,
-                        "source_msgs": entity_msg_map.get(ent_id, []),
+                        "source_msgs": sorted(source_msgs),
                     }
                 )
 
@@ -1132,6 +1156,37 @@ class IngestionPipeline:
                     },
                 )
                 continue
+            entity_a_source_msgs = entity_source_msgs_by_name.get(
+                conn.entity_a.lower(), set()
+            )
+            entity_b_source_msgs = entity_source_msgs_by_name.get(
+                conn.entity_b.lower(), set()
+            )
+            if (
+                conn.msg_id not in entity_a_source_msgs
+                or conn.msg_id not in entity_b_source_msgs
+            ):
+                logger.warning(
+                    "VP-02 returned relationship evidence msg_id "
+                    f"{conn.msg_id} outside entity source messages for "
+                    f"{conn.entity_a} -> {conn.entity_b}, skipping"
+                )
+                if trace is not None:
+                    trace.relationships_rejected += 1
+                record_issue(
+                    code="invalid_relationship_evidence_msg_id",
+                    message=(
+                        "VP-02 returned a relationship msg_id that was not a "
+                        "source message for both entities"
+                    ),
+                    item_ref=f"{conn.entity_a}->{conn.entity_b}",
+                    metadata={
+                        "msg_id": conn.msg_id,
+                        "entity_a_source_msgs": sorted(entity_a_source_msgs),
+                        "entity_b_source_msgs": sorted(entity_b_source_msgs),
+                    },
+                )
+                continue
             if conn.msg_id not in msg_map:
                 msg_map[conn.msg_id] = []
             msg_map[conn.msg_id].append(
@@ -1183,6 +1238,30 @@ class IngestionPipeline:
                     ),
                     item_ref=f"user->{conn.entity_name}",
                     metadata={"entity_name": conn.entity_name},
+                )
+                continue
+            entity_source_msgs = entity_source_msgs_by_name.get(
+                conn.entity_name.lower(), set()
+            )
+            if conn.msg_id not in entity_source_msgs:
+                logger.warning(
+                    "VP-02 returned user connection evidence msg_id "
+                    f"{conn.msg_id} outside entity source messages for "
+                    f"{conn.entity_name}, skipping"
+                )
+                if trace is not None:
+                    trace.user_relationships_rejected += 1
+                record_issue(
+                    code="invalid_user_connection_evidence_msg_id",
+                    message=(
+                        "VP-02 returned a user connection msg_id that was not "
+                        "a source message for the target entity"
+                    ),
+                    item_ref=f"user->{conn.entity_name}",
+                    metadata={
+                        "msg_id": conn.msg_id,
+                        "entity_source_msgs": sorted(entity_source_msgs),
+                    },
                 )
                 continue
             if conn.entity_name.lower() == self.user_name.lower():

@@ -648,7 +648,6 @@ class ProjectManager:
             idle_threshold=prof_cfg.idle_threshold,
             profile_batch_size=prof_cfg.profile_batch_size,
             contradiction_sim_low=prof_cfg.contradiction_sim_low,
-            contradiction_sim_high=prof_cfg.contradiction_sim_high,
             contradiction_batch_size=prof_cfg.contradiction_batch_size,
             profile_prompt=nlp_cfg.profile_prompt,
             contradiction_prompt=nlp_cfg.contradiction_prompt,

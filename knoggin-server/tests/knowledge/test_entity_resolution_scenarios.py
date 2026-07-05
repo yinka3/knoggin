@@ -333,7 +333,7 @@ async def test_bobby_chen_reuses_robert_chen_when_context_supports_nickname_drif
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_sparse_bob_does_not_reuse_known_alias_without_supporting_context():
+async def test_sparse_bob_reuses_direct_known_alias():
     processor, entities, knowledge_store, _ = make_harness(llm=FakeLLM(relevance=False))
     await seed_entity(entities, knowledge_store, 102, "Robert Chen", aliases=["Bob"])
     messages = [make_message(5, "Bob said yes.")]
@@ -643,6 +643,51 @@ async def test_known_labels_from_different_topics_block_auto_reuse():
 
     assert result.entity_ids == [1001]
     assert result.new_ids == {1001}
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_resolution_tries_next_candidate_when_top_candidate_is_incompatible():
+    processor, entities, knowledge_store, embedding = make_harness(
+        topic_config=make_schema_topic_config()
+    )
+    await seed_entity(
+        entities,
+        knowledge_store,
+        201,
+        "Workspace Tool",
+        entity_type="tool",
+        topic="Tools",
+    )
+    await seed_entity(
+        entities,
+        knowledge_store,
+        202,
+        "Workspace Concept",
+        entity_type="concept",
+        topic="Concepts",
+    )
+    knowledge_store.vector_results[vector_for(embedding, "workspace idea")] = [
+        (201, 0.95),
+        (202, 0.90),
+    ]
+    messages = [
+        make_message(
+            18,
+            "The workspace idea is still fuzzy and important to document.",
+        )
+    ]
+
+    result = await processor._resolve_mentions(
+        [(18, "workspace idea", "concept", "Concepts")],
+        messages,
+        "session-1",
+    )
+
+    assert result.entity_ids == [202]
+    assert result.new_ids == set()
+    assert result.entity_msg_map == {202: [18]}
+    assert result.candidate_suggestions == []
 
 
 @pytest.mark.storage

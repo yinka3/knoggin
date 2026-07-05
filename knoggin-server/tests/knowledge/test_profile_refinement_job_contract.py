@@ -187,7 +187,6 @@ def make_job(
         idle_threshold=idle_threshold,
         profile_batch_size=profile_batch_size,
         contradiction_sim_low=0.25,
-        contradiction_sim_high=0.9,
         contradiction_batch_size=2,
         contradiction_prompt="judge contradictions",
     )
@@ -305,7 +304,7 @@ def test_source_session_by_msg_id_maps_only_user_messages_with_session_id():
 
 
 @pytest.mark.no_network
-async def test_execute_filters_dirty_ids_force_limit_clears_processed_and_merges(
+async def test_execute_filters_dirty_ids_force_limit_clears_processed(
     monkeypatch,
 ):
     events = patch_profile_events(monkeypatch)
@@ -356,27 +355,11 @@ async def test_execute_filters_dirty_ids_force_limit_clears_processed_and_merges
     assert seen_entity_ids == [2, 3, 4, 5, 6]
     assert written_updates[1] == "project-1"
     assert await redis.smembers(dirty_key) == {"1", "6", "bad"}
-    assert await redis.smembers(RedisKeys.merge_queue("ada", "project-1")) == {"2"}
     assert [event[0][2] for event in events] == [
         "profiles_refined",
-        "merge_queue_marked",
         "dirty_entities_cleared",
     ]
-    merge_event = events[1][0]
-    assert merge_event == (
-        "project-1",
-        "job",
-        "merge_queue_marked",
-        {
-            "user_name": "ada",
-            "project_id": "project-1",
-            "merge_key": RedisKeys.merge_queue("ada", "project-1"),
-            "entity_ids": ["2"],
-            "marked_count": 1,
-            "reason": "profile_refined",
-        },
-    )
-    clear_event = events[2][0]
+    clear_event = events[1][0]
     assert clear_event == (
         "project-1",
         "job",
@@ -648,7 +631,6 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
         "user_name": "ada",
         "project_id": "project-1",
         "contradiction_sim_low": 0.25,
-        "contradiction_sim_high": 0.9,
         "contradiction_batch_size": 2,
         "contradiction_prompt": "judge contradictions",
         "source_session_by_msg_id": {7: "session-7"},
@@ -909,7 +891,6 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
         "user_name": "ada",
         "project_id": IDENTITY_SCOPE,
         "contradiction_sim_low": 0.25,
-        "contradiction_sim_high": 0.9,
         "contradiction_batch_size": 2,
         "contradiction_prompt": "judge contradictions",
         "source_session_by_msg_id": {7: "session-7"},

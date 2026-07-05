@@ -475,6 +475,9 @@ class FactResolutionSummary(BaseModel):
     failed_invalidations: List[str] = Field(default_factory=list)
     contradicted_fact_ids: List[str] = Field(default_factory=list)
     invalid_source_msg_ids: List[int] = Field(default_factory=list)
+    contradiction_candidate_diagnostics: List[Dict[str, Any]] = Field(
+        default_factory=list
+    )
     write_failed: bool = False
     error: Optional[str] = None
 

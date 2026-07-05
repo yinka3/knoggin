@@ -2,7 +2,6 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Mapping, Optional, Tuple
 
-import numpy as np
 from loguru import logger
 
 from common.exceptions import ConfigurationError, LLMError
@@ -13,6 +12,7 @@ from common.schema.contracts import (
 )
 from common.schema.primitives import FactRecord
 from common.scoping import require_scope_value
+from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit
 from common.utils.time_utils import get_now
 from infrastructure.knowledge_store import KnowledgeStore
@@ -45,7 +45,6 @@ class FactResolver:
         user_name: str,
         project_id: str,
         contradiction_sim_low: float = 0.70,
-        contradiction_sim_high: float = 0.95,
         contradiction_batch_size: int = 4,
         contradiction_prompt: Optional[str] = None,
         source_session_by_msg_id: Optional[Mapping[int, str]] = None,
@@ -66,9 +65,21 @@ class FactResolver:
         )
         now = get_now()
 
-        to_invalidate = set(merge_result.to_invalidate)
+        active_fact_ids = {
+            f.id for f in existing_facts if f.invalid_at is None
+        }
+        to_invalidate = set(merge_result.to_invalidate) & active_fact_ids
+        unknown_invalidation_ids = (
+            set(merge_result.to_invalidate) - active_fact_ids
+        )
+        if unknown_invalidation_ids:
+            logger.warning(
+                "FactResolver skipped invalidation ids outside active facts: "
+                f"{FactResolver._sorted_ids(unknown_invalidation_ids)}"
+            )
         contradicted_fact_ids = set()
         invalid_source_msg_ids = []
+        contradiction_candidate_diagnostics = []
         active_existing = [
             f
             for f in existing_facts
@@ -79,6 +90,14 @@ class FactResolver:
 
         for fact_update in merge_result.new_contents:
             content, msg_id = fact_update.content, fact_update.source_msg_id
+            skip_fact = False
+
+            if msg_id is None:
+                logger.warning(
+                    f"[{session_id}] FactResolver: "
+                    f"Skipping ungrounded fact without source_msg_id: {content}"
+                )
+                skip_fact = True
 
             if (
                 msg_id is not None
@@ -96,10 +115,14 @@ class FactResolver:
                     f"{valid_msg_ids} (type {valid_type})"
                 )
                 invalid_source_msg_ids.append(msg_id)
-                msg_id = None
+                skip_fact = True
 
             source_session_id = None
-            if msg_id is not None and source_session_by_msg_id is not None:
+            if (
+                not skip_fact
+                and msg_id is not None
+                and source_session_by_msg_id is not None
+            ):
                 source_session_id = source_session_by_msg_id.get(msg_id)
                 if not source_session_id:
                     logger.warning(
@@ -107,7 +130,10 @@ class FactResolver:
                         f"No source session found for valid msg_id {msg_id}"
                     )
                     invalid_source_msg_ids.append(msg_id)
-                    msg_id = None
+                    skip_fact = True
+
+            if skip_fact:
+                continue
 
             embedding = await embedding_service.encode_single(content)
 
@@ -115,13 +141,14 @@ class FactResolver:
                 new_content=content,
                 new_embedding=embedding,
                 existing_facts=active_existing,
+                embedding_service=embedding_service,
                 llm=llm,
                 session_id=session_id,
                 new_msg_id=msg_id,
                 contradiction_sim_low=contradiction_sim_low,
-                contradiction_sim_high=contradiction_sim_high,
                 contradiction_batch_size=contradiction_batch_size,
                 contradiction_prompt=contradiction_prompt,
+                candidate_diagnostics=contradiction_candidate_diagnostics,
             )
 
             to_invalidate.update(contradicted_ids)
@@ -192,6 +219,9 @@ class FactResolver:
                         contradicted_fact_ids
                     ),
                     invalid_source_msg_ids=invalid_source_msg_ids,
+                    contradiction_candidate_diagnostics=(
+                        contradiction_candidate_diagnostics
+                    ),
                     knowledge_store=knowledge_store,
                     user_name=user_name,
                     project_id=project_id,
@@ -211,6 +241,9 @@ class FactResolver:
                         contradicted_fact_ids
                     ),
                     invalid_source_msg_ids=invalid_source_msg_ids,
+                    contradiction_candidate_diagnostics=(
+                        contradiction_candidate_diagnostics
+                    ),
                 )
 
             except Exception as e:
@@ -239,6 +272,9 @@ class FactResolver:
                         contradicted_fact_ids
                     ),
                     invalid_source_msg_ids=invalid_source_msg_ids,
+                    contradiction_candidate_diagnostics=(
+                        contradiction_candidate_diagnostics
+                    ),
                     write_failed=True,
                     error=str(e),
                 )
@@ -275,6 +311,9 @@ class FactResolver:
                     contradicted_fact_ids
                 ),
                 invalid_source_msg_ids=invalid_source_msg_ids,
+                contradiction_candidate_diagnostics=(
+                    contradiction_candidate_diagnostics
+                ),
                 knowledge_store=knowledge_store,
                 user_name=user_name,
                 project_id=project_id,
@@ -294,6 +333,9 @@ class FactResolver:
                     contradicted_fact_ids
                 ),
                 invalid_source_msg_ids=invalid_source_msg_ids,
+                contradiction_candidate_diagnostics=(
+                    contradiction_candidate_diagnostics
+                ),
             )
 
         return FactResolutionSummary(
@@ -305,6 +347,9 @@ class FactResolver:
                 contradicted_fact_ids
             ),
             invalid_source_msg_ids=invalid_source_msg_ids,
+            contradiction_candidate_diagnostics=(
+                contradiction_candidate_diagnostics
+            ),
         )
 
     @staticmethod
@@ -339,6 +384,7 @@ class FactResolver:
         failed_invalidations: List[str],
         contradicted_fact_ids: List[str],
         invalid_source_msg_ids: List[int],
+        contradiction_candidate_diagnostics: List[dict],
         knowledge_store: KnowledgeStore,
         user_name: str,
         project_id: str,
@@ -384,6 +430,9 @@ class FactResolver:
             "contradicted_fact_ids": contradicted_fact_ids,
             "failed_invalidations": failed_invalidations,
             "invalid_source_msg_ids": invalid_source_msg_ids,
+            "contradiction_candidate_diagnostics": (
+                contradiction_candidate_diagnostics
+            ),
         }
         try:
             await knowledge_store.create_applied_fact_change_audit(
@@ -446,62 +495,93 @@ class FactResolver:
         new_content: str,
         new_embedding: List[float],
         existing_facts: List[FactRecord],
+        embedding_service: EmbeddingService,
         llm: LLMService,
         session_id: str = None,
         new_msg_id: Optional[int] = None,
         contradiction_sim_low: float = 0.70,
-        contradiction_sim_high: float = 0.95,
         contradiction_batch_size: int = 4,
         contradiction_prompt: Optional[str] = None,
+        candidate_diagnostics: Optional[List[dict]] = None,
     ) -> List[str]:
         """
         Find existing fact that new fact contradicts.
-        Uses embedding filter + LLM judgment.
+        Uses embeddings and NLI for candidate selection, then LLM judgment.
         Returns list of fact IDs to invalidate.
         """
         if not existing_facts:
             return []
 
-        new_emb = np.array(new_embedding)
-        new_emb = new_emb / np.linalg.norm(new_emb)
-
-        candidates = []
+        candidate_map: Dict[str, Tuple[FactRecord, float]] = {}
+        candidate_sources: Dict[str, set] = {}
+        candidate_nli: Dict[str, dict] = {}
+        nli_pairs = []
+        nli_facts = []
 
         for fact in existing_facts:
-            if not fact.embedding:
+            if FactResolver._same_fact_text(new_content, fact.content):
                 continue
 
-            existing_emb = np.array(fact.embedding)
-            existing_emb = existing_emb / np.linalg.norm(existing_emb)
+            if new_msg_id and fact.source_msg_id:
+                if new_msg_id < fact.source_msg_id:
+                    logger.debug(
+                        "Skipping contradiction check: "
+                        f"msg_{new_msg_id} older than "
+                        f"msg_{fact.source_msg_id} "
+                        f"for '{new_content[:40]}...'"
+                    )
+                    continue
+                if new_msg_id == fact.source_msg_id:
+                    logger.debug(
+                        "Skipping contradiction check: "
+                        f"msg_{new_msg_id} same as source msg "
+                        f"for '{new_content[:40]}...'"
+                    )
+                    continue
 
-            similarity = float(np.dot(new_emb, existing_emb))
+            similarity = (
+                cosine_similarity(new_embedding, fact.embedding)
+                if fact.embedding
+                else 0.0
+            )
+            if similarity >= contradiction_sim_low:
+                candidate_map[fact.id] = (fact, similarity)
+                candidate_sources.setdefault(fact.id, set()).add("embedding")
 
-            if contradiction_sim_low <= similarity < contradiction_sim_high:
-                if new_content.lower().strip() != fact.content.lower().strip():
-                    if new_msg_id and fact.source_msg_id:
-                        if new_msg_id < fact.source_msg_id:
-                            logger.debug(
-                                "Skipping contradiction check: "
-                                f"msg_{new_msg_id} older than "
-                                f"msg_{fact.source_msg_id} "
-                                f"for '{new_content[:40]}...'"
-                            )
-                            continue
-                        if new_msg_id == fact.source_msg_id:
-                            logger.debug(
-                                "Skipping contradiction check: "
-                                f"msg_{new_msg_id} same as source msg "
-                                f"for '{new_content[:40]}...'"
-                            )
-                            continue
-                    candidates.append((fact, similarity))
+            nli_pairs.append((fact.content, new_content))
+            nli_facts.append((fact, similarity))
 
-        if not candidates:
+        if nli_pairs:
+            classifications = await embedding_service.classify_text_pairs(
+                nli_pairs,
+                batch_size=contradiction_batch_size,
+            )
+            for classification, (fact, similarity) in zip(
+                classifications, nli_facts
+            ):
+                if classification.label.casefold() == "contradiction":
+                    candidate_map[fact.id] = (fact, similarity)
+                    candidate_sources.setdefault(fact.id, set()).add("nli")
+                    candidate_nli[fact.id] = {
+                        "label": classification.label,
+                        "scores": classification.scores,
+                    }
+
+        if not candidate_map:
             return []
 
         candidates_sorted: List[Tuple[FactRecord, float]] = sorted(
-            candidates, key=lambda x: x[1], reverse=True
+            candidate_map.values(), key=lambda x: x[1], reverse=True
         )
+        if candidate_diagnostics is not None:
+            candidate_diagnostics.extend(
+                FactResolver._contradiction_candidate_diagnostics(
+                    new_content,
+                    candidates_sorted,
+                    candidate_sources,
+                    candidate_nli,
+                )
+            )
 
         to_invalidate = []
 
@@ -542,6 +622,33 @@ class FactResolver:
         )
 
         return to_invalidate
+
+    @staticmethod
+    def _same_fact_text(left: str, right: str) -> bool:
+        return left.casefold().strip() == right.casefold().strip()
+
+    @staticmethod
+    def _contradiction_candidate_diagnostics(
+        new_content: str,
+        candidates: List[Tuple[FactRecord, float]],
+        candidate_sources: Dict[str, set],
+        candidate_nli: Dict[str, dict],
+    ) -> List[dict]:
+        diagnostics = []
+        for fact, similarity in candidates:
+            nli = candidate_nli.get(fact.id, {})
+            diagnostics.append(
+                {
+                    "new_content": new_content,
+                    "candidate_fact_id": fact.id,
+                    "candidate_content": fact.content,
+                    "sources": sorted(candidate_sources.get(fact.id, set())),
+                    "embedding_similarity": similarity,
+                    "nli_label": nli.get("label"),
+                    "nli_scores": nli.get("scores", {}),
+                }
+            )
+        return diagnostics
 
     @staticmethod
     async def llm_judge_contradiction(

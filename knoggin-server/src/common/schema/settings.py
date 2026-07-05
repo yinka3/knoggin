@@ -121,7 +121,6 @@ class ProfileSettings(BaseModel):
     profile_batch_size: int = Field(8, ge=1)
     max_facts_context: int = Field(50, ge=1)
     contradiction_sim_low: float = Field(0.70, ge=0.0, le=1.0)
-    contradiction_sim_high: float = Field(0.95, ge=0.0, le=1.0)
     contradiction_batch_size: int = Field(4, ge=1)
 
 

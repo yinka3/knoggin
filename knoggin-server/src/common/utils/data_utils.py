@@ -1,8 +1,8 @@
-from typing import List, Optional, Tuple
+import re
+from typing import List
 
 import numpy as np
 from loguru import logger
-from rapidfuzz import fuzz
 
 from common.schema.contracts import FactMergeResult, SkippedFactChange
 from common.schema.primitives import Fact, FactRecord
@@ -61,7 +61,8 @@ def find_duplicate_facts(
         if max_sim >= threshold:
             to_invalidate.append(fact_b.id)
             logger.info(
-                f"Marked duplicate fact for invalidation: '{fact_b.content[:50]}...' (sim={max_sim:.3f})"
+                "Marked duplicate fact for invalidation: "
+                f"'{fact_b.content[:50]}...' (sim={max_sim:.3f})"
             )
 
     return to_invalidate
@@ -161,14 +162,16 @@ def process_extracted_facts(
     )
 
 
-def _find_matching_fact(
-    text: str, facts: List[FactRecord], threshold: int = 90
-) -> FactRecord | None:
-    """Find existing fact matching the text via fuzzy match."""
-    text_lower = text.lower().strip()
+def _normalize_fact_target(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip().casefold()
+    return normalized.rstrip(".!?")
 
+
+def _find_matching_fact(text: str, facts: List[FactRecord]) -> FactRecord | None:
+    """Find existing fact by exact normalized text."""
+    target = _normalize_fact_target(text)
     for fact in facts:
-        if fuzz.ratio(text_lower, fact.content.lower().strip()) > threshold:
+        if _normalize_fact_target(fact.content) == target:
             return fact
 
     return None
@@ -176,5 +179,5 @@ def _find_matching_fact(
 
 def _is_duplicate(content: str, facts: List[FactRecord]) -> bool:
     """Check if content already exists in facts (exact match)."""
-    content_lower = content.lower().strip()
-    return any(f.content.lower().strip() == content_lower for f in facts)
+    target = _normalize_fact_target(content)
+    return any(_normalize_fact_target(f.content) == target for f in facts)

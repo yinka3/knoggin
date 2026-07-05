@@ -1,12 +1,23 @@
 import asyncio
 import gc
 import threading
-from typing import List
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 from loguru import logger
 from sentence_transformers import CrossEncoder, SentenceTransformer
+
+
+@dataclass(frozen=True)
+class TextPairClassification:
+    """Natural language inference result for a pair of texts."""
+
+    premise: str
+    hypothesis: str
+    label: str
+    scores: Dict[str, float] = field(default_factory=dict)
 
 
 class EmbeddingService:
@@ -18,6 +29,9 @@ class EmbeddingService:
         self,
         embedding_model: str = "dunzhang/stella_en_1.5B_v5",
         reranker_model: str = "BAAI/bge-reranker-large",
+        nli_model: str = (
+            "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
+        ),
         device: str = None,
         batch_size: int = 32,
     ):
@@ -27,6 +41,7 @@ class EmbeddingService:
 
         self._embedder = None
         self._reranker = None
+        self._nli = None
         self._embedding_dim = None
         self._config_kwargs = {}
         if str(self.device) == "cpu":
@@ -35,9 +50,11 @@ class EmbeddingService:
         self._model_Kwargs = {"torch_dtype": torch.float16}
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
+        self._nli_model = nli_model
 
         logger.info(
-            f"EmbeddingService initialized | device={self.device} | batch_size={batch_size}"
+            "EmbeddingService initialized | "
+            f"device={self.device} | batch_size={batch_size}"
         )
 
     async def load_models(self):
@@ -76,6 +93,11 @@ class EmbeddingService:
         if self._embedding_dim is None:
             return 1024
         return self._embedding_dim
+
+    @property
+    def nli_model(self) -> str:
+        """Configured NLI model name. Loaded only when NLI support is wired in."""
+        return self._nli_model
 
     async def encode(self, texts: List[str]) -> List[List[float]]:
         """Batch encode texts to vectors with chunking for large inputs (async)."""
@@ -146,6 +168,84 @@ class EmbeddingService:
 
         return all_scores
 
+    async def classify_text_pairs(
+        self,
+        pairs: List[Tuple[str, str]],
+        batch_size: int = None,
+    ) -> List[TextPairClassification]:
+        """Classify text pairs as entailment, contradiction, or neutral."""
+        if not pairs:
+            return []
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._classify_text_pairs_sync, pairs, batch_size
+        )
+
+    def _classify_text_pairs_sync(
+        self,
+        pairs: List[Tuple[str, str]],
+        batch_size: int = None,
+    ) -> List[TextPairClassification]:
+        if self._nli is None:
+            with self._lock:
+                if self._nli is None:
+                    self._nli = CrossEncoder(
+                        self._nli_model,
+                        device=self.device,
+                        model_kwargs=self._model_Kwargs,
+                    )
+                    logger.info(f"Loaded NLI model on {self.device}")
+
+        batch_size = batch_size or self.batch_size
+        judgments = []
+        labels = self._nli_labels()
+
+        for i in range(0, len(pairs), batch_size):
+            chunk = pairs[i : i + batch_size]
+            with self._lock:
+                raw_scores = self._nli.predict(chunk)
+
+            for pair, raw_score in zip(chunk, raw_scores):
+                scores = self._nli_score_map(raw_score, labels)
+                label = max(scores, key=scores.get)
+                judgments.append(
+                    TextPairClassification(
+                        premise=pair[0],
+                        hypothesis=pair[1],
+                        label=label,
+                        scores=scores,
+                    )
+                )
+
+        return judgments
+
+    def _nli_labels(self) -> List[str]:
+        config = getattr(getattr(self._nli, "model", None), "config", None)
+        id2label = getattr(config, "id2label", None)
+        if id2label:
+            return [
+                str(id2label[index]).casefold()
+                for index in sorted(id2label)
+            ]
+        return ["contradiction", "entailment", "neutral"]
+
+    @staticmethod
+    def _nli_score_map(raw_score, labels: List[str]) -> Dict[str, float]:
+        scores = np.asarray(raw_score, dtype=float)
+        if scores.ndim == 0:
+            scores = np.asarray([float(scores)])
+        shifted = scores - np.max(scores)
+        exp_scores = np.exp(shifted)
+        denominator = float(exp_scores.sum())
+        probabilities = (
+            exp_scores / denominator if denominator else np.zeros_like(exp_scores)
+        )
+
+        return {
+            labels[index] if index < len(labels) else f"label_{index}": float(score)
+            for index, score in enumerate(probabilities)
+        }
+
     def cleanup(self):
         """Explicitly free model memory."""
         if hasattr(self, "_embedder") and self._embedder is not None:
@@ -155,6 +255,10 @@ class EmbeddingService:
         if hasattr(self, "_reranker") and self._reranker is not None:
             del self._reranker
             self._reranker = None
+
+        if hasattr(self, "_nli") and self._nli is not None:
+            del self._nli
+            self._nli = None
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

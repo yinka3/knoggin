@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from cachetools import TTLCache, cached
@@ -24,6 +25,51 @@ from knoggin_server.knowledge.services.embedding_service import EmbeddingService
 
 if TYPE_CHECKING:
     from infrastructure.knowledge_store import KnowledgeStore
+
+
+@dataclass
+class EntityCandidate:
+    entity_id: int
+    score: float = 0.0
+    signals: set[str] = field(default_factory=set)
+    exact_score: Optional[float] = None
+    fuzzy_score: Optional[float] = None
+    vector_score: Optional[float] = None
+
+    def __iter__(self):
+        yield self.entity_id
+        yield self.score
+
+    def __getitem__(self, index: int):
+        return (self.entity_id, self.score)[index]
+
+    def __eq__(self, other):
+        if isinstance(other, tuple):
+            return (self.entity_id, self.score) == other
+        if isinstance(other, EntityCandidate):
+            return (
+                self.entity_id == other.entity_id
+                and self.score == other.score
+                and self.signals == other.signals
+                and self.exact_score == other.exact_score
+                and self.fuzzy_score == other.fuzzy_score
+                and self.vector_score == other.vector_score
+            )
+        return False
+
+    def add_signal(self, signal: str, score: float) -> None:
+        self.signals.add(signal)
+        self.score = max(self.score, score)
+        if signal == "exact":
+            self.exact_score = max(self.exact_score or 0.0, score)
+        elif signal == "fuzzy":
+            self.fuzzy_score = max(self.fuzzy_score or 0.0, score)
+        elif signal == "vector":
+            self.vector_score = max(self.vector_score or 0.0, score)
+
+    @property
+    def has_direct_name_evidence(self) -> bool:
+        return "exact" in self.signals
 
 
 class EntityResolver:
@@ -275,18 +321,20 @@ class EntityResolver:
 
     async def get_candidate_ids(
         self, mention: str, precomputed_embedding: List[float] = None
-    ) -> List[Tuple[int, float]]:
+    ) -> List[EntityCandidate]:
 
         if not mention:
             return []
 
-        candidate_scores: Dict[int, float] = {}
+        candidates: Dict[int, EntityCandidate] = {}
         mention_lower = mention.lower()
 
         with self._lock:
             exact_id = self._index.get_entity_id_for_name(mention_lower)
             if exact_id is not None:
-                candidate_scores[exact_id] = 1.0
+                candidates.setdefault(
+                    exact_id, EntityCandidate(exact_id)
+                ).add_signal("exact", 1.0)
 
             choices = self._index.iter_aliases()
             scorer = fuzz.ratio if len(mention_lower) < 4 else fuzz.WRatio
@@ -302,9 +350,16 @@ class EntityResolver:
                 eid = self._index.get_entity_id_for_name(alias)
                 if eid is not None:
                     normalized = fuzz_score / 100.0
-                    candidate_scores[eid] = max(
-                        candidate_scores.get(eid, 0), normalized
-                    )
+                    candidate = candidates.get(eid)
+                    if (
+                        normalized == 1.0
+                        and candidate
+                        and "exact" in candidate.signals
+                    ):
+                        continue
+                    candidates.setdefault(
+                        eid, EntityCandidate(eid)
+                    ).add_signal("fuzzy", normalized)
 
         vector = precomputed_embedding
         if vector is None:
@@ -330,15 +385,21 @@ class EntityResolver:
                 vector_results = []
         for eid, vec_score in vector_results:
             if eid:
-                candidate_scores[eid] = max(candidate_scores.get(eid, 0), vec_score)
+                candidates.setdefault(eid, EntityCandidate(eid)).add_signal(
+                    "vector", vec_score
+                )
 
         with self._lock:
-            valid_scores = {
-                eid: score
-                for eid, score in candidate_scores.items()
+            valid_candidates = [
+                candidate
+                for eid, candidate in candidates.items()
                 if self._index.has_entity(eid)
-            }
-        return sorted(valid_scores.items(), key=lambda x: x[1], reverse=True)
+            ]
+        return sorted(
+            valid_candidates,
+            key=lambda candidate: candidate.score,
+            reverse=True,
+        )
 
     async def register_entity(
         self,
@@ -489,9 +550,7 @@ class EntityResolver:
         if not candidates:
             return None
 
-        top_id, _ = candidates[0]
-
-        profile = await self.get_profile(top_id)
+        profile = await self.get_profile(candidates[0].entity_id)
         return profile.canonical_name if profile else None
 
     async def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:

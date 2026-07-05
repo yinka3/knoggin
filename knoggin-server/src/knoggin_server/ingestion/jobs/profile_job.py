@@ -54,7 +54,6 @@ class ProfileRefinementJob(BaseJob):
         volume_threshold: int = 15,
         idle_threshold: int = 90,
         contradiction_sim_low: float = 0.70,
-        contradiction_sim_high: float = 0.95,
         contradiction_batch_size: int = 4,
         profile_batch_size: int = 8,
         max_facts_context: int = 50,
@@ -76,7 +75,6 @@ class ProfileRefinementJob(BaseJob):
         self.idle_threshold = idle_threshold
 
         self.contradiction_sim_low = contradiction_sim_low
-        self.contradiction_sim_high = contradiction_sim_high
         self.contradiction_batch_size = contradiction_batch_size
         self.max_facts_context = max_facts_context
         self.profile_prompt = profile_prompt
@@ -93,7 +91,6 @@ class ProfileRefinementJob(BaseJob):
         self.profile_batch_size = settings.profile_batch_size
         self.max_facts_context = settings.max_facts_context
         self.contradiction_sim_low = settings.contradiction_sim_low
-        self.contradiction_sim_high = settings.contradiction_sim_high
         self.contradiction_batch_size = settings.contradiction_batch_size
         logger.info("ProfileRefinementJob settings updated")
 
@@ -369,31 +366,6 @@ class ProfileRefinementJob(BaseJob):
                                 str(get_now_unix()),
                             )
 
-                        merge_queue = RedisKeys.merge_queue(
-                            ctx.user_name, ctx.project_id
-                        )
-                        updated_ids = [str(u["id"]) for u in updates]
-
-                        if updated_ids:
-                            await self.redis.sadd(merge_queue, *updated_ids)
-                            await emit(
-                                ctx.project_id,
-                                "job",
-                                "merge_queue_marked",
-                                {
-                                    "user_name": ctx.user_name,
-                                    "project_id": ctx.project_id,
-                                    "merge_key": merge_queue,
-                                    "entity_ids": updated_ids,
-                                    "marked_count": len(updated_ids),
-                                    "reason": "profile_refined",
-                                },
-                            )
-                            logger.info(
-                                f"Passed {len(updated_ids)} updated entities "
-                                "to Merge Queue"
-                            )
-
                 except Exception as e:
                     logger.exception(f"Profile refinement batch process failed: {e}")
                     await emit(
@@ -564,7 +536,6 @@ class ProfileRefinementJob(BaseJob):
             user_name=ctx.user_name,
             project_id=IDENTITY_SCOPE,
             contradiction_sim_low=self.contradiction_sim_low,
-            contradiction_sim_high=self.contradiction_sim_high,
             contradiction_batch_size=self.contradiction_batch_size,
             contradiction_prompt=self.contradiction_prompt,
             source_session_by_msg_id=source_session_by_msg_id,
@@ -683,7 +654,6 @@ class ProfileRefinementJob(BaseJob):
                     user_name=ctx.user_name,
                     project_id=ctx.project_id,
                     contradiction_sim_low=self.contradiction_sim_low,
-                    contradiction_sim_high=self.contradiction_sim_high,
                     contradiction_batch_size=self.contradiction_batch_size,
                     contradiction_prompt=self.contradiction_prompt,
                     source_session_by_msg_id=source_session_by_msg_id,
