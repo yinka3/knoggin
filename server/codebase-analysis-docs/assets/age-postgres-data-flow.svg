@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="760" viewBox="0 0 1120 760" role="img" aria-labelledby="title desc">
+  <title id="title">AGE and Postgres data flow</title>
+  <desc id="desc">A concise data-flow diagram showing session messages, AGE graph models, Postgres helper tables, and project jobs.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #111827; }
+      .title { font-size: 26px; font-weight: 700; }
+      .note { font-size: 14px; fill: #475569; }
+      .label { font-size: 15px; font-weight: 700; }
+      .small { font-size: 13px; fill: #334155; }
+      .tiny { font-size: 12px; fill: #475569; }
+      .edge { stroke: #334155; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .edge-soft { stroke: #64748b; stroke-width: 1.7; fill: none; marker-end: url(#arrow); }
+      .session { fill: #e0f2fe; stroke: #0284c7; stroke-width: 2; }
+      .process { fill: #f8fafc; stroke: #64748b; stroke-width: 2; }
+      .age { fill: #ecfdf5; stroke: #059669; stroke-width: 2; }
+      .pg { fill: #fff7ed; stroke: #ea580c; stroke-width: 2; }
+      .job { fill: #f5f3ff; stroke: #7c3aed; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1120" height="760" fill="#ffffff"/>
+  <text x="40" y="48" class="title">AGE + Postgres Data Flow</text>
+  <text x="40" y="74" class="note">AGE owns graph truth. Postgres tables are fast search sidecars. Messages keep real session provenance.</text>
+
+  <rect x="40" y="120" width="190" height="84" rx="8" class="session"/>
+  <text x="60" y="150" class="label">Session Message</text>
+  <text x="60" y="174" class="small">user_name</text>
+  <text x="60" y="192" class="small">project_id + session_id</text>
+
+  <rect x="292" y="116" width="210" height="92" rx="8" class="process"/>
+  <text x="314" y="146" class="label">GraphWriter</text>
+  <text x="314" y="170" class="small">save_message_logs</text>
+  <text x="314" y="188" class="tiny">writes graph + FTS row</text>
+
+  <rect x="590" y="96" width="230" height="112" rx="8" class="age"/>
+  <text x="612" y="128" class="label">AGE Message</text>
+  <text x="612" y="154" class="small">key: user + session + id</text>
+  <text x="612" y="174" class="small">project_id, role, content</text>
+  <text x="612" y="194" class="small">timestamp</text>
+
+  <rect x="870" y="104" width="210" height="96" rx="8" class="pg"/>
+  <text x="892" y="134" class="label">message_search</text>
+  <text x="892" y="158" class="small">message_id</text>
+  <text x="892" y="178" class="small">user + session + tsvector</text>
+
+  <rect x="292" y="294" width="210" height="100" rx="8" class="process"/>
+  <text x="314" y="326" class="label">BatchProcessor</text>
+  <text x="314" y="350" class="small">extract mentions</text>
+  <text x="314" y="370" class="small">resolve relationships</text>
+
+  <rect x="590" y="286" width="230" height="116" rx="8" class="age"/>
+  <text x="612" y="318" class="label">AGE Entity</text>
+  <text x="612" y="344" class="small">id, user_name, project_id</text>
+  <text x="612" y="364" class="small">canonical_name, aliases</text>
+  <text x="612" y="384" class="small">topic</text>
+
+  <rect x="870" y="290" width="210" height="108" rx="8" class="pg"/>
+  <text x="892" y="322" class="label">entity_search</text>
+  <text x="892" y="348" class="small">entity_id</text>
+  <text x="892" y="368" class="small">user + project</text>
+  <text x="892" y="388" class="small">embedding</text>
+
+  <rect x="590" y="462" width="230" height="96" rx="8" class="age"/>
+  <text x="612" y="494" class="label">AGE Topic</text>
+  <text x="612" y="520" class="small">name</text>
+  <text x="612" y="540" class="small">linked by BELONGS_TO</text>
+
+  <rect x="292" y="512" width="210" height="100" rx="8" class="job"/>
+  <text x="314" y="544" class="label">Project Jobs</text>
+  <text x="314" y="568" class="small">read recent project</text>
+  <text x="314" y="588" class="small">messages from AGE</text>
+
+  <rect x="590" y="620" width="230" height="106" rx="8" class="age"/>
+  <text x="612" y="652" class="label">AGE Fact</text>
+  <text x="612" y="678" class="small">id, entity_id, project_id</text>
+  <text x="612" y="698" class="small">claim + source ids</text>
+
+  <rect x="870" y="622" width="210" height="104" rx="8" class="pg"/>
+  <text x="892" y="654" class="label">fact_search</text>
+  <text x="892" y="680" class="small">fact_id, entity_id</text>
+  <text x="892" y="700" class="small">project + embedding</text>
+  <text x="892" y="720" class="small">invalid_at</text>
+
+  <path d="M230 162 H292" class="edge"/>
+  <path d="M502 152 H590" class="edge"/>
+  <path d="M820 152 H870" class="edge"/>
+
+  <path d="M135 204 V344 H292" class="edge-soft"/>
+  <path d="M502 344 H590" class="edge"/>
+  <path d="M820 344 H870" class="edge"/>
+  <path d="M705 402 V462" class="edge-soft"/>
+  <text x="720" y="438" class="tiny">BELONGS_TO</text>
+  <path d="M590 344 C540 344 540 430 590 430" class="edge-soft"/>
+  <text x="498" y="430" class="tiny">RELATED_TO</text>
+
+  <path d="M590 182 C430 240 390 430 397 512" class="edge-soft"/>
+  <path d="M502 562 C540 590 558 640 590 672" class="edge"/>
+  <path d="M705 620 V558" class="edge-soft"/>
+  <text x="720" y="596" class="tiny">HAS_FACT</text>
+  <path d="M820 674 H870" class="edge"/>
+  <path d="M590 672 C470 672 456 196 590 152" class="edge-soft"/>
+  <text x="424" y="696" class="tiny">EXTRACTED_FROM uses MATCH on existing Message</text>
+
+  <rect x="40" y="666" width="454" height="60" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="60" y="692" class="label">Invariant</text>
+  <text x="140" y="692" class="small">project_id owns memory; session_id owns provenance.</text>
+  <text x="140" y="714" class="small">Do not guess a session when linking evidence.</text>
+</svg>

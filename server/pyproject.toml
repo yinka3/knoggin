@@ -1,0 +1,97 @@
+[project]
+name = "server"
+version = "0.1.0"
+description = "A transparent, self-hosted knowledge graph for personal AI memory - Server Engine"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.128.0",
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "numpy>=2.3.5",
+    "openai>=2.13.0",
+    "pathspec>=1.0.0",
+    "python-dotenv>=1.2.1",
+    "rapidfuzz>=3.14.3",
+    "redis>=7.1.0",
+    "redis-tools>=0.0.2",
+    "sentence-transformers>=5.2.0",
+    "tiktoken>=0.7.0",
+    "torch>=2.6.0,<2.7.0",
+    "xformers>=0.0.29.post3",
+    "scikit-learn>=1.8.0",
+    "gliner>=0.2.22",
+    "spacy>=3.8.11",
+    "wordfreq>=3.1.1",
+    "en-core-web-md",
+    "huggingface-hub[cli]>=0.36.0",
+    "psycopg[binary]>=3.2.3",
+    "psycopg-pool>=3.2.4",
+    "docx2txt>=0.9",
+    "llama-index-core>=0.12.0",
+    "pypdf>=6.6.2",
+    "mcp>=1.2.0,<2.0",
+    "duckduckgo-search>=8.0.0",
+    "cachetools>=5.4.0",
+    "markitdown>=0.1.5",
+    "ddgs>=9.11.3",
+    "instructor>=1.14.5",
+    "pyyaml>=6.0.3",
+    "ruff>=0.15.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.9.0"
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["common*", "core*", "infrastructure*", "log*"]
+
+[tool.uvicorn]
+reload-exclude = ["redis_data", "*.log"]
+
+[tool.uv.sources]
+en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" }
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+]
+markers = [
+    "unit: pure or mostly pure fast tests",
+    "smoke: package and import boundary checks",
+    "runtime: fake-backed engine lifecycle tests",
+    "storage: storage contract tests",
+    "ingestion: ingestion and queue behavior tests",
+    "integration: cross-subsystem tests",
+    "slow: expensive tests",
+    "requires_redis: requires a real Redis service",
+    "requires_postgres: requires a real Postgres service",
+    "requires_pgvector: requires pgvector support",
+    "requires_async_psycopg: requires psycopg async support in this OS/event loop",
+    "no_network: test is expected to make no external network calls",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["common", "infrastructure", "core", "log"]

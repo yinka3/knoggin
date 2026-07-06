@@ -4,13 +4,13 @@ services:
     container_name: knoggin-redis
     ports:
       - "127.0.0.1:6379:6379"
-    volumes:
-      - knoggin_redis_data:/data
     command:
       [
         "redis-server",
         "--appendonly",
-        "yes",
+        "no",
+        "--save",
+        "",
         "--maxmemory",
         "256mb",
         "--maxmemory-policy",
@@ -39,7 +39,7 @@ services:
     volumes:
       - knoggin_pg_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-      - ./knoggin-server/src/infrastructure/schema.sql:/docker-entrypoint-initdb.d/02-schema.sql:ro
+      - ./server/src/infrastructure/schema.sql:/docker-entrypoint-initdb.d/02-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U knoggin -d knoggin_db"]
       interval: 10s
@@ -50,4 +50,3 @@ services:
 
 volumes:
   knoggin_pg_data:
-  knoggin_redis_data:

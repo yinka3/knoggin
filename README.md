@@ -49,14 +49,14 @@ Those constraints are part of the design. They keep the graph closer to a usable
 
 This repository currently contains:
 
-- **`knoggin-server`**: the core memory engine, backed by Postgres, Apache AGE, Redis, vector search, and background jobs.
-- **`knoggin-sdk`**: a lightweight Python client for working with Knoggin integrations.
+- **`server`**: the core memory engine, backed by Postgres, Apache AGE, Redis, vector search, and background jobs.
+- **`sdk`**: a lightweight Python client for working with Knoggin integrations.
 - **`docker/` and `docker-compose.yml`**: local infrastructure for running the backing services.
 
-`knoggin-server` is the implementation package for the engine. It exposes the
+`server` is the implementation package for the engine. It exposes the
 runtime managers and services the API layer can compose, but it is not meant to
 define the polished public developer interface by itself. That public workflow
-surface belongs in `knoggin-sdk`, where project, session, agent, message, and
+surface belongs in `sdk`, where project, session, agent, message, and
 file operations can be shaped around external use.
 
 ## Engine Architecture
@@ -143,9 +143,28 @@ Install Python dependencies:
 uv sync
 ```
 
-`knoggin-server` currently ships as an engine package, not as a standalone HTTP API. The API layer for frontend and hosted access is intentionally separate and should import the engine rather than live inside it.
+### Running the Full Test Suite on Windows
 
-For SDK usage and integration notes, see [knoggin-sdk/README.md](./knoggin-sdk/README.md).
+The real-infrastructure tests use the Postgres and Redis ports published by
+Docker Desktop. Start Docker Desktop in Linux-container mode, then run:
+
+```powershell
+docker compose up -d --build
+docker compose ps
+
+$env:KNOGGIN_TEST_DATABASE_URL = "postgresql://knoggin:knoggin@localhost:5432/knoggin_db"
+$env:KNOGGIN_TEST_REDIS_URL = "redis://localhost:6379/1"
+
+Set-Location .\server
+uv run pytest -q
+```
+
+Storage tests backed by fakes remain independent of Postgres; only tests marked
+`requires_postgres` connect to and clean the real test database.
+
+`server` currently ships as an engine package, not as a standalone HTTP API. The API layer for frontend and hosted access is intentionally separate and should import the engine rather than live inside it.
+
+For SDK usage and integration notes, see [sdk/README.md](./sdk/README.md).
 
 ## Development Note
 

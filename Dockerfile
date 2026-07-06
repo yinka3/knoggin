@@ -13,12 +13,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Copy workspace configuration
 COPY pyproject.toml uv.lock ./
-COPY knoggin-server/pyproject.toml ./knoggin-server/
-COPY knoggin-sdk/pyproject.toml ./knoggin-sdk/
+COPY server/pyproject.toml ./server/
+COPY sdk/pyproject.toml ./sdk/
 
-# Install dependencies for knoggin-server
+# Install dependencies for server
 # Using uv sync with --frozen to ensure reproducible builds from the lockfile
-RUN uv sync --frozen --no-dev --package knoggin-server
+RUN uv sync --frozen --no-dev --package server
 
 # Use the virtual environment created by uv
 ENV PATH="/app/.venv/bin:$PATH"
@@ -34,12 +34,12 @@ RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner
 # Copy the entire workspace source
 COPY . .
 
-# Ensure config directory exists for persistence
-RUN mkdir -p /app/config
+# Ensure local persistence directories exist
+RUN mkdir -p /app/config /app/data/files
 
 # Use the virtual environment created by uv
 ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app/knoggin-server/src"
+ENV PYTHONPATH="/app/server/src"
 
-# knoggin-server currently ships as an engine package. An API entry point should
+# server currently ships as an engine package. An API entry point should
 # be supplied by the embedding application rather than this image.
