@@ -32,6 +32,12 @@ class AgentRunConfig:
     max_attempts: int = 15
     max_history_turns: int = 7
     max_accumulated_messages: int = 30
+    max_accumulated_profiles: int = 20
+    max_accumulated_graph: int = 40
+    max_accumulated_paths: int = 8
+    max_accumulated_hierarchy: int = 8
+    max_accumulated_facts: int = 8
+    max_accumulated_sources: int = 12
     max_consecutive_errors: int = 3
     empty_result_replan_threshold: int = 3
     tool_timeout: float = 30.0

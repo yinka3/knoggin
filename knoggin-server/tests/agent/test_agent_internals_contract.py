@@ -267,6 +267,109 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
 
 
 @pytest.mark.no_network
+def test_update_accumulators_caps_non_message_evidence_buckets():
+    ctx = make_ctx(
+        config=AgentRunConfig(
+            max_history_turns=2,
+            max_accumulated_messages=2,
+            max_accumulated_profiles=2,
+            max_accumulated_graph=2,
+            max_accumulated_paths=1,
+            max_accumulated_hierarchy=1,
+            max_accumulated_facts=1,
+            max_accumulated_sources=1,
+        )
+    )
+
+    update_accumulators(
+        ctx,
+        "search_entity",
+        {
+            "data": [
+                {"id": 1, "canonical_name": "Ada"},
+                {"id": 2, "canonical_name": "Grace"},
+                {"id": 3, "canonical_name": "Katherine"},
+            ]
+        },
+    )
+    update_accumulators(
+        ctx,
+        "get_connections",
+        {
+            "data": [
+                {"source": "Ada", "target": "Alpha"},
+                {"source": "Ada", "target": "Beta"},
+                {"source": "Ada", "target": "Gamma"},
+            ]
+        },
+    )
+    update_accumulators(
+        ctx,
+        "find_path",
+        {
+            "data": [
+                {"entity_a": "Ada", "entity_b": "Alpha"},
+                {"entity_a": "Ada", "entity_b": "Beta"},
+            ]
+        },
+    )
+    update_accumulators(
+        ctx,
+        "get_hierarchy",
+        {"data": [{"entity": "Alpha"}, {"entity": "Beta"}]},
+    )
+    update_accumulators(
+        ctx,
+        "fact_check",
+        {"data": [{"id": "fact-1"}, {"id": "fact-2"}]},
+    )
+    update_accumulators(
+        ctx,
+        "web_search",
+        {
+            "data": [
+                {"url": "https://example.test/old"},
+                {"url": "https://example.test/new"},
+            ]
+        },
+    )
+    update_accumulators(
+        ctx,
+        "search_documents",
+        {
+            "data": [
+                {
+                    "document_id": "file-1",
+                    "chunk_index": 1,
+                    "content": "one",
+                },
+                {
+                    "document_id": "file-1",
+                    "chunk_index": 2,
+                    "content": "two",
+                },
+                {
+                    "document_id": "file-1",
+                    "chunk_index": 3,
+                    "content": "three",
+                },
+            ]
+        },
+    )
+
+    assert [profile["id"] for profile in ctx.evidence.profiles] == [2, 3]
+    assert [(item["source"], item["target"]) for item in ctx.evidence.graph] == [
+        ("Ada", "Beta"),
+        ("Ada", "Gamma"),
+    ]
+    assert ctx.evidence.paths == [{"entity_a": "Ada", "entity_b": "Beta"}]
+    assert ctx.evidence.hierarchy == [{"entity": "Beta"}]
+    assert ctx.evidence.facts == [{"id": "fact-2"}]
+    assert ctx.evidence.sources == [{"url": "https://example.test/new"}]
+    assert [message["chunk_index"] for message in ctx.evidence.messages] == [2, 3]
+
+
+@pytest.mark.no_network
 def test_update_accumulators_ignores_errors_and_empty_results():
     ctx = make_ctx()
 

@@ -257,6 +257,11 @@ def _merge_unique(target_list: List, new_items, key_func) -> None:
             existing_keys.add(k)
 
 
+def _trim_oldest(target_list: List, limit: int) -> None:
+    if len(target_list) > limit:
+        del target_list[:-limit]
+
+
 def _message_evidence_key(item: Dict) -> Optional[Tuple]:
     if not isinstance(item, dict):
         return None
@@ -374,7 +379,12 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             )
             ev.messages = ev.messages[: cfg.max_accumulated_messages]
 
-    def _acc_unique_extend_or_append(target, data, key_func):
+    def _acc_unique(target, data, key_func, limit: int):
+        items = data if isinstance(data, list) else []
+        _merge_unique(target, items, key_func)
+        _trim_oldest(target, limit)
+
+    def _acc_unique_extend_or_append(target, data, key_func, limit: int):
         if isinstance(data, dict):
             items = [data]
         elif isinstance(data, list):
@@ -382,52 +392,67 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
         else:
             items = []
         _merge_unique(target, items, key_func)
+        _trim_oldest(target, limit)
+
+    def _acc_documents(ev, data, cfg):
+        _merge_unique(
+            ev.messages,
+            _normalize_document_chunks(data) if isinstance(data, list) else [],
+            _message_evidence_key,
+        )
+        _trim_oldest(ev.messages, cfg.max_accumulated_messages)
 
     strategies = {
         "search_messages": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
-        "search_entity": lambda ev, d, cfg: _merge_unique(
-            ev.profiles, d if isinstance(d, list) else [], lambda x: x["id"]
+        "search_entity": lambda ev, d, cfg: _acc_unique(
+            ev.profiles,
+            d,
+            lambda x: x["id"],
+            cfg.max_accumulated_profiles,
         ),
-        "get_connections": lambda ev, d, cfg: _merge_unique(
+        "get_connections": lambda ev, d, cfg: _acc_unique(
             ev.graph,
-            d if isinstance(d, list) else [],
+            d,
             lambda x: (x.get("source"), x.get("target")),
+            cfg.max_accumulated_graph,
         ),
-        "get_recent_activity": lambda ev, d, cfg: _merge_unique(
+        "get_recent_activity": lambda ev, d, cfg: _acc_unique(
             ev.graph,
-            d if isinstance(d, list) else [],
+            d,
             lambda x: (x.get("source"), x.get("target")),
+            cfg.max_accumulated_graph,
         ),
-        "find_path": lambda ev, d, cfg: _merge_unique(
+        "find_path": lambda ev, d, cfg: _acc_unique(
             ev.paths,
-            d if isinstance(d, list) else [],
+            d,
             _path_evidence_key,
+            cfg.max_accumulated_paths,
         ),
         "get_hierarchy": lambda ev, d, cfg: _acc_unique_extend_or_append(
             ev.hierarchy,
             d,
             _hierarchy_evidence_key,
+            cfg.max_accumulated_hierarchy,
         ),
         "fact_check": lambda ev, d, cfg: _acc_unique_extend_or_append(
             ev.facts,
             d,
             _fact_evidence_key,
+            cfg.max_accumulated_facts,
         ),
-        "search_documents": lambda ev, d, cfg: _merge_unique(
-            ev.messages,
-            _normalize_document_chunks(d) if isinstance(d, list) else [],
-            _message_evidence_key,
+        "search_documents": lambda ev, d, cfg: _acc_documents(ev, d, cfg),
+        "read_document": lambda ev, d, cfg: _acc_documents(ev, d, cfg),
+        "web_search": lambda ev, d, cfg: _acc_unique(
+            ev.sources,
+            d,
+            lambda x: x.get("url"),
+            cfg.max_accumulated_sources,
         ),
-        "read_document": lambda ev, d, cfg: _merge_unique(
-            ev.messages,
-            _normalize_document_chunks(d) if isinstance(d, list) else [],
-            _message_evidence_key,
-        ),
-        "web_search": lambda ev, d, cfg: _merge_unique(
-            ev.sources, d if isinstance(d, list) else [], lambda x: x.get("url")
-        ),
-        "news_search": lambda ev, d, cfg: _merge_unique(
-            ev.sources, d if isinstance(d, list) else [], lambda x: x.get("url")
+        "news_search": lambda ev, d, cfg: _acc_unique(
+            ev.sources,
+            d,
+            lambda x: x.get("url"),
+            cfg.max_accumulated_sources,
         ),
     }
 
