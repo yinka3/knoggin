@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["knoggin-server", "knoggin-sdk"]
+members = ["server", "sdk"]
 
 [dependency-groups]
 dev = [

@@ -13,7 +13,7 @@ resolution-markers = [
 [manifest]
 members = [
     "knoggin",
-    "knoggin-server",
+    "server",
 ]
 
 [manifest.dependency-groups]
@@ -1454,7 +1454,7 @@ wheels = [
 [[package]]
 name = "knoggin"
 version = "0.1.0"
-source = { editable = "knoggin-sdk" }
+source = { editable = "sdk" }
 
 [package.optional-dependencies]
 dev = [
@@ -1470,9 +1470,9 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
-name = "knoggin-server"
+name = "server"
 version = "0.1.0"
-source = { editable = "knoggin-server" }
+source = { editable = "server" }
 dependencies = [
     { name = "cachetools" },
     { name = "ddgs" },
