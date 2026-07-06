@@ -4,7 +4,7 @@ from common.conf.topics_config import TopicConfig
 from common.exceptions import LLMProviderError
 from common.schema.contracts import ExtractionTrace, NERResult
 from common.schema.primitives import EntityRecord
-from common.schema.settings import TopicSchema
+from common.schema.settings import TextProcessorSettings, TopicSchema
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.entity.profile import EntityProfile
 from tests.fixtures.factories import make_topic_config
@@ -126,7 +126,7 @@ def make_processor(
     llm_response=None,
     llm_raises=False,
     topic_config=None,
-    ner_prompt=None,
+    llm_ner=False,
 ):
     known_aliases = known_aliases or {}
     profiles = profiles or {}
@@ -146,8 +146,7 @@ def make_processor(
         get_profile=get_profile,
         gliner=object(),
         spacy=FakeNLP(),
-        vp01_min_confidence=0.8,
-        ner_prompt=ner_prompt,
+        settings=TextProcessorSettings(llm_ner=llm_ner),
     )
 
     processor._build_phrase_matcher = lambda: (
@@ -171,7 +170,7 @@ async def extract(processor, *, messages=None, trace=None, issues=None):
 @pytest.mark.ingestion
 @pytest.mark.no_network
 def test_build_phrase_matcher_reuses_cache_until_alias_version_changes(monkeypatch):
-    known_aliases = {"bob": 102}
+    known_aliases = {" Bob ": 102}
     alias_version = 1
 
     async def get_profile(_entity_id):
@@ -191,6 +190,7 @@ def test_build_phrase_matcher_reuses_cache_until_alias_version_changes(monkeypat
         get_profile=get_profile,
         gliner=object(),
         spacy=FakeNLP(),
+        settings=TextProcessorSettings(),
     )
 
     first = processor._build_phrase_matcher()
@@ -255,7 +255,38 @@ async def test_extract_mentions_known_alias_dedupes_duplicate_matches():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_extract_mentions_known_alias_missing_profile_records_issue_and_skips():
+    processor, _ = make_processor(
+        known_aliases={"bob": 102},
+        known_matches={MESSAGES[0]["message"]: ["Bob"]},
+    )
+    issues = []
+
+    result = await extract(processor, trace=ExtractionTrace(), issues=issues)
+
+    assert result == []
+    assert [issue.code for issue in issues] == ["known_alias_profile_missing"]
+    assert issues[0].metadata == {"entity_id": 102, "msg_id": 1}
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_extract_mentions_gliner_accepts_valid_labeled_mentions():
+    processor, _ = make_processor(
+        gliner_matches={MESSAGES[0]["message"]: [("Linear", "tool")]},
+    )
+    trace = ExtractionTrace()
+
+    result = await extract(processor, trace=trace, issues=[])
+
+    assert (1, "Linear", "tool", "Tools") in result
+    assert trace.gliner_raw_mentions == 1
+    assert trace.gliner_accepted_mentions == 1
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_mentions_gliner_skips_label_without_active_topic():
     processor, _ = make_processor(
         gliner_matches={MESSAGES[0]["message"]: [("Knoggin", "project")]},
     )
@@ -263,9 +294,9 @@ async def test_extract_mentions_gliner_accepts_valid_labeled_mentions():
 
     result = await extract(processor, trace=trace, issues=[])
 
-    assert (1, "Knoggin", "project", "General") in result
+    assert result == []
     assert trace.gliner_raw_mentions == 1
-    assert trace.gliner_accepted_mentions == 1
+    assert trace.gliner_accepted_mentions == 0
 
 
 @pytest.mark.ingestion
@@ -308,35 +339,35 @@ async def test_extract_mentions_llm_disabled_returns_known_and_gliner_only():
         known_aliases={"bob": 102},
         profiles={102: make_profile("Robert Chen")},
         known_matches={MESSAGES[0]["message"]: ["Bob"]},
-        gliner_matches={MESSAGES[0]["message"]: [("Knoggin", "project")]},
+        gliner_matches={MESSAGES[0]["message"]: [("Linear", "tool")]},
     )
-    processor.llm_ner = False
     trace = ExtractionTrace()
 
     result = await extract(processor, trace=trace, issues=[])
 
     assert result == [
         (1, "Bob", "person", "Identity"),
-        (1, "Knoggin", "project", "General"),
+        (1, "Linear", "tool", "Tools"),
     ]
     assert llm.calls == []
-    assert trace.fallbacks == [{"stage": "ner", "fallback": "llm_disabled"}]
+    assert trace.fallbacks == []
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_extract_mentions_llm_failure_falls_back_and_records_issue():
     processor, _ = make_processor(
-        gliner_matches={MESSAGES[0]["message"]: [("Knoggin", "project")]},
+        gliner_matches={MESSAGES[0]["message"]: [("Linear", "tool")]},
         llm_raises=True,
+        llm_ner=True,
     )
     trace = ExtractionTrace()
     issues = []
 
     result = await extract(processor, trace=trace, issues=issues)
 
-    assert result == [(1, "Knoggin", "project", "General")]
-    assert trace.fallbacks == [{"stage": "ner", "fallback": "known_gliner_only"}]
+    assert result == [(1, "Linear", "tool", "Tools")]
+    assert trace.fallbacks == []
     assert [issue.code for issue in issues] == ["llm_extraction_failed"]
 
 
@@ -344,16 +375,17 @@ async def test_extract_mentions_llm_failure_falls_back_and_records_issue():
 @pytest.mark.no_network
 async def test_extract_mentions_empty_llm_result_records_known_gliner_fallback():
     processor, _ = make_processor(
-        gliner_matches={MESSAGES[0]["message"]: [("Knoggin", "project")]},
+        gliner_matches={MESSAGES[0]["message"]: [("Linear", "tool")]},
         llm_response=NERResult(mentions=[]),
+        llm_ner=True,
     )
     trace = ExtractionTrace()
     issues = []
 
     result = await extract(processor, trace=trace, issues=issues)
 
-    assert result == [(1, "Knoggin", "project", "General")]
-    assert trace.fallbacks == [{"stage": "ner", "fallback": "known_gliner_only"}]
+    assert result == [(1, "Linear", "tool", "Tools")]
+    assert trace.fallbacks == []
     assert issues == []
 
 
@@ -364,6 +396,7 @@ async def test_extract_mentions_accepts_valid_llm_mentions():
         llm_response=NERResult(
             mentions=[make_entity("Linear", msg_id=2, typ="tool", topic="Tools")]
         ),
+        llm_ner=True,
     )
     trace = ExtractionTrace()
 
@@ -379,6 +412,7 @@ async def test_extract_mentions_accepts_valid_llm_mentions():
 async def test_extract_mentions_rejects_invalid_llm_msg_id():
     processor, _ = make_processor(
         llm_response=NERResult(mentions=[make_entity("Linear", msg_id=999)]),
+        llm_ner=True,
     )
     trace = ExtractionTrace()
     issues = []
@@ -398,6 +432,7 @@ async def test_extract_mentions_rejects_low_confidence_llm_mentions():
         llm_response=NERResult(
             mentions=[make_entity("Linear", msg_id=2, confidence=0.5)]
         ),
+        llm_ner=True,
     )
     trace = ExtractionTrace()
     issues = []
@@ -420,6 +455,7 @@ async def test_extract_mentions_rejects_duplicate_llm_mentions_already_covered()
         llm_response=NERResult(
             mentions=[make_entity("Alice", msg_id=1, typ="person", topic="Identity")]
         ),
+        llm_ner=True,
     )
     trace = ExtractionTrace()
     issues = []
@@ -445,6 +481,7 @@ async def test_extract_mentions_rejects_invalid_llm_entity():
                 )
             ]
         ),
+        llm_ner=True,
     )
     trace = ExtractionTrace()
     issues = []
@@ -458,14 +495,15 @@ async def test_extract_mentions_rejects_invalid_llm_entity():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_extract_mentions_uses_custom_ner_prompt_with_user_name():
+async def test_extract_mentions_uses_named_ner_prompt_with_user_name():
     processor, llm = make_processor(
         llm_response=NERResult(),
-        ner_prompt="Custom NER prompt for {user_name}",
+        llm_ner=True,
     )
 
     await extract(processor, trace=ExtractionTrace(), issues=[])
 
-    assert llm.calls[0]["system"] == "Custom NER prompt for ada"
+    assert "VEGAPUNK-01" in llm.calls[0]["system"]
+    assert "ada" in llm.calls[0]["system"]
     assert llm.calls[0]["temperature"] == 0.0
     assert llm.calls[0]["response_model"] is NERResult

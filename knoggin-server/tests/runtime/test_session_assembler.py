@@ -171,9 +171,9 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert consumer.kwargs["processor"] is processor
     assert consumer.get_session_context == ctx.get_conversation_context
     assert consumer.write_to_graph == ctx._write_to_graph_callback
-    assert consumer.kwargs["batch_size"] == 8
-    assert consumer.kwargs["checkpoint_interval"] == 32
-    assert consumer.kwargs["session_window"] == 24
+    assert consumer.kwargs["settings"].batch_size == 8
+    assert consumer.kwargs["settings"].checkpoint_interval == 32
+    assert consumer.kwargs["settings"].session_window == 24
 
     assert ctx.document_service is harness.project_state.document_service
     assert ctx.document_service.project_id == "project-1"

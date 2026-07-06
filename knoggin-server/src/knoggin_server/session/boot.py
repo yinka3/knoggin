@@ -122,10 +122,6 @@ class SessionFactory:
         write_to_graph: Callable,
     ) -> IngestionWorker:
         ingest_cfg = self.dev_settings.ingestion
-        batch_size = ingest_cfg.batch_size
-        batch_timeout = ingest_cfg.batch_timeout
-        checkpoint_interval = batch_size * 4
-        session_window = batch_size * 3
 
         return IngestionWorker(
             user_name=self.user_name,
@@ -135,8 +131,5 @@ class SessionFactory:
             processor=processor,
             get_session_context=get_session_context,
             write_to_graph=write_to_graph,
-            batch_size=batch_size,
-            batch_timeout=batch_timeout,
-            checkpoint_interval=checkpoint_interval,
-            session_window=session_window,
+            settings=ingest_cfg,
         )

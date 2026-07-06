@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Set, Tuple
 
-import numpy as np
 import redis.asyncio as aioredis
 from loguru import logger
 from wordfreq import word_frequency
@@ -14,7 +12,6 @@ from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
 from common.schema.contracts import (
     BatchResult,
-    BulkRelevanceResult,
     CandidateSuggestion,
     ConnectionsResult,
     EngineWorkUnit,
@@ -27,7 +24,6 @@ from common.schema.contracts import (
 )
 from common.schema.primitives import ConnectionRecord
 from common.schema.settings import EntityResolutionSettings
-from common.scoping import IDENTITY_SCOPE
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
 from common.utils.time_utils import get_now_unix
@@ -40,31 +36,27 @@ from knoggin_server.ingestion.dlq_state import (
     ensure_dlq_id,
     serialize_dlq_entry,
 )
-from knoggin_server.ingestion.prompts import (
-    get_connection_reasoning_prompt,
-    get_relevance_judgment_prompt,
-    render_configured_prompt,
-)
+from knoggin_server.ingestion.prompts import get_connection_reasoning_prompt
 from knoggin_server.ingestion.services.processor import TextProcessor
 from knoggin_server.knowledge.entity.profile import EntityProfile
 from knoggin_server.knowledge.entity.resolver import EntityResolver
 
 
-def _safe_json(obj):
-    """Fallback serializer for numpy types in DLQ payloads."""
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
-
-CANDIDATE_RELEVANCE_LLM_BATCH_SIZE = 15
-
-
 class IngestionPipeline:
+    """
+    Runs the message ingestion pipeline for one project/session scope.
+
+    IngestionPipeline coordinates mention extraction, safe entity reuse/new entity
+    creation, advisory candidate suggestions, and relationship extraction. It owns
+    the batch-level result contract: entity IDs, alias updates, relationship
+    observations, candidate suggestions, trace data, and validation issues.
+
+    Entity reuse is intentionally conservative: deterministic evidence must be
+    strong enough to reuse an existing profile; otherwise the pipeline creates a
+    new entity and preserves rejected candidates for later review. LLM use is
+    limited to configured extraction stages and does not override deterministic
+    safety checks.
+    """
     def __init__(
         self,
         project_id: str,
@@ -79,7 +71,6 @@ class IngestionPipeline:
         resolution_threshold: Optional[float] = None,
         common_word_frequency_threshold: Optional[float] = None,
         sparse_context_verbs: Optional[List[str]] = None,
-        connection_prompt: str = None,
         knowledge_store=None,
     ):
         if not project_id:
@@ -114,7 +105,6 @@ class IngestionPipeline:
             )
             if verb and verb.strip()
         }
-        self.connection_prompt = connection_prompt
 
     @property
     def get_next_ent_id(self):
@@ -145,6 +135,35 @@ class IngestionPipeline:
 
         if hasattr(self.processor, "update_settings"):
             self.processor.update_settings(config)
+
+    @staticmethod
+    def _record_issue(
+        issues: Optional[List[ValidationIssue]],
+        *,
+        stage: str,
+        code: str,
+        message: str,
+        severity: str = "warning",
+        item_ref: Optional[str] = None,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        if issues is None:
+            return
+
+        issues.append(
+            ValidationIssue(
+                stage=stage,
+                code=code,
+                message=message,
+                severity=severity,
+                item_ref=item_ref,
+                metadata=metadata or {},
+            )
+        )
+
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        return (name or "").strip().casefold()
 
     async def run(
         self, messages: List[Dict], session_text: str, *, session_id: str
@@ -181,11 +200,6 @@ class IngestionPipeline:
             result.trace.batch_size = len(messages)
             result.trace.message_ids = [m["id"] for m in messages]
 
-            logger.debug(
-                f"Processing batch of {len(messages)} messages: "
-                f"{[m['id'] for m in messages]}"
-            )
-
             await emit(
                 session_id,
                 "pipeline",
@@ -217,13 +231,14 @@ class IngestionPipeline:
                 ]
 
                 if not mentions:
-                    logger.info("No mentions found in batch, skipping LLM calls")
                     if result.work_unit:
                         result.work_unit.issues = list(result.issues)
                         result.work_unit.mark_succeeded("No mentions found")
                     return result
 
-                res = await self._resolve_mentions(mentions, messages, session_id)
+                res = await self._resolve_mentions(
+                    mentions, messages, session_id, result.issues
+                )
 
                 await emit(
                     session_id,
@@ -250,21 +265,6 @@ class IngestionPipeline:
                     result.trace,
                     result.issues,
                 )
-                if connections is None or user_connections is None:
-                    logger.error("Connection extraction failed")
-                    result.success = False
-                    result.error = "Connection extraction failed (VP-03)"
-                    if result.work_unit:
-                        result.work_unit.issues = list(result.issues)
-                        result.work_unit.mark_failed(result.error)
-                    await emit(
-                        session_id,
-                        "pipeline",
-                        "connections_failed",
-                        {"entity_count": len(res.entity_ids)},
-                    )
-                    return result
-
                 total_pairs = sum(len(mc.entity_pairs) for mc in connections)
                 total_user_pairs = sum(
                     len(mc.user_connections) for mc in user_connections
@@ -373,24 +373,31 @@ class IngestionPipeline:
 
         normalized_mentions = []
         for msg_id, text, typ, topic in mentions:
-            norm_topic = self.topic_config.normalize_topic(topic or "General")
+            norm_topic = self.topic_config.normalize_topic(topic)
             if norm_topic is None:
-                logger.debug(
-                    f"Skipping mention '{text}' — topic '{topic}' could not be resolved"
+                self._record_issue(
+                    issues,
+                    stage="mentions",
+                    code="invalid_topic",
+                    message="Mention topic could not be resolved",
+                    item_ref=text,
+                    metadata={"topic": topic, "msg_id": msg_id},
                 )
                 continue
 
             if norm_topic not in self.topic_config.active_topics:
-                logger.debug(
-                    f"Skipping mention '{text}' — topic '{norm_topic}' is inactive"
+                self._record_issue(
+                    issues,
+                    stage="mentions",
+                    code="inactive_topic",
+                    message="Mention topic is inactive",
+                    item_ref=text,
+                    metadata={"topic": norm_topic, "msg_id": msg_id},
                 )
                 continue
 
             normalized_mentions.append((msg_id, text, typ, norm_topic))
 
-        logger.debug(
-            f"Extracted {len(normalized_mentions)} mentions from {len(mentions)} raw"
-        )
         return normalized_mentions
 
     async def _resolve_mentions(
@@ -398,6 +405,7 @@ class IngestionPipeline:
         mentions: List[Tuple[int, str, str, str]],
         messages: List[Dict],
         session_id: str,
+        issues: Optional[List[ValidationIssue]] = None,
     ) -> ResolutionResult:
         """
         Deterministic entity resolution using 4 scoring signals.
@@ -414,62 +422,7 @@ class IngestionPipeline:
             alias_updates: Dict[int, List[str]] = {}
             candidate_suggestions: List[CandidateSuggestion] = []
 
-            # Precompute embeddings for unique mention names
-            unique_names = list({name for _, name, _, _ in mentions if name})
-            embedding_map = {}
-            if unique_names:
-                embeddings_array = await self.entities.embedding_service.encode(
-                    unique_names
-                )
-                embedding_map = {
-                    name: emb for name, emb in zip(unique_names, embeddings_array)
-                }
-
-            # First pass: collect base candidates for all mentions
-            mention_candidates = []
-            first_pass_results = {}
-            for msg_id, name, typ, topic in mentions:
-                if not name:
-                    mention_candidates.append(None)
-                    continue
-
-                dedupe_key = self._mention_dedupe_key(name, typ, topic)
-
-                if dedupe_key in first_pass_results:
-                    mention_candidates.append(first_pass_results[dedupe_key])
-                    continue
-
-                precomputed = embedding_map.get(name)
-                candidates = await self.entities.get_candidate_ids(
-                    name, precomputed_embedding=precomputed
-                )
-
-                if candidates:
-                    entry = ("candidates", candidates)
-                else:
-                    entry = ("new", None)
-
-                first_pass_results[dedupe_key] = entry
-                mention_candidates.append(entry)
-
-            # Second pass: collect advisory support signals for candidates.
-            # These scores are evidence only; base candidate score remains the
-            # authority for entity reuse.
-            pairs_for_support = []
-
-            for i, entry in enumerate(mention_candidates):
-                if entry and entry[0] == "candidates":
-                    msg_id = mentions[i][0]
-                    for candidate in entry[1]:
-                        pairs_for_support.append(
-                            (candidate.entity_id, candidate.score, msg_id)
-                        )
-
-            support_scores = {}
-            if pairs_for_support:
-                support_scores = await self._collect_candidate_support_scores(
-                    pairs_for_support, msg_text_map
-                )
+            mention_candidates = await self._candidate_entries_for_mentions(mentions)
 
             for i, (msg_id, name, typ, topic) in enumerate(mentions):
                 if not name:
@@ -490,7 +443,6 @@ class IngestionPipeline:
                     for candidate in entry[1]:
                         candidate_id = candidate.entity_id
                         base_score = candidate.score
-                        support_score = support_scores.get(candidate_id, base_score)
                         profile = await self.entities.get_profile(candidate_id)
                         compatibility = (
                             self._is_schema_compatible(typ, topic, profile)
@@ -500,7 +452,7 @@ class IngestionPipeline:
                         can_consider = (
                             base_score >= self.resolution_threshold
                             and profile
-                            and profile.project_id in {self.project_id, IDENTITY_SCOPE}
+                            and self._is_profile_visible(profile)
                         )
 
                         if can_consider and self._should_accept_candidate(
@@ -511,7 +463,7 @@ class IngestionPipeline:
                             profile,
                             candidate_id,
                             compatibility,
-                            candidate.has_direct_name_evidence,
+                            candidate,
                         ):
                             ent_id = candidate_id
 
@@ -536,7 +488,6 @@ class IngestionPipeline:
                                     candidate_id,
                                     profile,
                                     base_score,
-                                    support_score,
                                     compatibility,
                                 )
                             )
@@ -546,7 +497,6 @@ class IngestionPipeline:
                             candidate_id,
                             profile,
                             base_score,
-                            support_score,
                             compatibility,
                         ) in rejected_candidates:
                             candidate_suggestions.append(
@@ -558,7 +508,6 @@ class IngestionPipeline:
                                     candidate_id=candidate_id,
                                     profile=profile,
                                     base_score=base_score,
-                                    support_score=support_score,
                                     compatibility=compatibility,
                                     message_text=message_text,
                                 )
@@ -589,7 +538,19 @@ class IngestionPipeline:
                                 ):
                                     suggestion.created_entity_id = ent_id
                         except Exception as e:
-                            logger.error(f"Failed to register entity '{name}': {e}")
+                            self._record_issue(
+                                issues,
+                                stage="resolution",
+                                code="entity_registration_failed",
+                                message=f"Failed to register entity '{name}': {e}",
+                                severity="error",
+                                item_ref=name,
+                                metadata={
+                                    "msg_id": msg_id,
+                                    "type": typ,
+                                    "topic": topic,
+                                },
+                            )
                             ent_id = None
 
                 if ent_id is not None:
@@ -607,6 +568,41 @@ class IngestionPipeline:
                 candidate_suggestions=candidate_suggestions,
             )
 
+    async def _candidate_entries_for_mentions(
+        self, mentions: List[Tuple[int, str, str, str]]
+    ) -> List[Optional[Tuple[str, object]]]:
+        unique_names = list({name for _, name, _, _ in mentions if name})
+        embedding_map = {}
+        if unique_names:
+            embeddings_array = await self.entities.embedding_service.encode(
+                unique_names
+            )
+            embedding_map = {
+                name: emb for name, emb in zip(unique_names, embeddings_array)
+            }
+
+        entries = []
+        seen_by_dedupe_key = {}
+        for _, name, typ, topic in mentions:
+            if not name:
+                entries.append(None)
+                continue
+
+            dedupe_key = self._mention_dedupe_key(name, typ, topic)
+            if dedupe_key in seen_by_dedupe_key:
+                entries.append(seen_by_dedupe_key[dedupe_key])
+                continue
+
+            candidates = await self.entities.get_candidate_ids(
+                name,
+                precomputed_embedding=embedding_map.get(name),
+            )
+            entry = ("candidates", candidates) if candidates else ("new", None)
+            seen_by_dedupe_key[dedupe_key] = entry
+            entries.append(entry)
+
+        return entries
+
     def _should_accept_candidate(
         self,
         name: str,
@@ -616,21 +612,33 @@ class IngestionPipeline:
         profile: EntityProfile,
         candidate_id: int,
         compatibility: Optional[str] = None,
-        has_direct_name_evidence: Optional[bool] = None,
+        candidate=None,
     ) -> bool:
         compatibility = compatibility or self._is_schema_compatible(
             mention_type, mention_topic, profile
         )
         if compatibility == "incompatible":
             return False
+        if candidate is not None and "ambiguous_alias" in candidate.signals:
+            return False
 
-        direct_name_evidence = (
-            has_direct_name_evidence
-            if has_direct_name_evidence is not None
-            else self._has_direct_name_evidence(name, profile, candidate_id)
+        evidence = self._name_evidence_level(
+            name,
+            mention_type,
+            message_text,
+            profile,
+            candidate_id,
+            compatibility,
+            candidate,
         )
-        if direct_name_evidence:
+
+        if evidence == "strong":
             return True
+
+        if evidence == "medium":
+            return self._has_positive_entity_context(
+                name, mention_type, message_text, profile, compatibility
+            )
 
         if compatibility != "compatible":
             return False
@@ -643,22 +651,38 @@ class IngestionPipeline:
             candidate_id,
         )
 
+    def _is_profile_visible(self, profile: EntityProfile) -> bool:
+        readable_project_ids = set(
+            getattr(self.entities, "readable_project_ids", None) or [self.project_id]
+        )
+        return profile.project_id in readable_project_ids
+
     def _mention_dedupe_key(
         self, name: str, mention_type: str, topic: str
     ) -> Tuple[str, str, str]:
-        normalized_topic = self.topic_config.normalize_topic(topic or "General")
+        normalized_topic = self.topic_config.normalize_topic(topic)
         return (
             name.strip().casefold(),
             (mention_type or "").strip().casefold(),
-            normalized_topic or "General",
+            (normalized_topic or "").casefold(),
         )
 
-    def _has_direct_name_evidence(
-        self, name: str, profile: EntityProfile, candidate_id: int
-    ) -> bool:
+    def _name_evidence_level(
+        self,
+        name: str,
+        mention_type: str,
+        message_text: str,
+        profile: EntityProfile,
+        candidate_id: int,
+        compatibility: str,
+        candidate=None,
+    ) -> str:
         mention = name.strip().casefold()
         if not mention:
-            return False
+            return "none"
+
+        if candidate is not None and "ambiguous_alias" in candidate.signals:
+            return "weak"
 
         get_ids_for_name = getattr(
             self.entities,
@@ -668,20 +692,41 @@ class IngestionPipeline:
         if get_ids_for_name:
             owners = get_ids_for_name(mention)
             if owners and candidate_id not in owners:
-                return False
+                return "none"
             if len(owners) > 1:
-                return False
+                return "weak"
 
         canonical = (profile.canonical_name or "").strip().casefold()
-        if mention == canonical:
-            return True
-
         aliases = {
             alias.strip().casefold()
             for alias in self.entities.get_mentions_for_id(candidate_id)
             if alias and alias.strip()
         }
-        return mention in aliases
+        exact_name = mention == canonical or mention in aliases
+
+        if self._is_acronym_alias(name, profile.canonical_name or "", list(aliases)):
+            return "strong"
+
+        if not exact_name:
+            return "weak" if candidate is not None else "none"
+
+        if self._is_common_word_mention(name) and not self._has_positive_entity_context(
+            name, mention_type, message_text, profile, compatibility
+        ):
+            return "weak"
+
+        if exact_name and candidate is not None:
+            signal_count = len(candidate.signals & {"exact", "fuzzy", "vector"})
+            if signal_count > 1:
+                return "strong"
+
+        if len(self._word_tokens(name)) > 1:
+            return "strong"
+
+        if compatibility == "compatible":
+            return "medium"
+
+        return "weak"
 
     def _build_candidate_suggestion(
         self,
@@ -693,15 +738,12 @@ class IngestionPipeline:
         candidate_id: int,
         profile: EntityProfile,
         base_score: float,
-        support_score: float,
         compatibility: str,
         message_text: str,
     ) -> CandidateSuggestion:
         reasons = ["candidate_rejected"]
         if base_score < self.resolution_threshold:
             reasons.append("below_resolution_threshold")
-        if support_score > base_score:
-            reasons.append("advisory_context_support")
         if compatibility == "compatible":
             reasons.append("schema_compatible")
         elif compatibility == "incompatible":
@@ -721,7 +763,6 @@ class IngestionPipeline:
             candidate_id=candidate_id,
             candidate_name=profile.canonical_name or "",
             base_score=base_score,
-            support_score=support_score,
             reasons=list(dict.fromkeys(reasons)),
         )
 
@@ -747,8 +788,6 @@ class IngestionPipeline:
             return None
 
         normalized = self.topic_config.normalize_topic(topic.strip())
-        if normalized == "General":
-            return None
         return normalized
 
     def _is_schema_compatible(
@@ -766,6 +805,7 @@ class IngestionPipeline:
             mention_topic_normalized
             and profile_topic_normalized
             and mention_topic_normalized == profile_topic_normalized
+            and mention_topic_normalized.casefold() != "general"
         ):
             return "compatible"
 
@@ -815,6 +855,30 @@ class IngestionPipeline:
 
         return word_frequency(token, "en") >= self.common_word_frequency_threshold
 
+    def _has_positive_entity_context(
+        self,
+        name: str,
+        mention_type: str,
+        message_text: str,
+        profile: EntityProfile,
+        compatibility: str,
+    ) -> bool:
+        if compatibility != "compatible":
+            return False
+
+        mention_type_lower = (mention_type or "").strip().casefold()
+        profile_type_lower = (profile.entity_type or "").strip().casefold()
+        type_matches = bool(
+            mention_type_lower and mention_type_lower == profile_type_lower
+        )
+        label_topic_overlap = bool(
+            self._label_topics(mention_type_lower)
+            & self._label_topics(profile_type_lower)
+        )
+        return (type_matches or label_topic_overlap) and self._has_rich_context(
+            name, message_text
+        )
+
     def _has_contextual_support(
         self,
         name: str,
@@ -862,134 +926,59 @@ class IngestionPipeline:
     def _word_tokens(self, text: str) -> List[str]:
         return re.findall(r"[a-z0-9]+", (text or "").lower())
 
-    async def _collect_candidate_support_scores(
+    async def _build_connection_candidates(
         self,
-        candidate_pairs: List[Tuple[int, float, int]],
-        msg_text_map: Dict[int, str],
-    ) -> Dict[int, float]:
-        """
-        Collect advisory support scores from candidate-specific fact signals.
+        entity_ids: List[int],
+        entity_msg_map: Dict[int, List[int]],
+        issues: Optional[List[ValidationIssue]],
+    ) -> Tuple[List[Dict], Set[str], Dict[str, set], Dict[str, str]]:
+        candidates = []
+        valid_entity_names = set()
+        entity_source_msgs_by_name: Dict[str, set] = {}
+        canonical_name_by_name: Dict[str, str] = {}
 
-        The returned score must never authorize entity reuse on its own. It is
-        supporting evidence for diagnostics and future candidate review. Batch
-        context is used only for efficient reads and LLM calls, not as evidence.
-        """
-        if not candidate_pairs:
-            return {}
-
-        results = {}
-
-        # Vector embed each unique message once for fact relevance lookup.
-        unique_msg_ids = list({msg_id for _, _, msg_id in candidate_pairs})
-        msg_embeddings = {}
-        if unique_msg_ids:
-            msg_ids_to_embed = [m for m in unique_msg_ids if m in msg_text_map]
-            texts_to_embed = [msg_text_map[m] for m in msg_ids_to_embed]
-            if texts_to_embed:
-                embeddings = await self.entities.embedding_service.encode(
-                    texts_to_embed
+        for ent_id in entity_ids:
+            profile = await self.entities.get_profile(ent_id)
+            source_msgs = set(entity_msg_map.get(ent_id, []))
+            if not profile:
+                self._record_issue(
+                    issues,
+                    stage="connections",
+                    code="connection_candidate_profile_missing",
+                    message="Connection extraction candidate entity has no profile",
+                    item_ref=str(ent_id),
+                    metadata={
+                        "entity_id": ent_id,
+                        "source_msgs": sorted(source_msgs),
+                    },
                 )
-                msg_embeddings = {
-                    m: emb for m, emb in zip(msg_ids_to_embed, embeddings)
-                }
+                continue
 
-        # Signal 3: Fact relevance via LLM (RAG injected)
-        llm_pairs = []
-        pair_keys = []
-
-        async def fetch_candidate_facts(cid, b_score, m_id):
-            m_text = msg_text_map.get(m_id, "")
-            if not m_text or m_id not in msg_embeddings:
-                return cid, b_score, m_text, []
-
-            # Vector search facts for this specific entity against the message
-            try:
-                facts = await self.entities.search_relevant_facts(
-                    cid, msg_embeddings[m_id], limit=5
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Fact search failed for candidate {cid}, using base score: {e}"
-                )
-                facts = []
-            return cid, b_score, m_text, facts
-
-        tasks = [fetch_candidate_facts(c, b, m) for c, b, m in candidate_pairs]
-        if tasks:
-            rag_results = await asyncio.gather(*tasks)
-            for cid, b_score, m_text, facts in rag_results:
-                if not facts:
-                    results[cid] = max(results.get(cid, b_score), b_score)
+            canonical_name = profile.canonical_name
+            mentions = self.entities.get_mentions_for_id(ent_id)
+            for name in [canonical_name, *mentions]:
+                normalized = self._normalize_name(name)
+                if not normalized:
                     continue
+                valid_entity_names.add(normalized)
+                entity_source_msgs_by_name[normalized] = source_msgs
+                canonical_name_by_name[normalized] = canonical_name
 
-                fact_strs = [f.content for f in facts]
-                llm_pairs.append((m_text, fact_strs))
-                pair_keys.append((cid, b_score))
-
-        if llm_pairs:
-            for chunk_start in range(
-                0,
-                len(llm_pairs),
-                CANDIDATE_RELEVANCE_LLM_BATCH_SIZE,
-            ):
-                chunk_pairs = llm_pairs[
-                    chunk_start : chunk_start + CANDIDATE_RELEVANCE_LLM_BATCH_SIZE
-                ]
-                chunk_keys = pair_keys[
-                    chunk_start : chunk_start + CANDIDATE_RELEVANCE_LLM_BATCH_SIZE
-                ]
-
-                lines = []
-                for i, (msg, facts) in enumerate(chunk_pairs, 1):
-                    lines.append(f'{i}. Message: "{msg}" | Facts: {", ".join(facts)}')
-
-                prompt = (
-                    "For each index, determine if the message relates to the "
-                    "entity's facts.\n\n" + "\n".join(lines)
-                )
-
-                try:
-                    bulk_relevance: BulkRelevanceResult = (
-                        await self.llm.generate_structured(
-                            response_model=BulkRelevanceResult,
-                            system=get_relevance_judgment_prompt(),
-                            user=prompt,
-                            temperature=0.0,
-                        )
-                    )
-
-                    if bulk_relevance and bulk_relevance.judgments:
-                        judgment_map = {
-                            j.index: j.is_relevant for j in bulk_relevance.judgments
-                        }
-
-                        for i, (candidate_id, base_score) in enumerate(chunk_keys, 1):
-                            current = results.get(candidate_id, base_score)
-                            if judgment_map.get(i):
-                                results[candidate_id] = max(current, base_score + 0.05)
-                            else:
-                                results[candidate_id] = max(current, base_score)
-                    else:
-                        for candidate_id, base_score in chunk_keys:
-                            results[candidate_id] = max(
-                                results.get(candidate_id, base_score), base_score
-                            )
-
-                except (ConfigurationError, LLMError) as e:
-                    logger.warning(
-                        f"Fact relevance LLM failed for chunk, using base scores: {e}"
-                    )
-                    for candidate_id, base_score in chunk_keys:
-                        results[candidate_id] = max(
-                            results.get(candidate_id, base_score), base_score
-                        )
-
-        for candidate_id, base_score, _msg_id in candidate_pairs:
-            results[candidate_id] = max(
-                results.get(candidate_id, base_score), base_score
+            candidates.append(
+                {
+                    "canonical_name": canonical_name,
+                    "type": profile.entity_type,
+                    "mentions": mentions,
+                    "source_msgs": sorted(source_msgs),
+                }
             )
 
-        return results
+        return (
+            candidates,
+            valid_entity_names,
+            entity_source_msgs_by_name,
+            canonical_name_by_name,
+        )
 
     async def _extract_connections(
         self,
@@ -1010,57 +999,17 @@ class IngestionPipeline:
             trace.relationship_model = getattr(self.llm, "extraction_model", None)
             trace.relationship_prompt = "VEGAPUNK-02"
 
-        def record_issue(
-            code: str,
-            message: str,
-            severity: str = "warning",
-            item_ref: Optional[str] = None,
-            metadata: Optional[Dict] = None,
-        ) -> None:
-            if issues is not None:
-                issues.append(
-                    ValidationIssue(
-                        stage="connections",
-                        code=code,
-                        message=message,
-                        severity=severity,
-                        item_ref=item_ref,
-                        metadata=metadata or {},
-                    )
-                )
+        (
+            candidates,
+            valid_entity_names,
+            entity_source_msgs_by_name,
+            canonical_name_by_name,
+        ) = await self._build_connection_candidates(entity_ids, entity_msg_map, issues)
 
-        candidates = []
-        valid_entity_names = set()
-        entity_source_msgs_by_name: Dict[str, set] = {}
-        for ent_id in entity_ids:
-            profile = await self.entities.get_profile(ent_id)
-            if profile:
-                canonical_name = profile.canonical_name
-                mentions = self.entities.get_mentions_for_id(ent_id)
-                source_msgs = set(entity_msg_map.get(ent_id, []))
-                valid_entity_names.add(canonical_name.lower())
-                valid_entity_names.update(mention.lower() for mention in mentions)
-                entity_source_msgs_by_name[canonical_name.lower()] = source_msgs
-                for mention in mentions:
-                    entity_source_msgs_by_name[mention.lower()] = source_msgs
-                candidates.append(
-                    {
-                        "canonical_name": canonical_name,
-                        "type": profile.entity_type,
-                        "mentions": mentions,
-                        "source_msgs": sorted(source_msgs),
-                    }
-                )
+        if not candidates:
+            return [], []
 
-        if self.connection_prompt:
-            system_03 = render_configured_prompt(
-                self.connection_prompt,
-                prompt_name="configured extract_relationships",
-                required={"user_name"},
-                user_name=self.user_name,
-            )
-        else:
-            system_03 = get_connection_reasoning_prompt(self.user_name)
+        system_03 = get_connection_reasoning_prompt(self.user_name)
 
         user_03 = format_vp02_input(
             candidates,
@@ -1085,42 +1034,37 @@ class IngestionPipeline:
                 temperature=0.0,
             )
         except (ConfigurationError, LLMError) as e:
-            logger.warning(
-                "VP-02 connection extraction failed, continuing without "
-                f"connections: {e}"
-            )
             if trace is not None:
                 trace.fallbacks.append(
                     {"stage": "connections", "fallback": "empty_connections"}
                 )
-            record_issue(
+            self._record_issue(
+                issues,
+                stage="connections",
                 code="llm_extraction_failed",
                 message=f"VP-02 connection extraction failed: {e}",
                 severity="warning",
             )
-            conn_result = None
+            return [], []
 
-        if not conn_result or (
-            not conn_result.connections and not conn_result.user_connections
-        ):
-            if trace is not None and not any(
-                fb.get("stage") == "connections"
-                and fb.get("fallback") == "empty_connections"
-                for fb in trace.fallbacks
-            ):
+        if conn_result is None:
+            if trace is not None:
                 trace.fallbacks.append(
                     {"stage": "connections", "fallback": "empty_connections"}
                 )
-                if conn_result is not None:
-                    trace.relationships_seen = 0
-                    trace.user_relationships_seen = 0
-            await emit(
-                session_id,
-                "pipeline",
-                "llm_fallback",
-                {"stage": "connections", "fallback": "empty_connections"},
-                verbose_only=True,
+            self._record_issue(
+                issues,
+                stage="connections",
+                code="llm_extraction_failed",
+                message="VP-02 connection extraction returned no result",
+                severity="warning",
             )
+            return [], []
+
+        if not conn_result.connections and not conn_result.user_connections:
+            if trace is not None:
+                trace.relationships_seen = 0
+                trace.user_relationships_seen = 0
             return [], []
 
         valid_msg_ids = {m["id"] for m in messages}
@@ -1129,16 +1073,18 @@ class IngestionPipeline:
             trace.user_relationships_seen = len(conn_result.user_connections)
 
         msg_map: Dict[int, List[ConnectionRecord]] = {}
+        seen_relationships = set()
         for conn in conn_result.connections:
+            entity_a_key = self._normalize_name(conn.entity_a)
+            entity_b_key = self._normalize_name(conn.entity_b)
+            canonical_a = canonical_name_by_name.get(entity_a_key)
+            canonical_b = canonical_name_by_name.get(entity_b_key)
             if conn.msg_id not in valid_msg_ids:
-                logger.warning(
-                    f"VP-02 (connections) returned invalid msg_id {conn.msg_id} "
-                    f"(valid: {valid_msg_ids}), skipping connection "
-                    f"{conn.entity_a} -> {conn.entity_b}"
-                )
                 if trace is not None:
                     trace.relationships_rejected += 1
-                record_issue(
+                self._record_issue(
+                    issues,
+                    stage="connections",
                     code="invalid_msg_id",
                     message=f"VP-02 returned invalid msg_id {conn.msg_id}",
                     item_ref=f"{conn.entity_a}->{conn.entity_b}",
@@ -1149,16 +1095,14 @@ class IngestionPipeline:
                 )
                 continue
             if (
-                conn.entity_a.lower() not in valid_entity_names
-                or conn.entity_b.lower() not in valid_entity_names
+                entity_a_key not in valid_entity_names
+                or entity_b_key not in valid_entity_names
             ):
-                logger.warning(
-                    f"VP-02 returned unknown entity pair "
-                    f"{conn.entity_a} -> {conn.entity_b}, skipping"
-                )
                 if trace is not None:
                     trace.relationships_rejected += 1
-                record_issue(
+                self._record_issue(
+                    issues,
+                    stage="connections",
                     code="invalid_entity_name",
                     message="VP-02 returned a relationship with an unknown entity name",
                     item_ref=f"{conn.entity_a}->{conn.entity_b}",
@@ -1168,24 +1112,37 @@ class IngestionPipeline:
                     },
                 )
                 continue
+            if canonical_a == canonical_b:
+                if trace is not None:
+                    trace.relationships_rejected += 1
+                self._record_issue(
+                    issues,
+                    stage="connections",
+                    code="self_relationship",
+                    message="VP-02 returned a self relationship",
+                    item_ref=f"{conn.entity_a}->{conn.entity_b}",
+                    metadata={
+                        "entity_a": conn.entity_a,
+                        "entity_b": conn.entity_b,
+                        "canonical_name": canonical_a,
+                    },
+                )
+                continue
             entity_a_source_msgs = entity_source_msgs_by_name.get(
-                conn.entity_a.lower(), set()
+                entity_a_key, set()
             )
             entity_b_source_msgs = entity_source_msgs_by_name.get(
-                conn.entity_b.lower(), set()
+                entity_b_key, set()
             )
             if (
                 conn.msg_id not in entity_a_source_msgs
                 or conn.msg_id not in entity_b_source_msgs
             ):
-                logger.warning(
-                    "VP-02 returned relationship evidence msg_id "
-                    f"{conn.msg_id} outside entity source messages for "
-                    f"{conn.entity_a} -> {conn.entity_b}, skipping"
-                )
                 if trace is not None:
                     trace.relationships_rejected += 1
-                record_issue(
+                self._record_issue(
+                    issues,
+                    stage="connections",
                     code="invalid_relationship_evidence_msg_id",
                     message=(
                         "VP-02 returned a relationship msg_id that was not a "
@@ -1199,12 +1156,42 @@ class IngestionPipeline:
                     },
                 )
                 continue
+            relationship_key = (
+                conn.msg_id,
+                tuple(
+                    sorted(
+                        (
+                            self._normalize_name(canonical_a),
+                            self._normalize_name(canonical_b),
+                        )
+                    )
+                ),
+                self._normalize_name(conn.relationship),
+            )
+            if relationship_key in seen_relationships:
+                if trace is not None:
+                    trace.relationships_rejected += 1
+                self._record_issue(
+                    issues,
+                    stage="connections",
+                    code="duplicate_relationship",
+                    message="VP-02 returned a duplicate relationship",
+                    item_ref=f"{conn.entity_a}->{conn.entity_b}",
+                    metadata={
+                        "msg_id": conn.msg_id,
+                        "entity_a": canonical_a,
+                        "entity_b": canonical_b,
+                        "relationship": conn.relationship,
+                    },
+                )
+                continue
+            seen_relationships.add(relationship_key)
             if conn.msg_id not in msg_map:
                 msg_map[conn.msg_id] = []
             msg_map[conn.msg_id].append(
                 ConnectionRecord(
-                    entity_a=conn.entity_a,
-                    entity_b=conn.entity_b,
+                    entity_a=canonical_a,
+                    entity_b=canonical_b,
                     confidence=conn.confidence,
                     context=conn.context or conn.relationship,
                     relationship=conn.relationship,
@@ -1215,16 +1202,17 @@ class IngestionPipeline:
                 trace.relationships_accepted += 1
 
         user_msg_map: Dict[int, List[UserConnectionRecord]] = {}
+        seen_user_connections = set()
+        user_name_key = self._normalize_name(self.user_name)
         for conn in conn_result.user_connections:
+            entity_name_key = self._normalize_name(conn.entity_name)
+            canonical_entity_name = canonical_name_by_name.get(entity_name_key)
             if conn.msg_id not in valid_msg_ids:
-                logger.warning(
-                    f"VP-02 (user connections) returned invalid msg_id {conn.msg_id} "
-                    f"(valid: {valid_msg_ids}), skipping connection to "
-                    f"{conn.entity_name}"
-                )
                 if trace is not None:
                     trace.user_relationships_rejected += 1
-                record_issue(
+                self._record_issue(
+                    issues,
+                    stage="connections",
                     code="invalid_user_connection_msg_id",
                     message=(
                         f"VP-02 returned invalid user connection msg_id {conn.msg_id}"
@@ -1236,14 +1224,12 @@ class IngestionPipeline:
                     },
                 )
                 continue
-            if conn.entity_name.lower() not in valid_entity_names:
-                logger.warning(
-                    f"VP-02 returned unknown user connection entity "
-                    f"{conn.entity_name}, skipping"
-                )
+            if entity_name_key not in valid_entity_names:
                 if trace is not None:
                     trace.user_relationships_rejected += 1
-                record_issue(
+                self._record_issue(
+                    issues,
+                    stage="connections",
                     code="invalid_user_connection_entity",
                     message=(
                         "VP-02 returned a user connection with an unknown entity name"
@@ -1253,17 +1239,14 @@ class IngestionPipeline:
                 )
                 continue
             entity_source_msgs = entity_source_msgs_by_name.get(
-                conn.entity_name.lower(), set()
+                entity_name_key, set()
             )
             if conn.msg_id not in entity_source_msgs:
-                logger.warning(
-                    "VP-02 returned user connection evidence msg_id "
-                    f"{conn.msg_id} outside entity source messages for "
-                    f"{conn.entity_name}, skipping"
-                )
                 if trace is not None:
                     trace.user_relationships_rejected += 1
-                record_issue(
+                self._record_issue(
+                    issues,
+                    stage="connections",
                     code="invalid_user_connection_evidence_msg_id",
                     message=(
                         "VP-02 returned a user connection msg_id that was not "
@@ -1276,21 +1259,47 @@ class IngestionPipeline:
                     },
                 )
                 continue
-            if conn.entity_name.lower() == self.user_name.lower():
-                logger.warning("VP-02 returned user connected to itself, skipping")
+            if (
+                entity_name_key == user_name_key
+                or self._normalize_name(canonical_entity_name) == user_name_key
+            ):
                 if trace is not None:
                     trace.user_relationships_rejected += 1
-                record_issue(
+                self._record_issue(
+                    issues,
+                    stage="connections",
                     code="self_user_connection",
                     message="VP-02 returned a user connection to the user root itself",
                     item_ref=f"user->{conn.entity_name}",
                 )
                 continue
+            user_relationship_key = (
+                conn.msg_id,
+                self._normalize_name(canonical_entity_name),
+                self._normalize_name(conn.relationship),
+            )
+            if user_relationship_key in seen_user_connections:
+                if trace is not None:
+                    trace.user_relationships_rejected += 1
+                self._record_issue(
+                    issues,
+                    stage="connections",
+                    code="duplicate_user_connection",
+                    message="VP-02 returned a duplicate user relationship",
+                    item_ref=f"user->{conn.entity_name}",
+                    metadata={
+                        "msg_id": conn.msg_id,
+                        "entity_name": canonical_entity_name,
+                        "relationship": conn.relationship,
+                    },
+                )
+                continue
+            seen_user_connections.add(user_relationship_key)
             if conn.msg_id not in user_msg_map:
                 user_msg_map[conn.msg_id] = []
             user_msg_map[conn.msg_id].append(
                 UserConnectionRecord(
-                    entity_name=conn.entity_name,
+                    entity_name=canonical_entity_name,
                     confidence=conn.confidence,
                     context=conn.context or conn.relationship,
                     relationship=conn.relationship,

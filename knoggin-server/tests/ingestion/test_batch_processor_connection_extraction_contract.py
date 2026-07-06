@@ -30,10 +30,9 @@ class FakeConnectionLLM:
         return self.response
 
 
-def make_processor(response=None, *, raise_error=False, connection_prompt=None):
+def make_processor(response=None, *, raise_error=False):
     processor, entities, _, _ = make_harness()
     processor.llm = FakeConnectionLLM(response, raise_error=raise_error)
-    processor.connection_prompt = connection_prompt
     return processor, entities
 
 
@@ -164,7 +163,7 @@ async def test_extract_connections_happy_path_returns_graph_write_observations()
 @pytest.mark.no_network
 async def test_extract_connections_accepts_known_alias_names_from_llm():
     response = ConnectionsResult(
-        connections=[relationship(entity_b="Bob")],
+        connections=[relationship(entity_b=" Bob ")],
     )
     processor, entities = make_processor(response)
     await seed_connection_entities(entities)
@@ -177,7 +176,7 @@ async def test_extract_connections_accepts_known_alias_names_from_llm():
         issues=issues,
     )
 
-    assert relationships[0].entity_pairs[0].entity_b == "Bob"
+    assert relationships[0].entity_pairs[0].entity_b == "Robert Chen"
     assert user_relationships == []
     assert trace.relationships_accepted == 1
     assert trace.relationships_rejected == 0
@@ -208,7 +207,7 @@ async def test_extract_connections_llm_failure_records_fallback_and_issue():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_extract_connections_empty_llm_result_records_fallback():
+async def test_extract_connections_empty_llm_result_returns_empty_without_fallback():
     processor, entities = make_processor(ConnectionsResult())
     await seed_connection_entities(entities)
     trace = ExtractionTrace()
@@ -222,12 +221,33 @@ async def test_extract_connections_empty_llm_result_records_fallback():
 
     assert relationships == []
     assert user_relationships == []
-    assert trace.fallbacks == [
-        {"stage": "connections", "fallback": "empty_connections"}
-    ]
+    assert trace.fallbacks == []
     assert trace.relationships_seen == 0
     assert trace.user_relationships_seen == 0
     assert issues == []
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_connections_missing_profile_records_issue_and_skips_llm():
+    processor, _ = make_processor(ConnectionsResult(connections=[relationship()]))
+    trace = ExtractionTrace()
+    issues = []
+
+    relationships, user_relationships = await extract(
+        processor,
+        entity_ids=[999],
+        entity_msg_map={999: [1]},
+        trace=trace,
+        issues=issues,
+    )
+
+    assert relationships == []
+    assert user_relationships == []
+    assert processor.llm.calls == []
+    assert [issue.code for issue in issues] == [
+        "connection_candidate_profile_missing"
+    ]
 
 
 @pytest.mark.ingestion
@@ -299,6 +319,59 @@ async def test_extract_connections_rejects_relationship_msg_id_without_entity_so
     assert [issue.code for issue in issues] == [
         "invalid_relationship_evidence_msg_id"
     ]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_connections_rejects_self_relationship():
+    response = ConnectionsResult(
+        connections=[relationship(entity_a="Robert Chen", entity_b="Bob")]
+    )
+    processor, entities = make_processor(response)
+    await seed_connection_entities(entities)
+    trace = ExtractionTrace()
+    issues = []
+
+    relationships, user_relationships = await extract(
+        processor,
+        trace=trace,
+        issues=issues,
+    )
+
+    assert relationships == []
+    assert user_relationships == []
+    assert trace.relationships_seen == 1
+    assert trace.relationships_rejected == 1
+    assert [issue.code for issue in issues] == ["self_relationship"]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_connections_rejects_duplicate_relationship():
+    response = ConnectionsResult(
+        connections=[
+            relationship(),
+            relationship(entity_a="Robert Chen", entity_b="Alice"),
+        ],
+    )
+    processor, entities = make_processor(response)
+    await seed_connection_entities(entities)
+    trace = ExtractionTrace()
+    issues = []
+
+    relationships, user_relationships = await extract(
+        processor,
+        trace=trace,
+        issues=issues,
+    )
+
+    assert relationships[0].entity_pairs[0].entity_a == "Alice"
+    assert relationships[0].entity_pairs[0].entity_b == "Robert Chen"
+    assert user_relationships == []
+    assert trace.relationships_seen == 2
+    assert trace.relationships_accepted == 1
+    assert trace.relationships_rejected == 1
+    assert [issue.code for issue in issues] == ["duplicate_relationship"]
 
 
 @pytest.mark.ingestion
@@ -400,6 +473,34 @@ async def test_extract_connections_rejects_user_connected_to_self():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_extract_connections_rejects_duplicate_user_connection():
+    response = ConnectionsResult(
+        user_connections=[
+            user_relationship(entity_name="Knoggin"),
+            user_relationship(entity_name=" knoggin "),
+        ],
+    )
+    processor, entities = make_processor(response)
+    await seed_connection_entities(entities)
+    trace = ExtractionTrace()
+    issues = []
+
+    relationships, user_relationships = await extract(
+        processor,
+        trace=trace,
+        issues=issues,
+    )
+
+    assert relationships == []
+    assert user_relationships[0].user_connections[0].entity_name == "Knoggin"
+    assert trace.user_relationships_seen == 2
+    assert trace.user_relationships_accepted == 1
+    assert trace.user_relationships_rejected == 1
+    assert [issue.code for issue in issues] == ["duplicate_user_connection"]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_extract_connections_keeps_valid_items_when_response_is_mixed():
     response = ConnectionsResult(
         connections=[
@@ -446,15 +547,13 @@ async def test_extract_connections_keeps_valid_items_when_response_is_mixed():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_extract_connections_uses_custom_connection_prompt_with_user_name():
-    processor, entities = make_processor(
-        ConnectionsResult(),
-        connection_prompt="Custom prompt for {user_name}",
-    )
+async def test_extract_connections_uses_named_connection_prompt_with_user_name():
+    processor, entities = make_processor(ConnectionsResult())
     await seed_connection_entities(entities)
 
     await extract(processor)
 
-    assert processor.llm.calls[0]["system"] == "Custom prompt for ada"
+    assert "VEGAPUNK-02" in processor.llm.calls[0]["system"]
+    assert "ada" in processor.llm.calls[0]["system"]
     assert processor.llm.calls[0]["temperature"] == 0.0
     assert processor.llm.calls[0]["response_model"] is ConnectionsResult

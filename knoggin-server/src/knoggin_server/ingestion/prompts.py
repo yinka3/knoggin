@@ -5,7 +5,7 @@ from loguru import logger
 from common.utils.prompt_loader import load_named_prompt, render_prompt_text
 
 
-def ner_reasoning_prompt(user_name: str) -> str:
+def ner_prompt(user_name: str) -> str:
     return load_named_prompt("extract_entities", user_name=user_name)
 
 
@@ -23,10 +23,6 @@ def get_merge_judgment_prompt() -> str:
 
 def get_contradiction_judgment_prompt() -> str:
     return load_named_prompt("judge_contradiction")
-
-
-def get_relevance_judgment_prompt() -> str:
-    return load_named_prompt("judge_relevance")
 
 
 def render_configured_prompt(
@@ -79,7 +75,9 @@ async def enrich_facts_with_sources(
 
     if skipped_unscoped_sources:
         logger.debug(
-            f"Skipping {skipped_unscoped_sources} source message enrichments without user/session scope"
+            "Skipping "
+            f"{skipped_unscoped_sources} source message enrichments without "
+            "user/session scope"
         )
 
     if scope_to_indices:

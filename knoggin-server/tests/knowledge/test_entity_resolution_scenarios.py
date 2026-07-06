@@ -1,7 +1,6 @@
 import pytest
 
 from common.conf.topics_config import TopicConfig
-from common.schema.contracts import BulkRelevanceResult, RelevanceResult
 from common.schema.primitives import FactRecord
 from common.schema.settings import EntityResolutionSettings, TopicSchema
 from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
@@ -150,22 +149,12 @@ class FakeScenarioKnowledgeStore:
 class FakeLLM:
     extraction_model = "fake-llm"
 
-    def __init__(self, relevance=True):
-        self.relevance = relevance
+    def __init__(self):
         self.calls = []
 
     async def generate_structured(self, **kwargs):
         self.calls.append(kwargs)
-        if isinstance(self.relevance, list):
-            return BulkRelevanceResult(
-                judgments=[
-                    RelevanceResult(index=index, is_relevant=is_relevant)
-                    for index, is_relevant in enumerate(self.relevance, start=1)
-                ]
-            )
-        return BulkRelevanceResult(
-            judgments=[RelevanceResult(index=1, is_relevant=self.relevance)]
-        )
+        raise AssertionError("Entity resolution support scoring should not call LLM")
 
 
 def make_harness(*, llm=None, topic_config=None):
@@ -277,9 +266,7 @@ def make_fact(entity_id, content):
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_alice_openai_and_design_alice_stay_separate_with_irrelevant_facts():
-    processor, entities, knowledge_store, embedding = make_harness(
-        llm=FakeLLM(relevance=False)
-    )
+    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM())
     await seed_entity(entities, knowledge_store, 601, "OpenAI Alice")
     knowledge_store.vector_results[vector_for(embedding, "Design Alice")] = [
         (601, 0.83)
@@ -306,9 +293,7 @@ async def test_alice_openai_and_design_alice_stay_separate_with_irrelevant_facts
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_bobby_chen_reuses_robert_chen_when_context_supports_nickname_drift():
-    processor, entities, knowledge_store, embedding = make_harness(
-        llm=FakeLLM(relevance=True)
-    )
+    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM())
     await seed_entity(entities, knowledge_store, 102, "Robert Chen", aliases=["Bob"])
     knowledge_store.vector_results[vector_for(embedding, "Bobby Chen")] = [(102, 0.82)]
     knowledge_store.relevant_facts_by_entity[102] = [
@@ -333,8 +318,8 @@ async def test_bobby_chen_reuses_robert_chen_when_context_supports_nickname_drif
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_sparse_bob_reuses_direct_known_alias():
-    processor, entities, knowledge_store, _ = make_harness(llm=FakeLLM(relevance=False))
+async def test_sparse_bob_does_not_reuse_direct_known_alias():
+    processor, entities, knowledge_store, _ = make_harness(llm=FakeLLM())
     await seed_entity(entities, knowledge_store, 102, "Robert Chen", aliases=["Bob"])
     messages = [make_message(5, "Bob said yes.")]
 
@@ -351,9 +336,7 @@ async def test_sparse_bob_reuses_direct_known_alias():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_weak_descriptive_knoggin_support_does_not_authorize_reuse():
-    processor, entities, knowledge_store, embedding = make_harness(
-        llm=FakeLLM(relevance=True)
-    )
+    processor, entities, knowledge_store, embedding = make_harness(llm=FakeLLM())
     await seed_entity(
         entities,
         knowledge_store,

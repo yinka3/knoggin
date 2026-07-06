@@ -76,7 +76,6 @@ class CandidateSuggestionWriter:
             suggestion.candidate_id,
             suggestion.candidate_name,
             suggestion.base_score,
-            suggestion.support_score,
             json.dumps(suggestion.reasons),
             suggestion.created_entity_id,
         )
@@ -96,19 +95,17 @@ class CandidateSuggestionWriter:
             candidate_id,
             candidate_name,
             base_score,
-            support_score,
             reasons,
             created_entity_id
         )
         VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s
         )
         ON CONFLICT (suggestion_id) DO UPDATE
         SET mention_type = EXCLUDED.mention_type,
             mention_topic = EXCLUDED.mention_topic,
             candidate_name = EXCLUDED.candidate_name,
             base_score = EXCLUDED.base_score,
-            support_score = EXCLUDED.support_score,
             reasons = EXCLUDED.reasons,
             created_entity_id = COALESCE(
                 EXCLUDED.created_entity_id,

@@ -195,7 +195,7 @@ async def test_batch_processor_run_happy_path_builds_graph_write_result():
     async def extract_mentions(messages, session_id, trace, issues):
         return list(FAKE_MENTIONS)
 
-    async def resolve_mentions(mentions, messages, session_id):
+    async def resolve_mentions(mentions, messages, session_id, issues=None):
         return fake_resolution_result()
 
     async def extract_connections(
@@ -357,7 +357,7 @@ async def test_batch_processor_run_filters_blank_mentions_before_resolution():
             (1, "Alice", "person", "Identity"),
         ]
 
-    async def resolve_mentions(mentions, messages, session_id):
+    async def resolve_mentions(mentions, messages, session_id, issues=None):
         seen_mentions.extend(mentions)
         return ResolutionResult(
             entity_ids=[101],
@@ -393,13 +393,13 @@ async def test_batch_processor_run_filters_blank_mentions_before_resolution():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_batch_processor_run_marks_failed_when_connections_fail():
+async def test_batch_processor_run_accepts_empty_connections():
     processor = make_processor()
 
     async def extract_mentions(messages, session_id, trace, issues):
         return list(FAKE_MENTIONS)
 
-    async def resolve_mentions(mentions, messages, session_id):
+    async def resolve_mentions(mentions, messages, session_id, issues=None):
         return fake_resolution_result()
 
     async def extract_connections(
@@ -411,7 +411,7 @@ async def test_batch_processor_run_marks_failed_when_connections_fail():
         trace=None,
         issues=None,
     ):
-        return None, None
+        return [], []
 
     processor._extract_mentions = extract_mentions
     processor._resolve_mentions = resolve_mentions
@@ -421,10 +421,9 @@ async def test_batch_processor_run_marks_failed_when_connections_fail():
         FAKE_MESSAGES, session_text="", session_id="session-1"
     )
 
-    assert result.success is False
-    assert result.error == "Connection extraction failed (VP-03)"
-    assert result.work_unit.status == "failed"
-    assert result.work_unit.trace.summary == result.error
+    assert result.success is True
+    assert result.error is None
+    assert result.work_unit.status == "succeeded"
     assert result.entity_ids == [101, 102, 103, 104]
     assert result.relationship_observations == []
     assert result.user_relationship_observations == []
@@ -501,7 +500,7 @@ async def test_batch_processor_run_preserves_trace_fields():
         trace.llm_mentions_accepted = 2
         return list(FAKE_MENTIONS[:2])
 
-    async def resolve_mentions(mentions, messages, session_id):
+    async def resolve_mentions(mentions, messages, session_id, issues=None):
         return ResolutionResult(
             entity_ids=[101, 102],
             new_ids={101, 102},

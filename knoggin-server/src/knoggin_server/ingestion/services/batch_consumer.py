@@ -14,6 +14,19 @@ from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
 
 
 class IngestionWorker:
+    """
+    Drains buffered session messages and coordinates persistence around ingestion.
+
+    IngestionWorker reads queued messages from Redis, builds session context, runs
+    IngestionPipeline, saves message logs, persists candidate suggestions, writes
+    graph mutations, updates processing checkpoints, and routes failed batches to
+    the DLQ.
+
+    This class is infrastructure coordination, not entity extraction logic. It
+    handles operational failure boundaries around Redis, message-log persistence,
+    graph writes, and DLQ retry behavior while keeping successfully processed
+    batches moving through the ingestion system.
+    """
     def __init__(
         self,
         user_name: str,
@@ -23,20 +36,13 @@ class IngestionWorker:
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
         write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
-        batch_size: int = 8,
-        batch_timeout: float = 360.0,
-        checkpoint_interval: int = 24,
-        session_window: int = 18,
+        settings: IngestionSettings,
     ):
 
         self.user_name = user_name
         self.session_id = session_id
         self.knowledge_store = knowledge_store
         self.processor = processor
-        self.batch_size = batch_size
-        self.batch_timeout = batch_timeout
-        self.checkpoint_interval = checkpoint_interval
-        self.session_window = session_window
         self.redis = redis
 
         # callbacks
@@ -48,6 +54,7 @@ class IngestionWorker:
         self._shutdown_requested = False
         self._task: Optional[asyncio.Task] = None
         self._flush_future = None
+        self.update_settings(settings)
 
     @property
     def _buffer_key(self) -> str:
@@ -193,36 +200,9 @@ class IngestionWorker:
                 if buffer_len == 0:
                     break
 
-                raw = await self.redis.lrange(self._buffer_key, 0, self.batch_size - 1)
+                raw, messages = await self._read_buffer_batch()
                 if not raw:
-                    await emit(self.session_id, "pipeline", "buffer_empty", {})
                     break
-
-                await emit(
-                    self.session_id, "pipeline", "buffer_draining", {"queued": len(raw)}
-                )
-
-                messages = []
-                invalid_count = 0
-                for item in raw:
-                    parsed = safe_json_loads(item)
-                    if (
-                        not isinstance(parsed, dict)
-                        or "id" not in parsed
-                        or "message" not in parsed
-                    ):
-                        invalid_count += 1
-                        continue
-                    messages.append(parsed)
-
-                if invalid_count:
-                    logger.warning(f"Skipping {invalid_count} corrupt buffer entries")
-                    await emit(
-                        self.session_id,
-                        "pipeline",
-                        "buffer_invalid_entries",
-                        {"count": invalid_count},
-                    )
 
                 if not messages:
                     await self.redis.ltrim(self._buffer_key, len(raw), -1)
@@ -267,145 +247,31 @@ class IngestionWorker:
                         break
                     dlq_count += len(messages)
                 else:
-                    error_msg = None
-                    graph_success = True
-                    batch = [
-                        {
-                            "id": msg["id"],
-                            "content": msg["message"],
-                            "role": msg.get("role", "user"),
-                            "user_name": self.user_name,
-                            "session_id": self.session_id,
-                            "project_id": self.processor.project_id,
-                            "timestamp": msg.get("timestamp", ""),
-                        }
-                        for msg in messages
-                    ]
-                    try:
-                        await asyncio.wait_for(
-                            self.knowledge_store.save_message_logs(batch), timeout=30.0
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to save message logs: {e}")
-                        dlq_success = await self.processor.move_to_dead_letter(
-                            messages,
-                            f"MESSAGE_LOG_SAVE_FAILED: {e}",
-                            stage="message_log",
-                            session_text=session_text,
-                            batch_result=result,
-                            session_id=self.session_id,
-                        )
-                        if not dlq_success:
-                            logger.critical(
-                                "DLQ write failed after message log failure. "
-                                "Leaving messages in buffer."
-                            )
-                            break
+                    can_continue, dlq_written = await self._save_message_logs_or_dlq(
+                        messages, session_text, result
+                    )
+                    if dlq_written:
                         dlq_count += len(messages)
+                    if not can_continue:
+                        break
+                    if dlq_written:
                         batches_count += 1
                         total_processed += len(messages)
                         all_msg_ids.extend([m["id"] for m in messages])
                         await self.redis.ltrim(self._buffer_key, len(raw), -1)
                         continue
 
-                    if result.candidate_suggestions:
-                        if result.scope is None:
-                            result.set_scope(
-                                self.user_name,
-                                self.session_id,
-                                self.processor.project_id,
-                            )
-                        try:
-                            await asyncio.wait_for(
-                                self.knowledge_store.save_candidate_suggestions(
-                                    result.scope,
-                                    result.candidate_suggestions,
-                                ),
-                                timeout=30.0,
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to save candidate suggestions: {e}")
-                            await emit(
-                                self.session_id,
-                                "pipeline",
-                                "candidate_suggestions_save_failed",
-                                {
-                                    "error": str(e),
-                                    "suggestion_count": len(
-                                        result.candidate_suggestions
-                                    ),
-                                },
-                            )
+                    await self._save_candidate_suggestions(result)
 
-                    has_writes = result.has_graph_writes()
-                    if has_writes:
-                        try:
-                            graph_success, error_msg = await asyncio.wait_for(
-                                self.write_to_graph(result), timeout=self.batch_timeout
-                            )
-                        except asyncio.TimeoutError:
-                            graph_success, error_msg = False, "GRAPH_WRITE_TIMEOUT"
-                        except Exception as e:
-                            graph_success, error_msg = False, str(e)
-
-                        if not graph_success:
-                            logger.error(f"Graph write failed. Error: {error_msg}")
-                            await emit(
-                                self.session_id,
-                                "pipeline",
-                                "graph_write_failed",
-                                {"error": error_msg},
-                            )
-
-                    if not graph_success:
-                        dlq_success = await self.processor.move_to_dead_letter(
-                            messages,
-                            error_msg or "GRAPH_WRITE_FAILED [unknown]",
-                            stage="graph_write",
-                            batch_result=result,
-                            session_id=self.session_id,
-                        )
-                        if not dlq_success:
-                            logger.critical(
-                                "DLQ write failed after graph failure. Leaving "
-                                f"{len(messages)} messages in buffer for retry."
-                            )
-                            await emit(
-                                self.session_id,
-                                "pipeline",
-                                "dlq_write_failed",
-                                {"msg_count": len(messages)},
-                            )
-                            break
+                    can_continue, dlq_written = await self._write_graph_or_dlq(
+                        messages, result
+                    )
+                    if dlq_written:
                         dlq_count += len(messages)
-                    else:
-                        count = await self.redis.incrby(
-                            self._checkpoint_key, len(messages)
-                        )
-                        if count >= self.checkpoint_interval:
-                            await emit(
-                                self.session_id,
-                                "pipeline",
-                                "checkpoint_reached",
-                                {"message_count": count},
-                            )
-
-                            await self.redis.set(self._checkpoint_key, 0)
-
-                        if messages:
-                            last_id = max(m["id"] for m in messages)
-                            await self.redis.set(
-                                RedisKeys.last_processed(
-                                    self.user_name, self.session_id
-                                ),
-                                last_id,
-                            )
-                            await self.redis.set(
-                                RedisKeys.project_last_processed(
-                                    self.user_name, self.processor.project_id
-                                ),
-                                last_id,
-                            )
+                    if not can_continue:
+                        break
+                    if not dlq_written:
+                        await self._mark_batch_processed(messages)
 
                 batches_count += 1
                 total_processed += len(messages)
@@ -425,3 +291,175 @@ class IngestionWorker:
                     "partial_flush": flush_partial,
                 },
             )
+
+    async def _read_buffer_batch(self) -> tuple[List, List[Dict]]:
+        raw = await self.redis.lrange(self._buffer_key, 0, self.batch_size - 1)
+        if not raw:
+            await emit(self.session_id, "pipeline", "buffer_empty", {})
+            return [], []
+
+        await emit(
+            self.session_id, "pipeline", "buffer_draining", {"queued": len(raw)}
+        )
+
+        messages = []
+        invalid_count = 0
+        for item in raw:
+            parsed = safe_json_loads(item)
+            if (
+                not isinstance(parsed, dict)
+                or "id" not in parsed
+                or "message" not in parsed
+            ):
+                invalid_count += 1
+                continue
+            messages.append(parsed)
+
+        if invalid_count:
+            await emit(
+                self.session_id,
+                "pipeline",
+                "buffer_invalid_entries",
+                {"count": invalid_count},
+            )
+
+        return raw, messages
+
+    async def _save_message_logs_or_dlq(
+        self,
+        messages: List[Dict],
+        session_text: str,
+        result: BatchResult,
+    ) -> tuple[bool, bool]:
+        batch = [
+            {
+                "id": msg["id"],
+                "content": msg["message"],
+                "role": msg.get("role", "user"),
+                "user_name": self.user_name,
+                "session_id": self.session_id,
+                "project_id": self.processor.project_id,
+                "timestamp": msg.get("timestamp", ""),
+            }
+            for msg in messages
+        ]
+        try:
+            await asyncio.wait_for(
+                self.knowledge_store.save_message_logs(batch), timeout=30.0
+            )
+            return True, False
+        except Exception as e:
+            dlq_success = await self.processor.move_to_dead_letter(
+                messages,
+                f"MESSAGE_LOG_SAVE_FAILED: {e}",
+                stage="message_log",
+                session_text=session_text,
+                batch_result=result,
+                session_id=self.session_id,
+            )
+            if not dlq_success:
+                logger.critical(
+                    "DLQ write failed after message log failure. "
+                    "Leaving messages in buffer."
+                )
+                return False, False
+            return True, True
+
+    async def _save_candidate_suggestions(self, result: BatchResult) -> None:
+        if not result.candidate_suggestions:
+            return
+
+        if result.scope is None:
+            result.set_scope(
+                self.user_name,
+                self.session_id,
+                self.processor.project_id,
+            )
+        try:
+            await asyncio.wait_for(
+                self.knowledge_store.save_candidate_suggestions(
+                    result.scope,
+                    result.candidate_suggestions,
+                ),
+                timeout=30.0,
+            )
+        except Exception as e:
+            await emit(
+                self.session_id,
+                "pipeline",
+                "candidate_suggestions_save_failed",
+                {
+                    "error": str(e),
+                    "suggestion_count": len(result.candidate_suggestions),
+                },
+            )
+
+    async def _write_graph_or_dlq(
+        self,
+        messages: List[Dict],
+        result: BatchResult,
+    ) -> tuple[bool, bool]:
+        if not result.has_graph_writes():
+            return True, False
+
+        try:
+            graph_success, error_msg = await asyncio.wait_for(
+                self.write_to_graph(result), timeout=self.batch_timeout
+            )
+        except asyncio.TimeoutError:
+            graph_success, error_msg = False, "GRAPH_WRITE_TIMEOUT"
+        except Exception as e:
+            graph_success, error_msg = False, str(e)
+
+        if graph_success:
+            return True, False
+
+        await emit(
+            self.session_id,
+            "pipeline",
+            "graph_write_failed",
+            {"error": error_msg},
+        )
+
+        dlq_success = await self.processor.move_to_dead_letter(
+            messages,
+            error_msg or "GRAPH_WRITE_FAILED [unknown]",
+            stage="graph_write",
+            batch_result=result,
+            session_id=self.session_id,
+        )
+        if not dlq_success:
+            logger.critical(
+                "DLQ write failed after graph failure. Leaving "
+                f"{len(messages)} messages in buffer for retry."
+            )
+            await emit(
+                self.session_id,
+                "pipeline",
+                "dlq_write_failed",
+                {"msg_count": len(messages)},
+            )
+            return False, False
+        return True, True
+
+    async def _mark_batch_processed(self, messages: List[Dict]) -> None:
+        count = await self.redis.incrby(self._checkpoint_key, len(messages))
+        if count >= self.checkpoint_interval:
+            await emit(
+                self.session_id,
+                "pipeline",
+                "checkpoint_reached",
+                {"message_count": count},
+            )
+
+            await self.redis.set(self._checkpoint_key, 0)
+
+        last_id = max(m["id"] for m in messages)
+        await self.redis.set(
+            RedisKeys.last_processed(self.user_name, self.session_id),
+            last_id,
+        )
+        await self.redis.set(
+            RedisKeys.project_last_processed(self.user_name, self.processor.project_id),
+            last_id,
+        )

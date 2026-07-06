@@ -5,14 +5,11 @@ import re
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import redis.asyncio as aioredis
 from loguru import logger
 from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
-from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import parse_iso_time_or_now
-from infrastructure.redis_client import RedisKeys
 
 PRONOUNS = {
     "my",
@@ -164,9 +161,9 @@ def validate_entity(
     if not any(c.isalpha() for c in name):
         return False
 
-    if topic and topic != "General":
+    if topic:
         normalized = topic_config.normalize_topic(topic)
-        if normalized == "General" and topic.lower() not in topic_config.alias_lookup:
+        if not normalized or not topic_config.is_active(normalized):
             logger.debug(f"Invalid topic '{topic}' for entity '{name}'")
             return False
 
@@ -182,7 +179,8 @@ async def fetch_conversation_turns(
 ) -> List[Dict[str, Any]]:
     """Fetch conversation turns natively from Postgres in chronological order."""
     query = """
-        SELECT message_id, role, content, timestamp_ms as timestamp, user_msg_id, metadata
+        SELECT message_id, role, content, timestamp_ms as timestamp,
+               user_msg_id, metadata
         FROM public.messages
         WHERE user_name = %(user_name)s AND session_id = %(session_id)s
     """

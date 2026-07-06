@@ -372,7 +372,6 @@ CREATE TABLE IF NOT EXISTS public.ingestion_candidate_suggestions (
     candidate_id BIGINT NOT NULL,
     candidate_name TEXT NOT NULL,
     base_score DOUBLE PRECISION NOT NULL,
-    support_score DOUBLE PRECISION NOT NULL,
     reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_entity_id BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

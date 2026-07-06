@@ -48,11 +48,9 @@ def test_batch_result_serializes_candidate_suggestions_without_graph_writes():
         candidate_id=501,
         candidate_name="Notion",
         base_score=0.82,
-        support_score=0.87,
         reasons=[
             "candidate_rejected",
             "below_resolution_threshold",
-            "advisory_context_support",
         ],
         created_entity_id=1001,
     )

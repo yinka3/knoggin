@@ -196,17 +196,7 @@ class AgentLimitSettings(BaseModel):
 class TextProcessorSettings(BaseModel):
     gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
     vp01_min_confidence: float = Field(0.8, ge=0.0, le=1.0)
-    llm_ner: bool = Field(True)
-    ner_prompt: str = Field(
-        default_factory=lambda: load_pipeline_prompt_template(
-            "prompts/extraction.md", "Extract Entities"
-        )
-    )
-    connection_prompt: str = Field(
-        default_factory=lambda: load_pipeline_prompt_template(
-            "prompts/extraction.md", "Extract Relationships"
-        )
-    )
+    llm_ner: bool = Field(False)
     profile_prompt: str = Field(
         default_factory=lambda: load_pipeline_prompt_template(
             "prompts/refinement.md", "Extract Facts"
@@ -226,8 +216,6 @@ class TextProcessorSettings(BaseModel):
     @model_validator(mode="after")
     def validate_prompt_contracts(self):
         contracts = (
-            ("ner_prompt", self.ner_prompt, {"user_name"}),
-            ("connection_prompt", self.connection_prompt, {"user_name"}),
             ("profile_prompt", self.profile_prompt, {"user_name"}),
             ("merge_prompt", self.merge_prompt, set()),
             ("contradiction_prompt", self.contradiction_prompt, set()),

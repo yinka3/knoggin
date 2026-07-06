@@ -684,9 +684,16 @@ class EntityResolver:
                 neighbor_name = neighbor_profile.canonical_name
                 score = fuzz.WRatio(primary_name, neighbor_name)
                 is_substring = is_substring_match(primary_name, neighbor_name)
+                primary_tokens = set(primary_name.lower().split()) - generic_tokens
+                neighbor_tokens = set(neighbor_name.lower().split()) - generic_tokens
+                sparse_substring_name = is_substring and (
+                    len(primary_tokens) == 1 or len(neighbor_tokens) == 1
+                )
 
                 passes_threshold = (
-                    is_substring and score >= self.fuzzy_substring_threshold
+                    is_substring
+                    and score >= self.fuzzy_substring_threshold
+                    and not sparse_substring_name
                 ) or score >= self.fuzzy_non_substring_threshold
 
                 if not passes_threshold:
@@ -716,10 +723,7 @@ class EntityResolver:
                             continue
                     continue
 
-                tokens_i = set(primary_name.lower().split()) - generic_tokens
-                tokens_j = set(neighbor_name.lower().split()) - generic_tokens
-
-                if not (tokens_i & tokens_j):
+                if not (primary_tokens & neighbor_tokens):
                     continue
 
                 if (

@@ -509,8 +509,7 @@ class ProjectManager:
                 get_profile=entities.get_profile,
                 gliner=self.resources.gliner,
                 spacy=self.resources.spacy,
-                gliner_threshold=nlp_cfg.gliner_threshold,
-                vp01_min_confidence=nlp_cfg.vp01_min_confidence,
+                settings=nlp_cfg,
             ),
         )
 

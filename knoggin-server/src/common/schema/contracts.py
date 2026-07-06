@@ -62,21 +62,6 @@ class MergeJudgment(BaseModel):
     )
 
 
-class RelevanceResult(BaseModel):
-    """Structured response for a single relevance check."""
-
-    index: int = Field(..., description="The 1-based index from the input list")
-    is_relevant: bool = Field(
-        ..., description="Whether the message relates to the entity's facts"
-    )
-
-
-class BulkRelevanceResult(BaseModel):
-    """Collection of relevance results."""
-
-    judgments: List[RelevanceResult] = Field(default_factory=list)
-
-
 class ContradictionJudgment(BaseModel):
     """Result for a single contradiction check."""
 
@@ -493,7 +478,6 @@ class CandidateSuggestion:
     candidate_id: int
     candidate_name: str
     base_score: float
-    support_score: float
     reasons: List[str] = field(default_factory=list)
     created_entity_id: Optional[int] = None
 
@@ -510,7 +494,6 @@ class CandidateSuggestion:
             candidate_id=int(data.get("candidate_id", 0)),
             candidate_name=str(data.get("candidate_name") or ""),
             base_score=float(data.get("base_score") or 0.0),
-            support_score=float(data.get("support_score") or 0.0),
             reasons=list(data.get("reasons") or []),
             created_entity_id=(
                 int(data["created_entity_id"])

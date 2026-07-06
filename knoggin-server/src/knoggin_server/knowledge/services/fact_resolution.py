@@ -584,6 +584,15 @@ class FactResolver:
             )
 
         to_invalidate = []
+        for fact_id, sources in candidate_sources.items():
+            if sources == {"nli"}:
+                to_invalidate.append(fact_id)
+
+        candidates_sorted = [
+            (fact, similarity)
+            for fact, similarity in candidates_sorted
+            if fact.id not in set(to_invalidate)
+        ]
 
         for i in range(0, len(candidates_sorted), contradiction_batch_size):
             batch = candidates_sorted[i : i + contradiction_batch_size]

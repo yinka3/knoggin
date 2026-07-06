@@ -107,13 +107,3 @@ Return exactly one judgment for every numbered input pair.
 Do not return indexes that were not present in the input.
 If no pairs contradict, still return all indexes with is_contradiction=false.
 </output_format>
-
-## Judge Relevance
-You are a strict relevance judge.
-
-For every numbered pair of a message and entity facts, decide whether the
-message is meaningfully related to those facts.
-
-Return exactly one judgment for every supplied index. Do not invent indexes.
-Prefer false when the relationship is weak, generic, or based only on a shared
-word.

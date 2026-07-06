@@ -10,14 +10,13 @@ from loguru import logger
 from common.schema.settings import TopicSchema
 from common.utils.json_utils import safe_json_loads
 
-
 _TOPICS_SEED_FILE = (
     Path(__file__).parent.parent / "templates" / "topics.yaml"
 )
 _TOPIC_NAME = re.compile(r"^[A-Z][A-Za-z0-9 _-]{1,39}$")
 _LABEL = re.compile(r"^[a-z][a-z0-9 _-]{0,29}$")
 _ALIAS = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,39}$")
-PROTECTED_TOPICS = frozenset({"General", "Identity"})
+PROTECTED_TOPICS = frozenset({"Identity"})
 MAX_NEW_TOPICS_PER_UPDATE = 3
 MAX_LABELS_PER_TOPIC = 20
 MAX_ALIASES_PER_TOPIC = 20
@@ -36,8 +35,7 @@ def load_topic_seed() -> Dict[str, TopicSchema]:
         raise ValueError(
             f"topics.yaml is missing protected topics: {sorted(missing)}"
         )
-    for name in PROTECTED_TOPICS:
-        config[name].active = True
+    config["Identity"].active = True
     return config
 
 
@@ -336,7 +334,7 @@ class TopicConfig:
         canonical = self.alias_lookup.get(topic.lower())
         if canonical:
             return canonical
-        return "General" if self.is_active("General") else None
+        return None
 
     def get_labels_for_topic(self, topic: str) -> List[str]:
         config = self._config.get(topic)

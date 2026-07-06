@@ -346,6 +346,11 @@ class ProfileRefinementJob(BaseJob):
 
                     if updates:
                         await self._write_updates(updates, ctx.project_id)
+                        if clear_ids:
+                            await self.redis.sadd(
+                                RedisKeys.merge_queue(ctx.user_name, ctx.project_id),
+                                *[str(entity_id) for entity_id in clear_ids],
+                            )
                         await emit(
                             ctx.project_id,
                             "job",

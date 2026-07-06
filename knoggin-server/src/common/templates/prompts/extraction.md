@@ -11,7 +11,7 @@ You receive upstream results from:
 
 <valid_topics>
 Use ONLY topic names from the Label Schema provided in the input.
-Do NOT invent topic names. When uncertain, use "General".
+Do NOT invent topic names. If no provided topic fits, omit the mention.
 </valid_topics>
 
 <schema_contract>
@@ -67,7 +67,7 @@ Output: {
 Return your response as a JSON object matching the requested schema.
 Use top-level key "mentions". Every mention MUST include msg_id, name, type, topic, and confidence.
 msg_id MUST be one of the message IDs shown as [MSG <id>] in the input.
-topic MUST exactly match a topic name from the Label Schema or be "General".
+topic MUST exactly match a topic name from the Label Schema.
 Include only entities that qualify based on the tasks and ubiquity filters.
 Confidence scores: 0.9+ for unambiguous matches, 0.8-0.9 for likely correct ones.
 If confidence would be below 0.8, omit the mention.

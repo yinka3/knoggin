@@ -4,13 +4,12 @@ import pytest
 
 from common.exceptions import LLMProviderError
 from common.schema.contracts import (
-    BulkRelevanceResult,
     ConnectionsResult,
     NERResult,
-    RelevanceResult,
     UserConnectionRecord,
 )
 from common.schema.primitives import ConnectionRecord, EntityRecord
+from common.schema.settings import IngestionSettings, TextProcessorSettings
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.batch_consumer import IngestionWorker
 from knoggin_server.ingestion.services.pipeline_service import IngestionPipeline
@@ -139,7 +138,6 @@ class RoutedLLM:
         *,
         ner_result=None,
         connections_result=None,
-        relevance_result=None,
         raise_for=None,
     ):
         self.ner_result = ner_result if ner_result is not None else NERResult()
@@ -147,13 +145,6 @@ class RoutedLLM:
             connections_result
             if connections_result is not None
             else ConnectionsResult()
-        )
-        self.relevance_result = (
-            relevance_result
-            if relevance_result is not None
-            else BulkRelevanceResult(
-                judgments=[RelevanceResult(index=1, is_relevant=True)]
-            )
         )
         self.raise_for = set(raise_for or [])
         self.calls = []
@@ -167,8 +158,6 @@ class RoutedLLM:
             return self.ner_result
         if response_model is ConnectionsResult:
             return self.connections_result
-        if response_model is BulkRelevanceResult:
-            return self.relevance_result
         raise AssertionError(f"Unexpected response model: {response_model}")
 
 
@@ -255,6 +244,7 @@ async def make_harness(
     connections_result=None,
     raise_for_llm=None,
     write_response=(True, None),
+    llm_ner=False,
 ):
     message = message or BASE_MESSAGE
     redis = FakeRedis()
@@ -280,6 +270,7 @@ async def make_harness(
         get_profile=entities.get_profile,
         gliner=object(),
         spacy=FakeNLP(),
+        settings=TextProcessorSettings(llm_ner=llm_ner),
     )
     text_processor._build_phrase_matcher = lambda: (
         FakeMatcher(known_matches or {}),
@@ -320,8 +311,7 @@ async def make_harness(
         redis=redis,
         get_session_context=empty_context,
         write_to_graph=write_to_graph,
-        batch_size=8,
-        checkpoint_interval=4,
+        settings=IngestionSettings(checkpoint_interval=4),
     )
     return consumer, redis, batch_processor, knowledge_store, write_to_graph, entities
 
@@ -340,6 +330,7 @@ async def test_ingestion_subsystem_happy_path_drains_buffer_to_graph_write():
             },
             ner_result=ner_result,
             connections_result=make_connections(),
+            llm_ner=True,
         )
     )
     await seed_entity(entities, 102, "Robert Chen", aliases=["Bob"])
@@ -358,11 +349,11 @@ async def test_ingestion_subsystem_happy_path_drains_buffer_to_graph_write():
     assert result.scope.project_id == "project-1"
     assert result.trace.message_ids == [1]
     assert result.trace.llm_mentions_accepted == 1
-    assert set(result.entity_ids) == {1001, 102, 1002, 1003}
-    assert result.new_entity_ids == {1001, 1002, 1003}
+    assert set(result.entity_ids) == {1001, 102, 1002}
+    assert result.new_entity_ids == {1001, 1002}
     assert result.relationship_observations[0].message_id == 1
     assert result.relationship_observations[0].entity_pairs[0].msg_id == 1
-    assert result.user_relationship_observations[0].message_id == 1
+    assert result.user_relationship_observations == []
 
 
 @pytest.mark.ingestion
@@ -379,7 +370,10 @@ async def test_ingestion_subsystem_alias_resolution_survives_connection_validati
     await consumer._drain_buffer(flush_partial=True)
 
     result = write_to_graph.calls[0]
-    assert result.relationship_observations[0].entity_pairs[0].entity_b == "Bob"
+    assert (
+        result.relationship_observations[0].entity_pairs[0].entity_b
+        == "Robert Chen"
+    )
     assert not any(issue.code == "invalid_entity_name" for issue in result.issues)
 
 
@@ -418,7 +412,6 @@ async def test_ingestion_subsystem_connection_fallback_succeeds_without_dlq():
     assert result.success is True
     assert result.relationship_observations == []
     assert result.trace.fallbacks == [
-        {"stage": "ner", "fallback": "known_gliner_only"},
         {"stage": "connections", "fallback": "empty_connections"},
     ]
 
@@ -448,7 +441,9 @@ async def test_ingestion_subsystem_graph_write_failure_dlqs_complete_batch_resul
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_ingestion_subsystem_processing_failure_goes_to_processing_dlq():
-    consumer, redis, processor, knowledge_store, write_to_graph, _ = await make_harness()
+    consumer, redis, processor, knowledge_store, write_to_graph, _ = (
+        await make_harness()
+    )
 
     async def failing_extract_mentions(*args, **kwargs):
         raise RuntimeError("extract boom")

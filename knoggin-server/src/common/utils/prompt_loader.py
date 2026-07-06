@@ -41,10 +41,6 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "prompts/refinement.md",
         "Judge Contradiction",
     ),
-    "judge_relevance": PromptDefinition(
-        "prompts/refinement.md",
-        "Judge Relevance",
-    ),
     "judge_merge": PromptDefinition(
         "prompts/merge.md",
         "Judge Merge",
@@ -99,7 +95,9 @@ def _parse_markdown_sections(file_name: str) -> Dict[str, str]:
 
             current_section = match.group(1).strip()
             if not current_section:
-                raise ValueError(f"Prompt file contains an empty section name: {file_name}")
+                raise ValueError(
+                    f"Prompt file contains an empty section name: {file_name}"
+                )
             if current_section in sections:
                 raise ValueError(
                     f"Duplicate prompt section '{current_section}' in {file_name}"

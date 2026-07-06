@@ -1,5 +1,5 @@
 General:
-  active: true
+  active: false
   hot: false
   labels: []
   hierarchy: {}

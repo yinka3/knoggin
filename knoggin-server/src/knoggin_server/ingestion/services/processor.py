@@ -4,7 +4,6 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 import spacy
 from gliner import GLiNER
-from loguru import logger
 from spacy.matcher import PhraseMatcher
 
 from common.conf.topics_config import TopicConfig
@@ -20,14 +19,23 @@ from common.utils.core_utils import (
 )
 from common.utils.events import emit
 from infrastructure.llm_client import LLMService
-from knoggin_server.ingestion.prompts import (
-    ner_reasoning_prompt,
-    render_configured_prompt,
-)
+from knoggin_server.ingestion.prompts import ner_prompt
 from knoggin_server.knowledge.entity.profile import EntityProfile
 
 
 class TextProcessor:
+    """
+    Extracts typed entity mentions from message batches before resolution.
+
+    TextProcessor combines deterministic known-alias matching, GLiNER label-based
+    extraction, and optional VP-01 LLM extraction. It is responsible for producing
+    candidate mentions in the shape `(msg_id, name, type, topic)`, while filtering
+    invalid, duplicate, inactive-topic, ambiguous, and low-confidence mentions.
+
+    This class does not create or resolve graph entities. Its job is to identify
+    mention candidates with enough structured context for IngestionPipeline to
+    decide whether to reuse an existing entity or create a new one.
+    """
     def __init__(
         self,
         llm: LLMService,
@@ -37,9 +45,7 @@ class TextProcessor:
         get_profile: Callable[[int], Awaitable[Optional[EntityProfile]]],
         gliner: GLiNER,
         spacy: spacy.Language,
-        gliner_threshold: float = 0.85,
-        vp01_min_confidence: float = 0.8,
-        ner_prompt: str = None,
+        settings: TextProcessorSettings,
     ):
         self.llm_client = llm
         self.topic_config = topic_config
@@ -49,29 +55,18 @@ class TextProcessor:
         self._label_to_topics = self._build_label_to_topics()
         self._nlp = spacy
         self._gliner = gliner
-        self.gliner_threshold = gliner_threshold
-        self.vp01_min_confidence = vp01_min_confidence
-        self.ner_prompt = ner_prompt
-        self.llm_ner = True
         self._spacy_lock = threading.Lock()
         self._phrase_matcher_cache_version: Optional[int] = None
         self._phrase_matcher_cache: Optional[
             Tuple[PhraseMatcher, Dict[str, int]]
         ] = None
+        self.update_settings(settings)
 
     def update_settings(self, config: TextProcessorSettings):
         """Update settings dynamically while running."""
         self.gliner_threshold = config.gliner_threshold
         self.vp01_min_confidence = config.vp01_min_confidence
-        self.ner_prompt = config.ner_prompt
         self.llm_ner = config.llm_ner
-        logger.info(f"TextProcessor: llm_ner={self.llm_ner}")
-
-        logger.info(
-            "TextProcessor updated: "
-            f"gliner={self.gliner_threshold}, "
-            f"vp01_conf={self.vp01_min_confidence}"
-        )
 
     def _build_label_to_topics(self) -> Dict[str, List[str]]:
         """Invert topic_config: label -> [topics that include it]"""
@@ -86,7 +81,6 @@ class TextProcessor:
                     label_to_topics[label_lower] = []
                 label_to_topics[label_lower].append(topic)
 
-        logger.debug(f"Built label to topics map: {label_to_topics}")
         return label_to_topics
 
     def _build_phrase_matcher(self) -> Tuple[PhraseMatcher, Dict[str, int]]:
@@ -98,7 +92,11 @@ class TextProcessor:
         ):
             return self._phrase_matcher_cache
 
-        aliases = self.get_known_aliases()
+        aliases = {
+            alias.strip().casefold(): entity_id
+            for alias, entity_id in self.get_known_aliases().items()
+            if alias and alias.strip()
+        }
         matcher = PhraseMatcher(self._nlp.vocab, attr="LOWER")
 
         if aliases:
@@ -123,12 +121,8 @@ class TextProcessor:
             span = e["text"]
             if not span:
                 continue
-            score = e.get("score", 0)
-
-            logger.debug(f"GLiNER: '{span}' | label={e['label']} | score={score:.3f}")
             words = span.split()
             if span.lower() in PRONOUNS or (words and words[0].lower() in PRONOUNS):
-                logger.debug("  -> Filtered (pronoun)")
                 continue
 
             # Trust specific schema labels even for common dictionary words.
@@ -152,7 +146,6 @@ class TextProcessor:
                 continue
 
             if is_generic_phrase(span):
-                logger.debug(f"{span}  -> Filtered (generic word)")
                 continue
 
             filtered.append(e)
@@ -165,11 +158,9 @@ class TextProcessor:
         Returns: (topic or None, is_ambiguous)
         """
         if not label:
-            if self.topic_config.is_active("General"):
-                return "General", False
             return None, False
 
-        label_lower = label.lower()
+        label_lower = label.casefold()
         topics = self._label_to_topics.get(label_lower, [])
 
         if len(topics) == 1:
@@ -177,8 +168,6 @@ class TextProcessor:
         elif len(topics) > 1:
             return None, True
         else:
-            if self.topic_config.is_active("General"):
-                return "General", False
             return None, False
 
     async def extract_mentions(
@@ -229,7 +218,7 @@ class TextProcessor:
                     doc = self._nlp(msg["message"])
                     for _, start, end in matcher(doc):
                         span_text = doc[start:end].text
-                        eid = aliases.get(span_text.lower())
+                        eid = aliases.get(span_text.strip().casefold())
                         if eid:
                             k_ents.append((span_text, eid))
                             k_ents_msgs.append((msg["id"], span_text, eid))
@@ -273,14 +262,25 @@ class TextProcessor:
             tracked_known_matches.add(match_key)
 
             profile = await self.get_profile(eid)
+            covered_texts[msg_id].add(span_text.casefold())
 
-            covered_texts[msg_id].add(span_text.lower())
+            if profile is None:
+                record_issue(
+                    code="known_alias_profile_missing",
+                    message=(
+                        f"Known alias '{span_text}' resolved to missing entity {eid}"
+                    ),
+                    item_ref=span_text,
+                    metadata={"entity_id": eid, "msg_id": msg_id},
+                )
+                continue
+
             resolved.append(
                 (
                     msg_id,
                     span_text,
-                    profile.entity_type if profile else "unknown",
-                    profile.topic if profile else "General",
+                    profile.entity_type,
+                    profile.topic,
                 )
             )
 
@@ -291,22 +291,24 @@ class TextProcessor:
             if is_covered(span_text, covered_texts[msg_id]):
                 continue
 
-            if not validate_entity(
-                span_text, "General", self.topic_config, label=label
-            ):
-                logger.debug(f"Filtered invalid GLiNER entity: '{span_text}'")
-                gliner_filtered.add(span_text.lower())
+            topic, is_ambiguous = self._assign_topic(label)
+            if topic is None and not is_ambiguous:
+                gliner_filtered.add(span_text.casefold())
                 continue
 
-            covered_texts[msg_id].add(span_text.lower())
-            gliner_accepted_count += 1
-
-            topic, is_ambiguous = self._assign_topic(label)
+            if not validate_entity(
+                span_text, topic or "", self.topic_config, label=label
+            ):
+                gliner_filtered.add(span_text.casefold())
+                continue
 
             if is_ambiguous:
-                topics = self._label_to_topics.get(label.lower(), [])
+                covered_texts[msg_id].add(span_text.casefold())
+                topics = self._label_to_topics.get(label.casefold(), [])
                 ambiguous.append((msg_id, span_text, label, topics))
             else:
+                covered_texts[msg_id].add(span_text.casefold())
+                gliner_accepted_count += 1
                 resolved.append((msg_id, span_text, label, topic))
 
         if trace is not None:
@@ -323,13 +325,6 @@ class TextProcessor:
         output: List[Tuple[int, str, str, str]] = list(resolved)
 
         if not self.llm_ner:
-            if trace is not None:
-                trace.fallbacks.append({"stage": "ner", "fallback": "llm_disabled"})
-            logger.info(
-                f"Extracted {len(output)} mentions: {len(known_ents)} known, "
-                f"{len(gliner_ents) - len(gliner_filtered)} gliner "
-                "(LLM NER disabled)"
-            )
             await emit(
                 session_id,
                 "pipeline",
@@ -337,7 +332,7 @@ class TextProcessor:
                 {
                     "total": len(output),
                     "known": len(known_ents),
-                    "gliner": len(gliner_ents) - len(gliner_filtered),
+                    "gliner": gliner_accepted_count,
                     "vp01": 0,
                 },
             )
@@ -352,15 +347,7 @@ class TextProcessor:
             self.topic_config.label_block,
         )
 
-        if self.ner_prompt:
-            system_prompt = render_configured_prompt(
-                self.ner_prompt,
-                prompt_name="configured extract_entities",
-                required={"user_name"},
-                user_name=user_name,
-            )
-        else:
-            system_prompt = ner_reasoning_prompt(user_name)
+        system_prompt = ner_prompt(user_name)
 
         await emit(
             session_id,
@@ -378,13 +365,6 @@ class TextProcessor:
                 temperature=0.0,
             )
         except (ConfigurationError, LLMError) as e:
-            logger.warning(
-                f"VP-01 extraction failed, using deterministic mentions only: {e}"
-            )
-            if trace is not None:
-                trace.fallbacks.append(
-                    {"stage": "ner", "fallback": "known_gliner_only"}
-                )
             record_issue(
                 code="llm_extraction_failed",
                 message=f"VP-01 extraction failed: {e}",
@@ -399,10 +379,6 @@ class TextProcessor:
                 trace.llm_mentions_seen = len(ner_result.mentions)
             for entity in ner_result.mentions:
                 if entity.msg_id not in valid_msg_ids:
-                    logger.warning(
-                        f"VP-01 returned invalid msg_id {entity.msg_id}, "
-                        f"skipping entity '{entity.name}'"
-                    )
                     if trace is not None:
                         trace.llm_mentions_rejected += 1
                     record_issue(
@@ -436,9 +412,6 @@ class TextProcessor:
                     entity.name, entity.topic, self.topic_config, label=entity.type
                 ):
                     if is_covered(entity.name, covered_texts.get(entity.msg_id, set())):
-                        logger.debug(
-                            f"VP-01 entity '{entity.name}' filtered (already covered)"
-                        )
                         if trace is not None:
                             trace.llm_mentions_rejected += 1
                         record_issue(
@@ -451,10 +424,6 @@ class TextProcessor:
                             metadata={"msg_id": entity.msg_id},
                         )
                         continue
-                    if entity.name.lower() in gliner_filtered:
-                        logger.info(
-                            f"VP-01 recovered GLiNER-filtered entity: '{entity.name}'"
-                        )
                     output.append(
                         (entity.msg_id, entity.name, entity.type, entity.topic)
                     )
@@ -462,7 +431,6 @@ class TextProcessor:
                     if trace is not None:
                         trace.llm_mentions_accepted += 1
                 else:
-                    logger.debug(f"Filtered invalid VP-01 entity: '{entity.name}'")
                     if trace is not None:
                         trace.llm_mentions_rejected += 1
                     record_issue(
@@ -475,44 +443,6 @@ class TextProcessor:
                             "topic": entity.topic,
                         },
                     )
-        else:
-            logger.warning(
-                "VP-01 extraction returned no valid entities; "
-                "using known/GLiNER mentions"
-            )
-            if trace is not None and not any(
-                fb.get("stage") == "ner"
-                and fb.get("fallback") == "known_gliner_only"
-                for fb in trace.fallbacks
-            ):
-                trace.fallbacks.append(
-                    {"stage": "ner", "fallback": "known_gliner_only"}
-                )
-            await emit(
-                session_id,
-                "pipeline",
-                "llm_fallback",
-                {"stage": "ner", "fallback": "known_gliner_only"},
-                verbose_only=True,
-            )
-
-        if (
-            ner_result
-            and trace is not None
-            and vp01_count == 0
-            and not any(
-                fb.get("stage") == "ner"
-                and fb.get("fallback") == "known_gliner_only"
-                for fb in trace.fallbacks
-            )
-        ):
-            trace.fallbacks.append({"stage": "ner", "fallback": "known_gliner_only"})
-
-        logger.info(
-            f"Extracted {len(output)} mentions: "
-            f"{len(known_ents)} known, {len(gliner_ents)} gliner, "
-            f"{vp01_count} from VP-01"
-        )
         await emit(
             session_id,
             "pipeline",
@@ -520,7 +450,7 @@ class TextProcessor:
             {
                 "total": len(output),
                 "known": len(known_ents),
-                "gliner": len(gliner_ents) - len(gliner_filtered),
+                "gliner": gliner_accepted_count,
                 "vp01": vp01_count,
             },
         )
@@ -530,7 +460,3 @@ class TextProcessor:
     def refresh_topic_mappings(self):
         """Rebuild label-to-topics map after TopicConfig change."""
         self._label_to_topics = self._build_label_to_topics()
-        logger.info(
-            "TextProcessor label mappings refreshed: "
-            f"{len(self._label_to_topics)} labels"
-        )

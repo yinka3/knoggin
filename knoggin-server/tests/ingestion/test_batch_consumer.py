@@ -4,6 +4,7 @@ import json
 import pytest
 
 from common.schema.contracts import BatchResult, CandidateSuggestion
+from common.schema.settings import IngestionSettings
 from infrastructure.redis_client import RedisKeys
 from knoggin_server.ingestion.services.batch_consumer import IngestionWorker
 from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
@@ -128,7 +129,6 @@ def suggestion_result(*, graph_writes=False):
                 candidate_id=501,
                 candidate_name="Notion",
                 base_score=0.82,
-                support_score=0.87,
                 reasons=["candidate_rejected"],
                 created_entity_id=1001,
             )
@@ -157,6 +157,12 @@ def make_consumer(
     redis = redis or FakeRedis()
     processor = processor or FakeProcessor()
     knowledge_store = knowledge_store or FakeKnowledgeStore()
+    settings = IngestionSettings(
+        batch_size=batch_size,
+        checkpoint_interval=checkpoint_interval,
+        batch_timeout=batch_timeout,
+        session_window=session_window,
+    )
     consumer = IngestionWorker(
         user_name="ada",
         session_id="session-1",
@@ -165,10 +171,7 @@ def make_consumer(
         redis=redis,
         get_session_context=get_session_context or empty_context,
         write_to_graph=write_to_graph or successful_write_to_graph,
-        batch_size=batch_size,
-        checkpoint_interval=checkpoint_interval,
-        batch_timeout=batch_timeout,
-        session_window=session_window,
+        settings=settings,
     )
     return consumer, redis, processor, knowledge_store
 
@@ -496,8 +499,8 @@ async def test_batch_consumer_graph_write_timeout_goes_to_graph_write_dlq():
     consumer, redis, _, _ = make_consumer(
         processor=processor,
         write_to_graph=write_to_graph,
-        batch_timeout=0.001,
     )
+    consumer.batch_timeout = 0.001
     await push_messages(redis, consumer._buffer_key, make_message(1))
 
     await consumer._drain_buffer(flush_partial=True)

@@ -24,11 +24,9 @@ def make_suggestion(*, created_entity_id=1001):
         candidate_id=501,
         candidate_name="Notion",
         base_score=0.82,
-        support_score=0.87,
         reasons=[
             "candidate_rejected",
             "below_resolution_threshold",
-            "advisory_context_support",
         ],
         created_entity_id=created_entity_id,
     )
@@ -60,15 +58,14 @@ async def test_candidate_suggestion_writer_saves_suggestion_with_scope_and_reaso
     assert call[0] == "execute_command"
     assert "INSERT INTO ingestion_candidate_suggestions" in call[1]
     assert "ON CONFLICT (suggestion_id) DO UPDATE" in call[1]
+    assert "support_score" not in call[1]
     assert call[2][1:4] == ("ada", "project-1", "session-1")
     assert call[2][4] == 7
     assert call[2][5] == "workspace notes tool"
     assert call[2][8] == 501
-    assert call[2][12] == (
-        '["candidate_rejected", "below_resolution_threshold", '
-        '"advisory_context_support"]'
-    )
-    assert call[2][13] == 1001
+    assert call[2][10] == 0.82
+    assert call[2][11] == '["candidate_rejected", "below_resolution_threshold"]'
+    assert call[2][12] == 1001
 
 
 @pytest.mark.storage
@@ -86,4 +83,4 @@ async def test_candidate_suggestion_writer_uses_deterministic_suggestion_id():
     first_id = client.calls[0][2][0]
     second_id = client.calls[1][2][0]
     assert first_id == second_id
-    assert client.calls[1][2][13] == 1002
+    assert client.calls[1][2][12] == 1002
