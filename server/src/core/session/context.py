@@ -35,7 +35,7 @@ from core.knowledge.db.write_graph_db import (
     write_batch_callback,
     write_batch_to_graph,
 )
-from core.knowledge.services.document_service import DocumentService
+from core.knowledge.documents import DocumentService
 from core.project.state import ProjectState
 
 SESSION_KEY_TTL = SESSION_RUNTIME_TTL_SECONDS

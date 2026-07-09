@@ -12,7 +12,7 @@ from common.schema.document import FolderScanSettings, FolderUploadEntry
 from core.knowledge.services import (
     document_service as document_service_module,
 )
-from core.knowledge.services.document_service import DocumentService
+from core.knowledge.documents import DocumentService
 
 
 class MemoryPostgres:

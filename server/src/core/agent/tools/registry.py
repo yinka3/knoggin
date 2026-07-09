@@ -18,7 +18,7 @@ from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
 from core.agent.tools.topic_tools import TopicTools
 from core.knowledge.entity.resolver import EntityResolver
-from core.knowledge.services.document_service import DocumentService
+from core.knowledge.documents import DocumentService
 
 TOOL_DISPATCH = {
     "search_messages": ("search_messages", ["query", "limit"]),

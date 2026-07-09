@@ -3,7 +3,7 @@ import hashlib
 import pytest
 
 from common.schema.document import FolderScanSettings, FolderUploadEntry
-from core.knowledge.services.document_service import DocumentService
+from core.knowledge.documents import DocumentService
 
 
 class ForbiddenDependency:

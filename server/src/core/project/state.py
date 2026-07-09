@@ -10,7 +10,7 @@ from infrastructure.job.scheduler import Scheduler
 from infrastructure.postgres_client import PostgresClient
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.resolver import EntityResolver
-from core.knowledge.services.document_service import DocumentService
+from core.knowledge.documents import DocumentService
 from core.knowledge.services.embedding_service import EmbeddingService
 
 
