@@ -9,8 +9,9 @@ from uuid import UUID
 import pytest
 
 from common.schema.document import FolderScanSettings, FolderUploadEntry
-from core.knowledge.services import (
-    document_service as document_service_module,
+from core.knowledge.documents import (
+    constants as constants_module,
+    storage as storage_module,
 )
 from core.knowledge.documents import DocumentService
 
@@ -706,7 +707,7 @@ async def test_add_document_rejects_invalid_content_scope_and_size(
             visibility_scope="session",
         )
 
-    monkeypatch.setattr(document_service_module, "MAX_DOCUMENT_SIZE", 3)
+    monkeypatch.setattr(constants_module, "MAX_DOCUMENT_SIZE", 3)
     with pytest.raises(ValueError, match="50 MB"):
         await service.add_document(content=b"four", original_name="notes.md")
 
@@ -871,7 +872,7 @@ async def test_read_document_validates_ranges_and_character_limit(
     with pytest.raises(ValueError, match="exceeds document length"):
         await service.read_document(document_id=uploaded["document_id"], start_line=3)
 
-    monkeypatch.setattr(document_service_module, "MAX_READ_CHARACTERS", 8)
+    monkeypatch.setattr(constants_module, "MAX_READ_CHARACTERS", 8)
     result = await service.read_document(document_id=uploaded["document_id"], end_line=1)
     assert result["content"] == "1: 01234"
     assert result["truncated"] is True
@@ -892,7 +893,7 @@ async def test_delete_document_permanently_removes_metadata_chunks_and_bytes(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module, "SentenceSplitter", OneChunkSplitter
+        storage_module, "SentenceSplitter", OneChunkSplitter
     )
     first = await service.add_document(
         content=b"same content",
@@ -1168,7 +1169,7 @@ async def test_index_document_uses_configured_sentence_splitter(monkeypatch, doc
             return [" alpha ", "", " beta gamma "]
 
     monkeypatch.setattr(
-        document_service_module, "SentenceSplitter", RecordingSplitter
+        storage_module, "SentenceSplitter", RecordingSplitter
     )
     uploaded = await service.add_document(
         content=b"alpha beta gamma",
@@ -1245,13 +1246,13 @@ async def test_index_document_extracts_supported_documents(
             SimpleNamespace(extract_text=lambda: "Second page"),
         ]
         monkeypatch.setattr(
-            document_service_module,
+            storage_module,
             "PdfReader",
             lambda path: SimpleNamespace(pages=pages),
         )
     else:
         monkeypatch.setattr(
-            document_service_module.docx2txt,
+            storage_module.docx2txt,
             "process",
             lambda path: "Document text",
         )
@@ -1273,7 +1274,7 @@ async def test_index_document_records_document_parser_errors(monkeypatch, docume
     def fail_pdf_parse(path):
         raise ValueError("damaged PDF")
 
-    monkeypatch.setattr(document_service_module, "PdfReader", fail_pdf_parse)
+    monkeypatch.setattr(storage_module, "PdfReader", fail_pdf_parse)
     uploaded = await service.add_document(
         content=b"not a valid PDF",
         original_name="notes.pdf",
@@ -1369,7 +1370,7 @@ async def test_index_transaction_rolls_back_partial_chunks_and_can_retry(
             return ["alpha", "beta"]
 
     monkeypatch.setattr(
-        document_service_module, "SentenceSplitter", TwoChunkSplitter
+        storage_module, "SentenceSplitter", TwoChunkSplitter
     )
     uploaded = await service.add_document(
         content=b"alpha beta",
@@ -1423,7 +1424,7 @@ async def test_accept_folder_indexes_selected_subset_atomically(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1552,7 +1553,7 @@ async def test_accept_folder_without_selection_accepts_all_eligible_documents(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1594,7 +1595,7 @@ async def test_repeated_folder_acceptance_creates_independent_batches(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1712,7 +1713,7 @@ async def test_accept_folder_rolls_back_rows_chunks_and_bytes(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1751,7 +1752,7 @@ async def test_accept_folder_commit_failure_removes_rows_and_moved_bytes(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1795,7 +1796,7 @@ async def test_folder_reads_enforce_visibility_and_build_tree(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
