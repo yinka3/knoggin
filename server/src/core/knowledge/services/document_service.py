@@ -3,17 +3,13 @@ import fnmatch
 import hashlib
 import json
 import os
-import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Dict, List, Optional
 
-import docx2txt
-from llama_index.core.node_parser import SentenceSplitter
 from loguru import logger
 from pathspec import GitIgnoreSpec
-from pypdf import PdfReader
 
 from common.schema.document import (
     FolderPreview,
@@ -43,6 +39,20 @@ from core.knowledge.documents.constants import (
     SENSITIVE_FILE_PATTERNS,
     VALID_VISIBILITY_SCOPES,
     VIDEO_EXTENSIONS,
+)
+
+from core.knowledge.documents.storage import (
+    extract_text,
+    iter_prepared_chunks,
+    looks_binary,
+    purge_quarantined_file,
+    quarantine_stored_file,
+    remove_stored_file,
+    remove_tree,
+    restore_quarantined_file,
+    split_text,
+    write_file_atomically,
+    write_prepared_chunks,
 )
 
 
@@ -426,7 +436,7 @@ class DocumentService:
                 continue
             if (
                 extension not in BINARY_TEXT_EXEMPT_EXTENSIONS
-                and cls._looks_binary(content)
+                and looks_binary(content)
             ):
                 exclude(path, content, "binary_file", "content_type", False)
                 continue
@@ -627,45 +637,6 @@ class DocumentService:
         if visibility_scope == "session" and not session_id:
             raise ValueError("session-visible documents require session_id")
 
-    @staticmethod
-    def _remove_tree(path: Path) -> None:
-        if path.exists():
-            shutil.rmtree(path)
-        try:
-            path.parent.rmdir()
-        except OSError:
-            pass
-
-    @staticmethod
-    def _write_prepared_chunks(
-        path: Path,
-        chunks: List[str],
-        embeddings: List[List[float]],
-    ) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("x", encoding="utf-8") as handle:
-            for chunk_index, (content, embedding) in enumerate(
-                zip(chunks, embeddings)
-            ):
-                handle.write(
-                    json.dumps(
-                        {
-                            "chunk_index": chunk_index,
-                            "content": content,
-                            "embedding": embedding,
-                        },
-                        separators=(",", ":"),
-                    )
-                    + "\n"
-                )
-
-    @staticmethod
-    def _iter_prepared_chunks(path: Path):
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    yield json.loads(line)
-
     def _resolve_document_storage_path(self, document_metadata: Dict) -> Path:
         expected_key = PurePosixPath(
             self.project_id,
@@ -675,47 +646,6 @@ class DocumentService:
         if document_metadata["storage_key"] != expected_key:
             raise ValueError("stored document has an invalid managed storage key")
         return self._resolve_storage_path(expected_key)
-
-    @staticmethod
-    def _write_file_atomically(target: Path, content: bytes) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            with temporary.open("xb") as file_handle:
-                file_handle.write(content)
-                file_handle.flush()
-                os.fsync(file_handle.fileno())
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    @staticmethod
-    def _remove_stored_file(target: Path) -> None:
-        target.unlink(missing_ok=True)
-        try:
-            target.parent.rmdir()
-        except OSError:
-            pass
-
-    @staticmethod
-    def _quarantine_stored_file(target: Path) -> Optional[Path]:
-        directory = target.parent
-        if not directory.exists():
-            return None
-        quarantine = directory.with_name(
-            f".{directory.name}.deleting-{uuid.uuid4().hex}"
-        )
-        os.replace(directory, quarantine)
-        return quarantine
-
-    @staticmethod
-    def _restore_quarantined_file(quarantine: Path, target: Path) -> None:
-        if quarantine.exists():
-            os.replace(quarantine, target.parent)
-
-    @staticmethod
-    def _purge_quarantined_file(quarantine: Path) -> None:
-        shutil.rmtree(quarantine)
 
     @staticmethod
     def _public_metadata(row: Dict) -> Dict:
@@ -788,52 +718,6 @@ class DocumentService:
             (folder_root_id, self.project_id, session_id),
         )
         return rows[0] if rows else None
-
-    @staticmethod
-    def _looks_binary(content: bytes) -> bool:
-        if b"\x00" in content:
-            return True
-        if not content:
-            return False
-        control_bytes = sum(
-            byte < 32 and byte not in (8, 9, 10, 12, 13) for byte in content
-        )
-        return control_bytes / len(content) > 0.30
-
-    @classmethod
-    def _extract_text(cls, stored_path: Path, extension: str) -> str:
-        if not stored_path.is_file():
-            raise ValueError("Managed document content is missing")
-
-        if extension == ".pdf":
-            reader = PdfReader(str(stored_path))
-            text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
-        elif extension == ".docx":
-            text = docx2txt.process(str(stored_path)) or ""
-        else:
-            content = stored_path.read_bytes()
-            if cls._looks_binary(content):
-                raise ValueError("Document appears to contain binary content")
-            try:
-                text = content.decode("utf-8-sig", errors="strict")
-            except UnicodeDecodeError as exc:
-                raise ValueError("Document is not valid UTF-8 text") from exc
-
-        if not text.strip():
-            raise ValueError("Document contains no extractable text")
-        return text
-
-    @staticmethod
-    def _split_text(text: str) -> List[str]:
-        splitter = SentenceSplitter(
-            chunk_size=CHUNK_SIZE,
-            chunk_overlap=CHUNK_OVERLAP,
-        )
-        chunks = [chunk.strip() for chunk in splitter.split_text(text)]
-        chunks = [chunk for chunk in chunks if chunk]
-        if not chunks:
-            raise ValueError("Document produced no non-empty chunks")
-        return chunks
 
     async def _get_visible_document(
         self,
@@ -976,7 +860,7 @@ class DocumentService:
         document_metadata = rows[0]
         stored_path = self._resolve_document_storage_path(document_metadata)
         text = await asyncio.to_thread(
-            self._extract_text,
+            extract_text,
             stored_path,
             document_metadata["extension"],
         )
@@ -1076,7 +960,7 @@ class DocumentService:
                             document_metadata
                         )
                         quarantine = await asyncio.to_thread(
-                            self._quarantine_stored_file,
+                            quarantine_stored_file,
                             stored_path,
                         )
                         await cur.execute(
@@ -1100,7 +984,7 @@ class DocumentService:
             if quarantine is not None and stored_path is not None:
                 try:
                     await asyncio.to_thread(
-                        self._restore_quarantined_file,
+                        restore_quarantined_file,
                         quarantine,
                         stored_path,
                     )
@@ -1115,7 +999,7 @@ class DocumentService:
         if quarantine is not None:
             try:
                 await asyncio.to_thread(
-                    self._purge_quarantined_file,
+                    purge_quarantined_file,
                     quarantine,
                 )
             except Exception as purge_error:
@@ -1403,17 +1287,17 @@ class DocumentService:
                 staged_content = staged_directory / "content"
                 prepared_chunks = prepared_root / f"{document_id}.jsonl"
                 await asyncio.to_thread(
-                    self._write_file_atomically,
+                    write_file_atomically,
                     staged_content,
                     content,
                 )
 
                 text = await asyncio.to_thread(
-                    self._extract_text,
+                    extract_text,
                     staged_content,
                     preview_entry.extension,
                 )
-                chunks = await asyncio.to_thread(self._split_text, text)
+                chunks = await asyncio.to_thread(split_text, text)
                 embeddings = await self._embedding.encode(chunks)
                 if len(embeddings) != len(chunks):
                     raise ValueError(
@@ -1428,7 +1312,7 @@ class DocumentService:
                         f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
                     )
                 await asyncio.to_thread(
-                    self._write_prepared_chunks,
+                    write_prepared_chunks,
                     prepared_chunks,
                     chunks,
                     embeddings,
@@ -1551,7 +1435,7 @@ class DocumentService:
                                     indexed_at,
                                 ),
                             )
-                            for chunk in self._iter_prepared_chunks(
+                            for chunk in iter_prepared_chunks(
                                 document["prepared_chunks"]
                             ):
                                 await cur.execute(
@@ -1590,13 +1474,13 @@ class DocumentService:
                             )
                             moved_directories.append(final_directory)
                         await asyncio.to_thread(
-                            self._remove_tree,
+                            remove_tree,
                             staging_root,
                         )
         except Exception:
             for directory in reversed(moved_directories):
                 try:
-                    await asyncio.to_thread(self._remove_tree, directory)
+                    await asyncio.to_thread(remove_tree, directory)
                 except Exception as cleanup_error:
                     logger.error(
                         "Failed to remove rolled-back folder document {}: {}",
@@ -1604,7 +1488,7 @@ class DocumentService:
                         cleanup_error,
                     )
             try:
-                await asyncio.to_thread(self._remove_tree, staging_root)
+                await asyncio.to_thread(remove_tree, staging_root)
             except Exception as cleanup_error:
                 logger.error(
                     "Failed to remove folder staging directory {}: {}",
@@ -1698,7 +1582,7 @@ class DocumentService:
         extension = Path(original_name).suffix.lower()
         created_at = get_now_iso()
 
-        await asyncio.to_thread(self._write_file_atomically, stored_path, content)
+        await asyncio.to_thread(write_file_atomically, stored_path, content)
         try:
             inserted = await self._postgres.execute(
                 """
@@ -1744,7 +1628,7 @@ class DocumentService:
                     "project document metadata insert did not create a row"
                 )
         except Exception:
-            await asyncio.to_thread(self._remove_stored_file, stored_path)
+            await asyncio.to_thread(remove_stored_file, stored_path)
             raise
 
         return {
@@ -1788,11 +1672,11 @@ class DocumentService:
                 document_metadata
             )
             text = await asyncio.to_thread(
-                self._extract_text,
+                extract_text,
                 stored_path,
                 document_metadata["extension"],
             )
-            chunks = await asyncio.to_thread(self._split_text, text)
+            chunks = await asyncio.to_thread(split_text, text)
             embeddings = await self._embedding.encode(chunks)
             if len(embeddings) != len(chunks):
                 raise ValueError("Embedding count does not match chunk count")
