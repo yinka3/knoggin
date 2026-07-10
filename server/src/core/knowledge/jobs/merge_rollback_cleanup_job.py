@@ -14,12 +14,10 @@ class MergeCleanupJob(BaseJob):
     def __init__(
         self,
         knowledge_store: KnowledgeStore,
-        retention_hours: float = 5.0,
-        fallback_interval_hours: float = 1.0,
+        settings: MergeRollbackSettings,
     ):
         self.knowledge_store = knowledge_store
-        self.retention_hours = retention_hours
-        self._fallback_interval_seconds = fallback_interval_hours * 3600
+        self.update_settings(settings)
 
     @property
     def name(self) -> str:

@@ -3,22 +3,30 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.schema.settings import CommunitySettings, DeveloperSettings, RootConfig
+from common.schema.settings import (
+    ArchivalSettings,
+    CleanerSettings,
+    CommunitySettings,
+    DeveloperSettings,
+    DLQSettings,
+    ProfileSettings,
+    RootConfig,
+)
 from common.utils.time_utils import (
     frozen_time,
     get_now,
     get_now_ms,
     get_now_unix,
 )
-from infrastructure.job.base import JobContext, JobResult
-from infrastructure.job.scheduler import Scheduler
-from infrastructure.redis_client import RedisKeys
 from core.community.community_job import AACJob
 from core.ingestion.jobs.archive_job import FactArchivalJob
 from core.ingestion.jobs.cleaner_job import EntityCleanupJob
 from core.ingestion.jobs.dlq_job import DLQReplayJob
 from core.ingestion.jobs.profile_job import ProfileRefinementJob
 from core.knowledge.entity.profile import EntityProfile
+from infrastructure.job.base import JobContext, JobResult
+from infrastructure.job.scheduler import Scheduler
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis, FakeResources
 
 FROZEN_AT = "2024-01-01T00:00:00+00:00"
@@ -151,7 +159,7 @@ async def test_dlq_job_exposes_cadence_and_leaves_clock_to_scheduler():
         processor=ProcessorWithKnowledgeStore(),
         write_to_graph=lambda result: (True, None),
         redis_client=redis,
-        interval=60,
+        settings=DLQSettings(interval_seconds=60),
     )
     ctx = job_context()
     assert job.cadence_seconds == 60
@@ -177,9 +185,11 @@ async def test_entity_cleanup_uses_frozen_cutoffs_without_owning_cadence():
         knowledge_store=knowledge_store,
         entities=entities,
         redis_client=redis,
-        interval_hours=1,
-        orphan_age_hours=2,
-        stale_junk_days=3,
+        settings=CleanerSettings(
+            interval_hours=1,
+            orphan_age_hours=2,
+            stale_junk_days=3,
+        ),
     )
     ctx = job_context()
     with frozen_time(FROZEN_AT):
@@ -207,7 +217,13 @@ async def test_entity_cleanup_user_missing_returns_success_without_clock_write()
     redis = FakeRedis()
     knowledge_store = CleanupKnowledgeStore()
     entities = CleanupEntities(user_id=None)
-    job = EntityCleanupJob("ada", knowledge_store, entities, redis)
+    job = EntityCleanupJob(
+        "ada",
+        knowledge_store,
+        entities,
+        redis,
+        settings=CleanerSettings(),
+    )
     ctx = job_context()
     with frozen_time(FROZEN_AT):
         result = await job.execute(ctx)
@@ -230,7 +246,13 @@ async def test_entity_cleanup_evicts_only_ids_confirmed_deleted():
         bulk_deleted_ids=[2, 4],
     )
     entities = CleanupEntities(user_id=1)
-    job = EntityCleanupJob("ada", knowledge_store, entities, redis)
+    job = EntityCleanupJob(
+        "ada",
+        knowledge_store,
+        entities,
+        redis,
+        settings=CleanerSettings(),
+    )
 
     result = await job.execute(job_context())
 
@@ -245,11 +267,9 @@ async def test_fact_archival_exposes_fallback_cadence_and_consumes_marker_on_suc
     redis = FakeRedis()
     knowledge_store = ArchivalKnowledgeStore(deleted_count=2)
     job = FactArchivalJob(
-        user_name="ada",
         knowledge_store=knowledge_store,
         redis_client=redis,
-        retention_days=14,
-        fallback_interval_hours=1,
+        settings=ArchivalSettings(retention_days=14, fallback_interval_hours=1),
     )
     ctx = job_context()
     profile_complete_key = RedisKeys.project_profile_complete("ada", "project-1")
@@ -278,7 +298,11 @@ async def test_fact_archival_exposes_fallback_cadence_and_consumes_marker_on_suc
 async def test_fact_archival_preserves_profile_marker_when_execution_fails():
     redis = FakeRedis()
     knowledge_store = ArchivalKnowledgeStore()
-    job = FactArchivalJob("ada", knowledge_store, redis)
+    job = FactArchivalJob(
+        knowledge_store,
+        redis,
+        settings=ArchivalSettings(),
+    )
     ctx = job_context()
     profile_complete_key = RedisKeys.project_profile_complete("ada", "project-1")
     await redis.set(profile_complete_key, "profile-run-1")
@@ -362,6 +386,7 @@ async def test_profile_refinement_targeted_recency_and_markers_use_frozen_unix(
         executor=None,
         embedding_service=object(),
         redis_client=redis,
+        settings=ProfileSettings(),
     )
     ctx = job_context()
     seen_entity_ids = []

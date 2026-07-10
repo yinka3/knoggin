@@ -4,12 +4,13 @@ import pytest
 
 from common.schema.contracts import EntityProfilesResult, FactResolutionSummary
 from common.schema.primitives import Fact, FactRecord, ProfileUpdate
+from common.schema.settings import ProfileSettings
 from common.scoping import IDENTITY_SCOPE
 from common.utils.time_utils import frozen_time
-from infrastructure.job.base import JobContext
-from infrastructure.redis_client import RedisKeys
 from core.ingestion.jobs.profile_job import ProfileRefinementJob
 from core.knowledge.entity.profile import EntityProfile
+from infrastructure.job.base import JobContext
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -172,7 +173,6 @@ def make_job(
     llm=None,
     msg_window=6,
     volume_threshold=3,
-    idle_threshold=30,
     profile_batch_size=2,
 ):
     return ProfileRefinementJob(
@@ -182,13 +182,13 @@ def make_job(
         executor=None,
         embedding_service=FakeEmbedding(),
         redis_client=redis or FakeRedis(),
-        msg_window=msg_window,
-        volume_threshold=volume_threshold,
-        idle_threshold=idle_threshold,
-        profile_batch_size=profile_batch_size,
-        contradiction_sim_low=0.25,
-        contradiction_batch_size=2,
-        contradiction_prompt="judge contradictions",
+        settings=ProfileSettings(
+            msg_window=msg_window,
+            volume_threshold=volume_threshold,
+            profile_batch_size=profile_batch_size,
+            contradiction_sim_low=0.25,
+            contradiction_batch_size=2,
+        ),
     )
 
 
@@ -203,28 +203,26 @@ def patch_profile_events(monkeypatch):
 
 
 @pytest.mark.no_network
-async def test_profile_refinement_should_run_uses_dirty_count_volume_and_idle(
+async def test_profile_refinement_should_run_uses_dirty_count_volume(
     monkeypatch,
 ):
     events = patch_profile_events(monkeypatch)
     redis = FakeRedis()
-    job = make_job(redis=redis, volume_threshold=3, idle_threshold=30)
+    job = make_job(redis=redis, volume_threshold=3)
     dirty_key = RedisKeys.dirty_entities("ada", "project-1")
 
     assert await job.should_run(job_context(idle_seconds=100)) is False
 
+    # The user marker is handled during a normal run; it does not bypass volume.
+    await redis.sadd(dirty_key, "1")
+    assert await job.should_run(job_context(idle_seconds=100)) is False
+
     await redis.sadd(dirty_key, "2", "3")
-    assert await job.should_run(job_context(idle_seconds=10)) is False
-
-    assert await job.should_run(job_context(idle_seconds=30)) is True
-
-    await redis.sadd(dirty_key, "4")
     assert await job.should_run(job_context(idle_seconds=0)) is True
 
     event_names = [args[2] for args, _ in events]
     assert event_names == [
         "profile_skipped",
-        "profile_trigger_idle",
         "profile_trigger_volume",
     ]
 
@@ -304,7 +302,7 @@ def test_source_session_by_msg_id_maps_only_user_messages_with_session_id():
 
 
 @pytest.mark.no_network
-async def test_execute_filters_dirty_ids_force_limit_clears_processed(
+async def test_execute_filters_dirty_ids_and_clears_processed(
     monkeypatch,
 ):
     events = patch_profile_events(monkeypatch)
@@ -312,7 +310,7 @@ async def test_execute_filters_dirty_ids_force_limit_clears_processed(
     dirty_key = RedisKeys.dirty_entities("ada", "project-1")
     await redis.sadd(dirty_key, "bad", "1", "2", "3", "4", "5", "6")
     await redis.set(RedisKeys.project_last_processed("ada", "project-1"), "12")
-    job = make_job(redis=redis, volume_threshold=2)
+    job = make_job(redis=redis, volume_threshold=6)
     seen_entity_ids = []
     written_updates = []
 
@@ -348,13 +346,13 @@ async def test_execute_filters_dirty_ids_force_limit_clears_processed(
     job._maybe_refine_user = maybe_refine_user
 
     with frozen_time("2026-02-03T04:05:06+00:00"):
-        result = await job.execute(job_context(), force=True)
+        result = await job.execute(job_context())
 
     assert result.success is True
     assert result.summary == "Refined 1 profiles"
     assert seen_entity_ids == [2, 3, 4, 5, 6]
     assert written_updates[1] == "project-1"
-    assert await redis.smembers(dirty_key) == {"1", "6", "bad"}
+    assert await redis.smembers(dirty_key) == {"6", "bad"}
     assert [event[0][2] for event in events] == [
         "profiles_refined",
         "dirty_entities_cleared",
@@ -368,14 +366,46 @@ async def test_execute_filters_dirty_ids_force_limit_clears_processed(
             "user_name": "ada",
             "project_id": "project-1",
             "dirty_key": dirty_key,
-            "entity_ids": ["2", "3", "4", "5"],
-            "cleared_count": 4,
+            "entity_ids": ["2", "3", "4", "5", "1"],
+            "cleared_count": 5,
             "reason": "profile_processed",
         },
     )
     assert await redis.get(
         RedisKeys.project_profile_complete("ada", "project-1")
     ) == "1770091506.0"
+
+
+@pytest.mark.no_network
+async def test_execute_user_dirty_marker_can_trigger_user_refinement(monkeypatch):
+    events = patch_profile_events(monkeypatch)
+    redis = FakeRedis()
+    dirty_key = RedisKeys.dirty_entities("ada", "project-1")
+    await redis.sadd(dirty_key, "1")
+    await redis.set(RedisKeys.project_last_processed("ada", "project-1"), "12")
+    job = make_job(redis=redis)
+
+    async def fail_get_conversation_context(*_args, **_kwargs):
+        raise AssertionError("entity conversation should not be fetched")
+
+    async def fail_run_updates(*_args, **_kwargs):
+        raise AssertionError("entity updates should not run")
+
+    async def maybe_refine_user(ctx, current_msg_id):
+        assert current_msg_id == 12
+        return True
+
+    job._get_conversation_context = fail_get_conversation_context
+    job._run_updates = fail_run_updates
+    job._maybe_refine_user = maybe_refine_user
+
+    result = await job.execute(job_context())
+
+    assert result.success is True
+    assert result.summary == "refined ada"
+    assert await redis.smembers(dirty_key) == set()
+    assert [event[0][2] for event in events] == ["dirty_entities_cleared"]
+    assert events[0][0][3]["entity_ids"] == ["1"]
 
 
 @pytest.mark.no_network
@@ -390,12 +420,20 @@ async def test_execute_empty_conversation_returns_failure_without_profile_comple
     async def get_conversation_context(*_args, **_kwargs):
         return []
 
+    user_refine_calls = []
+
+    async def maybe_refine_user(ctx, current_msg_id):
+        user_refine_calls.append((ctx, current_msg_id))
+        return False
+
     job._get_conversation_context = get_conversation_context
+    job._maybe_refine_user = maybe_refine_user
 
     result = await job.execute(job_context())
 
     assert result.success is False
     assert result.summary == "No context found"
+    assert len(user_refine_calls) == 1
     assert await redis.get(
         RedisKeys.project_profile_complete("ada", "project-1")
     ) is None
@@ -535,7 +573,7 @@ async def test_process_single_batch_checkpoints_wrong_or_empty_llm_profiles():
 
 
 @pytest.mark.no_network
-async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
+async def test_process_single_batch_applies_facts_without_redirtying(
     monkeypatch,
 ):
     redis = FakeRedis()
@@ -606,7 +644,7 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
             "project_id": "project-1",
         }
     ]
-    assert await redis.smembers(RedisKeys.dirty_entities("ada", "project-1")) == {"2"}
+    assert await redis.smembers(RedisKeys.dirty_entities("ada", "project-1")) == set()
     assert entities.embedding_calls == [
         (2, "Widget (concept). Widget now requires direct source evidence")
     ]
@@ -632,7 +670,6 @@ async def test_process_single_batch_applies_facts_redirties_and_returns_updates(
         "project_id": "project-1",
         "contradiction_sim_low": 0.25,
         "contradiction_batch_size": 2,
-        "contradiction_prompt": "judge contradictions",
         "source_session_by_msg_id": {7: "session-7"},
         "audit_change_type": "profile_extraction",
         "actor": "profile_refinement",
@@ -680,6 +717,15 @@ async def test_maybe_refine_user_gates_and_sets_short_ttl():
     job._refine_user_profile = no_update_refine
 
     assert await job._maybe_refine_user(job_context(), curr_msg_id=9) is False
+    assert await redis.get(ran_key) is None
+    assert (ran_key, 300) not in redis.expirations
+
+    async def successful_refine(ctx, user_id, profile, curr_msg_id):
+        return True
+
+    job._refine_user_profile = successful_refine
+
+    assert await job._maybe_refine_user(job_context(), curr_msg_id=10) is True
     assert await redis.get(ran_key) == "true"
     assert (ran_key, 300) in redis.expirations
 
@@ -758,7 +804,7 @@ async def test_refine_user_profile_skips_incomplete_or_weak_inputs(case_name):
 
 
 @pytest.mark.no_network
-async def test_refine_user_profile_applies_global_scope_and_redirties_user(
+async def test_refine_user_profile_applies_global_scope_without_redirtying_user(
     monkeypatch,
 ):
     events = patch_profile_events(monkeypatch)
@@ -892,14 +938,13 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
         "project_id": IDENTITY_SCOPE,
         "contradiction_sim_low": 0.25,
         "contradiction_batch_size": 2,
-        "contradiction_prompt": "judge contradictions",
         "source_session_by_msg_id": {7: "session-7"},
         "audit_change_type": "profile_extraction",
         "actor": "profile_refinement",
         "reason": "user_profile_extraction",
     }
 
-    assert await redis.smembers(RedisKeys.dirty_entities("ada", "project-1")) == {"1"}
+    assert await redis.smembers(RedisKeys.dirty_entities("ada", "project-1")) == set()
     assert entities.embedding_calls == [
         (1, "ada (person). Ada requires direct evidence for profile updates")
     ]
@@ -914,17 +959,8 @@ async def test_refine_user_profile_applies_global_scope_and_redirties_user(
     ]
     assert [args[2] for args, _ in events] == [
         "llm_call",
-        "dirty_entities_marked",
         "user_profile_refined",
     ]
-    assert events[1][0][3] == {
-        "user_name": "ada",
-        "project_id": "project-1",
-        "dirty_key": RedisKeys.dirty_entities("ada", "project-1"),
-        "entity_ids": [1],
-        "marked_count": 1,
-        "reason": "fact_invalidation_failed",
-    }
     assert events[-1][0][3] == {
         "user_name": "ada",
         "facts_invalidated": 1,

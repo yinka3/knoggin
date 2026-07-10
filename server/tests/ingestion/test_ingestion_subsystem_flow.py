@@ -10,11 +10,11 @@ from common.schema.contracts import (
 )
 from common.schema.primitives import ConnectionRecord, EntityRecord
 from common.schema.settings import IngestionSettings, TextProcessorSettings
-from infrastructure.redis_client import RedisKeys
 from core.ingestion.services.batch_consumer import IngestionWorker
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.resolver import EntityResolver
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import FakeRedis
 

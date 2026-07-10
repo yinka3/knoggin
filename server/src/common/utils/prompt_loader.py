@@ -41,10 +41,6 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "prompts/refinement.md",
         "Judge Contradiction",
     ),
-    "judge_merge": PromptDefinition(
-        "prompts/merge.md",
-        "Judge Merge",
-    ),
 }
 
 _prompt_cache: Dict[Path, tuple[int, Dict[str, str]]] = {}

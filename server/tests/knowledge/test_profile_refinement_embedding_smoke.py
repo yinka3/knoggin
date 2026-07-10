@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from common.schema.primitives import FactRecord
+from common.schema.settings import ProfileSettings
 from common.utils.time_utils import get_now
 from core.ingestion.jobs.profile_job import ProfileRefinementJob
 from core.knowledge.entity.resolver import EntityResolver
@@ -57,6 +58,7 @@ async def test_real_embedding_profile_refinement_updates_profile_vector_from_fac
         executor=None,
         embedding_service=service,
         redis_client=object(),
+        settings=ProfileSettings(),
     )
     active_facts = [
         profile_fact(

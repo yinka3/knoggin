@@ -14,14 +14,9 @@ from common.utils.core_utils import format_vp04_input
 from common.utils.data_utils import process_extracted_facts
 from common.utils.events import emit
 from common.utils.time_utils import get_now_unix, parse_iso_time_or_now
-from infrastructure.job.base import BaseJob, JobContext, JobResult
-from infrastructure.knowledge_store import KnowledgeStore
-from infrastructure.llm_client import LLMService
-from infrastructure.redis_client import RedisKeys
 from core.ingestion.prompts import (
     enrich_facts_with_sources,
     get_profile_extraction_prompt,
-    render_configured_prompt,
 )
 from core.knowledge.entity.embedding import (
     build_entity_embedding_text,
@@ -30,16 +25,26 @@ from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.services.embedding_service import EmbeddingService
 from core.knowledge.services.fact_resolution import FactResolver
+from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.knowledge_store import KnowledgeStore
+from infrastructure.llm_client import LLMService
+from infrastructure.redis_client import RedisKeys
+
+ProfileTargetSelection = Tuple[List[int], bool, Optional[int]]
+EntityRefinementResult = Tuple[List[Dict[str, Any]], List[int], bool]
 
 
 class ProfileRefinementJob(BaseJob):
     """
-    Scans entities that have been 'touched' recently and updates their profiles
-    using the sliding window of recent messages.
+    Refines profiles for entities marked dirty by upstream graph changes.
 
-    Triggers:
-    1. VOLUME: If >=20 entities are dirty (ensures we catch them in the 75-msg window).
-    2. TIME: If user is idle for >5 minutes and we have ANY dirty entities.
+    The job runs when the dirty-entity queue reaches the configured volume
+    threshold. It uses recent project conversation plus existing facts to ask the
+    LLM for profile facts, resolves those facts through FactResolver, updates
+    entity embeddings/profile checkpoints, and marks updated entities for merge
+    detection. When a volume-triggered run includes a dirty user marker, it also
+    refines the identity profile without treating the user as a normal project
+    entity.
     """
 
     def __init__(
@@ -50,15 +55,7 @@ class ProfileRefinementJob(BaseJob):
         executor: ThreadPoolExecutor,
         embedding_service: EmbeddingService,
         redis_client: aioredis.Redis,
-        msg_window: int = 30,
-        volume_threshold: int = 15,
-        idle_threshold: int = 90,
-        contradiction_sim_low: float = 0.70,
-        contradiction_batch_size: int = 4,
-        profile_batch_size: int = 8,
-        max_facts_context: int = 50,
-        profile_prompt: str = None,
-        contradiction_prompt: str = None,
+        settings: ProfileSettings,
     ):
 
         self.llm = llm
@@ -69,16 +66,7 @@ class ProfileRefinementJob(BaseJob):
         self.embedding_service = embedding_service
         self.batch_semaphore = asyncio.Semaphore(2)
 
-        self.profile_batch_size = profile_batch_size
-        self.msg_window = msg_window
-        self.volume_threshold = volume_threshold
-        self.idle_threshold = idle_threshold
-
-        self.contradiction_sim_low = contradiction_sim_low
-        self.contradiction_batch_size = contradiction_batch_size
-        self.max_facts_context = max_facts_context
-        self.profile_prompt = profile_prompt
-        self.contradiction_prompt = contradiction_prompt
+        self.update_settings(settings)
 
     @property
     def name(self) -> str:
@@ -87,7 +75,6 @@ class ProfileRefinementJob(BaseJob):
     def update_settings(self, settings: ProfileSettings) -> None:
         self.msg_window = settings.msg_window
         self.volume_threshold = settings.volume_threshold
-        self.idle_threshold = settings.idle_threshold
         self.profile_batch_size = settings.profile_batch_size
         self.max_facts_context = settings.max_facts_context
         self.contradiction_sim_low = settings.contradiction_sim_low
@@ -143,29 +130,11 @@ class ProfileRefinementJob(BaseJob):
             )
             return True
 
-        if ctx.idle_seconds >= self.idle_threshold:
-            logger.info(
-                "Profile trigger: Idle threshold met "
-                f"({ctx.idle_seconds:.1f}s >= {self.idle_threshold}s)"
-            )
-            await emit(
-                ctx.project_id,
-                "job",
-                "profile_trigger_idle",
-                {
-                    "trigger": "idle",
-                    "idle_seconds": ctx.idle_seconds,
-                    "threshold": self.idle_threshold,
-                    "dirty_count": count,
-                },
-            )
-            return True
-
         await emit(
             ctx.project_id,
             "job",
             "profile_skipped",
-            {"dirty_count": count, "idle_seconds": ctx.idle_seconds},
+            {"dirty_count": count, "threshold": self.volume_threshold},
         )
         return False
 
@@ -190,7 +159,8 @@ class ProfileRefinementJob(BaseJob):
 
         success = await self._refine_user_profile(ctx, user_id, profile, curr_msg_id)
 
-        await self.redis.setex(ran_key, 300, "true")
+        if success:
+            await self.redis.setex(ran_key, 300, "true")
 
         return success
 
@@ -256,16 +226,142 @@ class ProfileRefinementJob(BaseJob):
             if turn.get("user_msg_id") is not None and turn.get("session_id")
         }
 
+    async def _select_profile_targets(
+        self,
+        ctx: JobContext,
+        target_ids: Optional[List[int]],
+    ) -> ProfileTargetSelection:
+        if target_ids:
+            raw_ids = [str(eid) for eid in target_ids]
+            logger.info(f"Targeted refinement for {len(raw_ids)} entities")
+        else:
+            dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
+            raw_ids = await self.redis.srandmember(
+                dirty_key, self.volume_threshold
+            )
+
+        user_id = await self.entities.get_id(ctx.user_name)
+        candidate_ids = []
+        user_requested = False
+        if raw_ids:
+            for id_str in raw_ids:
+                try:
+                    eid = int(id_str)
+                except (ValueError, TypeError):
+                    logger.warning(f"Non-numeric entity ID in dirty set: {id_str}")
+                    continue
+                if eid == user_id:
+                    user_requested = True
+                    continue
+                candidate_ids.append(eid)
+
+        # Targeted refinement is usually agent-initiated; avoid repeating recent work.
+        if not target_ids or not candidate_ids:
+            return candidate_ids, user_requested, user_id
+
+        keys = [
+            RedisKeys.last_profile_update(ctx.user_name, ctx.project_id, eid)
+            for eid in candidate_ids
+        ]
+        last_updates = await self.redis.mget(*keys)
+        now = get_now_unix()
+        entity_ids = []
+        for eid, last_update in zip(candidate_ids, last_updates):
+            if last_update:
+                age = now - float(last_update)
+                if age < 60:
+                    logger.info(
+                        "Skipping targeted refinement for entity "
+                        f"{eid} (refined {age:.1f}s ago)"
+                    )
+                    continue
+            entity_ids.append(eid)
+
+        return entity_ids, user_requested, user_id
+
+    async def _run_entity_refinement(
+        self,
+        ctx: JobContext,
+        entity_ids: List[int],
+        current_msg_id: int,
+    ) -> EntityRefinementResult:
+        if not entity_ids:
+            return [], [], False
+
+        conversation = await self._get_conversation_context(
+            ctx, self.msg_window, up_to_msg_id=current_msg_id
+        )
+
+        if not conversation:
+            logger.warning("Profile refinement: no conversation context")
+            await emit(
+                ctx.project_id,
+                "job",
+                "profile_refinement_failed",
+                {
+                    "entity_count": len(entity_ids),
+                    "error": "No context found",
+                },
+            )
+            return [], [], True
+
+        try:
+            updates, clear_ids = await self._run_updates(
+                ctx, entity_ids, conversation
+            )
+
+            if updates:
+                await self._write_updates(updates, ctx.project_id)
+                updated_ids = [str(update["id"]) for update in updates]
+                await self.redis.sadd(
+                    RedisKeys.merge_queue(ctx.user_name, ctx.project_id),
+                    *updated_ids,
+                )
+                await emit(
+                    ctx.project_id,
+                    "job",
+                    "profiles_refined",
+                    {
+                        "count": len(updates),
+                        "entities": [u["canonical_name"] for u in updates],
+                    },
+                )
+
+            # Update recency timestamps for all successfully processed entities.
+            for eid in clear_ids:
+                await self.redis.setex(
+                    RedisKeys.last_profile_update(ctx.user_name, ctx.project_id, eid),
+                    3600,  # Keep for 1 hour
+                    str(get_now_unix()),
+                )
+
+            return updates, clear_ids, False
+
+        except Exception as e:
+            logger.exception(f"Profile refinement batch process failed: {e}")
+            await emit(
+                ctx.project_id,
+                "job",
+                "profile_refinement_failed",
+                {"entity_count": len(entity_ids), "error": str(e)},
+            )
+            return [], [], False
+
+    async def _mark_profile_complete(self, ctx: JobContext) -> None:
+        await self.redis.setex(
+            RedisKeys.project_profile_complete(ctx.user_name, ctx.project_id),
+            300,
+            str(get_now_unix()),
+        )
+
     async def execute(
         self,
         ctx: JobContext,
-        force: bool = False,
         target_ids: Optional[List[int]] = None,
     ) -> JobResult:
         """
         Refines entity embeddings and profiles based on new facts.
-        :param force: If True, ignore volume thresholds and process as many as possible.
-        :param target_ids: If provided, only process these specific entities.
+        :param target_ids: If provided, process these specific entities directly.
         """
         # Establish structured logging context for the job
         with logger.contextualize(
@@ -277,110 +373,26 @@ class ProfileRefinementJob(BaseJob):
             current_msg_id = int(current_msg_id) if current_msg_id else 0
 
             dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
+            entity_ids, user_requested, user_id = await self._select_profile_targets(
+                ctx, target_ids
+            )
 
-            if target_ids:
-                # Targeted mode: use provided IDs, then verify dirty-set membership.
-                raw_ids = [str(eid) for eid in target_ids]
-                logger.info(f"Targeted refinement for {len(raw_ids)} entities")
-            else:
-                # If forced, take up to 3x the normal batch size to clear the queue
-                limit = self.volume_threshold * 3 if force else self.volume_threshold
-                raw_ids = await self.redis.srandmember(dirty_key, limit)
-
-            user_id = await self.entities.get_id(ctx.user_name)
-            candidate_ids = []
-            if raw_ids:
-                for id_str in raw_ids:
-                    try:
-                        eid = int(id_str)
-                    except (ValueError, TypeError):
-                        logger.warning(f"Non-numeric entity ID in dirty set: {id_str}")
-                        continue
-                    if eid != user_id:
-                        candidate_ids.append(eid)
-
-            # Recency Guard (Targeted only)
-            # Avoid refining if it was updated in the last 60 seconds
-            entity_ids = []
-            if target_ids and candidate_ids:
-                keys = [
-                    RedisKeys.last_profile_update(ctx.user_name, ctx.project_id, eid)
-                    for eid in candidate_ids
-                ]
-                last_updates = await self.redis.mget(*keys)
-                now = get_now_unix()
-                for eid, last_update in zip(candidate_ids, last_updates):
-                    if last_update:
-                        age = now - float(last_update)
-                        if age < 60:
-                            logger.info(
-                                "Skipping targeted refinement for entity "
-                                f"{eid} (refined {age:.1f}s ago)"
-                            )
-                            continue
-                    entity_ids.append(eid)
-            else:
-                entity_ids = candidate_ids
-
-            force_tag = " (force=True)" if force else ""
             target_tag = f" (target_ids={len(target_ids)})" if target_ids else ""
             logger.info(
                 "Profile refinement starting: "
-                f"{len(entity_ids)} entities to process{force_tag}{target_tag}"
+                f"{len(entity_ids)} entities to process{target_tag}"
             )
 
-            if entity_ids:
-                conversation = await self._get_conversation_context(
-                    ctx, self.msg_window, up_to_msg_id=current_msg_id
+            updates, clear_ids, entity_context_missing = (
+                await self._run_entity_refinement(
+                    ctx,
+                    entity_ids,
+                    current_msg_id,
                 )
+            )
 
-                if not conversation:
-                    return JobResult(success=False, summary="No context found")
-
-                updates = []
-                clear_ids = []
-                try:
-                    updates, clear_ids = await self._run_updates(
-                        ctx, entity_ids, conversation
-                    )
-
-                    if updates:
-                        await self._write_updates(updates, ctx.project_id)
-                        if clear_ids:
-                            await self.redis.sadd(
-                                RedisKeys.merge_queue(ctx.user_name, ctx.project_id),
-                                *[str(entity_id) for entity_id in clear_ids],
-                            )
-                        await emit(
-                            ctx.project_id,
-                            "job",
-                            "profiles_refined",
-                            {
-                                "count": len(updates),
-                                "entities": [u["canonical_name"] for u in updates],
-                            },
-                        )
-
-                        # Update recency timestamps for all processed entities
-                        for eid in clear_ids:
-                            await self.redis.setex(
-                                RedisKeys.last_profile_update(
-                                    ctx.user_name, ctx.project_id, eid
-                                ),
-                                3600,  # Keep for 1 hour
-                                str(get_now_unix()),
-                            )
-
-                except Exception as e:
-                    logger.exception(f"Profile refinement batch process failed: {e}")
-                    await emit(
-                        ctx.project_id,
-                        "job",
-                        "profile_refinement_failed",
-                        {"entity_count": len(entity_ids), "error": str(e)},
-                    )
-                    # We don't return here so that user refinement still has a chance
-
+            user_refined = False
+            if user_requested or entity_ids:
                 user_refined = await self._maybe_refine_user(ctx, current_msg_id)
 
                 # Clear IDs from dirty queue to prevent infinite loop
@@ -388,6 +400,9 @@ class ProfileRefinementJob(BaseJob):
                 processed_ids = []
                 if clear_ids:
                     processed_ids.extend([str(eid) for eid in clear_ids])
+                if user_requested and user_id:
+                    processed_ids.append(str(user_id))
+                processed_ids = list(dict.fromkeys(processed_ids))
 
                 if processed_ids:
                     await self.redis.srem(dirty_key, *processed_ids)
@@ -416,25 +431,13 @@ class ProfileRefinementJob(BaseJob):
 
                 summary = ", ".join(parts) if parts else "No profiles to update"
 
-                await self.redis.setex(
-                    RedisKeys.project_profile_complete(ctx.user_name, ctx.project_id),
-                    300,
-                    str(get_now_unix()),
-                )
+                if entity_context_missing and not user_refined:
+                    return JobResult(success=False, summary="No context found")
+
+                await self._mark_profile_complete(ctx)
 
                 return JobResult(success=True, summary=summary)
-            else:
-                return JobResult(success=True, summary="No profiles to update")
-
-    def _get_system_prompt(self, user_name: str) -> str:
-        if self.profile_prompt:
-            return render_configured_prompt(
-                self.profile_prompt,
-                prompt_name="configured extract_facts",
-                required={"user_name"},
-                user_name=user_name,
-            )
-        return get_profile_extraction_prompt(user_name)
+            return JobResult(success=True, summary="No profiles to update")
 
     async def _refine_user_profile(
         self, ctx: JobContext, user_id: int, profile: EntityProfile, curr_msg_id: int
@@ -465,7 +468,7 @@ class ProfileRefinementJob(BaseJob):
             logger.warning("Could not fetch user facts, skipping refinement")
             return False
 
-        system_reasoning = self._get_system_prompt(ctx.user_name)
+        system_reasoning = get_profile_extraction_prompt(ctx.user_name)
 
         enriched_facts = await enrich_facts_with_sources(
             existing_facts,
@@ -542,16 +545,11 @@ class ProfileRefinementJob(BaseJob):
             project_id=IDENTITY_SCOPE,
             contradiction_sim_low=self.contradiction_sim_low,
             contradiction_batch_size=self.contradiction_batch_size,
-            contradiction_prompt=self.contradiction_prompt,
             source_session_by_msg_id=source_session_by_msg_id,
             audit_change_type="profile_extraction",
             actor="profile_refinement",
             reason="user_profile_extraction",
         )
-        if fact_summary.failed_invalidations:
-            await self._mark_entity_dirty(
-                ctx, user_id, len(fact_summary.failed_invalidations)
-            )
 
         resolution_text = self._build_resolution_text(
             ctx.user_name, "person", fact_summary.active_facts
@@ -596,7 +594,7 @@ class ProfileRefinementJob(BaseJob):
                 batch, ctx.user_name
             )
 
-            system_reasoning = self._get_system_prompt(ctx.user_name)
+            system_reasoning = get_profile_extraction_prompt(ctx.user_name)
 
             user_content = format_vp04_input(llm_input, combined_conversation)
 
@@ -660,19 +658,11 @@ class ProfileRefinementJob(BaseJob):
                     project_id=ctx.project_id,
                     contradiction_sim_low=self.contradiction_sim_low,
                     contradiction_batch_size=self.contradiction_batch_size,
-                    contradiction_prompt=self.contradiction_prompt,
                     source_session_by_msg_id=source_session_by_msg_id,
                     audit_change_type="profile_extraction",
                     actor="profile_refinement",
                     reason="profile_extraction",
                 )
-
-                if fact_summary.failed_invalidations:
-                    await self._mark_entity_dirty(
-                        ctx,
-                        orig["ent_id"],
-                        len(fact_summary.failed_invalidations),
-                    )
 
                 resolved.append((orig, fact_summary))
 
@@ -727,10 +717,19 @@ class ProfileRefinementJob(BaseJob):
         current_msg_id = int(current_msg_id) if current_msg_id else 0
 
         valid_entities = []
+        missing_profile_ids = []
         for ent_id in entity_ids:
             profile = self.entities.get_cached_profile(ent_id)
             if profile:
                 valid_entities.append((ent_id, profile))
+            else:
+                missing_profile_ids.append(ent_id)
+
+        if missing_profile_ids:
+            logger.warning(
+                "Profile refinement skipping dirty entities without cached profiles: "
+                f"{missing_profile_ids}"
+            )
 
         if not valid_entities:
             return (
@@ -848,32 +847,6 @@ class ProfileRefinementJob(BaseJob):
     ) -> str:
         """Build the text used for embedding from entity metadata and facts."""
         return build_entity_embedding_text(canonical_name, entity_type, active_facts)
-
-    async def _mark_entity_dirty(
-        self,
-        ctx: JobContext,
-        entity_id: int,
-        failed_count: int,
-    ) -> None:
-        """Re-add entity to the dirty queue when fact invalidation fails."""
-        dirty_key = RedisKeys.dirty_entities(ctx.user_name, ctx.project_id)
-        await self.redis.sadd(dirty_key, str(entity_id))
-        await emit(
-            ctx.project_id,
-            "job",
-            "dirty_entities_marked",
-            {
-                "user_name": ctx.user_name,
-                "project_id": ctx.project_id,
-                "dirty_key": dirty_key,
-                "entity_ids": [entity_id],
-                "marked_count": 1,
-                "reason": "fact_invalidation_failed",
-            },
-        )
-        logger.warning(
-            f"Re-dirtied entity {entity_id}: {failed_count} invalidations failed"
-        )
 
     async def _build_llm_input(
         self, batch: List[Dict], user_name: str

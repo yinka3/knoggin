@@ -2,7 +2,7 @@ from typing import Dict, List, Tuple
 
 from loguru import logger
 
-from common.utils.prompt_loader import load_named_prompt, render_prompt_text
+from common.utils.prompt_loader import load_named_prompt
 
 
 def ner_prompt(user_name: str) -> str:
@@ -17,30 +17,8 @@ def get_profile_extraction_prompt(user_name: str) -> str:
     return load_named_prompt("extract_facts", user_name=user_name)
 
 
-def get_merge_judgment_prompt() -> str:
-    return load_named_prompt("judge_merge")
-
-
 def get_contradiction_judgment_prompt() -> str:
     return load_named_prompt("judge_contradiction")
-
-
-def render_configured_prompt(
-    prompt_template: str,
-    *,
-    prompt_name: str,
-    required: set[str] | None = None,
-    **values,
-) -> str:
-    """Strictly render a prompt supplied through runtime configuration."""
-    return render_prompt_text(
-        prompt_template,
-        values,
-        required=required,
-        prompt_name=prompt_name,
-    )
-
-
 
 async def enrich_facts_with_sources(
     facts: list,
