@@ -1,10 +1,9 @@
 import asyncio
 import hashlib
 import json
-import os
 import uuid
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Dict, List, Optional
 
 from loguru import logger
@@ -19,6 +18,7 @@ from infrastructure.postgres_client import PostgresClient
 from core.knowledge.services.embedding_service import EmbeddingService
 
 from .constants import (
+    ACCEPTED_EXTENSIONS,
     EXPECTED_EMBEDDING_DIMENSION,
     MAX_DOCUMENT_SIZE,
     MAX_ERROR_MESSAGE_LENGTH,
@@ -26,24 +26,10 @@ from .constants import (
     MAX_READ_LINES,
     VALID_VISIBILITY_SCOPES,
 )
-
-from .storage import (
-    extract_text,
-    iter_prepared_chunks,
-    purge_quarantined_file,
-    quarantine_stored_file,
-    remove_stored_file,
-    remove_tree,
-    restore_quarantined_file,
-    split_text,
-    write_file_atomically,
-    write_prepared_chunks,
-)
-
-from .scanning import (
-    build_folder_preview,
-    normalize_relative_path,
-)
+from .storage import extract_text, split_text
+from .scanning import build_folder_preview, normalize_relative_path
+from core.knowledge.db.readers.document_reader import DocumentReader
+from core.knowledge.db.writers.document_writer import DocumentWriter
 
 
 class DocumentService:
@@ -53,13 +39,12 @@ class DocumentService:
         self,
         project_id: str,
         postgres_client: PostgresClient,
-        storage_root: Path,
         embedding_service: EmbeddingService,
     ):
         self.project_id = project_id
-        self._postgres = postgres_client
-        self._storage_root = Path(storage_root).resolve()
         self._embedding = embedding_service
+        self._reader = DocumentReader(postgres_client, project_id)
+        self._writer = DocumentWriter(postgres_client, project_id)
 
     async def preview_folder(
         self,
@@ -83,9 +68,7 @@ class DocumentService:
         else:
             scan_settings = settings
             if not isinstance(scan_settings, FolderScanSettings):
-                scan_settings = FolderScanSettings.model_validate(
-                    scan_settings
-                )
+                scan_settings = FolderScanSettings.model_validate(scan_settings)
         return await asyncio.to_thread(
             build_folder_preview,
             folder_name.strip(),
@@ -96,17 +79,10 @@ class DocumentService:
 
     async def get_scan_settings(self) -> FolderScanSettings:
         """Return persisted project scan settings or validated defaults."""
-        rows = await self._postgres.fetch_all(
-            """
-            SELECT settings
-            FROM public.project_document_scan_settings
-            WHERE project_id = %s
-            """,
-            (self.project_id,),
-        )
-        if not rows:
+        row = await self._reader.fetch_scan_settings()
+        if row is None:
             return FolderScanSettings()
-        return FolderScanSettings.model_validate(rows[0]["settings"])
+        return FolderScanSettings.model_validate(row["settings"])
 
     async def save_scan_settings(
         self,
@@ -119,48 +95,19 @@ class DocumentService:
             else FolderScanSettings.model_validate(settings)
         )
         saved_at = get_now_iso()
-        await self._postgres.execute(
-            """
-            INSERT INTO public.project_document_scan_settings (
-                project_id,
-                settings,
-                created_at,
-                updated_at
-            )
-            VALUES (%s, %s::jsonb, %s, %s)
-            ON CONFLICT (project_id) DO UPDATE
-            SET
-                settings = EXCLUDED.settings,
-                updated_at = EXCLUDED.updated_at
-            """,
-            (
-                self.project_id,
-                json.dumps(validated.model_dump(mode="json")),
-                saved_at,
-                saved_at,
-            ),
+        await self._writer.upsert_scan_settings(
+            settings_json=json.dumps(validated.model_dump(mode="json")),
+            saved_at=saved_at,
         )
         return validated
 
     async def reset_scan_settings(self) -> FolderScanSettings:
         """Remove saved project settings and return defaults."""
-        await self._postgres.execute(
-            """
-            DELETE FROM public.project_document_scan_settings
-            WHERE project_id = %s
-            """,
-            (self.project_id,),
-        )
+        await self._writer.delete_scan_settings()
         return FolderScanSettings()
 
-    def _resolve_storage_path(self, storage_key: str) -> Path:
-        target = (self._storage_root / Path(storage_key)).resolve()
-        if not target.is_relative_to(self._storage_root):
-            raise ValueError("generated storage path escaped the storage root")
-        return target
-
-    @classmethod
-    def _normalize_path_prefix(cls, path_prefix: Optional[str]) -> Optional[str]:
+    @staticmethod
+    def _normalize_path_prefix(path_prefix: Optional[str]) -> Optional[str]:
         if path_prefix is None:
             return None
         normalized = normalize_relative_path(path_prefix, path_prefix)
@@ -178,20 +125,9 @@ class DocumentService:
         if visibility_scope == "session" and not session_id:
             raise ValueError("session-visible documents require session_id")
 
-    def _resolve_document_storage_path(self, document_metadata: Dict) -> Path:
-        expected_key = PurePosixPath(
-            self.project_id,
-            str(document_metadata["document_id"]),
-            "content",
-        ).as_posix()
-        if document_metadata["storage_key"] != expected_key:
-            raise ValueError("stored document has an invalid managed storage key")
-        return self._resolve_storage_path(expected_key)
-
     @staticmethod
     def _public_metadata(row: Dict) -> Dict:
         metadata = dict(row)
-        metadata.pop("storage_key", None)
         if metadata.get("document_id") is not None:
             metadata["document_id"] = str(metadata["document_id"])
         for key in ("created_at", "updated_at", "indexed_at"):
@@ -212,130 +148,6 @@ class DocumentService:
                 metadata[key] = value.isoformat()
         return metadata
 
-    @staticmethod
-    def _escape_like(value: str) -> str:
-        return (
-            value.replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
-
-    async def _get_visible_folder_upload(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str],
-    ) -> Optional[Dict]:
-        rows = await self._postgres.fetch_all(
-            """
-            SELECT
-                folder_root_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_name,
-                candidate_count,
-                candidate_bytes,
-                document_count,
-                total_size_bytes,
-                excluded_count,
-                excluded_bytes,
-                excluded_directory_count,
-                excluded_reason_counts,
-                scan_settings,
-                created_at,
-                indexed_at
-            FROM public.document_folder_uploads
-            WHERE folder_root_id = %s
-              AND project_id = %s
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
-            """,
-            (folder_root_id, self.project_id, session_id),
-        )
-        return rows[0] if rows else None
-
-    async def _get_visible_document(
-        self,
-        *,
-        document_id: str,
-        session_id: Optional[str],
-    ) -> Optional[Dict]:
-        rows = await self._get_visible_documents_by_reference(
-            document_id=document_id,
-            relative_path=None,
-            session_id=session_id,
-        )
-        return rows[0] if rows else None
-
-    async def _get_visible_documents_by_reference(
-        self,
-        *,
-        document_id: Optional[str],
-        relative_path: Optional[str],
-        session_id: Optional[str],
-    ) -> List[Dict]:
-        if (document_id is None) == (relative_path is None):
-            raise ValueError(
-                "provide exactly one of document_id or relative_path"
-            )
-
-        selector = (
-            "pd.document_id = %s"
-            if document_id is not None
-            else "pd.relative_path = %s"
-        )
-        selector_value = (
-            document_id if document_id is not None else relative_path
-        )
-        return await self._postgres.fetch_all(
-            """
-            SELECT
-                pd.document_id,
-                pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.folder_root_id,
-                pd.source_kind,
-                pd.original_name,
-                pd.relative_path,
-                pd.extension,
-                pd.size_bytes,
-                pd.content_hash,
-                pd.storage_key,
-                pd.status,
-                pd.created_at,
-                pd.updated_at,
-                pd.indexed_at,
-                pd.error_message,
-                (
-                    SELECT COUNT(*)::INTEGER
-                    FROM public.document_chunks AS dc
-                    WHERE dc.document_id = pd.document_id
-                ) AS chunk_count
-            FROM public.project_documents AS pd
-            WHERE """
-            + selector
-            + """
-              AND pd.project_id = %s
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
-            ORDER BY pd.created_at DESC, pd.document_id DESC
-            LIMIT 2
-            """,
-            (selector_value, self.project_id, session_id),
-        )
-
     async def get_document_info(
         self,
         *,
@@ -343,8 +155,8 @@ class DocumentService:
         document_id: Optional[str] = None,
         relative_path: Optional[str] = None,
     ) -> Dict:
-        """Return metadata for one visible document without storage paths."""
-        rows = await self._get_visible_documents_by_reference(
+        """Return metadata for one visible document."""
+        rows = await self._reader.fetch_documents_by_reference(
             document_id=document_id,
             relative_path=relative_path,
             session_id=session_id,
@@ -385,7 +197,7 @@ class DocumentService:
                 f"read_document is limited to {MAX_READ_LINES} lines"
             )
 
-        rows = await self._get_visible_documents_by_reference(
+        rows = await self._reader.fetch_documents_by_reference(
             document_id=document_id,
             relative_path=relative_path,
             session_id=session_id,
@@ -399,10 +211,14 @@ class DocumentService:
             )
 
         document_metadata = rows[0]
-        stored_path = self._resolve_document_storage_path(document_metadata)
+        raw_bytes = await self._reader.fetch_document_content(
+            str(document_metadata["document_id"])
+        )
+        if raw_bytes is None:
+            raise FileNotFoundError("Document content is missing")
         text = await asyncio.to_thread(
             extract_text,
-            stored_path,
+            raw_bytes,
             document_metadata["extension"],
         )
         lines = text.splitlines() or [text]
@@ -447,120 +263,34 @@ class DocumentService:
         document_id: str,
         session_id: Optional[str] = None,
     ) -> Dict:
-        """Permanently delete a visible document, chunks, and managed bytes."""
+        """Permanently delete a visible document, chunks, and stored bytes."""
         if not isinstance(document_id, str) or not document_id.strip():
             raise ValueError("document_id must not be empty")
-
-        pool = self._require_pool()
-        quarantine = None
-        stored_path = None
-        deleted_metadata = None
-        try:
-            async with pool.connection() as conn:
-                async with conn.transaction():
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            """
-                            SELECT
-                                document_id,
-                                project_id,
-                                session_id,
-                                visibility_scope,
-                                folder_root_id,
-                                source_kind,
-                                original_name,
-                                relative_path,
-                                extension,
-                                size_bytes,
-                                content_hash,
-                                storage_key,
-                                status,
-                                created_at,
-                                updated_at,
-                                indexed_at,
-                                error_message
-                            FROM public.project_documents
-                            WHERE document_id = %s
-                              AND project_id = %s
-                              AND (
-                                  visibility_scope = 'project'
-                                  OR (
-                                      visibility_scope = 'session'
-                                      AND session_id = %s
-                                  )
-                              )
-                            FOR UPDATE
-                            """,
-                            (document_id.strip(), self.project_id, session_id),
-                        )
-                        document_metadata = await cur.fetchone()
-                        if document_metadata is None:
-                            raise FileNotFoundError("Document not found")
-
-                        stored_path = self._resolve_document_storage_path(
-                            document_metadata
-                        )
-                        quarantine = await asyncio.to_thread(
-                            quarantine_stored_file,
-                            stored_path,
-                        )
-                        await cur.execute(
-                            """
-                            DELETE FROM public.project_documents
-                            WHERE document_id = %s
-                              AND project_id = %s
-                            RETURNING document_id
-                            """,
-                            (document_id.strip(), self.project_id),
-                        )
-                        deleted = await cur.fetchone()
-                        if deleted is None:
-                            raise RuntimeError(
-                                "Document deletion did not remove a row"
-                            )
-                        deleted_metadata = self._public_metadata(
-                            document_metadata
-                        )
-        except Exception:
-            if quarantine is not None and stored_path is not None:
-                try:
-                    await asyncio.to_thread(
-                        restore_quarantined_file,
-                        quarantine,
-                        stored_path,
-                    )
-                except Exception as restore_error:
-                    logger.error(
-                        "Failed to restore quarantined document bytes for {}: {}",
-                        document_id,
-                        restore_error,
-                    )
-            raise
-
-        if quarantine is not None:
-            try:
-                await asyncio.to_thread(
-                    purge_quarantined_file,
-                    quarantine,
-                )
-            except Exception as purge_error:
-                logger.error(
-                    "Document metadata was deleted but storage purge failed for {}: {}",
-                    document_id,
-                    purge_error,
-                )
-                raise RuntimeError(
-                    "Document metadata was deleted but stored-byte cleanup failed"
-                ) from purge_error
-
+        row = await self._writer.delete_document(
+            document_id=document_id.strip(),
+            session_id=session_id,
+        )
+        if row is None:
+            raise FileNotFoundError("Document not found")
+        deleted_metadata = self._public_metadata(row)
         deleted_metadata["deleted"] = True
         return deleted_metadata
 
-    def _require_pool(self):
-        pool = self._postgres.async_pool
-        if pool is None:
-            raise RuntimeError("PostgresClient async_pool is not initialized")
-        return pool
+    @staticmethod
+    def _validate_embeddings(
+        embeddings: List[List[float]],
+        chunks: List[str],
+    ) -> None:
+        if len(embeddings) != len(chunks):
+            raise ValueError("Embedding count does not match chunk count")
+        if any(
+            len(embedding) != EXPECTED_EMBEDDING_DIMENSION
+            for embedding in embeddings
+        ):
+            raise ValueError(
+                "Document chunk embeddings must have exactly "
+                f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
+            )
 
     async def _persist_indexed_chunks(
         self,
@@ -570,121 +300,17 @@ class DocumentService:
         chunks: List[str],
         embeddings: List[List[float]],
     ) -> Dict:
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        SELECT
-                            pd.document_id,
-                            pd.project_id,
-                            pd.session_id,
-                            pd.visibility_scope,
-                            pd.folder_root_id,
-                            pd.source_kind,
-                            pd.original_name,
-                            pd.relative_path,
-                            pd.extension,
-                            pd.size_bytes,
-                            pd.content_hash,
-                            pd.status,
-                            pd.created_at,
-                            pd.updated_at,
-                            pd.indexed_at,
-                            pd.error_message,
-                            (
-                                SELECT COUNT(*)::INTEGER
-                                FROM public.document_chunks AS dc
-                                WHERE dc.document_id = pd.document_id
-                            ) AS chunk_count
-                        FROM public.project_documents AS pd
-                        WHERE pd.document_id = %s
-                          AND pd.project_id = %s
-                          AND (
-                              pd.visibility_scope = 'project'
-                              OR (
-                                  pd.visibility_scope = 'session'
-                                  AND pd.session_id = %s
-                              )
-                          )
-                        FOR UPDATE
-                        """,
-                        (document_id, self.project_id, session_id),
-                    )
-                    locked_document = await cur.fetchone()
-                    if locked_document is None:
-                        raise FileNotFoundError("Document not found")
-                    if locked_document["status"] == "indexed":
-                        return self._public_metadata(locked_document)
-
-                    await cur.execute(
-                        """
-                        DELETE FROM public.document_chunks
-                        WHERE document_id = %s
-                        """,
-                        (document_id,),
-                    )
-                    for chunk_index, (content, embedding) in enumerate(
-                        zip(chunks, embeddings)
-                    ):
-                        await cur.execute(
-                            """
-                            INSERT INTO public.document_chunks (
-                                chunk_id,
-                                document_id,
-                                chunk_index,
-                                content,
-                                embedding
-                            )
-                            VALUES (%s, %s, %s, %s, %s::vector)
-                            """,
-                            (
-                                str(uuid.uuid4()),
-                                document_id,
-                                chunk_index,
-                                content,
-                                json.dumps(embedding),
-                            ),
-                        )
-
-                    indexed_at = get_now_iso()
-                    await cur.execute(
-                        """
-                        UPDATE public.project_documents
-                        SET
-                            status = 'indexed',
-                            indexed_at = %s,
-                            error_message = NULL,
-                            updated_at = %s
-                        WHERE document_id = %s
-                        RETURNING
-                            document_id,
-                            project_id,
-                            session_id,
-                            visibility_scope,
-                            folder_root_id,
-                            source_kind,
-                            original_name,
-                            relative_path,
-                            extension,
-                            size_bytes,
-                            content_hash,
-                            status,
-                            created_at,
-                            updated_at,
-                            indexed_at,
-                            error_message
-                        """,
-                        (indexed_at, indexed_at, document_id),
-                    )
-                    indexed_document = await cur.fetchone()
-                    if indexed_document is None:
-                        raise RuntimeError(
-                            "Indexed document status update failed"
-                        )
-                    indexed_document["chunk_count"] = len(chunks)
-                    return self._public_metadata(indexed_document)
+        indexed_at = get_now_iso()
+        row = await self._writer.persist_indexed_chunks(
+            document_id=document_id,
+            session_id=session_id,
+            chunks=chunks,
+            embeddings=embeddings,
+            indexed_at=indexed_at,
+        )
+        if row is None:
+            raise FileNotFoundError("Document not found")
+        return self._public_metadata(row)
 
     async def _record_index_failure(
         self,
@@ -693,52 +319,12 @@ class DocumentService:
         session_id: Optional[str],
         error_message: str,
     ) -> None:
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        SELECT status
-                        FROM public.project_documents
-                        WHERE document_id = %s
-                          AND project_id = %s
-                          AND (
-                              visibility_scope = 'project'
-                              OR (
-                                  visibility_scope = 'session'
-                                  AND session_id = %s
-                              )
-                          )
-                        FOR UPDATE
-                        """,
-                        (document_id, self.project_id, session_id),
-                    )
-                    row = await cur.fetchone()
-                    if row is None or row["status"] == "indexed":
-                        return
-
-                    await cur.execute(
-                        """
-                        DELETE FROM public.document_chunks
-                        WHERE document_id = %s
-                        """,
-                        (document_id,),
-                    )
-                    updated_at = get_now_iso()
-                    await cur.execute(
-                        """
-                        UPDATE public.project_documents
-                        SET
-                            status = 'failed',
-                            indexed_at = NULL,
-                            error_message = %s,
-                            updated_at = %s
-                        WHERE document_id = %s
-                          AND status <> 'indexed'
-                        """,
-                        (error_message, updated_at, document_id),
-                    )
+        await self._writer.record_index_failure(
+            document_id=document_id,
+            session_id=session_id,
+            error_message=error_message,
+            updated_at=get_now_iso(),
+        )
 
     async def accept_folder(
         self,
@@ -783,6 +369,7 @@ class DocumentService:
             normalized_selected.sort()
         if not normalized_selected:
             raise ValueError("folder preview contains no eligible documents")
+
         entry_content = {
             normalize_relative_path(
                 entry.relative_path,
@@ -807,236 +394,51 @@ class DocumentService:
             )
 
         folder_root_id = str(uuid.uuid4())
-        staging_root = self._resolve_storage_path(
-            PurePosixPath(
-                ".staging",
-                f"folder-{folder_root_id}",
-            ).as_posix()
-        )
-        originals_root = staging_root / "originals"
-        prepared_root = staging_root / "prepared"
-        prepared_documents = []
-        moved_directories = []
         indexed_at = get_now_iso()
+        candidate_bytes = sum(len(entry.content) for entry in validated_entries)
+        prepared_documents = []
 
-        try:
-            for relative_path in normalized_selected:
-                content = entry_content[relative_path]
-                preview_entry = included_by_path[relative_path]
-                document_id = str(uuid.uuid4())
-                staged_directory = originals_root / document_id
-                staged_content = staged_directory / "content"
-                prepared_chunks = prepared_root / f"{document_id}.jsonl"
-                await asyncio.to_thread(
-                    write_file_atomically,
-                    staged_content,
-                    content,
-                )
+        for relative_path in normalized_selected:
+            content = entry_content[relative_path]
+            preview_entry = included_by_path[relative_path]
+            document_id = str(uuid.uuid4())
+            text = await asyncio.to_thread(
+                extract_text,
+                content,
+                preview_entry.extension,
+            )
+            chunks = await asyncio.to_thread(split_text, text)
+            embeddings = await self._embedding.encode(chunks)
+            self._validate_embeddings(embeddings, chunks)
+            prepared_documents.append(
+                {
+                    "document_id": document_id,
+                    "relative_path": relative_path,
+                    "original_name": preview_entry.original_name,
+                    "extension": preview_entry.extension,
+                    "size_bytes": preview_entry.size_bytes,
+                    "content_hash": preview_entry.content_hash,
+                    "content": content,
+                    "chunks": list(zip(chunks, embeddings)),
+                    "chunk_count": len(chunks),
+                }
+            )
 
-                text = await asyncio.to_thread(
-                    extract_text,
-                    staged_content,
-                    preview_entry.extension,
-                )
-                chunks = await asyncio.to_thread(split_text, text)
-                embeddings = await self._embedding.encode(chunks)
-                if len(embeddings) != len(chunks):
-                    raise ValueError(
-                        "Embedding count does not match chunk count"
-                    )
-                if any(
-                    len(embedding) != EXPECTED_EMBEDDING_DIMENSION
-                    for embedding in embeddings
-                ):
-                    raise ValueError(
-                        "Document chunk embeddings must have exactly "
-                        f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
-                    )
-                await asyncio.to_thread(
-                    write_prepared_chunks,
-                    prepared_chunks,
-                    chunks,
-                    embeddings,
-                )
-                prepared_documents.append(
-                    {
-                        "document_id": document_id,
-                        "relative_path": relative_path,
-                        "original_name": preview_entry.original_name,
-                        "extension": preview_entry.extension,
-                        "size_bytes": preview_entry.size_bytes,
-                        "content_hash": preview_entry.content_hash,
-                        "storage_key": PurePosixPath(
-                            self.project_id,
-                            document_id,
-                            "content",
-                        ).as_posix(),
-                        "staged_directory": staged_directory,
-                        "prepared_chunks": prepared_chunks,
-                        "chunk_count": len(chunks),
-                    }
-                )
-
-            pool = self._require_pool()
-            async with pool.connection() as conn:
-                async with conn.transaction():
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            """
-                            INSERT INTO public.document_folder_uploads (
-                                folder_root_id,
-                                project_id,
-                                session_id,
-                                visibility_scope,
-                                folder_name,
-                                candidate_count,
-                                candidate_bytes,
-                                document_count,
-                                total_size_bytes,
-                                excluded_count,
-                                excluded_bytes,
-                                excluded_directory_count,
-                                excluded_reason_counts,
-                                scan_settings,
-                                created_at,
-                                indexed_at
-                            )
-                            VALUES (
-                                %s, %s, %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s::jsonb, %s::jsonb,
-                                %s, %s
-                            )
-                            """,
-                            (
-                                folder_root_id,
-                                self.project_id,
-                                session_id,
-                                visibility_scope,
-                                folder_name.strip(),
-                                len(validated_entries),
-                                sum(len(entry.content) for entry in validated_entries),
-                                len(prepared_documents),
-                                sum(
-                                    document["size_bytes"]
-                                    for document in prepared_documents
-                                ),
-                                preview.summary.excluded_count,
-                                preview.summary.excluded_bytes,
-                                preview.summary.excluded_directory_count,
-                                json.dumps(preview.summary.reason_counts),
-                                json.dumps(
-                                    preview.settings.model_dump(mode="json")
-                                ),
-                                indexed_at,
-                                indexed_at,
-                            ),
-                        )
-
-                        for document in prepared_documents:
-                            await cur.execute(
-                                """
-                                INSERT INTO public.project_documents (
-                                    document_id,
-                                    project_id,
-                                    session_id,
-                                    visibility_scope,
-                                    folder_root_id,
-                                    source_kind,
-                                    original_name,
-                                    relative_path,
-                                    extension,
-                                    size_bytes,
-                                    content_hash,
-                                    storage_key,
-                                    status,
-                                    indexed_at,
-                                    created_at,
-                                    updated_at
-                                )
-                                VALUES (
-                                    %s, %s, %s, %s, %s, 'folder_upload',
-                                    %s, %s, %s, %s, %s, %s, 'indexed',
-                                    %s, %s, %s
-                                )
-                                """,
-                                (
-                                    document["document_id"],
-                                    self.project_id,
-                                    session_id,
-                                    visibility_scope,
-                                    folder_root_id,
-                                    document["original_name"],
-                                    document["relative_path"],
-                                    document["extension"],
-                                    document["size_bytes"],
-                                    document["content_hash"],
-                                    document["storage_key"],
-                                    indexed_at,
-                                    indexed_at,
-                                    indexed_at,
-                                ),
-                            )
-                            for chunk in iter_prepared_chunks(
-                                document["prepared_chunks"]
-                            ):
-                                await cur.execute(
-                                    """
-                                    INSERT INTO public.document_chunks (
-                                        chunk_id,
-                                        document_id,
-                                        chunk_index,
-                                        content,
-                                        embedding
-                                    )
-                                    VALUES (%s, %s, %s, %s, %s::vector)
-                                    """,
-                                    (
-                                        str(uuid.uuid4()),
-                                        document["document_id"],
-                                        chunk["chunk_index"],
-                                        chunk["content"],
-                                        json.dumps(chunk["embedding"]),
-                                    ),
-                                )
-
-                            final_directory = self._resolve_storage_path(
-                                PurePosixPath(
-                                    self.project_id,
-                                    document["document_id"],
-                                ).as_posix()
-                            )
-                            final_directory.parent.mkdir(
-                                parents=True,
-                                exist_ok=True,
-                            )
-                            os.replace(
-                                document["staged_directory"],
-                                final_directory,
-                            )
-                            moved_directories.append(final_directory)
-                        await asyncio.to_thread(
-                            remove_tree,
-                            staging_root,
-                        )
-        except Exception:
-            for directory in reversed(moved_directories):
-                try:
-                    await asyncio.to_thread(remove_tree, directory)
-                except Exception as cleanup_error:
-                    logger.error(
-                        "Failed to remove rolled-back folder document {}: {}",
-                        directory,
-                        cleanup_error,
-                    )
-            try:
-                await asyncio.to_thread(remove_tree, staging_root)
-            except Exception as cleanup_error:
-                logger.error(
-                    "Failed to remove folder staging directory {}: {}",
-                    staging_root,
-                    cleanup_error,
-                )
-            raise
+        await self._writer.insert_folder_batch(
+            folder_root_id=folder_root_id,
+            session_id=session_id,
+            visibility_scope=visibility_scope,
+            folder_name=folder_name.strip(),
+            candidate_count=len(validated_entries),
+            candidate_bytes=candidate_bytes,
+            excluded_count=preview.summary.excluded_count,
+            excluded_bytes=preview.summary.excluded_bytes,
+            excluded_directory_count=preview.summary.excluded_directory_count,
+            excluded_reason_counts=preview.summary.reason_counts,
+            scan_settings=preview.settings.model_dump(mode="json"),
+            documents=prepared_documents,
+            indexed_at=indexed_at,
+        )
 
         documents = [
             {
@@ -1067,18 +469,14 @@ class DocumentService:
             "visibility_scope": visibility_scope,
             "folder_name": folder_name.strip(),
             "candidate_count": len(validated_entries),
-            "candidate_bytes": sum(
-                len(entry.content) for entry in validated_entries
-            ),
+            "candidate_bytes": candidate_bytes,
             "document_count": len(documents),
             "total_size_bytes": sum(
                 document["size_bytes"] for document in prepared_documents
             ),
             "excluded_count": preview.summary.excluded_count,
             "excluded_bytes": preview.summary.excluded_bytes,
-            "excluded_directory_count": (
-                preview.summary.excluded_directory_count
-            ),
+            "excluded_directory_count": preview.summary.excluded_directory_count,
             "excluded_reason_counts": preview.summary.reason_counts,
             "scan_settings": preview.settings.model_dump(mode="json"),
             "created_at": indexed_at,
@@ -1102,76 +500,36 @@ class DocumentService:
             raise ValueError("document content must not be empty")
         if len(content) > MAX_DOCUMENT_SIZE:
             raise ValueError("document exceeds the 50 MB size limit")
-        if not original_name or not original_name.strip():
+        original_name = original_name.strip() if original_name else original_name
+        if not original_name:
             raise ValueError("original_name must not be empty")
         if "\x00" in original_name:
             raise ValueError("original_name contains an invalid null byte")
-        if visibility_scope not in VALID_VISIBILITY_SCOPES:
+        extension = PurePosixPath(original_name).suffix.lower()
+        if extension not in ACCEPTED_EXTENSIONS:
             raise ValueError(
-                "visibility_scope must be either 'project' or 'session'"
+                f"Unsupported file type '{extension}'. "
+                f"Accepted types include PDF, DOCX, plain text, source code, and images."
             )
-        if visibility_scope == "session" and not session_id:
-            raise ValueError("session-visible documents require session_id")
+        self._validate_visibility(visibility_scope, session_id)
 
         normalized_path = normalize_relative_path(relative_path, original_name)
         document_id = str(uuid.uuid4())
-        storage_key = PurePosixPath(
-            self.project_id, document_id, "content"
-        ).as_posix()
-        stored_path = self._resolve_storage_path(storage_key)
         content_hash = hashlib.sha256(content).hexdigest()
-        extension = Path(original_name).suffix.lower()
         created_at = get_now_iso()
 
-        await asyncio.to_thread(write_file_atomically, stored_path, content)
-        try:
-            inserted = await self._postgres.execute(
-                """
-                INSERT INTO public.project_documents (
-                    document_id,
-                    project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_root_id,
-                    source_kind,
-                    original_name,
-                    relative_path,
-                    extension,
-                    size_bytes,
-                    content_hash,
-                    storage_key,
-                    status,
-                    created_at,
-                    updated_at
-                )
-                VALUES (
-                    %s, %s, %s, %s, NULL, 'manual_upload',
-                    %s, %s, %s, %s, %s, %s, 'uploaded', %s, %s
-                )
-                """,
-                (
-                    document_id,
-                    self.project_id,
-                    session_id,
-                    visibility_scope,
-                    original_name.strip(),
-                    normalized_path,
-                    extension,
-                    len(content),
-                    content_hash,
-                    storage_key,
-                    created_at,
-                    created_at,
-                ),
-            )
-            if inserted != 1:
-                raise RuntimeError(
-                    "project document metadata insert did not create a row"
-                )
-        except Exception:
-            await asyncio.to_thread(remove_stored_file, stored_path)
-            raise
-
+        await self._writer.insert_document(
+            document_id=document_id,
+            session_id=session_id,
+            visibility_scope=visibility_scope,
+            original_name=original_name,
+            relative_path=normalized_path,
+            extension=extension,
+            size_bytes=len(content),
+            content_hash=content_hash,
+            content=content,
+            created_at=created_at,
+        )
         return {
             "document_id": document_id,
             "project_id": self.project_id,
@@ -1179,7 +537,7 @@ class DocumentService:
             "visibility_scope": visibility_scope,
             "folder_root_id": None,
             "source_kind": "manual_upload",
-            "original_name": original_name.strip(),
+            "original_name": original_name,
             "relative_path": normalized_path,
             "extension": extension,
             "size_bytes": len(content),
@@ -1199,36 +557,31 @@ class DocumentService:
         session_id: Optional[str] = None,
     ) -> Dict:
         """Extract, chunk, embed, and persist one visible project document."""
-        document_metadata = await self._get_visible_document(
+        rows = await self._reader.fetch_documents_by_reference(
             document_id=document_id,
+            relative_path=None,
             session_id=session_id,
         )
+        document_metadata = rows[0] if rows else None
         if document_metadata is None:
             raise FileNotFoundError("Document not found")
         if document_metadata["status"] == "indexed":
             return self._public_metadata(document_metadata)
 
         try:
-            stored_path = self._resolve_document_storage_path(
-                document_metadata
+            raw_bytes = await self._reader.fetch_document_content(
+                str(document_metadata["document_id"])
             )
+            if raw_bytes is None:
+                raise FileNotFoundError("Document content is missing")
             text = await asyncio.to_thread(
                 extract_text,
-                stored_path,
+                raw_bytes,
                 document_metadata["extension"],
             )
             chunks = await asyncio.to_thread(split_text, text)
             embeddings = await self._embedding.encode(chunks)
-            if len(embeddings) != len(chunks):
-                raise ValueError("Embedding count does not match chunk count")
-            if any(
-                len(embedding) != EXPECTED_EMBEDDING_DIMENSION
-                for embedding in embeddings
-            ):
-                raise ValueError(
-                    "Document chunk embeddings must have exactly "
-                    f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
-                )
+            self._validate_embeddings(embeddings, chunks)
             return await self._persist_indexed_chunks(
                 document_id=document_id,
                 session_id=session_id,
@@ -1277,42 +630,11 @@ class DocumentService:
             or not 1 <= limit <= 100
         ):
             raise ValueError("limit must be between 1 and 100")
-
-        query = """
-            SELECT
-                folder_root_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_name,
-                candidate_count,
-                candidate_bytes,
-                document_count,
-                total_size_bytes,
-                excluded_count,
-                excluded_bytes,
-                excluded_directory_count,
-                excluded_reason_counts,
-                scan_settings,
-                created_at,
-                indexed_at
-            FROM public.document_folder_uploads
-            WHERE project_id = %s
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
-        """
-        params: list = [self.project_id, session_id]
-        if visibility_scope is not None:
-            query += " AND visibility_scope = %s"
-            params.append(visibility_scope)
-        query += " ORDER BY created_at DESC, folder_root_id DESC LIMIT %s"
-        params.append(limit)
-        rows = await self._postgres.fetch_all(query, tuple(params))
+        rows = await self._reader.list_folder_uploads(
+            session_id=session_id,
+            visibility_scope=visibility_scope,
+            limit=limit,
+        )
         return [self._public_folder_metadata(row) for row in rows]
 
     async def get_folder_upload_summary(
@@ -1323,17 +645,18 @@ class DocumentService:
         path_prefix: Optional[str] = None,
     ) -> Dict:
         """Return one visible folder batch and a shallow document tree."""
-        if not isinstance(folder_root_id, str) or not folder_root_id.strip():
+        folder_root_id = folder_root_id.strip()
+        if not folder_root_id:
             raise ValueError("folder_root_id must not be empty")
-        folder = await self._get_visible_folder_upload(
-            folder_root_id=folder_root_id.strip(),
+        folder = await self._reader.fetch_folder_upload(
+            folder_root_id=folder_root_id,
             session_id=session_id,
         )
         if folder is None:
             raise FileNotFoundError("Folder upload not found")
         result = self._public_folder_metadata(folder)
         result["tree"] = await self.list_folder_tree(
-            folder_root_id=folder_root_id.strip(),
+            folder_root_id=folder_root_id,
             session_id=session_id,
             path_prefix=path_prefix,
             max_depth=2,
@@ -1370,11 +693,12 @@ class DocumentService:
             raise ValueError(
                 "document focus requires document_id or folder_root_id"
             )
-        if not isinstance(folder_root_id, str) or not folder_root_id.strip():
+        folder_root_id = folder_root_id.strip()
+        if not folder_root_id:
             raise ValueError("folder_root_id must not be empty")
         normalized_prefix = self._normalize_path_prefix(path_prefix)
-        folder = await self._get_visible_folder_upload(
-            folder_root_id=folder_root_id.strip(),
+        folder = await self._reader.fetch_folder_upload(
+            folder_root_id=folder_root_id,
             session_id=session_id,
         )
         if folder is None:
@@ -1382,7 +706,7 @@ class DocumentService:
         if normalized_prefix is not None:
             documents = await self.list_documents(
                 session_id=session_id,
-                folder_root_id=folder_root_id.strip(),
+                folder_root_id=folder_root_id,
                 path_prefix=normalized_prefix,
                 limit=1,
             )
@@ -1392,60 +716,16 @@ class DocumentService:
                 "target_type": "subtree",
                 "document_id": None,
                 "relative_path": None,
-                "folder_root_id": folder_root_id.strip(),
+                "folder_root_id": folder_root_id,
                 "path_prefix": normalized_prefix,
             }
         return {
             "target_type": "folder_upload",
             "document_id": None,
             "relative_path": None,
-            "folder_root_id": folder_root_id.strip(),
+            "folder_root_id": folder_root_id,
             "path_prefix": None,
         }
-
-    async def _list_folder_documents(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str],
-        path_prefix: Optional[str] = None,
-    ) -> List[Dict]:
-        query = """
-            SELECT
-                pd.document_id,
-                pd.folder_root_id,
-                pd.original_name,
-                pd.relative_path,
-                pd.extension,
-                pd.size_bytes,
-                pd.status,
-                COUNT(dc.chunk_id)::INTEGER AS chunk_count
-            FROM public.project_documents AS pd
-            LEFT JOIN public.document_chunks AS dc
-                ON dc.document_id = pd.document_id
-            WHERE pd.project_id = %s
-              AND pd.folder_root_id = %s
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
-        """
-        params: list = [self.project_id, folder_root_id, session_id]
-        if path_prefix is not None:
-            escaped = self._escape_like(path_prefix)
-            query += (
-                " AND (pd.relative_path = %s "
-                "OR pd.relative_path LIKE %s ESCAPE '\\')"
-            )
-            params.extend([path_prefix, f"{escaped}/%"])
-        query += """
-            GROUP BY pd.document_id
-            ORDER BY pd.relative_path, pd.document_id
-        """
-        return await self._postgres.fetch_all(query, tuple(params))
 
     @staticmethod
     def _build_folder_tree(rows: List[Dict], max_depth: int) -> List[Dict]:
@@ -1509,7 +789,8 @@ class DocumentService:
         max_depth: int = 3,
     ) -> List[Dict]:
         """Return a deterministic tree for one visible folder upload."""
-        if not isinstance(folder_root_id, str) or not folder_root_id.strip():
+        folder_root_id = folder_root_id.strip()
+        if not folder_root_id:
             raise ValueError("folder_root_id must not be empty")
         if (
             not isinstance(max_depth, int)
@@ -1518,14 +799,14 @@ class DocumentService:
         ):
             raise ValueError("max_depth must be between 1 and 10")
         normalized_prefix = self._normalize_path_prefix(path_prefix)
-        folder = await self._get_visible_folder_upload(
-            folder_root_id=folder_root_id.strip(),
+        folder = await self._reader.fetch_folder_upload(
+            folder_root_id=folder_root_id,
             session_id=session_id,
         )
         if folder is None:
             raise FileNotFoundError("Folder upload not found")
-        rows = await self._list_folder_documents(
-            folder_root_id=folder_root_id.strip(),
+        rows = await self._reader.fetch_folder_documents(
+            folder_root_id=folder_root_id,
             session_id=session_id,
             path_prefix=normalized_prefix,
         )
@@ -1556,68 +837,22 @@ class DocumentService:
             raise ValueError("limit must be between 1 and 1000")
         normalized_prefix = self._normalize_path_prefix(path_prefix)
         if folder_root_id is not None:
-            if not isinstance(folder_root_id, str) or not folder_root_id.strip():
+            folder_root_id = folder_root_id.strip()
+            if not folder_root_id:
                 raise ValueError("folder_root_id must not be empty")
-            folder = await self._get_visible_folder_upload(
-                folder_root_id=folder_root_id.strip(),
+            folder = await self._reader.fetch_folder_upload(
+                folder_root_id=folder_root_id,
                 session_id=session_id,
             )
             if folder is None:
                 raise FileNotFoundError("Folder upload not found")
-
-        query = """
-            SELECT
-                pd.document_id,
-                pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.folder_root_id,
-                pd.source_kind,
-                pd.original_name,
-                pd.relative_path,
-                pd.extension,
-                pd.size_bytes,
-                pd.content_hash,
-                pd.status,
-                pd.created_at,
-                pd.updated_at,
-                pd.indexed_at,
-                pd.error_message,
-                COUNT(dc.chunk_id)::INTEGER AS chunk_count
-            FROM public.project_documents AS pd
-            LEFT JOIN public.document_chunks AS dc
-                ON dc.document_id = pd.document_id
-            WHERE pd.project_id = %s
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
-        """
-        params: list = [self.project_id, session_id]
-        if visibility_scope is not None:
-            query += " AND pd.visibility_scope = %s"
-            params.append(visibility_scope)
-        if folder_root_id is not None:
-            query += " AND pd.folder_root_id = %s"
-            params.append(folder_root_id.strip())
-        if normalized_prefix is not None:
-            escaped = self._escape_like(normalized_prefix)
-            query += (
-                " AND (pd.relative_path = %s "
-                "OR pd.relative_path LIKE %s ESCAPE '\\')"
-            )
-            params.extend([normalized_prefix, f"{escaped}/%"])
-        query += """
-            GROUP BY pd.document_id
-            ORDER BY pd.created_at DESC, pd.document_id DESC
-            LIMIT %s
-        """
-        params.append(limit)
-
-        rows = await self._postgres.fetch_all(query, tuple(params))
+        rows = await self._reader.list_documents(
+            session_id=session_id,
+            visibility_scope=visibility_scope,
+            folder_root_id=folder_root_id,
+            path_prefix=normalized_prefix,
+            limit=limit,
+        )
         return [self._public_metadata(row) for row in rows]
 
     async def search(
@@ -1657,10 +892,11 @@ class DocumentService:
         )
         normalized_prefix = self._normalize_path_prefix(path_prefix)
         if folder_root_id is not None:
-            if not isinstance(folder_root_id, str) or not folder_root_id.strip():
+            folder_root_id = folder_root_id.strip()
+            if not folder_root_id:
                 raise ValueError("folder_root_id must not be empty")
-            folder = await self._get_visible_folder_upload(
-                folder_root_id=folder_root_id.strip(),
+            folder = await self._reader.fetch_folder_upload(
+                folder_root_id=folder_root_id,
                 session_id=session_id,
             )
             if folder is None:
@@ -1673,56 +909,15 @@ class DocumentService:
                 f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
             )
 
-        embedding_json = json.dumps(query_embedding)
-        sql = """
-            SELECT
-                dc.document_id,
-                pd.folder_root_id,
-                pd.original_name,
-                pd.relative_path,
-                dc.chunk_index,
-                dc.content,
-                1 - (dc.embedding <=> %s::vector) AS score
-            FROM public.document_chunks AS dc
-            JOIN public.project_documents AS pd
-                ON pd.document_id = dc.document_id
-            WHERE pd.project_id = %s
-              AND pd.status = 'indexed'
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
-        """
-        params: list = [embedding_json, self.project_id, session_id]
-        if document_filter is not None:
-            sql += " AND pd.document_id = %s"
-            params.append(document_filter)
-        if folder_root_id is not None:
-            sql += " AND pd.folder_root_id = %s"
-            params.append(folder_root_id.strip())
-        if normalized_relative_path is not None:
-            sql += " AND pd.relative_path = %s"
-            params.append(normalized_relative_path)
-        if normalized_prefix is not None:
-            escaped = self._escape_like(normalized_prefix)
-            sql += (
-                " AND (pd.relative_path = %s "
-                "OR pd.relative_path LIKE %s ESCAPE '\\')"
-            )
-            params.extend([normalized_prefix, f"{escaped}/%"])
-        sql += """
-            ORDER BY
-                dc.embedding <=> %s::vector,
-                dc.document_id,
-                dc.chunk_index
-            LIMIT %s
-        """
-        params.extend([embedding_json, n_results])
-
-        rows = await self._postgres.fetch_all(sql, tuple(params))
+        rows = await self._reader.search_chunks(
+            session_id=session_id,
+            query_embedding=query_embedding,
+            n_results=n_results,
+            document_filter=document_filter,
+            folder_root_id=folder_root_id,
+            relative_path=normalized_relative_path,
+            path_prefix=normalized_prefix,
+        )
         results = []
         for row in rows:
             result = dict(row)

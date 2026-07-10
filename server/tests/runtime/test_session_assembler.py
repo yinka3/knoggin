@@ -102,7 +102,6 @@ def assembler_harness(monkeypatch):
         user_name="ada",
         redis_client=resources.redis,
         postgres_client=resources.postgres,
-        document_storage_root=resources.document_storage_root,
         embedding_service=resources.embedding,
         readable_project_ids=["project-1"],
         batch_processor=shared_processor,

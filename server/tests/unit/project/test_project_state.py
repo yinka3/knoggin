@@ -14,10 +14,6 @@ def test_project_state_owns_distinct_document_services():
     assert second.document_service.project_id == "project-2"
     assert first.document_service is not second.document_service
     assert first.document_service._postgres is first.postgres_client
-    assert (
-        first.document_service._storage_root
-        == first.document_storage_root.resolve()
-    )
 
 
 @pytest.mark.unit

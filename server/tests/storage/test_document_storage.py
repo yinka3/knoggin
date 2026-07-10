@@ -6,6 +6,45 @@ import pytest
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
+async def test_document_content_is_deleted_with_parent_document(
+    real_postgres_client,
+):
+    document_id = str(uuid.uuid4())
+
+    await real_postgres_client.execute(
+        """
+        INSERT INTO project_documents (
+            document_id, project_id, visibility_scope, original_name,
+            relative_path, extension, size_bytes, content_hash
+        )
+        VALUES (%s, 'project-1', 'project', 'notes.md',
+                'notes.md', '.md', 5, 'hash')
+        """,
+        (document_id,),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO document_content (document_id, content)
+        VALUES (%s, %s)
+        """,
+        (document_id, b"hello"),
+    )
+
+    await real_postgres_client.execute(
+        "DELETE FROM project_documents WHERE document_id = %s",
+        (document_id,),
+    )
+    rows = await real_postgres_client.fetch_all(
+        "SELECT document_id FROM document_content WHERE document_id = %s",
+        (document_id,),
+    )
+
+    assert rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
 async def test_document_chunks_are_deleted_with_parent_document(
     real_postgres_client,
 ):
@@ -17,10 +56,10 @@ async def test_document_chunks_are_deleted_with_parent_document(
         """
         INSERT INTO project_documents (
             document_id, project_id, visibility_scope, original_name,
-            relative_path, extension, size_bytes, content_hash, storage_key
+            relative_path, extension, size_bytes, content_hash
         )
         VALUES (%s, 'project-1', 'project', 'notes.md',
-                'notes.md', '.md', 5, 'hash', 'project-1/file/content')
+                'notes.md', '.md', 5, 'hash')
         """,
         (document_id,),
     )
@@ -78,12 +117,11 @@ async def test_folder_upload_delete_cascades_documents_and_chunks(
         INSERT INTO project_documents (
             document_id, project_id, visibility_scope, folder_root_id,
             source_kind, original_name, relative_path, extension,
-            size_bytes, content_hash, storage_key, status, indexed_at
+            size_bytes, content_hash, status, indexed_at
         )
         VALUES (
             %s, 'project-1', 'project', %s, 'folder_upload',
-            'notes.md', 'notes.md', '.md', 5, 'hash',
-            'project-1/document/content', 'indexed', NOW()
+            'notes.md', 'notes.md', '.md', 5, 'hash', 'indexed', NOW()
         )
         """,
         (document_id, folder_root_id),
