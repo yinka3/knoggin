@@ -8,9 +8,9 @@ from common.schema.contracts import BatchResult
 from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
 from common.utils.json_utils import safe_json_loads
+from core.ingestion.services.pipeline_service import IngestionPipeline
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
-from core.ingestion.services.pipeline_service import IngestionPipeline
 
 
 class IngestionWorker:

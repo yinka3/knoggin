@@ -5,8 +5,8 @@ import pytest
 
 from common.schema.contracts import BatchResult, CandidateSuggestion
 from common.schema.settings import IngestionSettings
-from infrastructure.redis_client import RedisKeys
 from core.ingestion.services.batch_consumer import IngestionWorker
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
 
 
