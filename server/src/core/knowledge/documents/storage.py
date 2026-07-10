@@ -1,109 +1,81 @@
-import json
-import os
-import shutil
-import uuid
-from pathlib import Path
-from typing import List, Optional
+import io
+from typing import List
 
 import docx2txt
 from llama_index.core.node_parser import SentenceSplitter
 from pypdf import PdfReader
 
-from core.knowledge.documents.constants import CHUNK_SIZE, CHUNK_OVERLAP
+# pytesseract is required for image OCR.
+# Install with: pip install pytesseract pillow
+# The host system must also have Tesseract installed:
+#   macOS:  brew install tesseract
+#   Ubuntu: apt-get install tesseract-ocr
+try:
+    import pytesseract
+    from PIL import Image as PILImage
+    _PYTESSERACT_AVAILABLE = True
+except ImportError:
+    _PYTESSERACT_AVAILABLE = False
 
-def remove_tree(path: Path) -> None:
-    if path.exists():
-        shutil.rmtree(path)
-    try:
-        path.parent.rmdir()
-    except OSError:
-        pass
+from core.knowledge.documents.constants import (
+    ACCEPTED_EXTENSIONS,
+    CHUNK_OVERLAP_TOKENS,
+    CHUNK_SIZE_TOKENS,
+    IMAGE_EXTENSIONS,
+)
 
-def write_prepared_chunks(
-    path: Path,
-    chunks: List[str],
-    embeddings: List[List[float]],
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as handle:
-        for chunk_index, (content, embedding) in enumerate(
-            zip(chunks, embeddings)
-        ):
-            handle.write(
-                json.dumps(
-                    {
-                        "chunk_index": chunk_index,
-                        "content": content,
-                        "embedding": embedding,
-                    },
-                    separators=(",", ":"),
-                )
-                + "\n"
-            )
+# Module-level splitter — constructing SentenceSplitter loads a tokenizer,
+# so we create it once rather than on every split_text() call.
+_SPLITTER = SentenceSplitter(
+    chunk_size=CHUNK_SIZE_TOKENS,
+    chunk_overlap=CHUNK_OVERLAP_TOKENS,
+)
 
-def iter_prepared_chunks(path: Path):
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                yield json.loads(line)
-
-def write_file_atomically(target: Path, content: bytes) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("xb") as file_handle:
-            file_handle.write(content)
-            file_handle.flush()
-            os.fsync(file_handle.fileno())
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-def remove_stored_file(target: Path) -> None:
-    target.unlink(missing_ok=True)
-    try:
-        target.parent.rmdir()
-    except OSError:
-        pass
-
-def quarantine_stored_file(target: Path) -> Optional[Path]:
-    directory = target.parent
-    if not directory.exists():
-        return None
-    quarantine = directory.with_name(
-        f".{directory.name}.deleting-{uuid.uuid4().hex}"
-    )
-    os.replace(directory, quarantine)
-    return quarantine
-
-def restore_quarantined_file(quarantine: Path, target: Path) -> None:
-    if quarantine.exists():
-        os.replace(quarantine, target.parent)
-
-def purge_quarantined_file(quarantine: Path) -> None:
-    shutil.rmtree(quarantine)
 
 def looks_binary(content: bytes) -> bool:
-    if b"\x00" in content:
-        return True
     if not content:
         return False
+    if b"\x00" in content:
+        return True
     control_bytes = sum(
         byte < 32 and byte not in (8, 9, 10, 12, 13) for byte in content
     )
     return control_bytes / len(content) > 0.30
 
-def extract_text(stored_path: Path, extension: str) -> str:
-    if not stored_path.is_file():
-        raise ValueError("Managed document content is missing")
 
-    if extension == ".pdf":
-        reader = PdfReader(str(stored_path))
+def is_accepted_extension(extension: str) -> bool:
+    """Return True if the extension is supported for upload and indexing."""
+    return extension.lower() in ACCEPTED_EXTENSIONS
+
+
+def extract_text(content: bytes, extension: str) -> str:
+    ext = extension.lower()
+
+    if ext not in ACCEPTED_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported file type '{ext}'. "
+            f"Accepted types include PDF, DOCX, plain text, source code, and images."
+        )
+
+    if ext == ".pdf":
+        reader = PdfReader(io.BytesIO(content))
         text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
-    elif extension == ".docx":
-        text = docx2txt.process(str(stored_path)) or ""
+    elif ext == ".docx":
+        text = docx2txt.process(io.BytesIO(content)) or ""
+    elif ext in IMAGE_EXTENSIONS:
+        if not _PYTESSERACT_AVAILABLE:
+            raise ValueError(
+                "Image OCR is not available. "
+                "Install pytesseract and pillow, and ensure Tesseract is installed on the host."
+            )
+        image = PILImage.open(io.BytesIO(content))
+        text = pytesseract.image_to_string(image)
+        if not text.strip():
+            raise ValueError(
+                "Image contains no readable text — it may be a photo or illustration."
+            )
+        return text
     else:
-        content = stored_path.read_bytes()
         if looks_binary(content):
             raise ValueError("Document appears to contain binary content")
         try:
@@ -115,12 +87,9 @@ def extract_text(stored_path: Path, extension: str) -> str:
         raise ValueError("Document contains no extractable text")
     return text
 
+
 def split_text(text: str) -> List[str]:
-    splitter = SentenceSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    )
-    chunks = [chunk.strip() for chunk in splitter.split_text(text)]
+    chunks = [chunk.strip() for chunk in _SPLITTER.split_text(text)]
     chunks = [chunk for chunk in chunks if chunk]
     if not chunks:
         raise ValueError("Document produced no non-empty chunks")

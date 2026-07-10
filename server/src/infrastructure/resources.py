@@ -1,7 +1,6 @@
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -44,7 +43,6 @@ class ResourceManager:
 
         self.knowledge_store: Optional[KnowledgeStore] = None
         self.postgres: Optional[PostgresClient] = None
-        self.document_storage_root: Optional[Path] = None
         self.embedding: Optional[EmbeddingService] = None
         self.redis_manager: Optional[AsyncRedisClient] = None
         self.redis: Optional[aioredis.Redis] = None
@@ -86,14 +84,6 @@ class ResourceManager:
                     raise ConfigurationError(
                         "DATABASE_URL environment variable is not set"
                     )
-                instance.document_storage_root = Path(
-                    os.getenv("KNOGGIN_DOCUMENT_STORAGE_DIR", "./data/documents")
-                ).expanduser().resolve()
-                await asyncio.to_thread(
-                    instance.document_storage_root.mkdir,
-                    parents=True,
-                    exist_ok=True,
-                )
                 redis_settings = RedisConnectionSettings.from_env()
                 instance.redis_manager = AsyncRedisClient(redis_settings)
                 instance.redis = await instance.redis_manager.connect()
@@ -224,7 +214,6 @@ class ResourceManager:
         self.gliner = None
         self.spacy = None
         self.knowledge_store = None
-        self.document_storage_root = None
 
     async def shutdown(self):
         """Release all managed resources."""

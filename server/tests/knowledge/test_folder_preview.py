@@ -18,11 +18,10 @@ class DefaultSettingsPostgres:
 
 
 @pytest.fixture
-def preview_service(tmp_path):
+def preview_service():
     return DocumentService(
         project_id="project-1",
         postgres_client=DefaultSettingsPostgres(),
-        storage_root=tmp_path,
         embedding_service=ForbiddenDependency(),
     )
 

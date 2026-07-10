@@ -543,7 +543,6 @@ class ProjectManager:
             user_name=self.user_name,
             redis_client=self.resources.redis,
             postgres_client=self.resources.postgres,
-            document_storage_root=self.resources.document_storage_root,
             embedding_service=self.resources.embedding,
             readable_project_ids=readable_project_ids,
             batch_processor=project_processor,

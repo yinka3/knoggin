@@ -1,6 +1,6 @@
 import fnmatch
 import hashlib
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Dict, List, Optional
 
 from pathspec import GitIgnoreSpec
@@ -13,16 +13,17 @@ from common.schema.document import (
     FolderUploadEntry,
 )
 from core.knowledge.documents.constants import (
+    ACCEPTED_EXTENSIONS,
     ARCHIVE_EXTENSIONS,
-    BINARY_TEXT_EXEMPT_EXTENSIONS,
+    AUDIO_EXTENSIONS,
     DEFAULT_IGNORED_DIRECTORIES,
     DEFAULT_IGNORED_PATTERNS,
     EXECUTABLE_EXTENSIONS,
-    IMAGE_EXTENSIONS,
     SENSITIVE_FILE_PATTERNS,
     VIDEO_EXTENSIONS,
 )
 from core.knowledge.documents.storage import looks_binary
+
 
 def normalize_relative_path(
     relative_path: Optional[str],
@@ -222,7 +223,7 @@ def build_folder_preview(
             FolderPreviewEntry(
                 relative_path=path,
                 original_name=path_obj.name,
-                extension=Path(path_obj.name).suffix.lower(),
+                extension=PurePosixPath(path_obj.name).suffix.lower(),
                 size_bytes=len(content),
                 reason=reason,
                 rule_source=source,
@@ -235,7 +236,7 @@ def build_folder_preview(
         path_obj = PurePosixPath(path)
         name = path_obj.name
         lower_name = name.lower()
-        extension = Path(name).suffix.lower()
+        extension = PurePosixPath(name).suffix.lower()
         depth = len(path_obj.parts) - 1
         forced = path in normalized_overrides
 
@@ -269,7 +270,7 @@ def build_folder_preview(
         if (
             extension in ARCHIVE_EXTENSIONS
             or (
-                extension != ".docx"
+                extension not in {".docx", ".pdf"}
                 and has_archive_signature(content)
             )
         ):
@@ -287,11 +288,11 @@ def build_folder_preview(
                 False,
             )
             continue
-        if extension in IMAGE_EXTENSIONS:
-            exclude(path, content, "image_file", "content_type", False)
-            continue
         if extension in VIDEO_EXTENSIONS:
             exclude(path, content, "video_file", "content_type", False)
+            continue
+        if extension in AUDIO_EXTENSIONS:
+            exclude(path, content, "audio_file", "content_type", False)
             continue
         if (
             extension not in BINARY_TEXT_EXEMPT_EXTENSIONS
@@ -387,6 +388,15 @@ def build_folder_preview(
                 "custom_file_name",
                 "project_filter",
                 True,
+            )
+            continue
+        if extension not in ACCEPTED_EXTENSIONS and not forced:
+            exclude(
+                path,
+                content,
+                "unsupported_extension",
+                "content_type",
+                False,
             )
             continue
         if (
