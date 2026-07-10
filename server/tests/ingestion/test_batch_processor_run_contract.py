@@ -10,9 +10,9 @@ from common.schema.contracts import (
     ValidationIssue,
 )
 from common.schema.primitives import ConnectionRecord
-from infrastructure.redis_client import RedisKeys
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.resolver import EntityResolver
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.factories import make_topic_config
 from tests.fixtures.fakes import FakeRedis
 from tests.ingestion.test_batch_processor_entity_resolution_contract import (

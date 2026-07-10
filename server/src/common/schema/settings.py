@@ -1,13 +1,9 @@
 import os
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from common.exceptions import ConfigurationError
-from common.utils.prompt_loader import (
-    load_pipeline_prompt_template,
-    validate_prompt_template,
-)
 
 
 class RedisConnectionSettings(BaseModel):
@@ -117,7 +113,6 @@ class CleanerSettings(BaseModel):
 class ProfileSettings(BaseModel):
     msg_window: int = Field(30, ge=5)
     volume_threshold: int = Field(15, ge=1)
-    idle_threshold: int = Field(90, ge=10)
     profile_batch_size: int = Field(8, ge=1)
     max_facts_context: int = Field(50, ge=1)
     contradiction_sim_low: float = Field(0.70, ge=0.0, le=1.0)
@@ -197,36 +192,6 @@ class TextProcessorSettings(BaseModel):
     gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
     vp01_min_confidence: float = Field(0.8, ge=0.0, le=1.0)
     llm_ner: bool = Field(False)
-    profile_prompt: str = Field(
-        default_factory=lambda: load_pipeline_prompt_template(
-            "prompts/refinement.md", "Extract Facts"
-        )
-    )
-    merge_prompt: str = Field(
-        default_factory=lambda: load_pipeline_prompt_template(
-            "prompts/merge.md", "Judge Merge"
-        )
-    )
-    contradiction_prompt: str = Field(
-        default_factory=lambda: load_pipeline_prompt_template(
-            "prompts/refinement.md", "Judge Contradiction"
-        )
-    )
-
-    @model_validator(mode="after")
-    def validate_prompt_contracts(self):
-        contracts = (
-            ("profile_prompt", self.profile_prompt, {"user_name"}),
-            ("merge_prompt", self.merge_prompt, set()),
-            ("contradiction_prompt", self.contradiction_prompt, set()),
-        )
-        for name, prompt, placeholders in contracts:
-            validate_prompt_template(
-                prompt,
-                required=placeholders,
-                prompt_name=f"developer_settings.nlp_pipeline.{name}",
-            )
-        return self
 
 
 class SearchSettings(BaseModel):

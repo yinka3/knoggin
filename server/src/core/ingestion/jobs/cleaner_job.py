@@ -6,19 +6,18 @@ from loguru import logger
 from common.schema.settings import CleanerSettings
 from common.utils.events import emit
 from common.utils.time_utils import get_now_ms
+from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
-from core.knowledge.entity.resolver import EntityResolver
 
 
 class EntityCleanupJob(BaseJob):
     """
-    Removes 'orphan' entities (no relationships) that have been
-    stagnant for >X hours.
+    Removes null, orphaned, and stale low-value entities.
 
-    Trigger: Time-based (Default Every 24h)
-    Safety: Only deletes if last_mentioned < 24h ago.
+    Cleanup is project-scoped, protects entities queued for merge evaluation,
+    and evicts only confirmed deletions from the entity resolver cache.
     """
 
     def __init__(
@@ -27,20 +26,15 @@ class EntityCleanupJob(BaseJob):
         knowledge_store: KnowledgeStore,
         entities: EntityResolver,
         redis_client: aioredis.Redis,
-        interval_hours: int = 24,
-        orphan_age_hours: int = 24,
-        stale_junk_days: int = 30,
+        settings: CleanerSettings,
     ):
         self.user_name = user_name
         self.knowledge_store = knowledge_store
         self.redis = redis_client
         self.entities = entities
-
-        self.run_interval_seconds = interval_hours * 3600
-        self.orphan_cutoff_ms = orphan_age_hours * 3600 * 1000
-        self.stale_cutoff_ms = stale_junk_days * 24 * 3600 * 1000
-
-        logger.info(f"Cleaner Job initialized. Interval: {interval_hours}h")
+        self.orphan_age_hours = settings.orphan_age_hours
+        self.stale_junk_days = settings.stale_junk_days
+        self.update_settings(settings)
 
     @property
     def name(self) -> str:
@@ -98,7 +92,8 @@ class EntityCleanupJob(BaseJob):
 
             logger.info(
                 f"Cleanup trigger: Found {len(orphan_ids)} entities "
-                "(Orphans >24h or Junk >30d)"
+                f"(orphans >{self.orphan_age_hours}h or junk "
+                f">{self.stale_junk_days}d)"
             )
             for eid in orphan_ids:
                 # We don't fetch names to avoid slow DB calls, but we log the IDs
@@ -130,6 +125,8 @@ class EntityCleanupJob(BaseJob):
         self.run_interval_seconds = settings.interval_hours * 3600
         self.orphan_cutoff_ms = settings.orphan_age_hours * 3600 * 1000
         self.stale_cutoff_ms = settings.stale_junk_days * 24 * 3600 * 1000
+        self.orphan_age_hours = settings.orphan_age_hours
+        self.stale_junk_days = settings.stale_junk_days
         logger.info(
             "EntityCleanupJob settings updated: "
             f"enabled={self.enabled}, interval={settings.interval_hours}h, "

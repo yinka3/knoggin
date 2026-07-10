@@ -28,13 +28,11 @@ def make_project_state(
     redis=None,
     scheduler=None,
     postgres=None,
-    document_storage_root=None,
     embedding=None,
 ):
     redis = redis or FakeRedis()
     scheduler = scheduler or FakeScheduler()
     postgres = postgres or FakePostgresClient()
-    document_storage_root = document_storage_root or Path("data/documents")
     embedding = embedding or FakeEmbeddingService()
     return ProjectState(
         project_id=project_id,
@@ -45,7 +43,6 @@ def make_project_state(
         user_name="ada",
         redis_client=redis,
         postgres_client=postgres,
-        document_storage_root=document_storage_root,
         embedding_service=embedding,
         readable_project_ids=[project_id],
     )

@@ -4,10 +4,10 @@ import pytest
 
 from common.schema.settings import MergeRollbackSettings
 from common.utils.time_utils import frozen_time, get_now
-from infrastructure.job.base import JobContext
 from core.knowledge.jobs.merge_rollback_cleanup_job import (
     MergeCleanupJob,
 )
+from infrastructure.job.base import JobContext
 
 
 class RecordingKnowledgeStore:
@@ -31,8 +31,10 @@ async def test_merge_rollback_cleanup_job_expires_old_available_state():
     store = RecordingKnowledgeStore(expire_result=2)
     job = MergeCleanupJob(
         store,
-        retention_hours=5,
-        fallback_interval_hours=1,
+        settings=MergeRollbackSettings(
+            retention_hours=5,
+            fallback_interval_hours=1,
+        ),
     )
     ctx = JobContext(user_name="ada", project_id="project-1")
 
@@ -53,16 +55,27 @@ async def test_merge_rollback_cleanup_job_expires_old_available_state():
 
 @pytest.mark.no_network
 async def test_merge_rollback_cleanup_job_settings_update_cadence_and_window():
-    job = MergeCleanupJob(RecordingKnowledgeStore())
+    job = MergeCleanupJob(
+        RecordingKnowledgeStore(),
+        settings=MergeRollbackSettings(
+            enabled=False,
+            retention_hours=4,
+            fallback_interval_hours=1,
+        ),
+    )
+
+    assert job.enabled is False
+    assert job.retention_hours == 4
+    assert job.cadence_seconds == 3600
 
     job.update_settings(
         MergeRollbackSettings(
-            enabled=False,
+            enabled=True,
             retention_hours=6,
             fallback_interval_hours=2,
         )
     )
 
-    assert job.enabled is False
+    assert job.enabled is True
     assert job.retention_hours == 6
     assert job.cadence_seconds == 7200

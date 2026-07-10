@@ -13,8 +13,11 @@ from infrastructure.redis_client import RedisKeys
 
 class FactArchivalJob(BaseJob):
     """
-    Archives old invalidated facts.
-    With Fact nodes, we simply delete facts past retention period.
+    Deletes invalidated facts after profile refinement completes.
+
+    The job is triggered by a per-project profile-complete Redis marker. It
+    removes invalidated facts older than the configured retention window and
+    consumes the marker only after archival succeeds.
     """
 
     _CONSUME_PROFILE_TRIGGER_SCRIPT = """
@@ -26,17 +29,13 @@ class FactArchivalJob(BaseJob):
 
     def __init__(
         self,
-        user_name: str,
         knowledge_store: KnowledgeStore,
         redis_client: aioredis.Redis,
-        retention_days: int = 14,
-        fallback_interval_hours: float = 24,
+        settings: ArchivalSettings,
     ):
-        self.user_name = user_name
         self.redis = redis_client
         self.knowledge_store = knowledge_store
-        self.retention_days = retention_days
-        self._fallback_interval_seconds = fallback_interval_hours * 3600
+        self.update_settings(settings)
 
     @property
     def name(self) -> str:

@@ -10,8 +10,6 @@ from common.schema.settings import DLQSettings
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_unix
-from infrastructure.job.base import BaseJob, JobContext, JobResult
-from infrastructure.redis_client import RedisKeys
 from core.ingestion.dlq_state import (
     DLQ_STATUS_COMPLETED,
     DLQ_STATUS_PARKED,
@@ -26,13 +24,22 @@ from core.ingestion.services.pipeline_service import (
     IngestionPipeline,
 )
 from core.knowledge.entity.resolver import EntityResolver
+from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.redis_client import RedisKeys
 
 
 class DLQReplayJob(BaseJob):
     """
-    Periodically checks the Dead Letter Queue with stage-aware retry:
-    - graph_write: Cheap retry, just write (no LLM cost)
-    - processing: Full reprocess with stored context (LLM cost)
+    Replays failed ingestion work from the Redis-backed dead letter queue.
+
+    The job is cadence-driven and uses explicit Redis state to claim, requeue,
+    complete, or park DLQ entries. Replay is stage-aware:
+    - graph_write: retry graph persistence only, avoiding LLM work.
+    - message_log: retry message-log persistence, then graph persistence.
+    - processing: rerun the ingestion pipeline with stored messages/context.
+
+    Failed transient retries are requeued until max attempts is reached; malformed
+    or terminal entries are parked for manual inspection.
     """
 
     TRANSIENT_ERRORS = [
@@ -70,9 +77,7 @@ class DLQReplayJob(BaseJob):
         processor: IngestionPipeline,
         write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
         redis_client: aioredis.Redis,
-        interval: int = 60,
-        batch_size: int = 50,
-        max_attempts: int = 3,
+        settings: DLQSettings,
     ):
         self.entities = entities
         self.processor = processor
@@ -82,9 +87,7 @@ class DLQReplayJob(BaseJob):
             )
         self.write_to_graph = write_to_graph
         self.redis = redis_client
-        self.interval = interval
-        self.batch_size = batch_size
-        self.max_attempts = max_attempts
+        self.update_settings(settings)
 
     @property
     def name(self) -> str:
@@ -357,6 +360,19 @@ class DLQReplayJob(BaseJob):
 
         return result
 
+    async def _write_replay_graph_if_needed(
+        self, result: BatchResult
+    ) -> Optional[str]:
+        if not result.has_graph_writes():
+            return None
+        if self.write_to_graph is None:
+            return "write_to_graph callback not configured"
+
+        success, err = await self.write_to_graph(result)
+        if success:
+            return None
+        return err or "Graph write failed"
+
     async def _retry_graph_write(self, entry: dict, ctx: JobContext) -> bool:
         """Retry just the graph write — no LLM cost."""
 
@@ -382,7 +398,8 @@ class DLQReplayJob(BaseJob):
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 return True  # Consider it handled
 
-            success, _ = await self.write_to_graph(result)
+            graph_error = await self._write_replay_graph_if_needed(result)
+            success = graph_error is None
 
             if success:
                 replay_unit.mark_succeeded("Graph write retry succeeded")
@@ -409,7 +426,8 @@ class DLQReplayJob(BaseJob):
                 )
 
             if not success:
-                replay_unit.mark_failed("Graph write retry failed")
+                logger.error(f"DLQ graph write retry failed: {graph_error}")
+                replay_unit.mark_failed(graph_error or "Graph write retry failed")
                 self._attach_replay_unit(result, replay_unit)
                 await self._emit_replay_unit_finished(ctx, replay_unit)
 
@@ -473,19 +491,16 @@ class DLQReplayJob(BaseJob):
 
             await self._save_candidate_suggestions_for_replay(result)
 
-            has_writes = result.has_graph_writes()
-
-            if has_writes:
-                success, err = await self.write_to_graph(result)
-                if not success:
-                    logger.error(
-                        "DLQ: Message log succeeded, but paired graph write "
-                        f"failed: {err}"
-                    )
-                    replay_unit.mark_failed(err or "Graph write failed")
-                    self._attach_replay_unit(result, replay_unit)
-                    await self._emit_replay_unit_finished(ctx, replay_unit)
-                    return False
+            graph_error = await self._write_replay_graph_if_needed(result)
+            if graph_error:
+                logger.error(
+                    "DLQ: Message log succeeded, but paired graph write "
+                    f"failed: {graph_error}"
+                )
+                replay_unit.mark_failed(graph_error)
+                self._attach_replay_unit(result, replay_unit)
+                await self._emit_replay_unit_finished(ctx, replay_unit)
+                return False
 
             replay_unit.mark_succeeded("Message log retry succeeded")
             self._attach_replay_unit(result, replay_unit)
@@ -569,17 +584,16 @@ class DLQReplayJob(BaseJob):
 
             await self._save_candidate_suggestions_for_replay(result)
 
-            has_writes = result.has_graph_writes()
-            if has_writes:
-                success, err = await self.write_to_graph(result)
-                if not success:
-                    logger.warning(
-                        f"DLQ: Reprocessing succeeded but graph write failed: {err}"
-                    )
-                    replay_unit.mark_failed(err or "Graph write failed")
-                    self._attach_replay_unit(result, replay_unit)
-                    await self._emit_replay_unit_finished(ctx, replay_unit)
-                    return False
+            graph_error = await self._write_replay_graph_if_needed(result)
+            if graph_error:
+                logger.warning(
+                    "DLQ: Reprocessing succeeded but graph write failed: "
+                    f"{graph_error}"
+                )
+                replay_unit.mark_failed(graph_error)
+                self._attach_replay_unit(result, replay_unit)
+                await self._emit_replay_unit_finished(ctx, replay_unit)
+                return False
 
             logger.info(f"DLQ: Full reprocess succeeded for {len(messages)} messages")
             replay_unit.mark_succeeded("Full reprocess succeeded")

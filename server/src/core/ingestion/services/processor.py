@@ -18,9 +18,9 @@ from common.utils.core_utils import (
     validate_entity,
 )
 from common.utils.events import emit
-from infrastructure.llm_client import LLMService
 from core.ingestion.prompts import ner_prompt
 from core.knowledge.entity.profile import EntityProfile
+from infrastructure.llm_client import LLMService
 
 
 class TextProcessor:

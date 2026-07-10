@@ -15,10 +15,10 @@ from common.scoping import require_scope_value
 from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit
 from common.utils.time_utils import get_now
-from infrastructure.knowledge_store import KnowledgeStore
-from infrastructure.llm_client import LLMService
 from core.ingestion.prompts import get_contradiction_judgment_prompt
 from core.knowledge.services.embedding_service import EmbeddingService
+from infrastructure.knowledge_store import KnowledgeStore
+from infrastructure.llm_client import LLMService
 
 
 class FactResolver:
@@ -46,7 +46,6 @@ class FactResolver:
         project_id: str,
         contradiction_sim_low: float = 0.70,
         contradiction_batch_size: int = 4,
-        contradiction_prompt: Optional[str] = None,
         source_session_by_msg_id: Optional[Mapping[int, str]] = None,
         audit_change_type: Optional[str] = None,
         actor: Optional[str] = None,
@@ -147,7 +146,6 @@ class FactResolver:
                 new_msg_id=msg_id,
                 contradiction_sim_low=contradiction_sim_low,
                 contradiction_batch_size=contradiction_batch_size,
-                contradiction_prompt=contradiction_prompt,
                 candidate_diagnostics=contradiction_candidate_diagnostics,
             )
 
@@ -501,7 +499,6 @@ class FactResolver:
         new_msg_id: Optional[int] = None,
         contradiction_sim_low: float = 0.70,
         contradiction_batch_size: int = 4,
-        contradiction_prompt: Optional[str] = None,
         candidate_diagnostics: Optional[List[dict]] = None,
     ) -> List[str]:
         """
@@ -603,7 +600,6 @@ class FactResolver:
                 pairs=pairs,
                 llm=llm,
                 session_id=session_id,
-                contradiction_prompt=contradiction_prompt,
             )
 
             for idx, is_contradiction in judgments.items():
@@ -664,7 +660,6 @@ class FactResolver:
         pairs: List[Tuple[str, str]],
         llm: LLMService,
         session_id: str,
-        contradiction_prompt: Optional[str] = None,
     ) -> Dict[int, bool]:
         """
         Ask LLM if new facts contradict existing facts.
@@ -672,11 +667,7 @@ class FactResolver:
         if not pairs:
             return {}
 
-        system = (
-            contradiction_prompt
-            if contradiction_prompt
-            else get_contradiction_judgment_prompt()
-        )
+        system = get_contradiction_judgment_prompt()
 
         lines = []
         lines.append("## Facts to evaluate for contradictions:")

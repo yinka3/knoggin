@@ -3,10 +3,11 @@ import json
 import pytest
 
 from common.schema.contracts import BatchResult
-from infrastructure.job.base import JobContext
-from infrastructure.redis_client import RedisKeys
+from common.schema.settings import DLQSettings
 from core.ingestion.dlq_state import ensure_dlq_id, serialize_dlq_entry
 from core.ingestion.jobs.dlq_job import DLQReplayJob
+from infrastructure.job.base import JobContext
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeKnowledgeStore, FakeRedis
 
 
@@ -16,6 +17,14 @@ class ProcessorWithoutKnowledgeStore:
 
 class ProcessorWithKnowledgeStore:
     knowledge_store = object()
+
+
+class EntityCache:
+    def __init__(self, valid_ids=None):
+        self.valid_ids = set(valid_ids or [])
+
+    def has_cached_entity(self, entity_id):
+        return entity_id in self.valid_ids
 
 
 class RecordingProcessor:
@@ -53,6 +62,29 @@ def dlq_entry(**overrides):
     return entry
 
 
+def make_job(
+    *,
+    redis=None,
+    entities=None,
+    processor=None,
+    write_to_graph=successful_write_to_graph,
+    interval_seconds=60,
+    batch_size=50,
+    max_attempts=2,
+):
+    return DLQReplayJob(
+        entities=entities or object(),
+        processor=processor or RecordingProcessor(),
+        write_to_graph=write_to_graph,
+        redis_client=redis or FakeRedis(),
+        settings=DLQSettings(
+            interval_seconds=interval_seconds,
+            batch_size=batch_size,
+            max_attempts=max_attempts,
+        ),
+    )
+
+
 @pytest.mark.ingestion
 @pytest.mark.no_network
 def test_dlq_job_requires_processor_knowledge_store():
@@ -64,18 +96,14 @@ def test_dlq_job_requires_processor_knowledge_store():
             processor=ProcessorWithoutKnowledgeStore(),
             write_to_graph=lambda result: (True, None),
             redis_client=FakeRedis(),
+            settings=DLQSettings(),
         )
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
 def test_dlq_job_accepts_processor_with_knowledge_store():
-    job = DLQReplayJob(
-        entities=object(),
-        processor=ProcessorWithKnowledgeStore(),
-        write_to_graph=lambda result: (True, None),
-        redis_client=FakeRedis(),
-    )
+    job = make_job(processor=ProcessorWithKnowledgeStore())
 
     assert job.name == "dlq_auto_replay"
 
@@ -84,12 +112,7 @@ def test_dlq_job_accepts_processor_with_knowledge_store():
 @pytest.mark.no_network
 async def test_dlq_job_parks_entries_missing_session_id():
     redis = FakeRedis()
-    job = DLQReplayJob(
-        entities=object(),
-        processor=RecordingProcessor(),
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-    )
+    job = make_job(redis=redis)
     ctx = JobContext(user_name="ada", project_id="project-1")
     dlq_key = RedisKeys.dlq("ada", "project-1")
     parked_key = RedisKeys.dlq_parked("ada", "project-1")
@@ -118,12 +141,7 @@ async def test_dlq_job_parks_entries_missing_session_id():
 async def test_dlq_processing_replay_uses_entry_session_id():
     redis = FakeRedis()
     processor = RecordingProcessor()
-    job = DLQReplayJob(
-        entities=object(),
-        processor=processor,
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-    )
+    job = make_job(redis=redis, processor=processor)
     ctx = JobContext(user_name="ada", project_id="project-1")
     dlq_key = RedisKeys.dlq("ada", "project-1")
     message = {"id": 1, "message": "hello"}
@@ -164,12 +182,7 @@ def test_dlq_id_is_stable_for_same_durable_inputs():
 async def test_dlq_success_claims_acknowledges_and_marks_completed():
     redis = FakeRedis()
     processor = RecordingProcessor()
-    job = DLQReplayJob(
-        entities=object(),
-        processor=processor,
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-    )
+    job = make_job(redis=redis, processor=processor)
     ctx = JobContext(user_name="ada", project_id="project-1")
     entry = dlq_entry()
     dlq_id = ensure_dlq_id(entry)
@@ -192,6 +205,55 @@ async def test_dlq_success_claims_acknowledges_and_marks_completed():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_dlq_graph_write_retry_preserves_callback_error(monkeypatch):
+    redis = FakeRedis()
+    emitted = []
+
+    async def fake_emit(*args, **kwargs):
+        emitted.append((args, kwargs))
+
+    async def graph_write_fails(result):
+        return False, "database unavailable"
+
+    monkeypatch.setattr("core.ingestion.jobs.dlq_job.emit", fake_emit)
+    job = make_job(
+        redis=redis,
+        entities=EntityCache(valid_ids={2}),
+        write_to_graph=graph_write_fails,
+    )
+    ctx = JobContext(user_name="ada", project_id="project-1")
+    result = BatchResult(entity_ids=[2], new_entity_ids={2})
+    result.set_scope("ada", "session-1", "project-1")
+    entry = dlq_entry(stage="graph_write", batch_result=result.to_dict())
+
+    assert await job._retry_graph_write(entry, ctx) is False
+
+    work_events = [
+        args[3]
+        for args, _kwargs in emitted
+        if args[2] == "dlq_work_unit_finished"
+    ]
+    assert work_events[-1]["status"] == "failed"
+    assert work_events[-1]["trace"]["summary"] == "database unavailable"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_dlq_replay_graph_write_helper_skips_when_no_graph_writes():
+    calls = []
+
+    async def graph_write(result):
+        calls.append(result)
+        return True, None
+
+    job = make_job(write_to_graph=graph_write)
+
+    assert await job._write_replay_graph_if_needed(BatchResult()) is None
+    assert calls == []
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_dlq_retry_failure_returns_claim_to_active_queue():
     redis = FakeRedis()
     processor = RecordingProcessor()
@@ -200,13 +262,7 @@ async def test_dlq_retry_failure_returns_claim_to_active_queue():
         return BatchResult(success=False, error="boom")
 
     processor.run = failed_run
-    job = DLQReplayJob(
-        entities=object(),
-        processor=processor,
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-        max_attempts=3,
-    )
+    job = make_job(redis=redis, processor=processor, max_attempts=3)
     ctx = JobContext(user_name="ada", project_id="project-1")
     entry = dlq_entry()
     dlq_id = ensure_dlq_id(entry)
@@ -228,12 +284,7 @@ async def test_dlq_retry_failure_returns_claim_to_active_queue():
 async def test_dlq_duplicate_completed_entry_is_not_replayed():
     redis = FakeRedis()
     processor = RecordingProcessor()
-    job = DLQReplayJob(
-        entities=object(),
-        processor=processor,
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-    )
+    job = make_job(redis=redis, processor=processor)
     ctx = JobContext(user_name="ada", project_id="project-1")
     entry = dlq_entry()
     dlq_id = ensure_dlq_id(entry)
@@ -253,12 +304,7 @@ async def test_dlq_duplicate_completed_entry_is_not_replayed():
 async def test_dlq_abandoned_processing_claim_is_requeued_before_work():
     redis = FakeRedis()
     processor = RecordingProcessor()
-    job = DLQReplayJob(
-        entities=object(),
-        processor=processor,
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-    )
+    job = make_job(redis=redis, processor=processor)
     ctx = JobContext(user_name="ada", project_id="project-1")
     entry = dlq_entry()
     dlq_id = ensure_dlq_id(entry)
@@ -280,13 +326,7 @@ async def test_dlq_abandoned_processing_claim_is_requeued_before_work():
 @pytest.mark.no_network
 async def test_dlq_parks_duplicate_only_once():
     redis = FakeRedis()
-    job = DLQReplayJob(
-        entities=object(),
-        processor=RecordingProcessor(),
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-        max_attempts=1,
-    )
+    job = make_job(redis=redis, max_attempts=1)
     ctx = JobContext(user_name="ada", project_id="project-1")
     entry = dlq_entry(attempt=1)
     dlq_id = ensure_dlq_id(entry)
@@ -305,12 +345,7 @@ async def test_dlq_parks_duplicate_only_once():
 @pytest.mark.no_network
 async def test_recovery_helpers_are_duplicate_safe():
     redis = FakeRedis()
-    job = DLQReplayJob(
-        entities=object(),
-        processor=RecordingProcessor(),
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-    )
+    job = make_job(redis=redis)
 
     assert await job.remark_dirty_entities("ada", "project-1", [2, 2, 3]) == 2
     assert await job.remark_dirty_entities("ada", "project-1", [2, 3]) == 0
@@ -327,12 +362,7 @@ async def test_recovery_helpers_are_duplicate_safe():
 @pytest.mark.no_network
 async def test_requeue_parked_dlq_item_validates_state_and_moves_to_active():
     redis = FakeRedis()
-    job = DLQReplayJob(
-        entities=object(),
-        processor=RecordingProcessor(),
-        write_to_graph=successful_write_to_graph,
-        redis_client=redis,
-    )
+    job = make_job(redis=redis)
     entry = dlq_entry(attempt=3)
     dlq_id = ensure_dlq_id(entry)
     await redis.rpush(

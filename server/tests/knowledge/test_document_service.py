@@ -3,16 +3,16 @@ import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
 from common.schema.document import FolderScanSettings, FolderUploadEntry
-from core.knowledge.services import (
-    document_service as document_service_module,
+from core.knowledge.documents import (
+    constants as constants_module,
+    storage as storage_module,
 )
-from core.knowledge.services.document_service import DocumentService
+from core.knowledge.documents import DocumentService
 
 
 class MemoryPostgres:
@@ -21,6 +21,7 @@ class MemoryPostgres:
         self.folders = []
         self.scan_settings = {}
         self.chunks = []
+        self.contents = {}  # document_id -> bytes
         self.calls = []
         self.write_error = None
         self.transaction_error_at_chunk = None
@@ -58,42 +59,6 @@ class MemoryPostgres:
                 "updated_at": updated_at,
             }
             return 1
-        (
-            document_id,
-            project_id,
-            session_id,
-            visibility_scope,
-            original_name,
-            relative_path,
-            extension,
-            size_bytes,
-            content_hash,
-            storage_key,
-            created_at,
-            updated_at,
-        ) = params
-        self.rows.append(
-            {
-                "document_id": document_id,
-                "project_id": project_id,
-                "session_id": session_id,
-                "visibility_scope": visibility_scope,
-                "folder_root_id": None,
-                "source_kind": "manual_upload",
-                "original_name": original_name,
-                "relative_path": relative_path,
-                "extension": extension,
-                "size_bytes": size_bytes,
-                "content_hash": content_hash,
-                "storage_key": storage_key,
-                "status": "uploaded",
-                "indexed_at": None,
-                "error_message": None,
-                "created_at": created_at,
-                "updated_at": updated_at,
-                "chunk_count": 0,
-            }
-        )
         return 1
 
     async def fetch_all(self, query, params=None):
@@ -125,6 +90,14 @@ class MemoryPostgres:
                 )
             ]
             return folders[:limit]
+        if (
+            "FROM public.document_content" in query
+        ):
+            document_id = params[0]
+            raw = self.contents.get(document_id)
+            if raw is None:
+                return []
+            return [{"content": raw}]
         if (
             "FROM public.project_documents AS pd" in query
             and "pd.folder_root_id = %s" in query
@@ -279,13 +252,14 @@ class MemoryCursor:
         if normalized.startswith("DELETE FROM public.project_documents"):
             if self.postgres.delete_error is not None:
                 raise self.postgres.delete_error
-            document_id, project_id = params
+            document_id, project_id, session_id = params
             row = next(
                 (
                     row
                     for row in self.postgres.rows
                     if row["document_id"] == document_id
                     and row["project_id"] == project_id
+                    and self.postgres._visible(row, project_id, session_id)
                 ),
                 None,
             )
@@ -298,7 +272,14 @@ class MemoryCursor:
                 for chunk in self.postgres.chunks
                 if chunk["document_id"] != document_id
             ]
-            self.result = {"document_id": document_id}
+            self.postgres.contents.pop(document_id, None)
+            self.result = dict(row)
+            return
+
+        if normalized.startswith("INSERT INTO public.document_content"):
+            document_id, content = params
+            self.postgres.contents[document_id] = bytes(content)
+            self.result = None
             return
 
         if normalized.startswith("INSERT INTO public.document_chunks"):
@@ -381,7 +362,6 @@ class MemoryCursor:
                 extension,
                 size_bytes,
                 content_hash,
-                storage_key,
                 indexed_at,
                 created_at,
                 updated_at,
@@ -399,7 +379,6 @@ class MemoryCursor:
                     "extension": extension,
                     "size_bytes": size_bytes,
                     "content_hash": content_hash,
-                    "storage_key": storage_key,
                     "status": "indexed",
                     "indexed_at": indexed_at,
                     "error_message": None,
@@ -462,6 +441,7 @@ class MemoryTransaction:
         self.rows = deepcopy(self.postgres.rows)
         self.chunks = deepcopy(self.postgres.chunks)
         self.folders = deepcopy(self.postgres.folders)
+        self.contents = deepcopy(self.postgres.contents)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -469,6 +449,7 @@ class MemoryTransaction:
             self.postgres.rows = self.rows
             self.postgres.chunks = self.chunks
             self.postgres.folders = self.folders
+            self.postgres.contents = self.contents
         if exc_type is None and self.postgres.transaction_commit_error:
             raise self.postgres.transaction_commit_error
         return False
@@ -518,22 +499,21 @@ class FakeEmbeddingService:
 
 
 @pytest.fixture
-def document_harness(tmp_path):
+def document_harness():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
     service = DocumentService(
         project_id="project-1",
         postgres_client=postgres,
-        storage_root=tmp_path,
         embedding_service=embedding,
     )
-    return service, postgres, tmp_path
+    return service, postgres
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_add_document_writes_managed_copy_and_persists_metadata(document_harness):
-    service, postgres, storage_root = document_harness
+async def test_add_document_stores_bytes_and_persists_metadata(document_harness):
+    service, postgres = document_harness
     content = b"alpha beta gamma"
 
     metadata = await service.add_document(
@@ -555,32 +535,30 @@ async def test_add_document_writes_managed_copy_and_persists_metadata(document_h
     assert metadata["chunk_count"] == 0
     assert "storage_key" not in metadata
 
-    stored_row = postgres.rows[0]
-    stored_path = storage_root / stored_row["storage_key"]
-    assert stored_path.read_bytes() == content
-    assert stored_path.name == "content"
-    assert stored_row["original_name"] == "Notes.MD"
+    assert postgres.contents[metadata["document_id"]] == content
+    assert postgres.rows[0]["original_name"] == "Notes.MD"
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_database_failure_removes_newly_written_document(document_harness):
-    service, postgres, storage_root = document_harness
+async def test_database_failure_leaves_no_content_or_metadata(document_harness):
+    service, postgres = document_harness
     postgres.write_error = RuntimeError("insert failed")
 
     with pytest.raises(RuntimeError, match="insert failed"):
         await service.add_document(content=b"alpha", original_name="notes.md")
 
-    assert list(storage_root.rglob("content")) == []
+    assert postgres.rows == []
+    assert postgres.contents == {}
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_visibility_rules_are_applied_when_listing_files(tmp_path):
+async def test_visibility_rules_are_applied_when_listing_files():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    project_one = DocumentService("project-1", postgres, tmp_path, embedding)
-    project_two = DocumentService("project-2", postgres, tmp_path, embedding)
+    project_one = DocumentService("project-1", postgres, embedding)
+    project_two = DocumentService("project-2", postgres, embedding)
 
     project_file = await project_one.add_document(
         content=b"project",
@@ -625,7 +603,7 @@ async def test_visibility_rules_are_applied_when_listing_files(tmp_path):
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_repeated_uploads_create_separate_records(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     first = await service.add_document(
         content=b"same",
@@ -656,7 +634,7 @@ async def test_repeated_uploads_create_separate_records(document_harness):
     ],
 )
 async def test_add_document_rejects_unsafe_relative_paths(document_harness, relative_path):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     with pytest.raises(ValueError):
         await service.add_document(
@@ -670,26 +648,10 @@ async def test_add_document_rejects_unsafe_relative_paths(document_harness, rela
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_generated_storage_path_cannot_escape_storage_root(tmp_path):
-    service = DocumentService(
-        project_id="../outside",
-        postgres_client=MemoryPostgres(),
-        storage_root=tmp_path,
-        embedding_service=FakeEmbeddingService(),
-    )
-
-    with pytest.raises(ValueError, match="escaped"):
-        await service.add_document(content=b"alpha", original_name="notes.md")
-
-    assert list(tmp_path.rglob("content")) == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 async def test_add_document_rejects_invalid_content_scope_and_size(
     monkeypatch, document_harness
 ):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     with pytest.raises(ValueError, match="must not be empty"):
         await service.add_document(content=b"", original_name="notes.md")
@@ -705,8 +667,12 @@ async def test_add_document_rejects_invalid_content_scope_and_size(
             original_name="notes.md",
             visibility_scope="session",
         )
+    with pytest.raises(ValueError, match="Unsupported file type"):
+        await service.add_document(content=b"data", original_name="video.mp4")
+    with pytest.raises(ValueError, match="Unsupported file type"):
+        await service.add_document(content=b"data", original_name="archive.zip")
 
-    monkeypatch.setattr(document_service_module, "MAX_DOCUMENT_SIZE", 3)
+    monkeypatch.setattr(constants_module, "MAX_DOCUMENT_SIZE", 3)
     with pytest.raises(ValueError, match="50 MB"):
         await service.add_document(content=b"four", original_name="notes.md")
 
@@ -716,7 +682,7 @@ async def test_add_document_rejects_invalid_content_scope_and_size(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_list_documents_normalizes_database_timestamps(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     postgres.rows.append(
         {
@@ -729,7 +695,6 @@ async def test_list_documents_normalizes_database_timestamps(document_harness):
             "extension": ".md",
             "size_bytes": 5,
             "content_hash": "hash",
-            "storage_key": "hidden",
             "status": "uploaded",
             "created_at": timestamp,
             "updated_at": timestamp,
@@ -747,7 +712,7 @@ async def test_list_documents_normalizes_database_timestamps(document_harness):
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_get_document_info_resolves_visible_document_without_storage_key(document_harness):
-    service, _, _ = document_harness
+    service, _ = document_harness
     uploaded = await service.add_document(
         content=b"alpha\nbeta",
         original_name="notes.txt",
@@ -764,10 +729,10 @@ async def test_get_document_info_resolves_visible_document_without_storage_key(d
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_get_document_info_enforces_visibility_and_reference_rules(tmp_path):
+async def test_get_document_info_enforces_visibility_and_reference_rules():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    service = DocumentService("project-1", postgres, tmp_path, embedding)
+    service = DocumentService("project-1", postgres, embedding)
     uploaded = await service.add_document(
         content=b"private",
         original_name="private.txt",
@@ -798,7 +763,7 @@ async def test_get_document_info_enforces_visibility_and_reference_rules(tmp_pat
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_relative_path_lookup_requires_document_id_when_uploads_repeat(document_harness):
-    service, _, _ = document_harness
+    service, _ = document_harness
     first = await service.add_document(
         content=b"first",
         original_name="notes.txt",
@@ -821,7 +786,7 @@ async def test_relative_path_lookup_requires_document_id_when_uploads_repeat(doc
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_read_document_returns_bounded_numbered_lines(document_harness):
-    service, _, _ = document_harness
+    service, _ = document_harness
     uploaded = await service.add_document(
         content=b"first\nsecond\nthird\nfourth",
         original_name="notes.txt",
@@ -848,7 +813,7 @@ async def test_read_document_returns_bounded_numbered_lines(document_harness):
 async def test_read_document_validates_ranges_and_character_limit(
     monkeypatch, document_harness
 ):
-    service, _, _ = document_harness
+    service, _ = document_harness
     uploaded = await service.add_document(
         content=b"0123456789\nsecond",
         original_name="notes.txt",
@@ -871,7 +836,7 @@ async def test_read_document_validates_ranges_and_character_limit(
     with pytest.raises(ValueError, match="exceeds document length"):
         await service.read_document(document_id=uploaded["document_id"], start_line=3)
 
-    monkeypatch.setattr(document_service_module, "MAX_READ_CHARACTERS", 8)
+    monkeypatch.setattr(constants_module, "MAX_READ_CHARACTERS", 8)
     result = await service.read_document(document_id=uploaded["document_id"], end_line=1)
     assert result["content"] == "1: 01234"
     assert result["truncated"] is True
@@ -882,7 +847,7 @@ async def test_read_document_validates_ranges_and_character_limit(
 async def test_delete_document_permanently_removes_metadata_chunks_and_bytes(
     monkeypatch, document_harness
 ):
-    service, postgres, storage_root = document_harness
+    service, postgres = document_harness
 
     class OneChunkSplitter:
         def __init__(self, **kwargs):
@@ -892,7 +857,7 @@ async def test_delete_document_permanently_removes_metadata_chunks_and_bytes(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module, "SentenceSplitter", OneChunkSplitter
+        storage_module, "SentenceSplitter", OneChunkSplitter
     )
     first = await service.add_document(
         content=b"same content",
@@ -903,25 +868,14 @@ async def test_delete_document_permanently_removes_metadata_chunks_and_bytes(
         original_name="notes.txt",
     )
     await service.index_document(document_id=first["document_id"])
-    first_storage = storage_root / next(
-        row["storage_key"]
-        for row in postgres.rows
-        if row["document_id"] == first["document_id"]
-    )
-    second_storage = storage_root / next(
-        row["storage_key"]
-        for row in postgres.rows
-        if row["document_id"] == second["document_id"]
-    )
 
     deleted = await service.delete_document(document_id=first["document_id"])
 
     assert deleted["document_id"] == first["document_id"]
     assert deleted["deleted"] is True
     assert "storage_key" not in deleted
-    assert not first_storage.exists()
-    assert not first_storage.parent.exists()
-    assert second_storage.read_bytes() == b"same content"
+    assert first["document_id"] not in postgres.contents
+    assert postgres.contents.get(second["document_id"]) == b"same content"
     assert [row["document_id"] for row in postgres.rows] == [second["document_id"]]
     assert all(
         chunk["document_id"] != first["document_id"] for chunk in postgres.chunks
@@ -930,11 +884,11 @@ async def test_delete_document_permanently_removes_metadata_chunks_and_bytes(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_delete_document_enforces_project_and_session_visibility(tmp_path):
+async def test_delete_document_enforces_project_and_session_visibility():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    project_one = DocumentService("project-1", postgres, tmp_path, embedding)
-    project_two = DocumentService("project-2", postgres, tmp_path, embedding)
+    project_one = DocumentService("project-1", postgres, embedding)
+    project_two = DocumentService("project-2", postgres, embedding)
     uploaded = await project_one.add_document(
         content=b"private",
         original_name="private.txt",
@@ -964,46 +918,8 @@ async def test_delete_document_enforces_project_and_session_visibility(tmp_path)
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_delete_document_restores_bytes_when_database_delete_fails(document_harness):
-    service, postgres, storage_root = document_harness
-    uploaded = await service.add_document(
-        content=b"keep me",
-        original_name="notes.txt",
-    )
-    stored_path = storage_root / postgres.rows[0]["storage_key"]
-    postgres.delete_error = RuntimeError("delete failed")
-
-    with pytest.raises(RuntimeError, match="delete failed"):
-        await service.delete_document(document_id=uploaded["document_id"])
-
-    assert stored_path.read_bytes() == b"keep me"
-    assert postgres.rows[0]["document_id"] == uploaded["document_id"]
-    assert not list(stored_path.parent.parent.glob(".*.deleting-*"))
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_delete_document_removes_metadata_when_managed_bytes_are_missing(
-    document_harness,
-):
-    service, postgres, storage_root = document_harness
-    uploaded = await service.add_document(
-        content=b"gone",
-        original_name="notes.txt",
-    )
-    stored_path = storage_root / postgres.rows[0]["storage_key"]
-    service._remove_stored_file(stored_path)
-
-    deleted = await service.delete_document(document_id=uploaded["document_id"])
-
-    assert deleted["deleted"] is True
-    assert postgres.rows == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 async def test_delete_document_rejects_empty_or_inaccessible_ids(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     with pytest.raises(ValueError, match="must not be empty"):
         await service.delete_document(document_id=" ")
@@ -1018,7 +934,7 @@ async def test_delete_document_rejects_empty_or_inaccessible_ids(document_harnes
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_document_service_search_remains_empty(document_harness):
-    service, _, _ = document_harness
+    service, _ = document_harness
 
     assert await service.search("alpha") == []
 
@@ -1028,7 +944,7 @@ async def test_document_service_search_remains_empty(document_harness):
 async def test_document_service_search_embeds_query_and_enforces_visibility(
     document_harness,
 ):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     document_id = UUID("a785ecfe-b738-4a43-9e6d-bbdc3f831b20")
     postgres.search_results = [
         {
@@ -1072,7 +988,7 @@ async def test_document_service_search_embeds_query_and_enforces_visibility(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_document_service_search_applies_document_filter(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     await service.search(
         "alpha",
@@ -1100,7 +1016,7 @@ async def test_document_service_search_applies_document_filter(document_harness)
 async def test_document_service_search_validates_inputs(
     document_harness, query, n_results, error
 ):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     with pytest.raises(ValueError, match=error):
         await service.search(query, n_results=n_results)
@@ -1117,7 +1033,7 @@ async def test_document_service_search_validates_inputs(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_document_service_search_validates_embedding_dimension(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     service._embedding.single_embedding = [0.1] * 3
 
     with pytest.raises(ValueError, match="exactly 1024 dimensions"):
@@ -1134,7 +1050,7 @@ async def test_document_service_search_validates_embedding_dimension(document_ha
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_index_document_extracts_utf8_bom_and_persists_chunks(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     uploaded = await service.add_document(
         content=b"\xef\xbb\xbfAlpha beta gamma.",
         original_name="notes.md",
@@ -1154,7 +1070,7 @@ async def test_index_document_extracts_utf8_bom_and_persists_chunks(document_har
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_index_document_uses_configured_sentence_splitter(monkeypatch, document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     settings = {}
 
     class RecordingSplitter:
@@ -1168,7 +1084,7 @@ async def test_index_document_uses_configured_sentence_splitter(monkeypatch, doc
             return [" alpha ", "", " beta gamma "]
 
     monkeypatch.setattr(
-        document_service_module, "SentenceSplitter", RecordingSplitter
+        storage_module, "SentenceSplitter", RecordingSplitter
     )
     uploaded = await service.add_document(
         content=b"alpha beta gamma",
@@ -1197,7 +1113,7 @@ async def test_index_document_uses_configured_sentence_splitter(monkeypatch, doc
 async def test_index_document_records_text_extraction_failures(
     document_harness, original_name, content, error
 ):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     uploaded = await service.add_document(content=content, original_name=original_name)
 
     with pytest.raises(RuntimeError, match=error):
@@ -1212,22 +1128,6 @@ async def test_index_document_records_text_extraction_failures(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_records_missing_managed_content(document_harness):
-    service, postgres, storage_root = document_harness
-    uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
-    stored_path = storage_root / postgres.rows[0]["storage_key"]
-    stored_path.unlink()
-
-    with pytest.raises(
-        RuntimeError, match="Managed document content is missing"
-    ):
-        await service.index_document(document_id=uploaded["document_id"])
-
-    assert postgres.rows[0]["status"] == "failed"
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 @pytest.mark.parametrize(
     ("extension", "expected"),
     [
@@ -1238,22 +1138,24 @@ async def test_index_document_records_missing_managed_content(document_harness):
 async def test_index_document_extracts_supported_documents(
     monkeypatch, document_harness, extension, expected
 ):
-    service, postgres, _ = document_harness
+    from types import SimpleNamespace
+
+    service, postgres = document_harness
     if extension == ".pdf":
         pages = [
             SimpleNamespace(extract_text=lambda: "First page"),
             SimpleNamespace(extract_text=lambda: "Second page"),
         ]
         monkeypatch.setattr(
-            document_service_module,
+            storage_module,
             "PdfReader",
-            lambda path: SimpleNamespace(pages=pages),
+            lambda buf: SimpleNamespace(pages=pages),
         )
     else:
         monkeypatch.setattr(
-            document_service_module.docx2txt,
+            storage_module.docx2txt,
             "process",
-            lambda path: "Document text",
+            lambda buf: "Document text",
         )
 
     uploaded = await service.add_document(
@@ -1268,12 +1170,12 @@ async def test_index_document_extracts_supported_documents(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_index_document_records_document_parser_errors(monkeypatch, document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
-    def fail_pdf_parse(path):
+    def fail_pdf_parse(buf):
         raise ValueError("damaged PDF")
 
-    monkeypatch.setattr(document_service_module, "PdfReader", fail_pdf_parse)
+    monkeypatch.setattr(storage_module, "PdfReader", fail_pdf_parse)
     uploaded = await service.add_document(
         content=b"not a valid PDF",
         original_name="notes.pdf",
@@ -1288,11 +1190,11 @@ async def test_index_document_records_document_parser_errors(monkeypatch, docume
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_enforces_project_and_session_visibility(tmp_path):
+async def test_index_document_enforces_project_and_session_visibility():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    project_one = DocumentService("project-1", postgres, tmp_path, embedding)
-    project_two = DocumentService("project-2", postgres, tmp_path, embedding)
+    project_one = DocumentService("project-1", postgres, embedding)
+    project_two = DocumentService("project-2", postgres, embedding)
     uploaded = await project_one.add_document(
         content=b"session content",
         original_name="private.txt",
@@ -1321,7 +1223,7 @@ async def test_index_document_enforces_project_and_session_visibility(tmp_path):
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_index_document_is_idempotent_after_success(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
     first = await service.index_document(document_id=uploaded["document_id"])
     calls_after_first = list(service._embedding.calls)
@@ -1338,7 +1240,7 @@ async def test_index_document_is_idempotent_after_success(document_harness):
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_index_document_validates_embedding_count_and_dimension(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
     service._embedding.embeddings = []
 
@@ -1359,7 +1261,7 @@ async def test_index_document_validates_embedding_count_and_dimension(document_h
 async def test_index_transaction_rolls_back_partial_chunks_and_can_retry(
     monkeypatch, document_harness
 ):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     class TwoChunkSplitter:
         def __init__(self, **kwargs):
@@ -1369,7 +1271,7 @@ async def test_index_transaction_rolls_back_partial_chunks_and_can_retry(
             return ["alpha", "beta"]
 
     monkeypatch.setattr(
-        document_service_module, "SentenceSplitter", TwoChunkSplitter
+        storage_module, "SentenceSplitter", TwoChunkSplitter
     )
     uploaded = await service.add_document(
         content=b"alpha beta",
@@ -1394,7 +1296,7 @@ async def test_index_transaction_rolls_back_partial_chunks_and_can_retry(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_index_transaction_locks_parent_and_rechecks_indexed_state(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
 
     await service.index_document(document_id=uploaded["document_id"])
@@ -1413,7 +1315,7 @@ async def test_accept_folder_indexes_selected_subset_atomically(
     monkeypatch,
     document_harness,
 ):
-    service, postgres, storage_root = document_harness
+    service, postgres = document_harness
 
     class OneChunkSplitter:
         def __init__(self, **kwargs):
@@ -1423,7 +1325,7 @@ async def test_accept_folder_indexes_selected_subset_atomically(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1461,22 +1363,20 @@ async def test_accept_folder_indexes_selected_subset_atomically(
         row["folder_root_id"] == result["folder_root_id"]
         for row in postgres.rows
     )
+    # bytes are stored in the DB, not on disk
     assert all(
-        (storage_root / row["storage_key"]).is_file()
+        postgres.contents.get(row["document_id"]) is not None
         for row in postgres.rows
     )
-    assert not (storage_root / ".staging").exists()
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_project_scan_settings_round_trip_defaults_reset_and_isolation(
-    tmp_path,
-):
+async def test_project_scan_settings_round_trip_defaults_reset_and_isolation():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    project_one = DocumentService("project-1", postgres, tmp_path, embedding)
-    project_two = DocumentService("project-2", postgres, tmp_path, embedding)
+    project_one = DocumentService("project-1", postgres, embedding)
+    project_two = DocumentService("project-2", postgres, embedding)
 
     defaults = await project_one.get_scan_settings()
     saved = await project_one.save_scan_settings(
@@ -1508,7 +1408,7 @@ async def test_project_scan_settings_round_trip_defaults_reset_and_isolation(
 async def test_preview_uses_saved_settings_and_explicit_settings_do_not_persist(
     document_harness,
 ):
-    service, _, _ = document_harness
+    service, _ = document_harness
     await service.save_scan_settings(
         FolderScanSettings(blocked_extensions={".foo"})
     )
@@ -1542,7 +1442,7 @@ async def test_accept_folder_without_selection_accepts_all_eligible_documents(
     monkeypatch,
     document_harness,
 ):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     class OneChunkSplitter:
         def __init__(self, **kwargs):
@@ -1552,7 +1452,7 @@ async def test_accept_folder_without_selection_accepts_all_eligible_documents(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1584,7 +1484,7 @@ async def test_repeated_folder_acceptance_creates_independent_batches(
     monkeypatch,
     document_harness,
 ):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
 
     class OneChunkSplitter:
         def __init__(self, **kwargs):
@@ -1594,7 +1494,7 @@ async def test_repeated_folder_acceptance_creates_independent_batches(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1627,7 +1527,7 @@ async def test_repeated_folder_acceptance_creates_independent_batches(
 async def test_accept_folder_rejects_unknown_and_excluded_selections(
     document_harness,
 ):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     entries = [
         FolderUploadEntry(relative_path="notes.txt", content=b"notes"),
         FolderUploadEntry(relative_path=".env", content=b"secret"),
@@ -1675,7 +1575,7 @@ async def test_accept_folder_rejects_unknown_and_excluded_selections(
 async def test_accept_folder_preparation_failure_leaves_no_state(
     document_harness,
 ):
-    service, postgres, storage_root = document_harness
+    service, postgres = document_harness
 
     with pytest.raises(ValueError, match="valid UTF-8"):
         await service.accept_folder(
@@ -1692,8 +1592,7 @@ async def test_accept_folder_preparation_failure_leaves_no_state(
     assert postgres.folders == []
     assert postgres.rows == []
     assert postgres.chunks == []
-    assert not (storage_root / "project-1").exists()
-    assert not (storage_root / ".staging").exists()
+    assert postgres.contents == {}
 
 
 @pytest.mark.storage
@@ -1702,7 +1601,7 @@ async def test_accept_folder_rolls_back_rows_chunks_and_bytes(
     monkeypatch,
     document_harness,
 ):
-    service, postgres, storage_root = document_harness
+    service, postgres = document_harness
 
     class OneChunkSplitter:
         def __init__(self, **kwargs):
@@ -1712,7 +1611,7 @@ async def test_accept_folder_rolls_back_rows_chunks_and_bytes(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1731,17 +1630,16 @@ async def test_accept_folder_rolls_back_rows_chunks_and_bytes(
     assert postgres.folders == []
     assert postgres.rows == []
     assert postgres.chunks == []
-    assert not (storage_root / "project-1").exists()
-    assert not (storage_root / ".staging").exists()
+    assert postgres.contents == {}
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_accept_folder_commit_failure_removes_rows_and_moved_bytes(
+async def test_accept_folder_commit_failure_removes_rows_and_bytes(
     monkeypatch,
     document_harness,
 ):
-    service, postgres, storage_root = document_harness
+    service, postgres = document_harness
 
     class OneChunkSplitter:
         def __init__(self, **kwargs):
@@ -1751,7 +1649,7 @@ async def test_accept_folder_commit_failure_removes_rows_and_moved_bytes(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1772,20 +1670,18 @@ async def test_accept_folder_commit_failure_removes_rows_and_moved_bytes(
     assert postgres.folders == []
     assert postgres.rows == []
     assert postgres.chunks == []
-    assert not (storage_root / "project-1").exists()
-    assert not (storage_root / ".staging").exists()
+    assert postgres.contents == {}
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_folder_reads_enforce_visibility_and_build_tree(
     monkeypatch,
-    tmp_path,
 ):
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    project_one = DocumentService("project-1", postgres, tmp_path, embedding)
-    project_two = DocumentService("project-2", postgres, tmp_path, embedding)
+    project_one = DocumentService("project-1", postgres, embedding)
+    project_two = DocumentService("project-2", postgres, embedding)
 
     class OneChunkSplitter:
         def __init__(self, **kwargs):
@@ -1795,7 +1691,7 @@ async def test_folder_reads_enforce_visibility_and_build_tree(
             return [text]
 
     monkeypatch.setattr(
-        document_service_module,
+        storage_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -1892,7 +1788,7 @@ async def test_folder_reads_enforce_visibility_and_build_tree(
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_folder_search_adds_folder_and_path_filters(document_harness):
-    service, postgres, _ = document_harness
+    service, postgres = document_harness
     folder_root_id = "a785ecfe-b738-4a43-9e6d-bbdc3f831b20"
     postgres.folders.append(
         {

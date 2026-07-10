@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -10,7 +9,7 @@ from infrastructure.job.scheduler import Scheduler
 from infrastructure.postgres_client import PostgresClient
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.resolver import EntityResolver
-from core.knowledge.services.document_service import DocumentService
+from core.knowledge.documents import DocumentService
 from core.knowledge.services.embedding_service import EmbeddingService
 
 
@@ -30,7 +29,6 @@ class ProjectState:
         redis_client: aioredis.Redis,
         readable_project_ids: list[str],
         postgres_client: PostgresClient,
-        document_storage_root: Path,
         embedding_service: EmbeddingService,
         batch_processor: Optional[Any] = None,
     ):
@@ -50,13 +48,11 @@ class ProjectState:
         self.user_name = user_name
         self.redis_client = redis_client
         self.postgres_client = postgres_client
-        self.document_storage_root = document_storage_root
         self.embedding_service = embedding_service
         self.batch_processor = batch_processor
         self.document_service = DocumentService(
             project_id=project_id,
             postgres_client=postgres_client,
-            storage_root=document_storage_root,
             embedding_service=embedding_service,
         )
 

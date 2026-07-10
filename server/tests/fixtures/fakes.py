@@ -862,7 +862,6 @@ class FakeResources:
     redis_manager: Any = None
     knowledge_store: FakeKnowledgeStore = field(default_factory=FakeKnowledgeStore)
     postgres: FakePostgresClient = field(default_factory=FakePostgresClient)
-    document_storage_root: Path = field(default_factory=lambda: Path("data/documents"))
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None

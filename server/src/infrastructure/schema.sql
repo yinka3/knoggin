@@ -546,7 +546,6 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     extension TEXT NOT NULL DEFAULT '',
     size_bytes BIGINT NOT NULL,
     content_hash TEXT NOT NULL,
-    storage_key TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'uploaded',
     indexed_at TIMESTAMPTZ,
     error_message TEXT,
@@ -570,6 +569,9 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
         CHECK (size_bytes >= 0)
 );
 
+-- Migration: drop storage_key if it exists from a previous schema version.
+ALTER TABLE public.project_documents DROP COLUMN IF EXISTS storage_key;
+
 CREATE INDEX IF NOT EXISTS project_documents_project_idx
 ON public.project_documents(project_id, created_at DESC);
 
@@ -581,6 +583,14 @@ ON public.project_documents(project_id, content_hash);
 
 CREATE INDEX IF NOT EXISTS project_documents_folder_root_idx
 ON public.project_documents(folder_root_id, relative_path);
+
+-- Raw document bytes, stored separately to keep the project_documents table lean.
+-- Deleted automatically when the parent project_documents row is removed.
+CREATE TABLE IF NOT EXISTS public.document_content (
+    document_id UUID PRIMARY KEY
+        REFERENCES public.project_documents(document_id) ON DELETE CASCADE,
+    content BYTEA NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS public.document_chunks (
     chunk_id UUID PRIMARY KEY,

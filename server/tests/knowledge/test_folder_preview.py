@@ -3,7 +3,7 @@ import hashlib
 import pytest
 
 from common.schema.document import FolderScanSettings, FolderUploadEntry
-from core.knowledge.services.document_service import DocumentService
+from core.knowledge.documents import DocumentService
 
 
 class ForbiddenDependency:
@@ -18,11 +18,10 @@ class DefaultSettingsPostgres:
 
 
 @pytest.fixture
-def preview_service(tmp_path):
+def preview_service():
     return DocumentService(
         project_id="project-1",
         postgres_client=DefaultSettingsPostgres(),
-        storage_root=tmp_path,
         embedding_service=ForbiddenDependency(),
     )
 

@@ -10,8 +10,6 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig, load_topic_seed
 from common.scoping import IDENTITY_ENTITY_ID, build_readable_project_ids
-from infrastructure.job.scheduler import Scheduler
-from infrastructure.resources import ResourceManager
 from core.community.community_job import AACJob
 from core.ingestion.jobs.archive_job import FactArchivalJob
 from core.ingestion.jobs.cleaner_job import EntityCleanupJob
@@ -25,6 +23,8 @@ from core.knowledge.jobs.merge_rollback_cleanup_job import (
     MergeCleanupJob,
 )
 from core.project.state import ProjectState
+from infrastructure.job.scheduler import Scheduler
+from infrastructure.resources import ResourceManager
 
 
 class ProjectStatus(str, Enum):
@@ -543,7 +543,6 @@ class ProjectManager:
             user_name=self.user_name,
             redis_client=self.resources.redis,
             postgres_client=self.resources.postgres,
-            document_storage_root=self.resources.document_storage_root,
             embedding_service=self.resources.embedding,
             readable_project_ids=readable_project_ids,
             batch_processor=project_processor,
@@ -632,7 +631,6 @@ class ProjectManager:
 
     def _init_profile_job(self, entities: EntityResolver) -> ProfileRefinementJob:
         jobs_cfg = self.dev_settings.jobs
-        nlp_cfg = self.dev_settings.nlp_pipeline
         prof_cfg = jobs_cfg.profile
 
         return ProfileRefinementJob(
@@ -642,14 +640,7 @@ class ProjectManager:
             executor=self.resources.executor,
             embedding_service=self.resources.embedding,
             redis_client=self.resources.redis,
-            msg_window=prof_cfg.msg_window,
-            volume_threshold=prof_cfg.volume_threshold,
-            idle_threshold=prof_cfg.idle_threshold,
-            profile_batch_size=prof_cfg.profile_batch_size,
-            contradiction_sim_low=prof_cfg.contradiction_sim_low,
-            contradiction_batch_size=prof_cfg.contradiction_batch_size,
-            profile_prompt=nlp_cfg.profile_prompt,
-            contradiction_prompt=nlp_cfg.contradiction_prompt,
+            settings=prof_cfg,
         )
 
     def _register_background_jobs(
@@ -705,24 +696,19 @@ class ProjectManager:
             processor=processor,
             write_to_graph=_dlq_write_callback,
             redis_client=self.resources.redis,
-            interval=dlq_cfg.interval_seconds,
-            batch_size=dlq_cfg.batch_size,
-            max_attempts=dlq_cfg.max_attempts,
+            settings=dlq_cfg,
         )
         scheduler.register(dlq_job)
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
         )
 
-        clean_cfg = jobs_cfg.cleaner
         cleaner_job = EntityCleanupJob(
             user_name=self.user_name,
             knowledge_store=self.resources.knowledge_store,
             entities=entities,
             redis_client=self.resources.redis,
-            interval_hours=clean_cfg.interval_hours,
-            orphan_age_hours=clean_cfg.orphan_age_hours,
-            stale_junk_days=clean_cfg.stale_junk_days,
+            settings=jobs_cfg.cleaner,
         )
         scheduler.register(cleaner_job)
         project_state.add_config_unsubscriber(
@@ -731,13 +717,10 @@ class ProjectManager:
             )
         )
 
-        arch_cfg = jobs_cfg.archival
         archival_job = FactArchivalJob(
-            user_name=self.user_name,
             knowledge_store=self.resources.knowledge_store,
             redis_client=self.resources.redis,
-            retention_days=arch_cfg.retention_days,
-            fallback_interval_hours=arch_cfg.fallback_interval_hours,
+            settings=jobs_cfg.archival,
         )
         scheduler.register(archival_job)
         project_state.add_config_unsubscriber(
@@ -746,11 +729,9 @@ class ProjectManager:
             )
         )
 
-        rollback_cfg = jobs_cfg.merge_rollback
         rollback_cleanup_job = MergeCleanupJob(
             knowledge_store=self.resources.knowledge_store,
-            retention_hours=rollback_cfg.retention_hours,
-            fallback_interval_hours=rollback_cfg.fallback_interval_hours,
+            settings=jobs_cfg.merge_rollback,
         )
         scheduler.register(rollback_cleanup_job)
         project_state.add_config_unsubscriber(

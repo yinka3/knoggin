@@ -27,8 +27,6 @@ from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
 from common.utils.time_utils import get_now_unix
-from infrastructure.llm_client import LLMService
-from infrastructure.redis_client import RedisKeys
 from core.ingestion.dlq_state import (
     DLQ_STATUS_PROCESSING,
     DLQ_STATUS_QUEUED,
@@ -40,6 +38,8 @@ from core.ingestion.prompts import get_connection_reasoning_prompt
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.entity.resolver import EntityResolver
+from infrastructure.llm_client import LLMService
+from infrastructure.redis_client import RedisKeys
 
 
 class IngestionPipeline:
