@@ -38,7 +38,11 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     )
     project_state = make_project_state(project["id"], redis=resources.redis)
 
-    async def fake_get_or_start_project(project_id, initial_topics_config=None):
+    async def fake_get_or_start_project(
+        project_id,
+        initial_topics_config=None,
+        project_metadata=None,
+    ):
         project_state.active_runtime_sessions_count += 1
         project_manager.active_projects[project_id] = project_state
         return project_state

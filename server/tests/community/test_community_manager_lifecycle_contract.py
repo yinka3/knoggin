@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -170,6 +171,63 @@ async def test_trigger_discussion_creates_discussion_and_cleans_up_after_error(
 
 
 @pytest.mark.no_network
+async def test_trigger_discussion_claims_before_running_the_seed(monkeypatch):
+    patch_manager_config(monkeypatch)
+    patch_events(monkeypatch)
+    redis = FakeRedis()
+    resources = make_resources(redis=redis)
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    async def seed_discussion():
+        assert await redis.get(manager._active_discussion_key()) == (
+            manager._active_discussion_id
+        )
+        return None
+
+    manager._seed_discussion = seed_discussion
+
+    await manager.trigger_discussion()
+
+    assert await redis.get(manager._active_discussion_key()) is None
+    assert manager._active_discussion_id is None
+
+
+@pytest.mark.no_network
+async def test_concurrent_aac_triggers_only_seed_one_discussion(monkeypatch):
+    patch_manager_config(monkeypatch)
+    patch_events(monkeypatch)
+    redis = FakeRedis()
+    resources = make_resources(redis=redis)
+    first = CommunityManager(make_project_state(), "ada", resources)
+    second = CommunityManager(make_project_state(), "ada", resources)
+    first_seed_started = asyncio.Event()
+    release_first_seed = asyncio.Event()
+    second_seed_calls = 0
+
+    async def first_seed():
+        first_seed_started.set()
+        await release_first_seed.wait()
+        return None
+
+    async def second_seed():
+        nonlocal second_seed_calls
+        second_seed_calls += 1
+        return None
+
+    first._seed_discussion = first_seed
+    second._seed_discussion = second_seed
+
+    first_trigger = asyncio.create_task(first.trigger_discussion())
+    await first_seed_started.wait()
+    await second.trigger_discussion()
+
+    assert second_seed_calls == 0
+    release_first_seed.set()
+    await first_trigger
+    assert await redis.get(first._active_discussion_key()) is None
+
+
+@pytest.mark.no_network
 async def test_run_loop_rotates_participants_persists_messages_and_stops_on_end(
     monkeypatch,
 ):
@@ -179,19 +237,6 @@ async def test_run_loop_rotates_participants_persists_messages_and_stops_on_end(
     manager = CommunityManager(make_project_state(), "ada", resources)
     await resources.redis.set(manager._active_discussion_key(), "disc-1")
     seen_turns = []
-
-    class FakeAssembler:
-        def __init__(self, user_name, resources_arg):
-            assert user_name == "ada"
-            assert resources_arg is resources
-
-        async def assemble(self, project_state, session_id):
-            assert session_id == "aac_disc-1"
-            return SimpleNamespace(
-                session_id=session_id,
-                project=project_state,
-                document_service=None,
-            )
 
     async def get_agent_config(agent_id):
         return AgentConfig(
@@ -216,10 +261,6 @@ async def test_run_loop_rotates_participants_persists_messages_and_stops_on_end(
             return "First contribution"
         return "Second contribution [[END_DISCUSSION]]"
 
-    monkeypatch.setattr(
-        "core.community.community_manager.SessionFactory",
-        FakeAssembler,
-    )
     manager._get_agent_config = get_agent_config
     manager._agent_turn = agent_turn
 
@@ -254,17 +295,6 @@ async def test_run_loop_stops_when_active_discussion_key_changes(monkeypatch):
     await resources.redis.set(manager._active_discussion_key(), "disc-1")
     turns = 0
 
-    class FakeAssembler:
-        def __init__(self, *_args):
-            pass
-
-        async def assemble(self, project_state, session_id):
-            return SimpleNamespace(
-                session_id=session_id,
-                project=project_state,
-                document_service=None,
-            )
-
     async def get_agent_config(agent_id):
         return AgentConfig(
             id=agent_id,
@@ -279,10 +309,6 @@ async def test_run_loop_stops_when_active_discussion_key_changes(monkeypatch):
         await resources.redis.set(manager._active_discussion_key(), "other-discussion")
         return "Only first turn"
 
-    monkeypatch.setattr(
-        "core.community.community_manager.SessionFactory",
-        FakeAssembler,
-    )
     manager._get_agent_config = get_agent_config
     manager._agent_turn = agent_turn
 

@@ -144,6 +144,13 @@ EngineWorkKind = Literal[
     "topic_evolution",
     "cleanup",
     "archival",
+    "embedding",
+    "rerank",
+    "nli",
+    "spacy",
+    "gliner",
+    "document_index",
+    "model_load",
 ]
 
 EngineWorkStatus = Literal[
@@ -153,6 +160,7 @@ EngineWorkStatus = Literal[
     "failed",
     "deferred",
     "skipped",
+    "cancelled",
 ]
 
 
@@ -170,8 +178,10 @@ class EngineWorkTrace(BaseModel):
     """Timing and attempt metadata for an engine work unit."""
 
     created_at: datetime = Field(default_factory=get_now)
+    queued_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    queue_wait_ms: Optional[int] = None
     duration_ms: Optional[int] = None
     attempt: int = 1
     stage: Optional[str] = None
@@ -184,6 +194,7 @@ class EngineWorkUnit(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
     kind: EngineWorkKind
     scope: EngineScope
+    parent_work_unit_id: Optional[str] = None
     status: EngineWorkStatus = "pending"
     priority: int = 100
     resource_profile: EngineResourceProfile = Field(
@@ -245,9 +256,43 @@ class EngineWorkUnit(BaseModel):
             metadata={"stage": stage},
         )
 
+    @classmethod
+    def for_model_operation(
+        cls,
+        kind: Literal["embedding", "rerank", "nli", "spacy", "gliner", "document_index", "model_load"],
+        scope: EngineScope,
+        *,
+        parent_work_unit_id: Optional[str] = None,
+        priority: int = 100,
+        stage: Optional[str] = None,
+    ) -> "EngineWorkUnit":
+        embedding_calls = 1 if kind == "embedding" else 0
+        cpu_weight = 2 if kind in {"spacy", "gliner", "document_index"} else 1
+        memory_weight = 2 if kind in {"embedding", "rerank", "nli", "gliner"} else 1
+        return cls(
+            kind=kind,
+            scope=scope,
+            parent_work_unit_id=parent_work_unit_id,
+            priority=priority,
+            resource_profile=EngineResourceProfile(
+                cpu_weight=cpu_weight,
+                memory_weight=memory_weight,
+                embedding_calls_expected=embedding_calls,
+            ),
+            trace=EngineWorkTrace(stage=stage or kind),
+        )
+
+    def mark_queued(self) -> None:
+        self.status = "pending"
+        self.trace.queued_at = get_now()
+
     def mark_running(self) -> None:
         self.status = "running"
         self.trace.started_at = get_now()
+        queued_at = self.trace.queued_at or self.trace.created_at
+        self.trace.queue_wait_ms = int(
+            (self.trace.started_at - queued_at).total_seconds() * 1000
+        )
 
     def mark_succeeded(self, summary: Optional[str] = None) -> None:
         self.status = "succeeded"
@@ -263,6 +308,26 @@ class EngineWorkUnit(BaseModel):
         self.status = "skipped"
         self.trace.summary = summary
         self._finish()
+
+    def mark_cancelled(self, summary: Optional[str] = None) -> None:
+        self.status = "cancelled"
+        self.trace.summary = summary
+        self._finish()
+
+    def add_model_work_summary(self, child: "EngineWorkUnit") -> None:
+        summaries = self.metadata.setdefault("model_work", [])
+        summaries.append(
+            {
+                "id": child.id,
+                "kind": child.kind,
+                "status": child.status,
+                "priority": child.priority,
+                "stage": child.trace.stage,
+                "queue_wait_ms": child.trace.queue_wait_ms,
+                "duration_ms": child.trace.duration_ms,
+                "summary": child.trace.summary,
+            }
+        )
 
     def add_issue(
         self,

@@ -8,7 +8,12 @@ from spacy.matcher import PhraseMatcher
 
 from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
-from common.schema.contracts import ExtractionTrace, NERResult, ValidationIssue
+from common.schema.contracts import (
+    EngineWorkUnit,
+    ExtractionTrace,
+    NERResult,
+    ValidationIssue,
+)
 from common.schema.settings import TextProcessorSettings
 from common.utils.core_utils import (
     PRONOUNS,
@@ -21,6 +26,7 @@ from common.utils.events import emit
 from core.ingestion.prompts import ner_prompt
 from core.knowledge.entity.profile import EntityProfile
 from infrastructure.llm_client import LLMService
+from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 
 
 class TextProcessor:
@@ -46,6 +52,7 @@ class TextProcessor:
         gliner: GLiNER,
         spacy: spacy.Language,
         settings: TextProcessorSettings,
+        model_work: Optional[ModelWorkCoordinator] = None,
     ):
         self.llm_client = llm
         self.topic_config = topic_config
@@ -55,6 +62,7 @@ class TextProcessor:
         self._label_to_topics = self._build_label_to_topics()
         self._nlp = spacy
         self._gliner = gliner
+        self._model_work = model_work
         self._spacy_lock = threading.Lock()
         self._phrase_matcher_cache_version: Optional[int] = None
         self._phrase_matcher_cache: Optional[
@@ -82,6 +90,32 @@ class TextProcessor:
                 label_to_topics[label_lower].append(topic)
 
         return label_to_topics
+
+    async def _run_model_work(
+        self,
+        operation,
+        *,
+        name: str,
+        work_kind: str,
+        parent_work_unit: Optional[EngineWorkUnit] = None,
+    ):
+        if self._model_work is not None:
+            work_unit = None
+            if parent_work_unit is not None:
+                work_unit = EngineWorkUnit.for_model_operation(
+                    kind=work_kind,
+                    scope=parent_work_unit.scope,
+                    parent_work_unit_id=parent_work_unit.id,
+                    priority=parent_work_unit.priority,
+                )
+            return await self._model_work.run_blocking(
+                operation,
+                priority=ModelWorkPriority.BACKGROUND,
+                name=name,
+                work_unit=work_unit,
+                parent_work_unit=parent_work_unit,
+            )
+        return await asyncio.to_thread(operation)
 
     def _build_phrase_matcher(self) -> Tuple[PhraseMatcher, Dict[str, int]]:
         """Build or reuse PhraseMatcher from current known aliases."""
@@ -177,6 +211,7 @@ class TextProcessor:
         session_id: str,
         trace: Optional[ExtractionTrace] = None,
         issues: Optional[List[ValidationIssue]] = None,
+        work_unit: Optional[EngineWorkUnit] = None,
     ) -> List[Tuple[int, str, str, str]]:
         """
         Extracts entities via known aliases, GLiNER, and VP-01.
@@ -224,7 +259,12 @@ class TextProcessor:
                             k_ents_msgs.append((msg["id"], span_text, eid))
             return k_ents, k_ents_msgs
 
-        known_ents, known_ents_msgs = await asyncio.to_thread(_run_spacy_matcher)
+        known_ents, known_ents_msgs = await self._run_model_work(
+            _run_spacy_matcher,
+            name="spacy-known-aliases",
+            work_kind="spacy",
+            parent_work_unit=work_unit,
+        )
         if trace is not None:
             trace.known_mentions = len(known_ents)
 
@@ -245,7 +285,12 @@ class TextProcessor:
                     results.append((msg_id, span, label))
             return results
 
-        gliner_ents = await asyncio.to_thread(_run_gliner_batch)
+        gliner_ents = await self._run_model_work(
+            _run_gliner_batch,
+            name="gliner-mentions",
+            work_kind="gliner",
+            parent_work_unit=work_unit,
+        )
         if trace is not None:
             trace.gliner_raw_mentions = len(gliner_ents)
 

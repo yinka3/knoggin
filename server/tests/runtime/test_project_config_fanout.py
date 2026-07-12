@@ -48,6 +48,7 @@ class RecordingProjectState:
     def __init__(self):
         self.project_id = "project-1"
         self.scheduler = RecordingScheduler()
+        self.document_service = SimpleNamespace()
         self.unsubscribers = []
 
     def add_config_unsubscriber(self, unsubscribe):
@@ -111,6 +112,10 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
     )
     monkeypatch.setattr(
+        "core.project.project_manager.DocumentIndexingRecoveryJob",
+        lambda *args, **kwargs: RecordingJob("document_index_recovery", **kwargs),
+    )
+    monkeypatch.setattr(
         "core.project.project_manager.AACJob",
         lambda state, deps: RecordingJob(
             "aac_discussion",
@@ -128,6 +133,7 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
 
     assert list(project_state.scheduler._jobs) == [
         "profile_refinement",
+        "document_index_recovery",
         "dlq_auto_replay",
         "entity_cleanup",
         "fact_archival",
@@ -138,12 +144,13 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
         "developer_settings.jobs.profile",
+        "developer_settings.jobs.document_indexing",
         "developer_settings.jobs.dlq",
         "developer_settings.jobs.cleaner",
         "developer_settings.jobs.archival",
         "developer_settings.jobs.merge_rollback",
     ]
-    assert len(project_state.unsubscribers) == 7
+    assert len(project_state.unsubscribers) == 8
 
 
 @pytest.mark.runtime
@@ -187,6 +194,10 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
     )
     monkeypatch.setattr(
+        "core.project.project_manager.DocumentIndexingRecoveryJob",
+        lambda *args, **kwargs: RecordingJob("document_index_recovery", **kwargs),
+    )
+    monkeypatch.setattr(
         "core.project.project_manager.AACJob",
         lambda *_: RecordingJob("aac_discussion"),
     )
@@ -196,6 +207,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     config_manager.emit("developer_settings.entity_resolution", marker)
     config_manager.emit("developer_settings.nlp_pipeline", marker)
     config_manager.emit("developer_settings.jobs.profile", marker)
+    config_manager.emit("developer_settings.jobs.document_indexing", marker)
     config_manager.emit("developer_settings.jobs.dlq", marker)
     config_manager.emit("developer_settings.jobs.cleaner", marker)
     config_manager.emit("developer_settings.jobs.archival", marker)
@@ -204,6 +216,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     assert entities.updates[-1] is marker
     assert processor.updates[-2:] == [marker, marker]
     assert profile.updates[-1] is marker
+    assert state.scheduler._jobs["document_index_recovery"].updates[-1] is marker
     assert state.scheduler._jobs["dlq_auto_replay"].updates[-1] is marker
     assert state.scheduler._jobs["entity_cleanup"].updates[-1] is marker
     assert state.scheduler._jobs["fact_archival"].updates[-1] is marker

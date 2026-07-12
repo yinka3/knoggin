@@ -111,6 +111,49 @@ class DocumentReader:
             return None
         return bytes(rows[0]["content"])
 
+    async def list_documents_for_index_recovery(self, limit: int = 16) -> List[Dict]:
+        """Return queued project documents for durable indexing recovery."""
+        return await self._client.fetch_all(
+            """
+            SELECT
+                document_id,
+                project_id,
+                session_id,
+                visibility_scope,
+                folder_root_id,
+                source_kind,
+                original_name,
+                relative_path,
+                extension,
+                size_bytes,
+                content_hash,
+                status,
+                created_at,
+                updated_at,
+                indexed_at,
+                error_message,
+                0::INTEGER AS chunk_count
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND status = 'queued'
+            ORDER BY created_at ASC, document_id ASC
+            LIMIT %s
+            """,
+            (self._project_id, limit),
+        )
+
+    async def count_documents_for_index_recovery(self) -> int:
+        rows = await self._client.fetch_all(
+            """
+            SELECT COUNT(*)::INTEGER AS count
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND status = 'queued'
+            """,
+            (self._project_id,),
+        )
+        return int(rows[0]["count"]) if rows else 0
+
     async def list_documents(
         self,
         *,

@@ -7,8 +7,21 @@ from cachetools import LRUCache
 from core.knowledge.entity.profile import EntityProfile
 
 
+class _EvictingLRUCache(LRUCache):
+    """LRU cache that reports automatic evictions to its owning index."""
+
+    def __init__(self, *args, on_evict, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_evict = on_evict
+
+    def popitem(self):
+        key, value = super().popitem()
+        self._on_evict(key, value)
+        return key, value
+
+
 class EntityIndex:
-    """Owns coherent in-memory entity profile and alias indexes."""
+    """Owns coherent in-memory entity profile and alias indexes, including eviction."""
 
     def __init__(
         self,
@@ -17,13 +30,50 @@ class EntityIndex:
         name_maxsize: int = 3000000,
         names_by_id_maxsize: int = 1000000,
     ):
-        self._profiles = LRUCache(maxsize=profile_maxsize)
-        self._name_to_ids = LRUCache(maxsize=name_maxsize)
-        self._id_to_names = LRUCache(maxsize=names_by_id_maxsize)
+        self._profiles = _EvictingLRUCache(
+            maxsize=profile_maxsize,
+            on_evict=self._on_profile_evicted,
+        )
+        self._name_to_ids = _EvictingLRUCache(
+            maxsize=name_maxsize,
+            on_evict=self._on_name_evicted,
+        )
+        self._id_to_names = _EvictingLRUCache(
+            maxsize=names_by_id_maxsize,
+            on_evict=self._on_entity_names_evicted,
+        )
 
     @staticmethod
     def _normalize_name(name: str) -> str:
         return str(name or "").strip().casefold()
+
+    def _on_profile_evicted(self, entity_id: int, _profile: EntityProfile) -> None:
+        self._remove_all_aliases_for_entity(entity_id)
+
+    def _on_name_evicted(self, alias: str, owners: Set[int]) -> None:
+        for entity_id in owners:
+            names = self._id_to_names.get(entity_id)
+            if names is not None:
+                names.discard(alias)
+
+    def _on_entity_names_evicted(self, entity_id: int, aliases: Set[str]) -> None:
+        for alias in aliases:
+            self._remove_alias_owner(entity_id, alias)
+
+    def _remove_alias_owner(self, entity_id: int, alias: str) -> None:
+        owners = self._name_to_ids.get(alias)
+        if owners is None:
+            return
+        owners.discard(entity_id)
+        if owners:
+            self._name_to_ids[alias] = owners
+        else:
+            self._name_to_ids.pop(alias, None)
+
+    def _remove_all_aliases_for_entity(self, entity_id: int) -> None:
+        aliases = self._id_to_names.pop(entity_id, set())
+        for alias in aliases:
+            self._remove_alias_owner(entity_id, alias)
 
     def _add_alias_owner(self, entity_id: int, alias: str) -> bool:
         alias_key = self._normalize_name(alias)
@@ -157,14 +207,7 @@ class EntityIndex:
             to_remove = list(self._id_to_names.get(entity_id, set()))
             aliases_changed = aliases_changed or bool(to_remove)
             for alias in to_remove:
-                owners = self._name_to_ids.get(alias)
-                if owners is None:
-                    continue
-                owners.discard(entity_id)
-                if owners:
-                    self._name_to_ids[alias] = owners
-                else:
-                    self._name_to_ids.pop(alias, None)
+                self._remove_alias_owner(entity_id, alias)
 
             aliases_changed = (
                 self._id_to_names.pop(entity_id, None) is not None

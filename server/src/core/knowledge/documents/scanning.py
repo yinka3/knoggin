@@ -13,12 +13,13 @@ from common.schema.document import (
     FolderUploadEntry,
 )
 from core.knowledge.documents.constants import (
-    ACCEPTED_EXTENSIONS,
     ARCHIVE_EXTENSIONS,
     AUDIO_EXTENSIONS,
+    BINARY_TEXT_EXEMPT_EXTENSIONS,
     DEFAULT_IGNORED_DIRECTORIES,
     DEFAULT_IGNORED_PATTERNS,
     EXECUTABLE_EXTENSIONS,
+    IMAGE_EXTENSIONS,
     SENSITIVE_FILE_PATTERNS,
     VIDEO_EXTENSIONS,
 )
@@ -294,6 +295,9 @@ def build_folder_preview(
         if extension in AUDIO_EXTENSIONS:
             exclude(path, content, "audio_file", "content_type", False)
             continue
+        if extension in IMAGE_EXTENSIONS:
+            exclude(path, content, "image_file", "content_type", False)
+            continue
         if (
             extension not in BINARY_TEXT_EXEMPT_EXTENSIONS
             and looks_binary(content)
@@ -390,15 +394,6 @@ def build_folder_preview(
                 True,
             )
             continue
-        if extension not in ACCEPTED_EXTENSIONS and not forced:
-            exclude(
-                path,
-                content,
-                "unsupported_extension",
-                "content_type",
-                False,
-            )
-            continue
         if (
             extension in settings.blocked_extensions
             and not forced
@@ -480,4 +475,3 @@ def build_folder_preview(
         excluded=excluded,
         summary=summary,
     )
-

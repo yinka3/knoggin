@@ -3,10 +3,10 @@ import json
 import pytest
 
 from common.utils.events import EventEmitter
-from infrastructure.redis_client import RedisKeys
 from core.session.context import Session
 from core.session.session_manager import SessionManager
-from tests.fixtures.fakes import FakeSession, FakeProjectManager, FakeResources
+from infrastructure.redis_client import RedisKeys
+from tests.fixtures.fakes import FakeProjectManager, FakeResources, FakeSession
 
 
 @pytest.fixture
@@ -92,6 +92,41 @@ async def test_create_session_releases_project_state_when_context_create_fails(
     session_id = project_manager.acquire_calls[0][1]
     assert project_manager.remove_session_calls == [("project-1", session_id)]
     assert project_manager.release_calls == ["project-1"]
+    assert active_sessions == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_create_session_cleans_runtime_when_persistence_fails(
+    monkeypatch, session_manager
+):
+    manager, resources, project_manager, active_sessions = session_manager
+    context = FakeSession(session_id="session-1", project_id="project-1")
+
+    async def fake_create(**kwargs):
+        context.session_id = kwargs["session_id"]
+        return context
+
+    async def failing_execute(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    unregister_calls = []
+
+    class FakeEmitter:
+        def unregister_session(self, project_id, session_id):
+            unregister_calls.append((project_id, session_id))
+
+    monkeypatch.setattr(Session, "create", fake_create)
+    monkeypatch.setattr(resources.postgres, "execute", failing_execute)
+    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: FakeEmitter()))
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await manager.create_session(project_id="project-1")
+
+    assert context.shutdown_count == 1
+    assert project_manager.release_calls == ["project-1"]
+    assert project_manager.remove_session_calls == [("project-1", context.session_id)]
+    assert unregister_calls == [("project-1", context.session_id)]
     assert active_sessions == {}
 
 
@@ -213,8 +248,36 @@ async def test_close_session_releases_project_and_shuts_context_down(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_shutdown_deactivates_every_runtime_session(monkeypatch, session_manager):
+    manager, _, project_manager, active_sessions = session_manager
+    first = FakeSession(session_id="session-1", project_id="project-1")
+    second = FakeSession(session_id="session-2", project_id="project-2")
+    active_sessions[first.session_id] = first
+    active_sessions[second.session_id] = second
+    unregister_calls = []
+
+    class FakeEmitter:
+        def unregister_session(self, project_id, session_id):
+            unregister_calls.append((project_id, session_id))
+
+    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: FakeEmitter()))
+
+    await manager.shutdown()
+
+    assert active_sessions == {}
+    assert first.shutdown_count == 1
+    assert second.shutdown_count == 1
+    assert set(project_manager.release_calls) == {"project-1", "project-2"}
+    assert set(unregister_calls) == {
+        ("project-1", "session-1"),
+        ("project-2", "session-2"),
+    }
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_delete_session_data_does_not_remove_project_documents(
-    session_manager,
+    monkeypatch, session_manager,
 ):
     manager, resources, project_manager, active_sessions = session_manager
     ctx = FakeSession(session_id="session-1", project_id="project-1")
@@ -235,10 +298,22 @@ async def test_delete_session_data_does_not_remove_project_documents(
     await resources.redis.set(dedup_key, "42")
     await resources.redis.rpush(RedisKeys.buffer("ada", "session-1"), "pending")
 
+    unregister_calls = []
+
+    class FakeEmitter:
+        def unregister_session(self, project_id, session_id):
+            unregister_calls.append((project_id, session_id))
+
+    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: FakeEmitter()))
+
     deleted = await manager.delete_session_data("session-1")
 
     assert deleted >= 1
     assert ctx.document_service is project_document_service
+    assert ctx.shutdown_count == 1
+    assert active_sessions == {}
+    assert project_manager.release_calls == ["project-1"]
+    assert unregister_calls == [("project-1", "session-1")]
     assert project_manager.remove_session_calls == [("project-1", "session-1")]
     assert await resources.redis.hget(RedisKeys.sessions("ada"), "session-1") is None
     assert await resources.redis.get(memory_key) is None

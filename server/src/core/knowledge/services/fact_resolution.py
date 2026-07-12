@@ -171,28 +171,54 @@ class FactResolver:
             facts_to_create.append(fact)
             active_existing.append(fact)
 
-        if facts_to_create:
+        if facts_to_create or to_invalidate:
             try:
-                fallback_session_id = (
-                    None if source_session_by_msg_id is not None else session_id
-                )
-                count = await knowledge_store.create_facts_batch(
-                    entity_id,
-                    facts_to_create,
-                    user_name=user_name,
-                    session_id=fallback_session_id,
-                    project_id=project_id,
-                )
-                logger.debug(f"Created {count} facts for entity {entity_id}")
-
-                failed_invalidations = await FactResolver._invalidate_facts(
-                    to_invalidate,
-                    entity_id,
-                    session_id,
-                    knowledge_store,
-                    now,
-                    project_id=project_id,
-                )
+                invalidated_fact_ids = FactResolver._sorted_ids(to_invalidate)
+                if audit_change_type:
+                    await knowledge_store.apply_fact_changes_with_audit(
+                        fact_change_id=fact_change_id or str(uuid.uuid4()),
+                        user_name=user_name,
+                        project_id=project_id,
+                        entity_id=entity_id,
+                        facts_to_create=facts_to_create,
+                        fact_ids_to_invalidate=invalidated_fact_ids,
+                        actor=actor or "profile_refinement",
+                        change_type=audit_change_type,
+                        reason=reason or "profile_extraction",
+                        session_id=session_id,
+                        metadata=FactResolver._audit_metadata(
+                            merge_result=merge_result,
+                            contradicted_fact_ids=FactResolver._sorted_ids(
+                                contradicted_fact_ids
+                            ),
+                            invalid_source_msg_ids=invalid_source_msg_ids,
+                            contradiction_candidate_diagnostics=(
+                                contradiction_candidate_diagnostics
+                            ),
+                        ),
+                    )
+                    failed_invalidations = []
+                else:
+                    if facts_to_create:
+                        fallback_session_id = (
+                            None if source_session_by_msg_id is not None else session_id
+                        )
+                        count = await knowledge_store.create_facts_batch(
+                            entity_id,
+                            facts_to_create,
+                            user_name=user_name,
+                            session_id=fallback_session_id,
+                            project_id=project_id,
+                        )
+                        logger.debug(f"Created {count} facts for entity {entity_id}")
+                    failed_invalidations = await FactResolver._invalidate_facts(
+                        to_invalidate,
+                        entity_id,
+                        session_id,
+                        knowledge_store,
+                        now,
+                        project_id=project_id,
+                    )
 
                 await emit(
                     session_id,
@@ -205,35 +231,10 @@ class FactResolver:
                     },
                     verbose_only=True,
                 )
-
-                await FactResolver._audit_fact_changes(
-                    entity_id=entity_id,
-                    merge_result=merge_result,
-                    existing_facts=existing_facts,
-                    created_facts=facts_to_create,
-                    invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
-                    failed_invalidations=failed_invalidations,
-                    contradicted_fact_ids=FactResolver._sorted_ids(
-                        contradicted_fact_ids
-                    ),
-                    invalid_source_msg_ids=invalid_source_msg_ids,
-                    contradiction_candidate_diagnostics=(
-                        contradiction_candidate_diagnostics
-                    ),
-                    knowledge_store=knowledge_store,
-                    user_name=user_name,
-                    project_id=project_id,
-                    session_id=session_id,
-                    audit_change_type=audit_change_type,
-                    actor=actor,
-                    reason=reason,
-                    fact_change_id=fact_change_id,
-                )
-
                 return FactResolutionSummary(
                     active_facts=active_existing,
                     created_facts=facts_to_create,
-                    invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
+                    invalidated_fact_ids=invalidated_fact_ids,
                     failed_invalidations=failed_invalidations,
                     contradicted_fact_ids=FactResolver._sorted_ids(
                         contradicted_fact_ids
@@ -243,11 +244,10 @@ class FactResolver:
                         contradiction_candidate_diagnostics
                     ),
                 )
-
-            except Exception as e:
+            except Exception as exc:
                 logger.error(
                     f"Failed to write facts for {entity_id}, "
-                    f"skipping invalidations. Error: {e}"
+                    f"skipping invalidations. Error: {exc}"
                 )
                 await emit(
                     session_id,
@@ -256,12 +256,12 @@ class FactResolver:
                     {
                         "entity_id": entity_id,
                         "fact_count": len(facts_to_create),
-                        "error": str(e),
+                        "error": str(exc),
                     },
                 )
                 return FactResolutionSummary(
                     active_facts=[
-                        f for f in active_existing if f not in facts_to_create
+                        fact for fact in active_existing if fact not in facts_to_create
                     ],
                     created_facts=[],
                     invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
@@ -274,67 +274,8 @@ class FactResolver:
                         contradiction_candidate_diagnostics
                     ),
                     write_failed=True,
-                    error=str(e),
+                    error=str(exc),
                 )
-        elif to_invalidate:
-            failed_invalidations = await FactResolver._invalidate_facts(
-                to_invalidate,
-                entity_id,
-                session_id,
-                knowledge_store,
-                now,
-                project_id=project_id,
-            )
-
-            await emit(
-                session_id,
-                "job",
-                "facts_changed",
-                {
-                    "entity_id": entity_id,
-                    "invalidated": len(to_invalidate),
-                    "created": 0,
-                },
-                verbose_only=True,
-            )
-
-            await FactResolver._audit_fact_changes(
-                entity_id=entity_id,
-                merge_result=merge_result,
-                existing_facts=existing_facts,
-                created_facts=[],
-                invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
-                failed_invalidations=failed_invalidations,
-                contradicted_fact_ids=FactResolver._sorted_ids(
-                    contradicted_fact_ids
-                ),
-                invalid_source_msg_ids=invalid_source_msg_ids,
-                contradiction_candidate_diagnostics=(
-                    contradiction_candidate_diagnostics
-                ),
-                knowledge_store=knowledge_store,
-                user_name=user_name,
-                project_id=project_id,
-                session_id=session_id,
-                audit_change_type=audit_change_type,
-                actor=actor,
-                reason=reason,
-                fact_change_id=fact_change_id,
-            )
-
-            return FactResolutionSummary(
-                active_facts=active_existing,
-                created_facts=[],
-                invalidated_fact_ids=FactResolver._sorted_ids(to_invalidate),
-                failed_invalidations=failed_invalidations,
-                contradicted_fact_ids=FactResolver._sorted_ids(
-                    contradicted_fact_ids
-                ),
-                invalid_source_msg_ids=invalid_source_msg_ids,
-                contradiction_candidate_diagnostics=(
-                    contradiction_candidate_diagnostics
-                ),
-            )
 
         return FactResolutionSummary(
             active_facts=active_existing,
@@ -351,106 +292,29 @@ class FactResolver:
         )
 
     @staticmethod
-    def _fact_snapshot(fact: FactRecord, *, user_name: str, project_id: str) -> dict:
-        return {
-            "fact_id": fact.id,
-            "entity_id": fact.source_entity_id,
-            "user_name": user_name,
-            "project_id": project_id,
-            "content": fact.content,
-            "valid_at": fact.valid_at,
-            "invalid_at": fact.invalid_at,
-            "confidence": fact.confidence,
-            "source_msg_id": fact.source_msg_id,
-            "source_user_name": fact.source_user_name,
-            "source_session_id": fact.source_session_id,
-            "source": fact.source,
-        }
-
-    @staticmethod
-    def _skipped_payload(items) -> list[dict]:
-        return [item.model_dump(mode="json") for item in items]
-
-    @staticmethod
-    async def _audit_fact_changes(
+    def _audit_metadata(
         *,
-        entity_id: int,
         merge_result: FactMergeResult,
-        existing_facts: List[FactRecord],
-        created_facts: List[FactRecord],
-        invalidated_fact_ids: List[str],
-        failed_invalidations: List[str],
         contradicted_fact_ids: List[str],
         invalid_source_msg_ids: List[int],
         contradiction_candidate_diagnostics: List[dict],
-        knowledge_store: KnowledgeStore,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        audit_change_type: Optional[str],
-        actor: Optional[str],
-        reason: Optional[str],
-        fact_change_id: Optional[str],
-    ) -> None:
-        if not audit_change_type:
-            return
-        if not created_facts and not invalidated_fact_ids:
-            return
-
-        existing_by_id = {fact.id: fact for fact in existing_facts}
-        invalidated_snapshots = [
-            FactResolver._fact_snapshot(
-                existing_by_id[fact_id],
-                user_name=user_name,
-                project_id=project_id,
-            )
-            for fact_id in invalidated_fact_ids
-            if fact_id in existing_by_id
-        ]
-        source_msg_ids = sorted(
-            {
-                int(msg_id)
-                for msg_id in (
-                    [fact.source_msg_id for fact in created_facts]
-                    + [
-                        snapshot.get("source_msg_id")
-                        for snapshot in invalidated_snapshots
-                    ]
-                )
-                if msg_id is not None
-            }
-        )
-        metadata = {
+    ) -> dict:
+        return {
             "skipped": FactResolver._skipped_payload(merge_result.skipped),
             "missing_targets": FactResolver._skipped_payload(
                 merge_result.missing_targets
             ),
             "contradicted_fact_ids": contradicted_fact_ids,
-            "failed_invalidations": failed_invalidations,
+            "failed_invalidations": [],
             "invalid_source_msg_ids": invalid_source_msg_ids,
             "contradiction_candidate_diagnostics": (
                 contradiction_candidate_diagnostics
             ),
         }
-        try:
-            await knowledge_store.create_applied_fact_change_audit(
-                fact_change_id=fact_change_id or str(uuid.uuid4()),
-                user_name=user_name,
-                project_id=project_id,
-                entity_id=entity_id,
-                actor=actor or "profile_refinement",
-                change_type=audit_change_type,
-                reason=reason or "profile_extraction",
-                session_id=session_id,
-                source_msg_ids=source_msg_ids,
-                invalidated_fact_ids=invalidated_fact_ids,
-                invalidated_fact_snapshots=invalidated_snapshots,
-                created_fact_ids=[fact.id for fact in created_facts],
-                replacement_content=None,
-                metadata=metadata,
-            )
-        except Exception as exc:
-            logger.warning(f"Failed to audit fact changes for {entity_id}: {exc}")
+
+    @staticmethod
+    def _skipped_payload(items) -> list[dict]:
+        return [item.model_dump(mode="json") for item in items]
 
     @staticmethod
     async def _invalidate_facts(

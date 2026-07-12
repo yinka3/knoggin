@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from infrastructure.background_work import BackgroundWorkRejected
 from infrastructure.job.base import JobContext, JobResult
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
@@ -207,6 +208,49 @@ async def test_false_result_emits_failed_not_completed(monkeypatch):
 
     assert result.success is False
     assert [event[2] for event in events] == ["started", "failed"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_scheduler_releases_lease_when_background_admission_is_rejected(
+    monkeypatch,
+):
+    events = capture_events(monkeypatch)
+
+    class RejectingBackgroundWork:
+        async def submit(self, project_id, operation, *, name, coalesce_key=None):
+            raise BackgroundWorkRejected(
+                project_id=project_id,
+                name=name,
+                reason="global_queue_full",
+                limit=1,
+                queued=1,
+            )
+
+    redis = FakeRedis()
+    scheduler = Scheduler(
+        "ada",
+        "project-c",
+        redis,
+        background_work=RejectingBackgroundWork(),
+    )
+    job = ControlledJob(name="profile_refinement")
+    ctx = JobContext(user_name="ada", project_id="project-c")
+    lease_key, lease_token = await scheduler._acquire_lease(ctx, job)
+    rejected = await scheduler._execute_job(
+        job,
+        ctx,
+        lease_key=lease_key,
+        lease_token=lease_token,
+    )
+
+    assert rejected.success is False
+    assert job.execute_calls == 0
+    assert await redis.get(
+        RedisKeys.job_lease("ada", "project-c", job.name)
+    ) is None
+    assert events[-1][2] == "admission_rejected"
+    assert events[-1][3]["reason"] == "global_queue_full"
 
 
 @pytest.mark.runtime

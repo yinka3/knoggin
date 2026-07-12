@@ -131,6 +131,83 @@ class DocumentWriter:
         )
         return rows[0] if rows else None
 
+    async def transition_index_status(
+        self,
+        *,
+        document_id: str,
+        session_id: Optional[str],
+        status: str,
+        allowed_statuses: tuple[str, ...],
+        updated_at: str,
+    ) -> Optional[Dict]:
+        """Atomically transition one visible document into a work state."""
+        pool = self._require_pool()
+        allowed = tuple(allowed_statuses)
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        UPDATE public.project_documents
+                        SET
+                            status = %s,
+                            indexed_at = NULL,
+                            error_message = NULL,
+                            updated_at = %s
+                        WHERE document_id = %s
+                          AND project_id = %s
+                          AND (
+                              visibility_scope = 'project'
+                              OR (
+                                  visibility_scope = 'session'
+                                  AND session_id = %s
+                              )
+                          )
+                          AND status = ANY(%s)
+                        RETURNING
+                            document_id,
+                            project_id,
+                            session_id,
+                            visibility_scope,
+                            folder_root_id,
+                            source_kind,
+                            original_name,
+                            relative_path,
+                            extension,
+                            size_bytes,
+                            content_hash,
+                            status,
+                            created_at,
+                            updated_at,
+                            indexed_at,
+                            error_message
+                        """,
+                        (
+                            status,
+                            updated_at,
+                            document_id,
+                            self._project_id,
+                            session_id,
+                            list(allowed),
+                        ),
+                    )
+                    row = await cur.fetchone()
+                    return dict(row) if row else None
+
+    async def requeue_interrupted_indexes(self, *, updated_at: str) -> int:
+        """Make work left in ``indexing`` by a stopped process recoverable."""
+        rows = await self._client.fetch_all(
+            """
+            UPDATE public.project_documents
+            SET status = 'queued', updated_at = %s
+            WHERE project_id = %s
+              AND status = 'indexing'
+            RETURNING document_id
+            """,
+            (updated_at, self._project_id),
+        )
+        return len(rows)
+
     async def insert_folder_batch(
         self,
         *,

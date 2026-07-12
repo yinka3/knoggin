@@ -6,11 +6,11 @@ from loguru import logger
 from common.schema.contracts import CandidateSuggestion, EngineScope
 from common.schema.primitives import FactRecord
 from common.scoping import require_scope_value
-from infrastructure.postgres_client import PostgresClient
 from core.community.community_store import CommunityStore
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.entity_reader import EntityReader
+from core.knowledge.db.readers.fact_audit_reader import FactAuditReader
 from core.knowledge.db.readers.fact_reader import FactReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
@@ -25,6 +25,7 @@ from core.knowledge.db.writers.fact_writer import FactWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.services.embedding_service import EmbeddingService
+from infrastructure.postgres_client import PostgresClient
 
 
 class KnowledgeStore:
@@ -48,6 +49,7 @@ class KnowledgeStore:
         self._graph_writer = GraphWriter(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
+        self._fact_audit_reader = FactAuditReader(self._postgres_client)
         self._fact_reader = FactReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
@@ -134,8 +136,31 @@ class KnowledgeStore:
     async def replace_facts_with_audit(self, **kwargs) -> dict:
         return await self._fact_writer.replace_facts_with_audit(**kwargs)
 
+    async def apply_fact_changes_with_audit(self, **kwargs) -> dict:
+        return await self._fact_writer.apply_fact_changes_with_audit(**kwargs)
+
     async def create_applied_fact_change_audit(self, **kwargs) -> None:
         return await self._fact_audit_writer.create_applied_audit(**kwargs)
+
+    async def get_fact_change_audit(
+        self,
+        fact_change_id: str,
+        **kwargs,
+    ) -> Optional[Dict]:
+        return await self._fact_audit_reader.get_fact_change_audit(
+            fact_change_id,
+            **kwargs,
+        )
+
+    async def list_fact_change_audits_for_entity(self, **kwargs) -> List[Dict]:
+        return await self._fact_audit_reader.list_fact_change_audits_for_entity(
+            **kwargs
+        )
+
+    async def list_fact_change_audits_for_project(self, **kwargs) -> List[Dict]:
+        return await self._fact_audit_reader.list_fact_change_audits_for_project(
+            **kwargs
+        )
 
     async def update_entity_profile(
         self,

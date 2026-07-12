@@ -17,6 +17,7 @@ class RecordingKnowledgeStore:
         self.create_calls = []
         self.invalidate_calls = []
         self.audit_calls = []
+        self.transactional_change_calls = []
         self.fail_create = fail_create
         self.fail_audit = fail_audit
 
@@ -56,6 +57,19 @@ class RecordingKnowledgeStore:
         if self.fail_audit:
             raise RuntimeError("audit failed")
         self.audit_calls.append(kwargs)
+
+    async def apply_fact_changes_with_audit(self, **kwargs):
+        if self.fail_create:
+            raise RuntimeError("write failed")
+        if self.fail_audit:
+            raise RuntimeError("audit failed")
+        self.transactional_change_calls.append(kwargs)
+        return {
+            "fact_change_id": kwargs["fact_change_id"],
+            "entity_id": kwargs["entity_id"],
+            "invalidated_fact_ids": kwargs["fact_ids_to_invalidate"],
+            "created_fact_ids": [fact.id for fact in kwargs["facts_to_create"]],
+        }
 
 
 class FakeEmbedding:
@@ -223,15 +237,13 @@ async def test_fact_resolution_audits_profile_extraction_created_facts():
         fact_change_id="change-1",
     )
 
-    audit = knowledge_store.audit_calls[0]
-    assert audit["fact_change_id"] == "change-1"
-    assert audit["change_type"] == "profile_extraction"
-    assert audit["actor"] == "profile_refinement"
-    assert audit["source_msg_ids"] == [1]
-    assert len(audit["created_fact_ids"]) == 1
-    assert audit["invalidated_fact_ids"] == []
-    assert audit["invalidated_fact_snapshots"] == []
-    assert audit["metadata"]["skipped"][0]["reason"] == "duplicate"
+    change = knowledge_store.transactional_change_calls[0]
+    assert change["fact_change_id"] == "change-1"
+    assert change["change_type"] == "profile_extraction"
+    assert change["actor"] == "profile_refinement"
+    assert len(change["facts_to_create"]) == 1
+    assert change["fact_ids_to_invalidate"] == []
+    assert change["metadata"]["skipped"][0]["reason"] == "duplicate"
 
 
 @pytest.mark.runtime
@@ -270,27 +282,10 @@ async def test_fact_resolution_audits_profile_extraction_invalidated_facts():
         reason="profile_extraction",
     )
 
-    audit = knowledge_store.audit_calls[0]
-    assert audit["created_fact_ids"] == []
-    assert audit["invalidated_fact_ids"] == ["fact-old"]
-    assert audit["source_msg_ids"] == [7]
-    assert audit["invalidated_fact_snapshots"] == [
-        {
-            "fact_id": "fact-old",
-            "entity_id": 101,
-            "user_name": "ada",
-            "project_id": "project-1",
-            "content": "Alice uses Trello.",
-            "valid_at": existing.valid_at,
-            "invalid_at": None,
-            "confidence": 1.0,
-            "source_msg_id": 7,
-            "source_user_name": "ada",
-            "source_session_id": "session-1",
-            "source": "user",
-        }
-    ]
-    assert audit["metadata"]["missing_targets"][0]["reason"] == (
+    change = knowledge_store.transactional_change_calls[0]
+    assert change["facts_to_create"] == []
+    assert change["fact_ids_to_invalidate"] == ["fact-old"]
+    assert change["metadata"]["missing_targets"][0]["reason"] == (
         "invalidates_target_not_found"
     )
 
@@ -428,7 +423,7 @@ async def test_fact_resolution_does_not_audit_noop_profile_extraction():
         reason="profile_extraction",
     )
 
-    assert knowledge_store.audit_calls == []
+    assert knowledge_store.transactional_change_calls == []
 
 
 @pytest.mark.runtime
@@ -457,12 +452,12 @@ async def test_fact_resolution_write_failure_skips_invalidations_and_audit():
 
     assert summary.write_failed is True
     assert knowledge_store.invalidate_calls == []
-    assert knowledge_store.audit_calls == []
+    assert knowledge_store.transactional_change_calls == []
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_fact_resolution_audit_failure_does_not_fail_profile_extraction():
+async def test_fact_resolution_audit_failure_rolls_back_profile_extraction():
     knowledge_store = RecordingKnowledgeStore(fail_audit=True)
 
     summary = await FactResolver.apply_fact_changes(
@@ -484,10 +479,10 @@ async def test_fact_resolution_audit_failure_does_not_fail_profile_extraction():
         reason="profile_extraction",
     )
 
-    assert summary.write_failed is False
-    assert len(summary.created_facts) == 1
-    assert len(knowledge_store.create_calls) == 1
-    assert knowledge_store.audit_calls == []
+    assert summary.write_failed is True
+    assert summary.created_facts == []
+    assert knowledge_store.create_calls == []
+    assert knowledge_store.transactional_change_calls == []
 
 
 @pytest.mark.runtime

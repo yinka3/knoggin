@@ -7,8 +7,12 @@ from loguru import logger
 
 from common.utils.events import emit
 from common.utils.time_utils import get_now, get_now_iso, get_now_unix, parse_iso_time
-from infrastructure.job.base import BaseJob, JobContext
-from infrastructure.redis_client import RedisKeys, PROJECT_ACTIVITY_TTL_SECONDS
+from infrastructure.background_work import (
+    BackgroundWorkCoordinator,
+    BackgroundWorkRejected,
+)
+from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.redis_client import PROJECT_ACTIVITY_TTL_SECONDS, RedisKeys
 
 
 class Scheduler:
@@ -33,10 +37,12 @@ class Scheduler:
         user_name: str,
         project_id: str,
         redis: aioredis.Redis,
+        background_work: Optional[BackgroundWorkCoordinator] = None,
     ):
         self.user_name = user_name
         self.project_id = project_id
         self.redis = redis
+        self.background_work = background_work
         self._jobs: Dict[str, BaseJob] = {}
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._monitor_task: Optional[asyncio.Task] = None
@@ -219,6 +225,46 @@ class Scheduler:
         lease_token: Optional[str] = None,
     ):
         """Execute a single job with error handling."""
+        if self.background_work is not None:
+            try:
+                return await self.background_work.submit(
+                    ctx.project_id,
+                    lambda: self._execute_job_now(
+                        job,
+                        ctx,
+                        lease_key=lease_key,
+                        lease_token=lease_token,
+                    ),
+                    name=job.name,
+                    coalesce_key=f"job:{job.name}",
+                )
+            except BackgroundWorkRejected as exc:
+                logger.warning(exc.message)
+                if lease_key is not None and lease_token is not None:
+                    await self._release_lease(lease_key, lease_token)
+                await self._safe_emit(
+                    ctx.project_id,
+                    "job",
+                    "admission_rejected",
+                    {"name": job.name, **exc.details},
+                )
+                return JobResult(success=False, summary=exc.message)
+        return await self._execute_job_now(
+            job,
+            ctx,
+            lease_key=lease_key,
+            lease_token=lease_token,
+        )
+
+    async def _execute_job_now(
+        self,
+        job: BaseJob,
+        ctx: JobContext,
+        *,
+        lease_key: Optional[str] = None,
+        lease_token: Optional[str] = None,
+    ):
+        """Execute a job after it has received a fair background-work turn."""
         if lease_key is None or lease_token is None:
             lease = await self._acquire_lease(ctx, job)
             if lease is None:

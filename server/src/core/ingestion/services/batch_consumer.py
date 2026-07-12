@@ -134,14 +134,38 @@ class IngestionWorker:
     def update_settings(self, config: IngestionSettings):
         """Update settings dynamically while running."""
         self.batch_size = config.batch_size
+        self.batch_debounce_seconds = config.batch_debounce_seconds
         self.batch_timeout = config.batch_timeout
         self.checkpoint_interval = config.checkpoint_interval
         self.session_window = config.session_window
 
         logger.info(
             "Consumer ingestion settings updated: "
-            f"batch={self.batch_size}, timeout={self.batch_timeout}"
+            f"batch={self.batch_size}, debounce={self.batch_debounce_seconds}, "
+            f"timeout={self.batch_timeout}"
         )
+
+    async def _wait_for_batch(self) -> bool:
+        """Wait briefly for a full batch. Returns whether partial work is due."""
+        if self._shutdown_requested or self._flush_future is not None:
+            return True
+
+        deadline = asyncio.get_running_loop().time() + self.batch_debounce_seconds
+        while True:
+            if self._shutdown_requested or self._flush_future is not None:
+                return True
+            if await self.redis.llen(self._buffer_key) >= self.batch_size:
+                return False
+
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return True
+
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return True
+            self._wake_event.clear()
 
     async def _run(self):
         with logger.contextualize(
@@ -161,9 +185,20 @@ class IngestionWorker:
 
                 self._wake_event.clear()
                 try:
-                    await self._drain_buffer(
-                        flush_partial=timed_out or self._flush_future is not None
+                    flush_partial = (
+                        timed_out
+                        or self._flush_future is not None
+                        or self._shutdown_requested
                     )
+                    if not flush_partial:
+                        flush_partial = await self._wait_for_batch()
+                    while True:
+                        deferred_partial = await self._drain_buffer(
+                            flush_partial=flush_partial
+                        )
+                        if not deferred_partial or self._shutdown_requested:
+                            break
+                        flush_partial = await self._wait_for_batch()
                     error_count = 0  # Reset on success
                 except Exception as e:
                     error_count += 1
@@ -186,7 +221,8 @@ class IngestionWorker:
         except Exception as e:
             logger.error(f"IngestionWorker shutdown sequence failed: {e}")
 
-    async def _drain_buffer(self, flush_partial: bool):
+    async def _drain_buffer(self, flush_partial: bool) -> bool:
+        """Drain complete batches and report whether an undersized tail remains."""
         with logger.contextualize(
             user=self.user_name, session=self.session_id, component="IngestionWorker"
         ):
@@ -194,10 +230,14 @@ class IngestionWorker:
             total_processed = 0
             all_msg_ids = []
             dlq_count = 0
+            deferred_partial = False
 
             while True:
                 buffer_len = await self.redis.llen(self._buffer_key)
                 if buffer_len == 0:
+                    break
+                if not flush_partial and buffer_len < self.batch_size:
+                    deferred_partial = True
                     break
 
                 raw, messages = await self._read_buffer_batch()
@@ -291,6 +331,7 @@ class IngestionWorker:
                     "partial_flush": flush_partial,
                 },
             )
+            return deferred_partial
 
     async def _read_buffer_batch(self) -> tuple[List, List[Dict]]:
         raw = await self.redis.lrange(self._buffer_key, 0, self.batch_size - 1)

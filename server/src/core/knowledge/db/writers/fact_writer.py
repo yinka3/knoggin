@@ -7,11 +7,11 @@ from loguru import logger
 from common.schema.primitives import FactRecord
 from common.scoping import require_scope_value
 from common.utils.time_utils import get_now
-from infrastructure.postgres_client import PostgresClient
 from core.knowledge.db.writers.age_projection_writer import (
     AgeProjectionWriter,
 )
 from core.knowledge.db.writers.fact_audit_writer import FactAuditWriter
+from infrastructure.postgres_client import PostgresClient
 
 
 class FactWriter:
@@ -380,6 +380,7 @@ class FactWriter:
                 SET invalid_at = %s
                 WHERE fact_id = %s
                   AND project_id = %s
+                  AND invalid_at IS NULL
                 RETURNING fact_id
                 """,
                 (invalid_at, fact_id, project_id),
@@ -404,6 +405,145 @@ class FactWriter:
                 )
                 return True
         return False
+
+    async def apply_fact_changes_with_audit(
+        self,
+        *,
+        fact_change_id: str,
+        user_name: str,
+        project_id: str,
+        entity_id: int,
+        facts_to_create: list[FactRecord],
+        fact_ids_to_invalidate: list[str],
+        actor: str,
+        change_type: str,
+        reason: Optional[str] = None,
+        session_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict:
+        """Apply a profile fact batch and its audit row in one transaction."""
+        operation = "apply_fact_changes_with_audit"
+        fact_change_id = require_scope_value(
+            fact_change_id,
+            "fact_change_id",
+            operation,
+        )
+        user_name = require_scope_value(user_name, "user_name", operation)
+        project_id = require_scope_value(project_id, "project_id", operation)
+        actor = require_scope_value(actor, "actor", operation)
+        change_type = require_scope_value(change_type, "change_type", operation)
+        if entity_id <= 0:
+            raise ValueError(f"{operation} requires positive entity_id")
+        if not facts_to_create and not fact_ids_to_invalidate:
+            raise ValueError(f"{operation} requires fact changes")
+
+        invalidated_fact_ids = [
+            require_scope_value(fact_id, "fact_id", operation)
+            for fact_id in fact_ids_to_invalidate
+        ]
+        if len(set(invalidated_fact_ids)) != len(invalidated_fact_ids):
+            raise ValueError(f"{operation} rejects duplicate fact_ids")
+
+        invalid_at = get_now()
+        created_fact_ids = [fact.id for fact in facts_to_create]
+        created_fact_id_set = set(created_fact_ids)
+        existing_fact_ids_to_invalidate = [
+            fact_id
+            for fact_id in invalidated_fact_ids
+            if fact_id not in created_fact_id_set
+        ]
+        async with self.client.transaction() as cur:
+            records = []
+            if existing_fact_ids_to_invalidate:
+                await cur.execute(
+                    """
+                    SELECT *
+                    FROM facts
+                    WHERE user_name = %s
+                      AND project_id = %s
+                      AND entity_id = %s
+                      AND fact_id = ANY(%s)
+                      AND invalid_at IS NULL
+                    FOR UPDATE
+                    """,
+                    (
+                        user_name,
+                        project_id,
+                        entity_id,
+                        existing_fact_ids_to_invalidate,
+                    ),
+                )
+                records = await cur.fetchall()
+                found_ids = {
+                    str(self._clean_string(record["fact_id"])) for record in records
+                }
+                missing_ids = [
+                    fact_id
+                    for fact_id in existing_fact_ids_to_invalidate
+                    if fact_id not in found_ids
+                ]
+                if missing_ids:
+                    raise ValueError(
+                        "Missing active scoped facts for profile fact change: "
+                        + ", ".join(missing_ids)
+                    )
+
+            snapshots = [self._fact_snapshot(record) for record in records]
+            source_msg_ids = sorted(
+                {
+                    int(message_id)
+                    for message_id in (
+                        [fact.source_msg_id for fact in facts_to_create]
+                        + [snapshot.get("source_msg_id") for snapshot in snapshots]
+                    )
+                    if message_id is not None
+                }
+            )
+            await self.audit_writer.create_applying_audit_with_cursor(
+                cur,
+                fact_change_id=fact_change_id,
+                user_name=user_name,
+                project_id=project_id,
+                entity_id=entity_id,
+                actor=actor,
+                change_type=change_type,
+                reason=reason,
+                session_id=session_id,
+                source_msg_ids=source_msg_ids,
+                invalidated_fact_ids=invalidated_fact_ids,
+                invalidated_fact_snapshots=snapshots,
+                created_fact_ids=created_fact_ids,
+                replacement_content=None,
+                metadata=metadata,
+            )
+            for fact in facts_to_create:
+                await self._insert_fact_with_cursor(
+                    cur,
+                    entity_id=entity_id,
+                    fact=fact,
+                    user_name=user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                )
+            await self._invalidate_fact_ids_with_cursor(
+                cur,
+                invalidated_fact_ids,
+                invalid_at,
+                project_id=project_id,
+            )
+            await self.audit_writer.mark_applied_with_cursor(
+                cur,
+                fact_change_id,
+                invalidated_fact_ids=invalidated_fact_ids,
+                created_fact_ids=created_fact_ids,
+            )
+
+        return {
+            "fact_change_id": fact_change_id,
+            "entity_id": entity_id,
+            "invalidated_fact_ids": invalidated_fact_ids,
+            "created_fact_ids": created_fact_ids,
+        }
 
     async def remove_fact_with_audit(
         self,

@@ -9,6 +9,9 @@ import torch
 from loguru import logger
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
+from common.schema.contracts import EngineWorkUnit
+from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
+
 
 @dataclass(frozen=True)
 class TextPairClassification:
@@ -24,6 +27,7 @@ class EmbeddingService:
     """Embedding infrastructure for the knowledge graph."""
 
     BATCH_SIZE = 64
+    supports_model_work_units = True
 
     def __init__(
         self,
@@ -34,6 +38,7 @@ class EmbeddingService:
         ),
         device: str = None,
         batch_size: int = 32,
+        model_work: ModelWorkCoordinator | None = None,
     ):
         self.device = device or "cpu"
         self.batch_size = batch_size
@@ -51,18 +56,50 @@ class EmbeddingService:
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
         self._nli_model = nli_model
+        self._model_work = model_work
 
         logger.info(
             "EmbeddingService initialized | "
             f"device={self.device} | batch_size={batch_size}"
         )
 
+    def set_model_work_coordinator(
+        self, model_work: ModelWorkCoordinator
+    ) -> None:
+        self._model_work = model_work
+
+    async def _run_blocking(
+        self,
+        operation,
+        *,
+        name: str,
+        priority: ModelWorkPriority,
+        work_kind: str,
+        parent_work_unit: EngineWorkUnit | None = None,
+    ):
+        if self._model_work is not None:
+            work_unit = None
+            if parent_work_unit is not None:
+                work_unit = EngineWorkUnit.for_model_operation(
+                    kind=work_kind,
+                    scope=parent_work_unit.scope,
+                    parent_work_unit_id=parent_work_unit.id,
+                    priority=parent_work_unit.priority,
+                )
+            return await self._model_work.run_blocking(
+                operation,
+                priority=priority,
+                name=name,
+                work_unit=work_unit,
+                parent_work_unit=parent_work_unit,
+            )
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, operation)
+
     async def load_models(self):
         """Async initialization for heavy ML models."""
         if self._embedder and self._reranker:
             return
-
-        loop = asyncio.get_running_loop()
 
         def _load_models():
             embedder = SentenceTransformer(
@@ -79,7 +116,12 @@ class EmbeddingService:
             )
             return embedder, reranker
 
-        self._embedder, self._reranker = await loop.run_in_executor(None, _load_models)
+        self._embedder, self._reranker = await self._run_blocking(
+            _load_models,
+            name="embedding-model-load",
+            priority=ModelWorkPriority.BACKGROUND,
+            work_kind="model_load",
+        )
 
         if self._embedder:
             self._embedding_dim = self._embedder.get_sentence_embedding_dimension()
@@ -99,13 +141,23 @@ class EmbeddingService:
         """Configured NLI model name. Loaded only when NLI support is wired in."""
         return self._nli_model
 
-    async def encode(self, texts: List[str]) -> List[List[float]]:
+    async def encode(
+        self,
+        texts: List[str],
+        *,
+        parent_work_unit: EngineWorkUnit | None = None,
+    ) -> List[List[float]]:
         """Batch encode texts to vectors with chunking for large inputs (async)."""
         if not texts:
             return []
 
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._encode_sync, texts)
+        return await self._run_blocking(
+            lambda: self._encode_sync(texts),
+            name="embedding-encode",
+            priority=ModelWorkPriority.BACKGROUND,
+            work_kind="embedding",
+            parent_work_unit=parent_work_unit,
+        )
 
     def _encode_sync(self, texts: List[str]) -> List[List[float]]:
         if not self._embedder:
@@ -125,8 +177,12 @@ class EmbeddingService:
 
     async def encode_single(self, text: str) -> List[float]:
         """Encode single text, returns list for JSON serialization (async)."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._encode_single_sync, text)
+        return await self._run_blocking(
+            lambda: self._encode_single_sync(text),
+            name="embedding-encode-single",
+            priority=ModelWorkPriority.FOREGROUND,
+            work_kind="embedding",
+        )
 
     def _encode_single_sync(self, text: str) -> List[float]:
         if not self._embedder:
@@ -141,9 +197,11 @@ class EmbeddingService:
         """Score query-candidate pairs via cross-encoder (async)."""
         if not candidates:
             return []
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, self._rerank_sync, query, candidates, batch_size
+        return await self._run_blocking(
+            lambda: self._rerank_sync(query, candidates, batch_size),
+            name="embedding-rerank",
+            priority=ModelWorkPriority.FOREGROUND,
+            work_kind="rerank",
         )
 
     def _rerank_sync(
@@ -176,9 +234,11 @@ class EmbeddingService:
         """Classify text pairs as entailment, contradiction, or neutral."""
         if not pairs:
             return []
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, self._classify_text_pairs_sync, pairs, batch_size
+        return await self._run_blocking(
+            lambda: self._classify_text_pairs_sync(pairs, batch_size),
+            name="embedding-nli",
+            priority=ModelWorkPriority.FOREGROUND,
+            work_kind="nli",
         )
 
     def _classify_text_pairs_sync(
