@@ -15,11 +15,13 @@ from common.exceptions import ConfigurationError, DependencyError
 from common.schema.settings import RedisConnectionSettings
 from common.utils.coordination_log import configure_coordination_log
 from common.utils.events import CommunityEventEmitter
+from core.knowledge.services.embedding_service import EmbeddingService
+from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.llm_client import LLMService
+from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient
-from core.knowledge.services.embedding_service import EmbeddingService
 from log.llm_trace import get_trace_logger
 
 
@@ -48,6 +50,8 @@ class ResourceManager:
         self.redis: Optional[aioredis.Redis] = None
         self.llm_service: Optional[LLMService] = None
         self.executor: Optional[ThreadPoolExecutor] = None
+        self.background_work: Optional[BackgroundWorkCoordinator] = None
+        self.model_work: Optional[ModelWorkCoordinator] = None
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
@@ -78,6 +82,31 @@ class ResourceManager:
                     device = torch.device("cpu")
 
                 instance.executor = ThreadPoolExecutor(max_workers=num_workers)
+                instance.background_work = BackgroundWorkCoordinator(
+                    max_concurrency=int(
+                        os.getenv("KNOGGIN_BACKGROUND_JOB_WORKERS", "1")
+                    ),
+                    max_queued_per_project=int(
+                        os.getenv("KNOGGIN_BACKGROUND_QUEUE_PER_PROJECT", "8")
+                    ),
+                    max_queued_global=int(
+                        os.getenv("KNOGGIN_BACKGROUND_QUEUE_GLOBAL", "64")
+                    ),
+                )
+                await instance.background_work.start()
+                instance.model_work = ModelWorkCoordinator(
+                    instance.executor,
+                    foreground_concurrency=int(
+                        os.getenv("KNOGGIN_FOREGROUND_MODEL_WORKERS", "1")
+                    ),
+                    background_concurrency=int(
+                        os.getenv("KNOGGIN_BACKGROUND_MODEL_WORKERS", "1")
+                    ),
+                    foreground_timeout_seconds=float(
+                        os.getenv("KNOGGIN_FOREGROUND_MODEL_TIMEOUT_SECONDS", "30")
+                    ),
+                )
+                await instance.model_work.start()
 
                 dsn = os.environ.get("DATABASE_URL")
                 if not dsn:
@@ -132,6 +161,8 @@ class ResourceManager:
                     nli_model=nli_model,
                     device=device,
                 )
+                if hasattr(instance.embedding, "set_model_work_coordinator"):
+                    instance.embedding.set_model_work_coordinator(instance.model_work)
                 instance.knowledge_store = KnowledgeStore(
                     dsn=dsn,
                     embedding_service=instance.embedding,
@@ -140,19 +171,20 @@ class ResourceManager:
 
                 async def load_spacy():
                     exclude = ["ner", "lemmatizer", "attribute_ruler"]
-                    loop = asyncio.get_running_loop()
-                    processor = await loop.run_in_executor(
-                        None, lambda: spacy.load("en_core_web_md", exclude=exclude)
+                    processor = await instance.model_work.run_blocking(
+                        lambda: spacy.load("en_core_web_md", exclude=exclude),
+                        priority=ModelWorkPriority.BACKGROUND,
+                        name="spacy-model-load",
                     )
                     processor.add_pipe("doc_cleaner")
                     instance.spacy = processor
                     logger.info("Loaded spacy model")
 
                 async def load_gliner():
-                    loop = asyncio.get_running_loop()
-                    model = await loop.run_in_executor(
-                        None,
+                    model = await instance.model_work.run_blocking(
                         lambda: GLiNER.from_pretrained("urchade/gliner_large-v2.1"),
+                        priority=ModelWorkPriority.BACKGROUND,
+                        name="gliner-model-load",
                     )
                     model.to(device)
                     instance.gliner = model
@@ -192,8 +224,17 @@ class ResourceManager:
             unsubscribe()
         self.config_unsubscribers.clear()
 
+        if self.background_work:
+            await self.background_work.shutdown()
+            self.background_work = None
+
+        if self.model_work:
+            await self.model_work.shutdown()
+            self.model_work = None
+
         if self.executor:
             self.executor.shutdown(wait=wait)
+            self.executor = None
 
         if self.redis is not None:
             CommunityEventEmitter.get().unbind_redis(self.redis)
@@ -214,6 +255,15 @@ class ResourceManager:
         self.gliner = None
         self.spacy = None
         self.knowledge_store = None
+
+    def work_snapshot(self) -> dict[str, object]:
+        """Return local scheduler health without requiring an API endpoint."""
+        return {
+            "background_work": (
+                self.background_work.snapshot() if self.background_work else None
+            ),
+            "model_work": self.model_work.snapshot() if self.model_work else None,
+        }
 
     async def shutdown(self):
         """Release all managed resources."""

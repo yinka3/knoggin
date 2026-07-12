@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
@@ -12,7 +13,6 @@ from common.scoping import IDENTITY_SCOPE
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now
-from infrastructure.redis_client import RedisKeys
 from core.agent.executor import AgentExecutor
 from core.agent.services.agent_manager import AgentManager
 from core.agent.system_prompt import get_agent_prompt
@@ -24,8 +24,7 @@ from core.agent.types import (
     RetrievedEvidence,
 )
 from core.project.state import ProjectState
-from core.session.boot import SessionFactory
-from core.session.context import Session
+from infrastructure.redis_client import RedisKeys
 
 COMMUNITY_ENABLED_TOOLS = AAC_READ_TOOL_NAMES
 ACTIVE_DISCUSSION_TTL_SECONDS = 2 * 60 * 60
@@ -52,8 +51,24 @@ COMMUNITY_RUN_CONFIG = AgentRunConfig(
 )
 
 
+@dataclass(frozen=True)
+class CommunityExecutionContext:
+    """Minimal project context for AAC agent turns without a session runtime."""
+
+    session_id: str
+    project: ProjectState
+    document_service: Optional[object]
+
+
 class CommunityManager:
     """Orchestrates autonomous agent discussions."""
+
+    _RELEASE_ACTIVE_DISCUSSION_SCRIPT = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('del', KEYS[1])
+    end
+    return 0
+    """
 
     def __init__(self, project_state: ProjectState, user_name: str, resources):
         self.project_state = project_state
@@ -114,40 +129,66 @@ class CommunityManager:
         manager = AgentManager(self.resources, self.user_name, {})
         return await manager.get_agent(agent_id)
 
+    def _track_discussion_task(self, task: asyncio.Task) -> None:
+        self._discussion_task = task
+        if hasattr(self.project_state, "track_community_task"):
+            self.project_state.track_community_task(task)
+
+    async def _release_active_discussion(self, discussion_id: str) -> None:
+        await self.resources.redis.eval(
+            self._RELEASE_ACTIVE_DISCUSSION_SCRIPT,
+            1,
+            self._active_discussion_key(),
+            discussion_id,
+        )
+
     async def trigger_discussion(self) -> None:
         """Main entry point called by scheduler."""
         if await self._is_discussion_active():
             logger.info("AAC: Discussion already in progress, skipping.")
             return
 
-        seed_data = await self._seed_discussion()
-        if not seed_data:
-            return
-
-        raw_agent_ids = seed_data.get("agent_ids", [])
-        valid_agent_ids = []
-        for aid in raw_agent_ids:
-            if aid == "default_stella" or await self._agent_exists(aid):
-                valid_agent_ids.append(aid)
-            else:
-                logger.warning(f"AAC: Seeded agent_id '{aid}' not found, skipping")
-
-        if not valid_agent_ids:
-            logger.warning("AAC: No valid agents after validation, using default")
-            valid_agent_ids = [await self._get_default_agent_id()]
-
         discussion_id = str(uuid.uuid4())
-        self._active_discussion_id = discussion_id
-
-        topic = seed_data["topic"]
-        await self.resources.redis.set(
+        claimed = await self.resources.redis.set(
             self._active_discussion_key(),
             discussion_id,
             ex=ACTIVE_DISCUSSION_TTL_SECONDS,
+            nx=True,
         )
-        await self.resources.knowledge_store.community.create_discussion(
-            discussion_id, topic, valid_agent_ids
-        )
+        if not claimed:
+            logger.info("AAC: Discussion claimed by another runtime, skipping.")
+            return
+        self._active_discussion_id = discussion_id
+
+        try:
+            seed_data = await self._seed_discussion()
+            if not seed_data:
+                await self._release_active_discussion(discussion_id)
+                self._active_discussion_id = None
+                return
+
+            raw_agent_ids = seed_data.get("agent_ids", [])
+            valid_agent_ids = []
+            for aid in raw_agent_ids:
+                if aid == "default_stella" or await self._agent_exists(aid):
+                    valid_agent_ids.append(aid)
+                else:
+                    logger.warning(
+                        f"AAC: Seeded agent_id '{aid}' not found, skipping"
+                    )
+
+            if not valid_agent_ids:
+                logger.warning("AAC: No valid agents after validation, using default")
+                valid_agent_ids = [await self._get_default_agent_id()]
+
+            topic = seed_data["topic"]
+            await self.resources.knowledge_store.community.create_discussion(
+                discussion_id, topic, valid_agent_ids
+            )
+        except BaseException:
+            await self._release_active_discussion(discussion_id)
+            self._active_discussion_id = None
+            raise
 
         await emit_community(
             self.user_name,
@@ -159,12 +200,19 @@ class CommunityManager:
         async def _run_and_cleanup():
             try:
                 await self._run_loop(discussion_id, topic, valid_agent_ids)
+            except asyncio.CancelledError:
+                logger.info(f"AAC discussion {discussion_id} cancelled")
+                raise
             except Exception as e:
                 logger.error(f"AAC discussion {discussion_id} error: {e}")
             finally:
-                await self.resources.redis.delete(
-                    self._active_discussion_key()
-                )
+                try:
+                    await self._release_active_discussion(discussion_id)
+                except Exception as e:
+                    logger.warning(
+                        "AAC: Failed to release active discussion marker "
+                        f"for {discussion_id}: {e}"
+                    )
                 self._active_discussion_id = None
                 try:
                     await self.resources.knowledge_store.community.close_discussion(
@@ -182,15 +230,19 @@ class CommunityManager:
                     {"id": discussion_id},
                 )
 
-        self._discussion_task = asyncio.create_task(_run_and_cleanup())
+        task = asyncio.create_task(
+            _run_and_cleanup(),
+            name=f"aac:{self.user_name}:{self.project_state.project_id}",
+        )
+        self._track_discussion_task(task)
 
     async def _run_loop(
         self, discussion_id: str, topic: str, initial_agent_ids: List[str]
     ) -> None:
-        assembler = SessionFactory(self.user_name, self.resources)
-        ctx = await assembler.assemble(
-            project_state=self.project_state,
+        ctx = CommunityExecutionContext(
             session_id=f"aac_{discussion_id}",
+            project=self.project_state,
+            document_service=getattr(self.project_state, "document_service", None),
         )
 
         config = ConfigManager.get().config
@@ -272,7 +324,7 @@ class CommunityManager:
         topic: str,
         history: List[Dict],
         participants: List[str],
-        ctx: Session,
+        ctx: CommunityExecutionContext,
     ) -> Optional[str]:
         """Runs a single agent turn using the core AgentExecutor."""
 

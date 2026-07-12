@@ -556,7 +556,7 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     CONSTRAINT project_documents_session_visibility_check
         CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
     CONSTRAINT project_documents_status_check
-        CHECK (status IN ('uploaded', 'indexed', 'failed')),
+        CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed')),
     CONSTRAINT project_documents_source_kind_check
         CHECK (source_kind IN ('manual_upload', 'folder_upload')),
     CONSTRAINT project_documents_folder_source_check
@@ -571,6 +571,11 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
 
 -- Migration: drop storage_key if it exists from a previous schema version.
 ALTER TABLE public.project_documents DROP COLUMN IF EXISTS storage_key;
+ALTER TABLE public.project_documents
+    DROP CONSTRAINT IF EXISTS project_documents_status_check;
+ALTER TABLE public.project_documents
+    ADD CONSTRAINT project_documents_status_check
+    CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed'));
 
 CREATE INDEX IF NOT EXISTS project_documents_project_idx
 ON public.project_documents(project_id, created_at DESC);

@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -5,18 +6,21 @@ from loguru import logger
 
 from common.conf.topics_config import TopicConfig
 from common.scoping import require_scope_value, require_visible_project_ids
+from core.ingestion.services.processor import TextProcessor
+from core.knowledge.documents import DocumentService
+from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.postgres_client import PostgresClient
-from core.ingestion.services.processor import TextProcessor
-from core.knowledge.entity.resolver import EntityResolver
-from core.knowledge.documents import DocumentService
-from core.knowledge.services.embedding_service import EmbeddingService
+from infrastructure.background_work import BackgroundWorkCoordinator
 
 
 class ProjectState:
     """
     Holds the runtime shared resources for a Project.
     """
+
+    COMMUNITY_TASK_SHUTDOWN_TIMEOUT = 30.0
 
     def __init__(
         self,
@@ -31,6 +35,7 @@ class ProjectState:
         postgres_client: PostgresClient,
         embedding_service: EmbeddingService,
         batch_processor: Optional[Any] = None,
+        background_work: Optional[BackgroundWorkCoordinator] = None,
     ):
         self.project_id = require_scope_value(
             project_id,
@@ -54,9 +59,11 @@ class ProjectState:
             project_id=project_id,
             postgres_client=postgres_client,
             embedding_service=embedding_service,
+            background_work=background_work,
         )
 
         self.profile_job: Optional[Any] = None
+        self._community_task: Optional[asyncio.Task] = None
         self.active_runtime_sessions_count = 0
         self.config_unsubscribers: list[Any] = []
 
@@ -67,12 +74,42 @@ class ProjectState:
     def add_config_unsubscriber(self, unsubscribe):
         self.config_unsubscribers.append(unsubscribe)
 
+    def track_community_task(self, task: asyncio.Task) -> None:
+        """Associate the project's one long-running AAC task with its runtime."""
+        self._community_task = task
+        task.add_done_callback(self._clear_community_task)
+
+    def _clear_community_task(self, task: asyncio.Task) -> None:
+        if self._community_task is task:
+            self._community_task = None
+
+    async def _stop_community_task(self) -> None:
+        task = self._community_task
+        self._community_task = None
+        if task is None or task.done():
+            return
+
+        logger.info(f"Cancelling AAC discussion for {self.project_id}")
+        task.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(task, return_exceptions=True),
+                timeout=self.COMMUNITY_TASK_SHUTDOWN_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out waiting for AAC discussion shutdown "
+                f"for {self.project_id}"
+            )
+
     async def shutdown(self):
         """Cleanly shuts down project-level background resources."""
         logger.info(f"Shutting down ProjectState resources for {self.project_id}")
         for unsubscribe in self.config_unsubscribers:
             unsubscribe()
         self.config_unsubscribers.clear()
+        await self._stop_community_task()
+        await self.document_service.shutdown()
         if self.scheduler:
             await self.scheduler.stop()
         # EntityResolver and others don't have explicit shutdown methods,

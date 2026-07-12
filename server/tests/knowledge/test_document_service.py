@@ -63,6 +63,63 @@ class MemoryPostgres:
 
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
+        if query.lstrip().startswith("DELETE FROM public.project_documents"):
+            if self.delete_error is not None:
+                raise self.delete_error
+            document_id, project_id, session_id = params
+            row = next(
+                (
+                    row
+                    for row in self.rows
+                    if row["document_id"] == document_id
+                    and self._visible(row, project_id, session_id)
+                ),
+                None,
+            )
+            if row is None:
+                return []
+            self.rows.remove(row)
+            self.chunks = [
+                chunk
+                for chunk in self.chunks
+                if chunk["document_id"] != document_id
+            ]
+            self.contents.pop(document_id, None)
+            return [dict(row)]
+        if (
+            query.lstrip().startswith("UPDATE public.project_documents")
+            and "status = 'indexing'" in query
+        ):
+            updated_at, project_id = params
+            updated = []
+            for row in self.rows:
+                if row["project_id"] == project_id and row["status"] == "indexing":
+                    row["status"] = "queued"
+                    row["updated_at"] = updated_at
+                    updated.append({"document_id": row["document_id"]})
+            return updated
+        if "COUNT(*)::INTEGER AS count" in query and "status = 'queued'" in query:
+            project_id = params[0]
+            return [
+                {
+                    "count": sum(
+                        row["project_id"] == project_id and row["status"] == "queued"
+                        for row in self.rows
+                    )
+                }
+            ]
+        if (
+            "FROM public.project_documents" in query
+            and "status = 'queued'" in query
+            and "LIMIT %s" in query
+            and "pd." not in query
+        ):
+            project_id, limit = params
+            return [
+                deepcopy(row)
+                for row in self.rows
+                if row["project_id"] == project_id and row["status"] == "queued"
+            ][:limit]
         if "FROM public.project_document_scan_settings" in query:
             row = self.scan_settings.get(params[0])
             return [deepcopy(row)] if row else []
@@ -214,6 +271,8 @@ class MemoryCursor:
 
     async def execute(self, query, params=None):
         self.postgres.calls.append(("cursor.execute", query, params))
+        if self.postgres.write_error is not None:
+            raise self.postgres.write_error
         normalized = " ".join(query.split())
 
         if normalized.startswith("SELECT") and "FOR UPDATE" in normalized:
@@ -237,6 +296,35 @@ class MemoryCursor:
                     chunk["document_id"] == document_id
                     for chunk in self.postgres.chunks
                 )
+            return
+
+        if (
+            normalized.startswith("UPDATE public.project_documents")
+            and "SET status = %s" in normalized
+        ):
+            status, updated_at, document_id, project_id, session_id, allowed = params
+            row = next(
+                (
+                    row
+                    for row in self.postgres.rows
+                    if row["document_id"] == document_id
+                    and self.postgres._visible(row, project_id, session_id)
+                    and row["status"] in allowed
+                ),
+                None,
+            )
+            if row is None:
+                self.result = None
+            else:
+                row.update(
+                    {
+                        "status": status,
+                        "indexed_at": None,
+                        "error_message": None,
+                        "updated_at": updated_at,
+                    }
+                )
+                self.result = dict(row)
             return
 
         if normalized.startswith("DELETE FROM public.document_chunks"):
@@ -305,24 +393,44 @@ class MemoryCursor:
         if normalized.startswith(
             "INSERT INTO public.document_folder_uploads"
         ):
-            (
-                folder_root_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_name,
-                candidate_count,
-                candidate_bytes,
-                document_count,
-                total_size_bytes,
-                excluded_count,
-                excluded_bytes,
-                excluded_directory_count,
-                excluded_reason_counts,
-                scan_settings,
-                created_at,
-                indexed_at,
-            ) = params
+            if len(params) == 15:
+                (
+                    folder_root_id,
+                    project_id,
+                    session_id,
+                    visibility_scope,
+                    folder_name,
+                    candidate_count,
+                    candidate_bytes,
+                    document_count,
+                    total_size_bytes,
+                    excluded_count,
+                    excluded_bytes,
+                    excluded_directory_count,
+                    excluded_reason_counts,
+                    scan_settings,
+                    created_at,
+                ) = params
+                indexed_at = None
+            else:
+                (
+                    folder_root_id,
+                    project_id,
+                    session_id,
+                    visibility_scope,
+                    folder_name,
+                    candidate_count,
+                    candidate_bytes,
+                    document_count,
+                    total_size_bytes,
+                    excluded_count,
+                    excluded_bytes,
+                    excluded_directory_count,
+                    excluded_reason_counts,
+                    scan_settings,
+                    created_at,
+                    indexed_at,
+                ) = params
             self.postgres.folders.append(
                 {
                     "folder_root_id": folder_root_id,
@@ -351,6 +459,81 @@ class MemoryCursor:
         if normalized.startswith(
             "INSERT INTO public.project_documents"
         ):
+            if "'manual_upload'" in normalized and "'uploaded'" in normalized:
+                (
+                    document_id,
+                    project_id,
+                    session_id,
+                    visibility_scope,
+                    original_name,
+                    relative_path,
+                    extension,
+                    size_bytes,
+                    content_hash,
+                    created_at,
+                    updated_at,
+                ) = params
+                self.postgres.rows.append(
+                    {
+                        "document_id": document_id,
+                        "project_id": project_id,
+                        "session_id": session_id,
+                        "visibility_scope": visibility_scope,
+                        "folder_root_id": None,
+                        "source_kind": "manual_upload",
+                        "original_name": original_name,
+                        "relative_path": relative_path,
+                        "extension": extension,
+                        "size_bytes": size_bytes,
+                        "content_hash": content_hash,
+                        "status": "uploaded",
+                        "indexed_at": None,
+                        "error_message": None,
+                        "created_at": created_at,
+                        "updated_at": updated_at,
+                        "chunk_count": 0,
+                    }
+                )
+                self.result = None
+                return
+            if "'folder_upload'" in normalized and "'uploaded'" in normalized:
+                (
+                    document_id,
+                    project_id,
+                    session_id,
+                    visibility_scope,
+                    folder_root_id,
+                    original_name,
+                    relative_path,
+                    extension,
+                    size_bytes,
+                    content_hash,
+                    created_at,
+                    updated_at,
+                ) = params
+                self.postgres.rows.append(
+                    {
+                        "document_id": document_id,
+                        "project_id": project_id,
+                        "session_id": session_id,
+                        "visibility_scope": visibility_scope,
+                        "folder_root_id": folder_root_id,
+                        "source_kind": "folder_upload",
+                        "original_name": original_name,
+                        "relative_path": relative_path,
+                        "extension": extension,
+                        "size_bytes": size_bytes,
+                        "content_hash": content_hash,
+                        "status": "uploaded",
+                        "indexed_at": None,
+                        "error_message": None,
+                        "created_at": created_at,
+                        "updated_at": updated_at,
+                        "chunk_count": 0,
+                    }
+                )
+                self.result = None
+                return
             (
                 document_id,
                 project_id,
@@ -672,7 +855,10 @@ async def test_add_document_rejects_invalid_content_scope_and_size(
     with pytest.raises(ValueError, match="Unsupported file type"):
         await service.add_document(content=b"data", original_name="archive.zip")
 
-    monkeypatch.setattr(constants_module, "MAX_DOCUMENT_SIZE", 3)
+    monkeypatch.setattr(
+        "core.knowledge.documents.service.MAX_DOCUMENT_SIZE",
+        3,
+    )
     with pytest.raises(ValueError, match="50 MB"):
         await service.add_document(content=b"four", original_name="notes.md")
 
@@ -836,7 +1022,10 @@ async def test_read_document_validates_ranges_and_character_limit(
     with pytest.raises(ValueError, match="exceeds document length"):
         await service.read_document(document_id=uploaded["document_id"], start_line=3)
 
-    monkeypatch.setattr(constants_module, "MAX_READ_CHARACTERS", 8)
+    monkeypatch.setattr(
+        "core.knowledge.documents.service.MAX_READ_CHARACTERS",
+        8,
+    )
     result = await service.read_document(document_id=uploaded["document_id"], end_line=1)
     assert result["content"] == "1: 01234"
     assert result["truncated"] is True
@@ -914,6 +1103,23 @@ async def test_delete_document_enforces_project_and_session_visibility():
     )
     assert deleted["deleted"] is True
     assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_recovery_requeues_interrupted_document_indexing(document_harness):
+    service, postgres = document_harness
+    uploaded = await service.add_document(
+        content=b"alpha beta gamma",
+        original_name="notes.md",
+    )
+    postgres.rows[0]["status"] = "indexing"
+
+    recovered = await service.recover_pending_indexes()
+
+    assert recovered == 1
+    assert postgres.rows[0]["status"] == "indexed"
+    assert service.indexing_snapshot()["last_recovery_requeued"] == 1
 
 
 @pytest.mark.storage
@@ -1084,7 +1290,9 @@ async def test_index_document_uses_configured_sentence_splitter(monkeypatch, doc
             return [" alpha ", "", " beta gamma "]
 
     monkeypatch.setattr(
-        storage_module, "SentenceSplitter", RecordingSplitter
+        storage_module,
+        "_SPLITTER",
+        RecordingSplitter(chunk_size=512, chunk_overlap=50),
     )
     uploaded = await service.add_document(
         content=b"alpha beta gamma",
@@ -1271,7 +1479,9 @@ async def test_index_transaction_rolls_back_partial_chunks_and_can_retry(
             return ["alpha", "beta"]
 
     monkeypatch.setattr(
-        storage_module, "SentenceSplitter", TwoChunkSplitter
+        storage_module,
+        "_SPLITTER",
+        TwoChunkSplitter(),
     )
     uploaded = await service.add_document(
         content=b"alpha beta",

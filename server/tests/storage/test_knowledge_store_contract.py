@@ -59,6 +59,11 @@ def knowledge_store(monkeypatch):
         component_factory("fact_audit_writer"),
     )
     monkeypatch.setattr(
+        knowledge_store_module,
+        "FactAuditReader",
+        component_factory("fact_audit_reader"),
+    )
+    monkeypatch.setattr(
         knowledge_store_module, "GraphWriter", component_factory("graph_writer")
     )
     monkeypatch.setattr(
@@ -222,10 +227,34 @@ def test_knowledge_store_community_property(knowledge_store):
             {"fact_change_id": "change-1", "user_name": "ada"},
         ),
         (
+            "apply_fact_changes_with_audit",
+            "fact_writer",
+            (),
+            {"fact_change_id": "change-1", "user_name": "ada"},
+        ),
+        (
             "create_applied_fact_change_audit",
             "fact_audit_writer",
             (),
             {"fact_change_id": "change-1", "user_name": "ada"},
+        ),
+        (
+            "get_fact_change_audit",
+            "fact_audit_reader",
+            ("change-1",),
+            {"user_name": "ada", "project_id": "project-1"},
+        ),
+        (
+            "list_fact_change_audits_for_entity",
+            "fact_audit_reader",
+            (),
+            {"user_name": "ada", "project_id": "project-1", "entity_id": 2},
+        ),
+        (
+            "list_fact_change_audits_for_project",
+            "fact_audit_reader",
+            (),
+            {"user_name": "ada", "project_id": "project-1"},
         ),
         (
             "delete_old_invalidated_facts",

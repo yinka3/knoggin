@@ -169,6 +169,46 @@ def test_entity_index_merge_remove_and_embedding_update_keep_views_coherent():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+def test_entity_index_profile_eviction_removes_all_alias_views():
+    index = EntityIndex(profile_maxsize=1, name_maxsize=10, names_by_id_maxsize=10)
+    index.populate({"id": 101, "canonical_name": "Robert Chen", "aliases": ["Bob"]})
+    index.populate({"id": 202, "canonical_name": "Grace Hopper", "aliases": []})
+
+    assert index.get_profile(101) is None
+    assert index.get_mentions(101) == []
+    assert index.get_entity_id_for_name("robert chen") is None
+    assert index.get_entity_id_for_name("bob") is None
+    assert index.get_entity_id_for_name("grace hopper") == 202
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_entity_index_alias_eviction_removes_the_inverse_entity_view():
+    index = EntityIndex(profile_maxsize=10, name_maxsize=1, names_by_id_maxsize=10)
+    index.populate({"id": 101, "canonical_name": "Robert Chen", "aliases": []})
+    index.populate({"id": 202, "canonical_name": "Grace Hopper", "aliases": []})
+
+    assert index.get_profile(101) is not None
+    assert index.get_mentions(101) == []
+    assert index.get_entity_id_for_name("robert chen") is None
+    assert index.get_entity_id_for_name("grace hopper") == 202
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_entity_index_entity_alias_eviction_removes_name_owners():
+    index = EntityIndex(profile_maxsize=10, name_maxsize=10, names_by_id_maxsize=1)
+    index.populate({"id": 101, "canonical_name": "Robert Chen", "aliases": []})
+    index.populate({"id": 202, "canonical_name": "Grace Hopper", "aliases": []})
+
+    assert index.get_profile(101) is not None
+    assert index.get_mentions(101) == []
+    assert index.get_entity_id_for_name("robert chen") is None
+    assert index.get_entity_id_for_name("grace hopper") == 202
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 def test_populate_cache_loads_profiles_names_and_aliases(entity_manager_harness):
     entities, _, _ = entity_manager_harness
 

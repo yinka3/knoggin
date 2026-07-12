@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from typing import Dict, List, Optional, Set, Tuple
 
 import redis.asyncio as aioredis
@@ -105,6 +106,10 @@ class IngestionPipeline:
             )
             if verb and verb.strip()
         }
+        self._work_unit_context: ContextVar[Optional[EngineWorkUnit]] = ContextVar(
+            "ingestion_work_unit",
+            default=None,
+        )
 
     @property
     def get_next_ent_id(self):
@@ -135,6 +140,13 @@ class IngestionPipeline:
 
         if hasattr(self.processor, "update_settings"):
             self.processor.update_settings(config)
+
+    async def _run_with_work_unit(self, work_unit, operation, *args):
+        token = self._work_unit_context.set(work_unit)
+        try:
+            return await operation(*args)
+        finally:
+            self._work_unit_context.reset(token)
 
     @staticmethod
     def _record_issue(
@@ -168,12 +180,7 @@ class IngestionPipeline:
     async def run(
         self, messages: List[Dict], session_text: str, *, session_id: str
     ) -> BatchResult:
-        """
-        Process a batch of messages.
-
-        Returns BatchResult with entity IDs and connections.
-        Caller responsible for lock acquisition and publishing results.
-        """
+        """Process a single scoped ingestion batch."""
         if not session_id:
             raise ValueError("IngestionPipeline.run requires session_id")
 
@@ -181,14 +188,10 @@ class IngestionPipeline:
             user=self.user_name, session=session_id, component="IngestionPipeline"
         ):
             result = BatchResult()
-            result.set_scope(
-                self.user_name,
-                session_id,
-                self.project_id,
-            )
+            result.set_scope(self.user_name, session_id, self.project_id)
             if result.scope:
                 result.work_unit = EngineWorkUnit.for_message_batch(
-                    result.scope, [m["id"] for m in messages]
+                    result.scope, [message["id"] for message in messages]
                 )
                 result.work_unit.mark_running()
 
@@ -198,17 +201,18 @@ class IngestionPipeline:
                 return result
 
             result.trace.batch_size = len(messages)
-            result.trace.message_ids = [m["id"] for m in messages]
-
+            result.trace.message_ids = [message["id"] for message in messages]
             await emit(
                 session_id,
                 "pipeline",
                 "batch_start",
-                {"size": len(messages), "msg_ids": [m["id"] for m in messages]},
+                {"size": len(messages), "msg_ids": result.trace.message_ids},
             )
 
             try:
-                mentions = await self._extract_mentions(
+                mentions = await self._run_with_work_unit(
+                    result.work_unit,
+                    self._extract_mentions,
                     messages, session_id, result.trace, result.issues
                 )
                 await emit(
@@ -224,50 +228,46 @@ class IngestionPipeline:
                     verbose_only=True,
                 )
 
-                mentions = [
-                    (msg_id, text, typ, topic)
-                    for msg_id, text, typ, topic in mentions
-                    if text
-                ]
-
+                mentions = [mention for mention in mentions if mention[1]]
                 if not mentions:
                     if result.work_unit:
                         result.work_unit.issues = list(result.issues)
                         result.work_unit.mark_succeeded("No mentions found")
                     return result
 
-                res = await self._resolve_mentions(
+                resolution = await self._run_with_work_unit(
+                    result.work_unit,
+                    self._resolve_mentions,
                     mentions, messages, session_id, result.issues
                 )
-
                 await emit(
                     session_id,
                     "pipeline",
                     "resolution_complete",
                     {
-                        "new": len(res.new_ids),
-                        "existing": len(res.entity_ids) - len(res.new_ids),
-                        "aliases_added": len(res.alias_ids),
+                        "new": len(resolution.new_ids),
+                        "existing": len(resolution.entity_ids) - len(resolution.new_ids),
+                        "aliases_added": len(resolution.alias_ids),
                     },
                 )
 
-                result.entity_ids = res.entity_ids
-                result.new_entity_ids = res.new_ids
-                result.alias_updated_ids = res.alias_ids
-                result.alias_updates = res.alias_updates
-                result.candidate_suggestions = res.candidate_suggestions
+                result.entity_ids = resolution.entity_ids
+                result.new_entity_ids = resolution.new_ids
+                result.alias_updated_ids = resolution.alias_ids
+                result.alias_updates = resolution.alias_updates
+                result.candidate_suggestions = resolution.candidate_suggestions
                 connections, user_connections = await self._extract_connections(
-                    res.entity_ids,
-                    res.entity_msg_map,
+                    resolution.entity_ids,
+                    resolution.entity_msg_map,
                     messages,
                     session_text,
                     session_id,
                     result.trace,
                     result.issues,
                 )
-                total_pairs = sum(len(mc.entity_pairs) for mc in connections)
+                total_pairs = sum(len(item.entity_pairs) for item in connections)
                 total_user_pairs = sum(
-                    len(mc.user_connections) for mc in user_connections
+                    len(item.user_connections) for item in user_connections
                 )
                 await emit(
                     session_id,
@@ -284,16 +284,16 @@ class IngestionPipeline:
                                 "b": pair.entity_b,
                                 "confidence": pair.confidence,
                             }
-                            for mc in connections
-                            for pair in mc.entity_pairs
+                            for item in connections
+                            for pair in item.entity_pairs
                         ],
                         "user_pairs": [
                             {
                                 "entity": pair.entity_name,
                                 "confidence": pair.confidence,
                             }
-                            for mc in user_connections
-                            for pair in mc.user_connections
+                            for item in user_connections
+                            for pair in item.user_connections
                         ],
                     },
                     verbose_only=True,
@@ -341,18 +341,16 @@ class IngestionPipeline:
                         },
                     },
                 )
-
                 if result.work_unit:
                     result.work_unit.mark_succeeded(
                         f"{len(result.entity_ids)} entities, "
                         f"{total_pairs + total_user_pairs} relationships"
                     )
                 return result
-
-            except Exception as e:
-                logger.error(f"Batch processing failed: {e}")
+            except Exception as exc:
+                logger.error(f"Batch processing failed: {exc}")
                 result.success = False
-                result.error = str(e)
+                result.error = str(exc)
                 if result.work_unit:
                     result.work_unit.issues = list(result.issues)
                     result.work_unit.mark_failed(result.error)
@@ -368,7 +366,12 @@ class IngestionPipeline:
         """Run NER across all messages. Returns List[(msg_id, name, type, topic)]."""
 
         mentions = await self.processor.extract_mentions(
-            self.user_name, messages, session_id, trace=trace, issues=issues
+            self.user_name,
+            messages,
+            session_id,
+            trace=trace,
+            issues=issues,
+            work_unit=self._work_unit_context.get(),
         )
 
         normalized_mentions = []
@@ -422,7 +425,9 @@ class IngestionPipeline:
             alias_updates: Dict[int, List[str]] = {}
             candidate_suggestions: List[CandidateSuggestion] = []
 
-            mention_candidates = await self._candidate_entries_for_mentions(mentions)
+            mention_candidates = await self._candidate_entries_for_mentions(
+                mentions,
+            )
 
             for i, (msg_id, name, typ, topic) in enumerate(mentions):
                 if not name:
@@ -569,14 +574,25 @@ class IngestionPipeline:
             )
 
     async def _candidate_entries_for_mentions(
-        self, mentions: List[Tuple[int, str, str, str]]
+        self,
+        mentions: List[Tuple[int, str, str, str]],
     ) -> List[Optional[Tuple[str, object]]]:
         unique_names = list({name for _, name, _, _ in mentions if name})
         embedding_map = {}
         if unique_names:
-            embeddings_array = await self.entities.embedding_service.encode(
-                unique_names
-            )
+            embedding_service = self.entities.embedding_service
+            work_unit = self._work_unit_context.get()
+            if work_unit is not None and getattr(
+                embedding_service,
+                "supports_model_work_units",
+                False,
+            ):
+                embeddings_array = await embedding_service.encode(
+                    unique_names,
+                    parent_work_unit=work_unit,
+                )
+            else:
+                embeddings_array = await embedding_service.encode(unique_names)
             embedding_map = {
                 name: emb for name, emb in zip(unique_names, embeddings_array)
             }

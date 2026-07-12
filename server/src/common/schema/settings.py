@@ -98,9 +98,15 @@ DEFAULT_SPARSE_CONTEXT_VERBS = [
 
 class IngestionSettings(BaseModel):
     batch_size: int = Field(8, ge=1, le=100)
+    batch_debounce_seconds: float = Field(0.75, ge=0.0, le=10.0)
     batch_timeout: float = Field(300.0, ge=10.0)
     checkpoint_interval: int = Field(32, ge=1)
     session_window: int = Field(24, ge=1)
+
+
+class DocumentIndexingSettings(BaseModel):
+    recovery_interval_seconds: int = Field(60, ge=10)
+    recovery_batch_size: int = Field(16, ge=1, le=100)
 
 
 class CleanerSettings(BaseModel):
@@ -144,6 +150,9 @@ class JobSettings(BaseModel):
     archival: ArchivalSettings = Field(default_factory=ArchivalSettings)
     merge_rollback: MergeRollbackSettings = Field(
         default_factory=MergeRollbackSettings
+    )
+    document_indexing: DocumentIndexingSettings = Field(
+        default_factory=DocumentIndexingSettings
     )
 
 

@@ -19,6 +19,7 @@ from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.db.write_graph_db import write_batch_callback
 from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
 from core.knowledge.jobs.merge_rollback_cleanup_job import (
     MergeCleanupJob,
 )
@@ -155,9 +156,14 @@ class ProjectManager:
             del meta["topic_config"]
         return meta
 
-    async def get_readable_project_ids(self, project_id: str) -> List[str]:
+    async def get_readable_project_ids(
+        self,
+        project_id: str,
+        *,
+        project_metadata: Optional[dict] = None,
+    ) -> List[str]:
         """Return projects readable from project_id."""
-        meta = await self.get_project(project_id)
+        meta = project_metadata or await self.get_project(project_id)
         if not meta or meta["status"] == ProjectStatus.DELETED.value:
             return []
 
@@ -411,7 +417,9 @@ class ProjectManager:
 
         await self._ensure_identity_invariant()
         project_state = await self._get_or_start_project(
-            project_id, initial_topics_config=topics_config
+            project_id,
+            initial_topics_config=topics_config,
+            project_metadata=project,
         )
         return project_state
 
@@ -453,9 +461,12 @@ class ProjectManager:
             )
 
     async def _get_or_start_project(
-        self, project_id: str, initial_topics_config: Optional[dict] = None
+        self,
+        project_id: str,
+        initial_topics_config: Optional[dict] = None,
+        project_metadata: Optional[dict] = None,
     ) -> ProjectState:
-        project = await self.get_project(project_id)
+        project = project_metadata or await self.get_project(project_id)
         if project is None:
             raise ValueError(
                 f"Project '{project_id}' does not exist; "
@@ -472,7 +483,10 @@ class ProjectManager:
             return self.active_projects[project_id]
 
         logger.info(f"Bootstrapping ProjectState for project_id: {project_id}")
-        readable_project_ids = await self.get_readable_project_ids(project_id)
+        readable_project_ids = await self.get_readable_project_ids(
+            project_id,
+            project_metadata=project,
+        )
 
         # Project topic config is the runtime source of truth. Seed it only when
         # this project has no persisted config yet.
@@ -510,6 +524,7 @@ class ProjectManager:
                 gliner=self.resources.gliner,
                 spacy=self.resources.spacy,
                 settings=nlp_cfg,
+                model_work=getattr(self.resources, "model_work", None),
             ),
         )
 
@@ -531,7 +546,12 @@ class ProjectManager:
 
         await self._verify_user_entity(entities)
 
-        scheduler = Scheduler(self.user_name, project_id, self.resources.redis)
+        scheduler = Scheduler(
+            self.user_name,
+            project_id,
+            self.resources.redis,
+            background_work=getattr(self.resources, "background_work", None),
+        )
         profile_job = self._init_profile_job(entities)
 
         project_state = ProjectState(
@@ -546,6 +566,7 @@ class ProjectManager:
             embedding_service=self.resources.embedding,
             readable_project_ids=readable_project_ids,
             batch_processor=project_processor,
+            background_work=getattr(self.resources, "background_work", None),
         )
         project_state.profile_job = profile_job
 
@@ -689,6 +710,18 @@ class ProjectManager:
             )
         )
         scheduler.register(profile_job)
+
+        document_index_job = DocumentIndexingRecoveryJob(
+            project_state.document_service,
+            jobs_cfg.document_indexing,
+        )
+        scheduler.register(document_index_job)
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                document_index_job.update_settings,
+                "developer_settings.jobs.document_indexing",
+            )
+        )
 
         dlq_cfg = jobs_cfg.dlq
         dlq_job = DLQReplayJob(

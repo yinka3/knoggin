@@ -1,3 +1,4 @@
+from concurrent.futures import Future
 from unittest.mock import MagicMock
 
 import pytest
@@ -314,6 +315,14 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
         def shutdown(self, wait=True):
             self.shutdown_calls.append(wait)
+
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
 
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")

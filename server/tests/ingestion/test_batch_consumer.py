@@ -150,6 +150,7 @@ def make_consumer(
     get_session_context=None,
     write_to_graph=None,
     batch_size=8,
+    batch_debounce_seconds=0.75,
     checkpoint_interval=4,
     batch_timeout=360.0,
     session_window=18,
@@ -159,6 +160,7 @@ def make_consumer(
     knowledge_store = knowledge_store or FakeKnowledgeStore()
     settings = IngestionSettings(
         batch_size=batch_size,
+        batch_debounce_seconds=batch_debounce_seconds,
         checkpoint_interval=checkpoint_interval,
         batch_timeout=batch_timeout,
         session_window=session_window,
@@ -174,6 +176,121 @@ def make_consumer(
         settings=settings,
     )
     return consumer, redis, processor, knowledge_store
+
+
+async def wait_for_processor_run(processor, *, timeout=0.5):
+    async def wait_until_run():
+        while not processor.run_calls:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(wait_until_run(), timeout=timeout)
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_waits_for_debounce_before_processing_partial_batch():
+    consumer, redis, processor, _ = make_consumer(
+        batch_size=2,
+        batch_debounce_seconds=0.05,
+    )
+    consumer.start()
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+    consumer.signal()
+
+    await asyncio.sleep(0.01)
+    assert processor.run_calls == []
+
+    await wait_for_processor_run(processor)
+    await consumer.stop()
+
+    assert [call[0] for call in processor.run_calls] == [[make_message(1)]]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_processes_full_batch_without_waiting_for_debounce():
+    consumer, redis, processor, _ = make_consumer(
+        batch_size=2,
+        batch_debounce_seconds=1.0,
+    )
+    consumer.start()
+    await push_messages(redis, consumer._buffer_key, make_message(1), make_message(2))
+    consumer.signal()
+
+    await wait_for_processor_run(processor, timeout=0.1)
+    await consumer.stop()
+
+    assert [call[0] for call in processor.run_calls] == [
+        [make_message(1), make_message(2)]
+    ]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_flush_bypasses_debounce_for_partial_batch():
+    consumer, redis, processor, _ = make_consumer(
+        batch_size=2,
+        batch_debounce_seconds=1.0,
+    )
+    consumer.start()
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+    consumer.signal()
+
+    await asyncio.sleep(0.01)
+    assert processor.run_calls == []
+
+    await asyncio.wait_for(consumer.flush(), timeout=0.1)
+    await consumer.stop()
+
+    assert [call[0] for call in processor.run_calls] == [[make_message(1)]]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_defers_partial_remainder_until_next_partial_drain():
+    consumer, redis, processor, _ = make_consumer(batch_size=2)
+    await push_messages(redis, consumer._buffer_key, make_message(1))
+
+    await consumer._drain_buffer(flush_partial=False)
+
+    assert processor.run_calls == []
+    assert await redis.llen(consumer._buffer_key) == 1
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_batch_consumer_debounces_partial_remainder_after_full_batch():
+    consumer, redis, processor, _ = make_consumer(
+        batch_size=2,
+        batch_debounce_seconds=0.05,
+    )
+    consumer.start()
+    await push_messages(
+        redis,
+        consumer._buffer_key,
+        make_message(1),
+        make_message(2),
+        make_message(3),
+    )
+    consumer.signal()
+
+    await wait_for_processor_run(processor)
+    await asyncio.sleep(0.01)
+    assert [call[0] for call in processor.run_calls] == [
+        [make_message(1), make_message(2)]
+    ]
+
+    async def tail_processed():
+        while len(processor.run_calls) < 2:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(tail_processed(), timeout=0.5)
+    await consumer.stop()
+
+    assert [call[0] for call in processor.run_calls] == [
+        [make_message(1), make_message(2)],
+        [make_message(3)],
+    ]
 
 
 @pytest.mark.ingestion
