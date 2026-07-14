@@ -253,6 +253,40 @@ class RedisKeys:
         return f"project_heartbeat_counter:{user}:{project_id}"
 
     @staticmethod
+    def project_cleanup_keys(user: str, project_id: str) -> list[str]:
+        """Return fixed Redis keys wholly owned by one project."""
+        return [
+            RedisKeys.dirty_entities(user, project_id),
+            RedisKeys.merge_queue(user, project_id),
+            RedisKeys.merge_proposals(user, project_id),
+            RedisKeys.merge_intents_index(user, project_id),
+            RedisKeys.dlq(user, project_id),
+            RedisKeys.dlq_processing(user, project_id),
+            RedisKeys.dlq_state(user, project_id),
+            RedisKeys.dlq_claims(user, project_id),
+            RedisKeys.dlq_parked(user, project_id),
+            RedisKeys.project_profile_complete(user, project_id),
+            RedisKeys.project_user_profile_ran(user, project_id),
+            RedisKeys.project_last_processed(user, project_id),
+            RedisKeys.project_last_activity(user, project_id),
+            RedisKeys.project_heartbeat_counter(user, project_id),
+            RedisKeys.project_sessions(user, project_id),
+            RedisKeys.community_discussion_active(user, project_id),
+        ]
+
+    @staticmethod
+    def project_cleanup_patterns(user: str, project_id: str) -> list[str]:
+        """Return variable-suffix Redis key patterns owned by one project."""
+        return [
+            f"last_profile_update:{user}:{project_id}:*",
+            f"merge_intent:{user}:{project_id}:*",
+            f"last_run:*:{user}:{project_id}",
+            f"job_lease:{user}:{project_id}:*",
+            f"maintenance_attempts:{user}:{project_id}:*",
+            f"maintenance_cooldown:{user}:{project_id}:*",
+        ]
+
+    @staticmethod
     def session_keys(user: str, session: str) -> list[str]:
         """Returns all Redis keys that are scoped to a specific session."""
         return [

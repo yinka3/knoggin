@@ -1470,96 +1470,6 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
-name = "server"
-version = "0.1.0"
-source = { editable = "server" }
-dependencies = [
-    { name = "cachetools" },
-    { name = "ddgs" },
-    { name = "docx2txt" },
-    { name = "duckduckgo-search" },
-    { name = "en-core-web-md" },
-    { name = "fastapi", extra = ["standard"] },
-    { name = "gliner" },
-    { name = "httpx" },
-    { name = "huggingface-hub", extra = ["cli"] },
-    { name = "instructor" },
-    { name = "llama-index-core" },
-    { name = "loguru" },
-    { name = "markitdown" },
-    { name = "mcp" },
-    { name = "numpy" },
-    { name = "openai" },
-    { name = "pathspec" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "psycopg-pool" },
-    { name = "pypdf" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "rapidfuzz" },
-    { name = "redis" },
-    { name = "redis-tools" },
-    { name = "ruff" },
-    { name = "scikit-learn" },
-    { name = "sentence-transformers" },
-    { name = "spacy" },
-    { name = "tiktoken" },
-    { name = "torch" },
-    { name = "wordfreq" },
-    { name = "xformers" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "cachetools", specifier = ">=5.4.0" },
-    { name = "ddgs", specifier = ">=9.11.3" },
-    { name = "docx2txt", specifier = ">=0.9" },
-    { name = "duckduckgo-search", specifier = ">=8.0.0" },
-    { name = "en-core-web-md", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" },
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.128.0" },
-    { name = "gliner", specifier = ">=0.2.22" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "huggingface-hub", extras = ["cli"], specifier = ">=0.36.0" },
-    { name = "instructor", specifier = ">=1.14.5" },
-    { name = "llama-index-core", specifier = ">=0.12.0" },
-    { name = "loguru", specifier = ">=0.7.3" },
-    { name = "markitdown", specifier = ">=0.1.5" },
-    { name = "mcp", specifier = ">=1.2.0,<2.0" },
-    { name = "numpy", specifier = ">=2.3.5" },
-    { name = "openai", specifier = ">=2.13.0" },
-    { name = "pathspec", specifier = ">=1.0.0" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2.3" },
-    { name = "psycopg-pool", specifier = ">=3.2.4" },
-    { name = "pypdf", specifier = ">=6.6.2" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "python-dotenv", specifier = ">=1.2.1" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "rapidfuzz", specifier = ">=3.14.3" },
-    { name = "redis", specifier = ">=7.1.0" },
-    { name = "redis-tools", specifier = ">=0.0.2" },
-    { name = "ruff", specifier = ">=0.15.12" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.0" },
-    { name = "scikit-learn", specifier = ">=1.8.0" },
-    { name = "sentence-transformers", specifier = ">=5.2.0" },
-    { name = "spacy", specifier = ">=3.8.11" },
-    { name = "tiktoken", specifier = ">=0.7.0" },
-    { name = "torch", specifier = ">=2.6.0,<2.7.0" },
-    { name = "wordfreq", specifier = ">=3.1.1" },
-    { name = "xformers", specifier = ">=0.0.29.post3" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "langcodes"
 version = "3.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2941,6 +2851,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pytesseract"
+version = "0.3.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9f/a6/7d679b83c285974a7cb94d739b461fa7e7a9b17a3abfd7bf6cbc5c2394b0/pytesseract-0.3.13.tar.gz", hash = "sha256:4bf5f880c99406f52a3cfc2633e42d9dc67615e69d8a509d74867d3baddb5db9", size = 17689, upload-time = "2024-08-16T02:33:56.762Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7a/33/8312d7ce74670c9d39a532b2c246a853861120486be9443eebf048043637/pytesseract-0.3.13-py3-none-any.whl", hash = "sha256:7a99c6c2ac598360693d83a416e36e0b33a67638bb9d77fdcac094a3589d4b34", size = 14705, upload-time = "2024-08-16T02:36:10.09Z" },
+]
+
+[[package]]
 name = "pytest"
 version = "9.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3672,6 +3595,100 @@ sdist = { url = "https://files.pythonhosted.org/packages/c8/e9/2e3a46c304e7fa21e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/53/39/be412cc86bc6247b8f69e9383d7950711bd86f8d0a4a4b0fe8fad685bc21/sentry_sdk-2.54.0-py2.py3-none-any.whl", hash = "sha256:fd74e0e281dcda63afff095d23ebcd6e97006102cdc8e78a29f19ecdf796a0de", size = 439198, upload-time = "2026-03-02T15:12:39.546Z" },
 ]
+
+[[package]]
+name = "server"
+version = "0.1.0"
+source = { editable = "server" }
+dependencies = [
+    { name = "cachetools" },
+    { name = "ddgs" },
+    { name = "docx2txt" },
+    { name = "duckduckgo-search" },
+    { name = "en-core-web-md" },
+    { name = "fastapi", extra = ["standard"] },
+    { name = "gliner" },
+    { name = "httpx" },
+    { name = "huggingface-hub", extra = ["cli"] },
+    { name = "instructor" },
+    { name = "llama-index-core" },
+    { name = "loguru" },
+    { name = "markitdown" },
+    { name = "mcp" },
+    { name = "numpy" },
+    { name = "openai" },
+    { name = "pathspec" },
+    { name = "pillow" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "psycopg-pool" },
+    { name = "pypdf" },
+    { name = "pytesseract" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "rapidfuzz" },
+    { name = "redis" },
+    { name = "redis-tools" },
+    { name = "ruff" },
+    { name = "scikit-learn" },
+    { name = "sentence-transformers" },
+    { name = "spacy" },
+    { name = "tiktoken" },
+    { name = "torch" },
+    { name = "wordfreq" },
+    { name = "xformers" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cachetools", specifier = ">=5.4.0" },
+    { name = "ddgs", specifier = ">=9.11.3" },
+    { name = "docx2txt", specifier = ">=0.9" },
+    { name = "duckduckgo-search", specifier = ">=8.0.0" },
+    { name = "en-core-web-md", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" },
+    { name = "fastapi", extras = ["standard"], specifier = ">=0.128.0" },
+    { name = "gliner", specifier = ">=0.2.22" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "huggingface-hub", extras = ["cli"], specifier = ">=0.36.0" },
+    { name = "instructor", specifier = ">=1.14.5" },
+    { name = "llama-index-core", specifier = ">=0.12.0" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "markitdown", specifier = ">=0.1.5" },
+    { name = "mcp", specifier = ">=1.2.0,<2.0" },
+    { name = "numpy", specifier = ">=2.3.5" },
+    { name = "openai", specifier = ">=2.13.0" },
+    { name = "pathspec", specifier = ">=1.0.0" },
+    { name = "pillow", specifier = ">=11.0.0" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2.3" },
+    { name = "psycopg-pool", specifier = ">=3.2.4" },
+    { name = "pypdf", specifier = ">=6.6.2" },
+    { name = "pytesseract", specifier = ">=0.3.13" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "python-dotenv", specifier = ">=1.2.1" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "rapidfuzz", specifier = ">=3.14.3" },
+    { name = "redis", specifier = ">=7.1.0" },
+    { name = "redis-tools", specifier = ">=0.0.2" },
+    { name = "ruff", specifier = ">=0.15.12" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.0" },
+    { name = "scikit-learn", specifier = ">=1.8.0" },
+    { name = "sentence-transformers", specifier = ">=5.2.0" },
+    { name = "spacy", specifier = ">=3.8.11" },
+    { name = "tiktoken", specifier = ">=0.7.0" },
+    { name = "torch", specifier = ">=2.6.0,<2.7.0" },
+    { name = "wordfreq", specifier = ">=3.1.1" },
+    { name = "xformers", specifier = ">=0.0.29.post3" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "setuptools"

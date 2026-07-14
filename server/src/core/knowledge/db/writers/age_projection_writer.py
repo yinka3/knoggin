@@ -108,31 +108,29 @@ class AgeProjectionWriter:
 
     async def clear_project_projection(self, cur, project_id: str) -> None:
         """Clear project-scoped AGE projection before rebuilding it from SQL."""
-        cypher = """
-        MATCH (n)
-        WHERE (
-            n:Entity OR n:Message OR n:Fact
-        )
-          AND n.project_id = $project_id
-          AND coalesce(n.id, -1) <> $identity_entity_id
-        DETACH DELETE n
-        RETURN count(n)
-        """
-        await cur.execute(
-            self._build_cypher(cypher),
-            (
-                json.dumps(
-                    {
-                        "project_id": project_id,
-                        "identity_entity_id": IDENTITY_ENTITY_ID,
-                    }
-                ),
+        params = (
+            json.dumps(
+                {
+                    "project_id": project_id,
+                    "identity_entity_id": IDENTITY_ENTITY_ID,
+                }
             ),
         )
+        for label in ("Entity", "Message", "Fact"):
+            cypher = f"""
+            MATCH (n:{label})
+            WHERE n.project_id = $project_id
+              AND coalesce(n.id, -1) <> $identity_entity_id
+            DETACH DELETE n
+            RETURN count(n)
+            """
+            await cur.execute(self._build_cypher(cypher), params)
 
         orphan_topic_cypher = """
         MATCH (t:Topic)
-        WHERE NOT ()-[:BELONGS_TO]->(t)
+        OPTIONAL MATCH (owner)-[:BELONGS_TO]->(t)
+        WITH t, count(owner) AS owner_count
+        WHERE owner_count = 0
         DELETE t
         RETURN count(t)
         """

@@ -56,6 +56,22 @@ def test_session_scan_patterns_match_their_key_families():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_project_cleanup_inventory_covers_fixed_and_variable_key_families():
+    keys = RedisKeys.project_cleanup_keys("ada", "project-1")
+    patterns = RedisKeys.project_cleanup_patterns("ada", "project-1")
+
+    assert RedisKeys.dirty_entities("ada", "project-1") in keys
+    assert RedisKeys.dlq_state("ada", "project-1") in keys
+    assert RedisKeys.project_sessions("ada", "project-1") in keys
+    assert RedisKeys.community_discussion_active("ada", "project-1") in keys
+    assert "last_profile_update:ada:project-1:*" in patterns
+    assert "merge_intent:ada:project-1:*" in patterns
+    assert "job_lease:ada:project-1:*" in patterns
+    assert "maintenance_attempts:ada:project-1:*" in patterns
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_fake_redis_expiration_applies_to_every_supported_key_type():
     redis = FakeRedis()
     await redis.set("string", "value")

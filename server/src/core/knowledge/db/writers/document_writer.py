@@ -14,12 +14,6 @@ class DocumentWriter:
         self._client = client
         self._project_id = project_id
 
-    def _require_pool(self):
-        pool = self._client.async_pool
-        if pool is None:
-            raise RuntimeError("PostgresClient async_pool is not initialized")
-        return pool
-
     async def insert_document(
         self,
         *,
@@ -38,54 +32,51 @@ class DocumentWriter:
         Insert one manual-upload document row and its raw bytes in a single
         transaction.
         """
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        INSERT INTO public.project_documents (
-                            document_id,
-                            project_id,
-                            session_id,
-                            visibility_scope,
-                            folder_root_id,
-                            source_kind,
-                            original_name,
-                            relative_path,
-                            extension,
-                            size_bytes,
-                            content_hash,
-                            status,
-                            created_at,
-                            updated_at
-                        )
-                        VALUES (
-                            %s, %s, %s, %s, NULL, 'manual_upload',
-                            %s, %s, %s, %s, %s, 'uploaded', %s, %s
-                        )
-                        """,
-                        (
-                            document_id,
-                            self._project_id,
-                            session_id,
-                            visibility_scope,
-                            original_name,
-                            relative_path,
-                            extension,
-                            size_bytes,
-                            content_hash,
-                            created_at,
-                            created_at,
-                        ),
-                    )
-                    await cur.execute(
-                        """
-                        INSERT INTO public.document_content (document_id, content)
-                        VALUES (%s, %s)
-                        """,
-                        (document_id, content),
-                    )
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                INSERT INTO public.project_documents (
+                    document_id,
+                    project_id,
+                    session_id,
+                    visibility_scope,
+                    folder_root_id,
+                    source_kind,
+                    original_name,
+                    relative_path,
+                    extension,
+                    size_bytes,
+                    content_hash,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, NULL, 'manual_upload',
+                    %s, %s, %s, %s, %s, 'uploaded', %s, %s
+                )
+                """,
+                (
+                    document_id,
+                    self._project_id,
+                    session_id,
+                    visibility_scope,
+                    original_name,
+                    relative_path,
+                    extension,
+                    size_bytes,
+                    content_hash,
+                    created_at,
+                    created_at,
+                ),
+            )
+            await cur.execute(
+                """
+                INSERT INTO public.document_content (document_id, content)
+                VALUES (%s, %s)
+                """,
+                (document_id, content),
+            )
 
     async def delete_document(
         self,
@@ -141,58 +132,55 @@ class DocumentWriter:
         updated_at: str,
     ) -> Optional[Dict]:
         """Atomically transition one visible document into a work state."""
-        pool = self._require_pool()
         allowed = tuple(allowed_statuses)
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        UPDATE public.project_documents
-                        SET
-                            status = %s,
-                            indexed_at = NULL,
-                            error_message = NULL,
-                            updated_at = %s
-                        WHERE document_id = %s
-                          AND project_id = %s
-                          AND (
-                              visibility_scope = 'project'
-                              OR (
-                                  visibility_scope = 'session'
-                                  AND session_id = %s
-                              )
-                          )
-                          AND status = ANY(%s)
-                        RETURNING
-                            document_id,
-                            project_id,
-                            session_id,
-                            visibility_scope,
-                            folder_root_id,
-                            source_kind,
-                            original_name,
-                            relative_path,
-                            extension,
-                            size_bytes,
-                            content_hash,
-                            status,
-                            created_at,
-                            updated_at,
-                            indexed_at,
-                            error_message
-                        """,
-                        (
-                            status,
-                            updated_at,
-                            document_id,
-                            self._project_id,
-                            session_id,
-                            list(allowed),
-                        ),
-                    )
-                    row = await cur.fetchone()
-                    return dict(row) if row else None
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE public.project_documents
+                SET
+                    status = %s,
+                    indexed_at = NULL,
+                    error_message = NULL,
+                    updated_at = %s
+                WHERE document_id = %s
+                  AND project_id = %s
+                  AND (
+                      visibility_scope = 'project'
+                      OR (
+                          visibility_scope = 'session'
+                          AND session_id = %s
+                      )
+                  )
+                  AND status = ANY(%s)
+                RETURNING
+                    document_id,
+                    project_id,
+                    session_id,
+                    visibility_scope,
+                    folder_root_id,
+                    source_kind,
+                    original_name,
+                    relative_path,
+                    extension,
+                    size_bytes,
+                    content_hash,
+                    status,
+                    created_at,
+                    updated_at,
+                    indexed_at,
+                    error_message
+                """,
+                (
+                    status,
+                    updated_at,
+                    document_id,
+                    self._project_id,
+                    session_id,
+                    list(allowed),
+                ),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
     async def requeue_interrupted_indexes(self, *, updated_at: str) -> int:
         """Make work left in ``indexing`` by a stopped process recoverable."""
@@ -234,12 +222,9 @@ class DocumentWriter:
             size_bytes, content_hash, content (bytes),
             chunks: List[Tuple[str, List[float]]]  (text, embedding)
         """
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
                         INSERT INTO public.document_folder_uploads (
                             folder_root_id,
                             project_id,
@@ -264,29 +249,29 @@ class DocumentWriter:
                             %s, %s
                         )
                         """,
-                        (
-                            folder_root_id,
-                            self._project_id,
-                            session_id,
-                            visibility_scope,
-                            folder_name,
-                            candidate_count,
-                            candidate_bytes,
-                            len(documents),
-                            sum(d["size_bytes"] for d in documents),
-                            excluded_count,
-                            excluded_bytes,
-                            excluded_directory_count,
-                            json.dumps(excluded_reason_counts),
-                            json.dumps(scan_settings),
-                            indexed_at,
-                            indexed_at,
-                        ),
-                    )
+                (
+                    folder_root_id,
+                    self._project_id,
+                    session_id,
+                    visibility_scope,
+                    folder_name,
+                    candidate_count,
+                    candidate_bytes,
+                    len(documents),
+                    sum(d["size_bytes"] for d in documents),
+                    excluded_count,
+                    excluded_bytes,
+                    excluded_directory_count,
+                    json.dumps(excluded_reason_counts),
+                    json.dumps(scan_settings),
+                    indexed_at,
+                    indexed_at,
+                ),
+            )
 
-                    for document in documents:
-                        await cur.execute(
-                            """
+            for document in documents:
+                await cur.execute(
+                    """
                             INSERT INTO public.project_documents (
                                 document_id,
                                 project_id,
@@ -310,34 +295,34 @@ class DocumentWriter:
                                 %s, %s, %s
                             )
                             """,
-                            (
-                                document["document_id"],
-                                self._project_id,
-                                session_id,
-                                visibility_scope,
-                                folder_root_id,
-                                document["original_name"],
-                                document["relative_path"],
-                                document["extension"],
-                                document["size_bytes"],
-                                document["content_hash"],
-                                indexed_at,
-                                indexed_at,
-                                indexed_at,
-                            ),
-                        )
-                        await cur.execute(
-                            """
+                    (
+                        document["document_id"],
+                        self._project_id,
+                        session_id,
+                        visibility_scope,
+                        folder_root_id,
+                        document["original_name"],
+                        document["relative_path"],
+                        document["extension"],
+                        document["size_bytes"],
+                        document["content_hash"],
+                        indexed_at,
+                        indexed_at,
+                        indexed_at,
+                    ),
+                )
+                await cur.execute(
+                    """
                             INSERT INTO public.document_content (document_id, content)
                             VALUES (%s, %s)
                             """,
-                            (document["document_id"], document["content"]),
-                        )
-                        for chunk_index, (chunk_text, embedding) in enumerate(
-                            document["chunks"]
-                        ):
-                            await cur.execute(
-                                """
+                    (document["document_id"], document["content"]),
+                )
+                for chunk_index, (chunk_text, embedding) in enumerate(
+                    document["chunks"]
+                ):
+                    await cur.execute(
+                        """
                                 INSERT INTO public.document_chunks (
                                     chunk_id,
                                     document_id,
@@ -347,14 +332,14 @@ class DocumentWriter:
                                 )
                                 VALUES (%s, %s, %s, %s, %s::vector)
                                 """,
-                                (
-                                    str(uuid.uuid4()),
-                                    document["document_id"],
-                                    chunk_index,
-                                    chunk_text,
-                                    json.dumps(embedding),
-                                ),
-                            )
+                        (
+                            str(uuid.uuid4()),
+                            document["document_id"],
+                            chunk_index,
+                            chunk_text,
+                            json.dumps(embedding),
+                        ),
+                    )
 
     async def persist_indexed_chunks(
         self,
@@ -371,12 +356,9 @@ class DocumentWriter:
         the document as indexed.  Returns the updated document row, or None if
         the document was not found.
         """
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
                         SELECT
                             document_id,
                             project_id,
@@ -411,26 +393,26 @@ class DocumentWriter:
                           )
                         FOR UPDATE
                         """,
-                        (document_id, self._project_id, session_id),
-                    )
-                    locked = await cur.fetchone()
-                    if locked is None:
-                        return None
-                    if locked["status"] == "indexed":
-                        return dict(locked)
+                (document_id, self._project_id, session_id),
+            )
+            locked = await cur.fetchone()
+            if locked is None:
+                return None
+            if locked["status"] == "indexed":
+                return dict(locked)
 
-                    await cur.execute(
-                        """
+            await cur.execute(
+                """
                         DELETE FROM public.document_chunks
                         WHERE document_id = %s
                         """,
-                        (document_id,),
-                    )
-                    for chunk_index, (chunk_text, embedding) in enumerate(
-                        zip(chunks, embeddings)
-                    ):
-                        await cur.execute(
-                            """
+                (document_id,),
+            )
+            for chunk_index, (chunk_text, embedding) in enumerate(
+                zip(chunks, embeddings)
+            ):
+                await cur.execute(
+                    """
                             INSERT INTO public.document_chunks (
                                 chunk_id,
                                 document_id,
@@ -440,17 +422,17 @@ class DocumentWriter:
                             )
                             VALUES (%s, %s, %s, %s, %s::vector)
                             """,
-                            (
-                                str(uuid.uuid4()),
-                                document_id,
-                                chunk_index,
-                                chunk_text,
-                                json.dumps(embedding),
-                            ),
-                        )
+                    (
+                        str(uuid.uuid4()),
+                        document_id,
+                        chunk_index,
+                        chunk_text,
+                        json.dumps(embedding),
+                    ),
+                )
 
-                    await cur.execute(
-                        """
+            await cur.execute(
+                """
                         UPDATE public.project_documents
                         SET
                             status = 'indexed',
@@ -476,14 +458,14 @@ class DocumentWriter:
                             indexed_at,
                             error_message
                         """,
-                        (indexed_at, indexed_at, document_id),
-                    )
-                    updated = await cur.fetchone()
-                    if updated is None:
-                        raise RuntimeError("Indexed document status update failed")
-                    result = dict(updated)
-                    result["chunk_count"] = len(chunks)
-                    return result
+                (indexed_at, indexed_at, document_id),
+            )
+            updated = await cur.fetchone()
+            if updated is None:
+                raise RuntimeError("Indexed document status update failed")
+            result = dict(updated)
+            result["chunk_count"] = len(chunks)
+            return result
 
     async def record_index_failure(
         self,
@@ -498,12 +480,9 @@ class DocumentWriter:
         already indexed, clear any partial chunks, and mark the document as
         failed.
         """
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
                         SELECT status
                         FROM public.project_documents
                         WHERE document_id = %s
@@ -517,21 +496,21 @@ class DocumentWriter:
                           )
                         FOR UPDATE
                         """,
-                        (document_id, self._project_id, session_id),
-                    )
-                    row = await cur.fetchone()
-                    if row is None or row["status"] == "indexed":
-                        return
+                (document_id, self._project_id, session_id),
+            )
+            row = await cur.fetchone()
+            if row is None or row["status"] == "indexed":
+                return
 
-                    await cur.execute(
-                        """
+            await cur.execute(
+                """
                         DELETE FROM public.document_chunks
                         WHERE document_id = %s
                         """,
-                        (document_id,),
-                    )
-                    await cur.execute(
-                        """
+                (document_id,),
+            )
+            await cur.execute(
+                """
                         UPDATE public.project_documents
                         SET
                             status = 'failed',
@@ -541,8 +520,8 @@ class DocumentWriter:
                         WHERE document_id = %s
                           AND status <> 'indexed'
                         """,
-                        (error_message, updated_at, document_id),
-                    )
+                (error_message, updated_at, document_id),
+            )
 
     async def upsert_scan_settings(
         self,

@@ -117,7 +117,6 @@ AUDIO_EXTENSIONS = {
 BINARY_TEXT_EXEMPT_EXTENSIONS = {".docx", ".pdf"}
 
 # Extensions accepted for upload and indexing.
-# Images require Tesseract (pytesseract) installed on the host — see storage.py.
 ACCEPTED_EXTENSIONS = (
     # Documents
     {".pdf", ".docx"}

@@ -135,15 +135,24 @@ async def test_projection_rebuilder_replays_canonical_rows_into_age_projection()
         "hierarchy_edges": 1,
     }
 
-    assert "DETACH DELETE n" in client.calls[0][1]
-    assert json.loads(client.calls[0][2][0]) == {
-        "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
-    assert "FROM messages" in client.calls[2][1]
-    assert client.calls[2][2] == ("project-1", "ada")
-    assert "FROM entities e" in client.calls[3][1]
-    assert client.calls[3][2] == (
+    clear_calls = [call for call in client.calls if "DETACH DELETE n" in call[1]]
+    assert len(clear_calls) == 3
+    assert {label for label in ("Entity", "Message", "Fact") if any(
+        f"MATCH (n:{label})" in call[1] for call in clear_calls
+    )} == {"Entity", "Message", "Fact"}
+    assert all(
+        json.loads(call[2][0])
+        == {
+            "project_id": "project-1",
+            "identity_entity_id": IDENTITY_ENTITY_ID,
+        }
+        for call in clear_calls
+    )
+
+    message_read = next(call for call in client.calls if "FROM messages" in call[1])
+    assert message_read[2] == ("project-1", "ada")
+    entity_read = next(call for call in client.calls if "FROM entities e" in call[1])
+    assert entity_read[2] == (
         "project-1",
         IDENTITY_ENTITY_ID,
         "ada",

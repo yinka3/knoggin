@@ -2,20 +2,10 @@ import io
 from typing import List
 
 import docx2txt
+import pytesseract
 from llama_index.core.node_parser import SentenceSplitter
+from PIL import Image as PILImage
 from pypdf import PdfReader
-
-# pytesseract is required for image OCR.
-# Install with: pip install pytesseract pillow
-# The host system must also have Tesseract installed:
-#   macOS:  brew install tesseract
-#   Ubuntu: apt-get install tesseract-ocr
-try:
-    import pytesseract
-    from PIL import Image as PILImage
-    _PYTESSERACT_AVAILABLE = True
-except ImportError:
-    _PYTESSERACT_AVAILABLE = False
 
 from core.knowledge.documents.constants import (
     ACCEPTED_EXTENSIONS,
@@ -63,11 +53,6 @@ def extract_text(content: bytes, extension: str) -> str:
     elif ext == ".docx":
         text = docx2txt.process(io.BytesIO(content)) or ""
     elif ext in IMAGE_EXTENSIONS:
-        if not _PYTESSERACT_AVAILABLE:
-            raise ValueError(
-                "Image OCR is not available. "
-                "Install pytesseract and pillow, and ensure Tesseract is installed on the host."
-            )
         image = PILImage.open(io.BytesIO(content))
         text = pytesseract.image_to_string(image)
         if not text.strip():

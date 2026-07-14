@@ -71,6 +71,7 @@ class Session:
         self.consumer: Optional[IngestionWorker] = None
         self.task_group = BackgroundTaskGroup("SessionTasks")
         self.config_unsubscribers: List = []
+        self._message_add_lock = asyncio.Lock()
 
     @property
     def current_config(self) -> RootConfig:
@@ -118,6 +119,12 @@ class Session:
         if not self.project or not self.project.scheduler or not self.consumer:
             raise RuntimeError("Session is not fully initialized for message ingestion")
 
+        async with self._message_add_lock:
+            return await self._add_user_message(msg)
+
+    async def _add_user_message(self, msg: Message) -> Message:
+        """Durably accept and idempotently enqueue one user message."""
+
         msg.timestamp = self._normalize_timestamp(msg.timestamp)
 
         # Deterministic ID: same content + session + timestamp_ns = same ID
@@ -134,35 +141,56 @@ class Session:
 
         existing_id = await self.redis_client.get(dedup_key)
         if existing_id:
-            msg.id = int(existing_id)
-            return msg
+            status, message_id = self._parse_message_dedup(existing_id)
+            msg.id = message_id
+            if status == "accepted":
+                return msg
+        else:
+            new_id = await self.knowledge_store.allocate_message_id()
+            was_set = await self.redis_client.set(
+                dedup_key,
+                f"pending:{new_id}",
+                ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
+                nx=True,
+            )
 
-        new_id = await self.knowledge_store.allocate_message_id()
-        was_set = await self.redis_client.set(
-            dedup_key,
-            str(new_id),
-            ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
-            nx=True,
-        )
+            if was_set:
+                msg.id = new_id
+            else:
+                existing_id = await self.redis_client.get(dedup_key)
+                if not existing_id:
+                    raise RuntimeError("Message dedup claim disappeared during add")
+                status, message_id = self._parse_message_dedup(existing_id)
+                msg.id = message_id
+                if status == "accepted":
+                    return msg
 
-        if not was_set:
-            existing_id = await self.redis_client.get(dedup_key)
-            msg.id = int(existing_id) if existing_id else new_id
-            return msg
-
-        msg.id = new_id
-
+        durable = False
         try:
             await self._persist_user_turn(msg)
+            durable = True
+            await self._record_conversation_message(
+                message_id=msg.id,
+                role="user",
+                content=msg.content.strip(),
+                timestamp=msg.timestamp,
+                user_msg_id=msg.id,
+            )
             await self._enqueue_user_message(msg)
+            await self.redis_client.set(
+                dedup_key,
+                f"accepted:{msg.id}",
+                ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
+            )
         except Exception:
-            try:
-                await self.redis_client.delete(dedup_key)
-            except Exception as cleanup_exc:
-                logger.warning(
-                    "Failed to release message dedup claim after add failure: "
-                    f"{cleanup_exc}"
-                )
+            if not durable:
+                try:
+                    await self.redis_client.delete(dedup_key)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to release message dedup claim after add failure: "
+                        f"{cleanup_exc}"
+                    )
             raise
 
         await self.project.record_session_activity()
@@ -170,6 +198,17 @@ class Session:
         await self.refresh_session_ttls()
 
         return msg
+
+    @staticmethod
+    def _parse_message_dedup(value: str) -> tuple[str, int]:
+        """Parse current status values and legacy numeric dedup claims."""
+        text = str(value)
+        if ":" not in text:
+            return "accepted", int(text)
+        status, raw_message_id = text.split(":", 1)
+        if status not in {"pending", "accepted"}:
+            raise ValueError(f"Unknown message dedup status: {status}")
+        return status, int(raw_message_id)
 
     @staticmethod
     def _normalize_timestamp(timestamp: datetime) -> datetime:
@@ -235,13 +274,21 @@ class Session:
         await pipe.execute()
 
     async def _persist_user_turn(self, msg: Message):
-        """Cache a canonical user message in the active conversation."""
-        await self._record_conversation_message(
-            message_id=msg.id,
-            role="user",
-            content=msg.content.strip(),
-            timestamp=msg.timestamp,
-            user_msg_id=msg.id,
+        """Write the canonical user message before acknowledging or enqueueing."""
+        await self.knowledge_store.save_message_logs(
+            [
+                {
+                    "id": msg.id,
+                    "content": msg.content.strip(),
+                    "role": "user",
+                    "user_name": self.user_name,
+                    "session_id": self.session_id,
+                    "project_id": self.project_id,
+                    "timestamp": msg.timestamp.timestamp() * 1000,
+                    "metadata": {},
+                    "user_msg_id": msg.id,
+                }
+            ]
         )
 
     async def _enqueue_user_message(self, msg: Message):
@@ -255,17 +302,16 @@ class Session:
         )
 
         buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
-        await self.redis_client.rpush(
-            buffer_key,
-            json.dumps(
-                {
-                    "id": msg.id,
-                    "message": msg.content.strip(),
-                    "timestamp": msg.timestamp.isoformat(),
-                    "role": "user",
-                }
-            ),
+        payload = json.dumps(
+            {
+                "id": msg.id,
+                "message": msg.content.strip(),
+                "timestamp": msg.timestamp.isoformat(),
+                "role": "user",
+            }
         )
+        await self.redis_client.lrem(buffer_key, 0, payload)
+        await self.redis_client.rpush(buffer_key, payload)
 
     async def add_assistant_turn(
         self,
@@ -312,11 +358,14 @@ class Session:
         """Remove all staged Postgres and Redis state for one canonical message."""
         # Delete from Postgres
         query = "DELETE FROM public.messages WHERE user_name = %(user_name)s AND session_id = %(session_id)s AND message_id = %(message_id)s"
-        await self.resources.postgres.execute(query, {
-            "user_name": self.user_name,
-            "session_id": self.session_id,
-            "message_id": message_id
-        })
+        await self.resources.postgres.execute(
+            query,
+            {
+                "user_name": self.user_name,
+                "session_id": self.session_id,
+                "message_id": message_id,
+            },
+        )
 
         message_key = str(message_id)
         pipe = self.redis_client.pipeline()
@@ -384,7 +433,11 @@ class Session:
     ) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
         turns = await fetch_conversation_turns(
-            self.resources.postgres, self.user_name, self.session_id, num_turns, up_to_msg_id
+            self.resources.postgres,
+            self.user_name,
+            self.session_id,
+            num_turns,
+            up_to_msg_id,
         )
 
         results = []

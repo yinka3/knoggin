@@ -4,6 +4,8 @@ import pytest
 
 from common.scoping import IDENTITY_SCOPE
 from core.project.project_manager import ProjectManager, ProjectStatus
+from infrastructure.redis_client import RedisKeys
+from tests.fixtures.fakes import FakeRedis
 
 
 def project_row(
@@ -44,6 +46,15 @@ class RecordingPostgres:
     async def execute(self, query, params=None):
         self.calls.append(("execute", query, params))
         return self.execute_results.pop(0) if self.execute_results else 1
+
+
+class RecordingProjectDeletionWriter:
+    def __init__(self):
+        self.calls = []
+
+    async def delete_project(self, *, user_name, project_id):
+        self.calls.append((user_name, project_id))
+        return {"projects": 1}
 
 
 def make_manager(postgres):
@@ -216,12 +227,71 @@ async def test_archive_and_reactivate_project_update_durable_status():
 async def test_delete_project_uses_cascading_postgres_boundary():
     postgres = RecordingPostgres([[project_row()]])
     manager = make_manager(postgres)
+    writer = RecordingProjectDeletionWriter()
+    manager._project_deletion_writer = writer
 
     deleted = await manager.delete_project("project-1")
 
-    write = next(call for call in postgres.calls if call[0] == "execute")
-    assert "DELETE FROM public.projects" in write[1]
+    assert writer.calls == [("ada", "project-1")]
     assert deleted["status"] == ProjectStatus.DELETED.value
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_delete_project_clears_project_session_and_agent_redis_state():
+    postgres = RecordingPostgres(
+        [
+            [project_row()],
+            [{"session_id": "session-1"}],
+            [{"agent_id": "agent-1"}],
+        ]
+    )
+    redis = FakeRedis()
+    manager = ProjectManager(
+        resources=SimpleNamespace(postgres=postgres, redis=redis),
+        user_name="ada",
+    )
+    writer = RecordingProjectDeletionWriter()
+    manager._project_deletion_writer = writer
+
+    await redis.sadd(RedisKeys.dirty_entities("ada", "project-1"), "2")
+    await redis.set(
+        RedisKeys.last_profile_update("ada", "project-1", 2),
+        "done",
+    )
+    await redis.set(RedisKeys.buffer("ada", "session-1"), "buffered")
+    await redis.set(
+        RedisKeys.message_dedup("ada", "session-1", "digest"),
+        "accepted:1",
+    )
+    await redis.set(
+        RedisKeys.agent_directives("ada", "agent-1"),
+        "directives",
+    )
+    await redis.set(
+        RedisKeys.dirty_entities("ada", "project-2"),
+        "preserve",
+    )
+    await redis.hset(RedisKeys.projects("ada"), "project-1", "metadata")
+    await redis.hset(RedisKeys.sessions("ada"), "session-1", "metadata")
+    await redis.hset(RedisKeys.agents("ada"), "agent-1", "metadata")
+    await redis.set(RedisKeys.agents_default("ada"), "agent-1")
+
+    await manager.delete_project("project-1")
+
+    assert writer.calls == [("ada", "project-1")]
+    assert await redis.get(RedisKeys.dirty_entities("ada", "project-1")) is None
+    assert await redis.get(RedisKeys.last_profile_update("ada", "project-1", 2)) is None
+    assert await redis.get(RedisKeys.buffer("ada", "session-1")) is None
+    assert (
+        await redis.get(RedisKeys.message_dedup("ada", "session-1", "digest")) is None
+    )
+    assert await redis.get(RedisKeys.agent_directives("ada", "agent-1")) is None
+    assert await redis.get(RedisKeys.agents_default("ada")) is None
+    assert await redis.hget(RedisKeys.projects("ada"), "project-1") is None
+    assert await redis.hget(RedisKeys.sessions("ada"), "session-1") is None
+    assert await redis.hget(RedisKeys.agents("ada"), "agent-1") is None
+    assert await redis.get(RedisKeys.dirty_entities("ada", "project-2")) == ("preserve")
 
 
 @pytest.mark.runtime

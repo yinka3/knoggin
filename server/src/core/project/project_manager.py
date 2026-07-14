@@ -18,6 +18,7 @@ from core.ingestion.jobs.profile_job import ProfileRefinementJob
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.db.write_graph_db import write_batch_callback
+from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
 from core.knowledge.jobs.merge_rollback_cleanup_job import (
@@ -25,6 +26,7 @@ from core.knowledge.jobs.merge_rollback_cleanup_job import (
 )
 from core.project.state import ProjectState
 from infrastructure.job.scheduler import Scheduler
+from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
 
 
@@ -41,6 +43,7 @@ class ProjectManager:
         self.resources = resources
         self.user_name = user_name
         self.pg = resources.postgres
+        self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.active_projects: Dict[str, ProjectState] = {}
         self._identity_initialized = False
         self._maintenance_lock = asyncio.Lock()
@@ -83,25 +86,31 @@ class ProjectManager:
                 %(access_mode)s, %(status)s, %(topic_config)s
             ) RETURNING created_at, updated_at
         """
-        await self.pg.fetch_all(query, {
-            "project_id": project_id,
-            "user_name": self.user_name,
-            "name": name,
-            "description": description,
-            "access_mode": access_mode,
-            "status": ProjectStatus.ACTIVE.value,
-            "topic_config": json.dumps(topic_seed),
-        })
+        await self.pg.fetch_all(
+            query,
+            {
+                "project_id": project_id,
+                "user_name": self.user_name,
+                "name": name,
+                "description": description,
+                "access_mode": access_mode,
+                "status": ProjectStatus.ACTIVE.value,
+                "topic_config": json.dumps(topic_seed),
+            },
+        )
         for allowed_id in allowed_projects:
             scope_query = """
                 INSERT INTO public.project_read_scopes (user_name, project_id, readable_project_id)
                 VALUES (%(user_name)s, %(project_id)s, %(readable)s)
             """
-            await self.pg.execute(scope_query, {
-                "user_name": self.user_name,
-                "project_id": project_id,
-                "readable": allowed_id
-            })
+            await self.pg.execute(
+                scope_query,
+                {
+                    "user_name": self.user_name,
+                    "project_id": project_id,
+                    "readable": allowed_id,
+                },
+            )
 
         logger.info(f"Created project {project_id} ('{name}')")
         return await self.get_project(project_id)
@@ -124,7 +133,13 @@ class ProjectManager:
             meta["id"] = meta.pop("project_id")
             meta["allowed_projects"] = meta["allowed_projects"] or []
             # Convert datetime to isoformat
-            for time_field in ["created_at", "updated_at", "archived_at", "deleted_at", "last_activity_at"]:
+            for time_field in [
+                "created_at",
+                "updated_at",
+                "archived_at",
+                "deleted_at",
+                "last_activity_at",
+            ]:
                 if meta.get(time_field):
                     meta[time_field] = meta[time_field].isoformat()
             if "topic_config" in meta:
@@ -142,14 +157,22 @@ class ProjectManager:
             FROM public.projects p
             WHERE p.user_name = %(user_name)s AND p.project_id = %(project_id)s
         """
-        rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "project_id": project_id})
+        rows = await self.pg.fetch_all(
+            query, {"user_name": self.user_name, "project_id": project_id}
+        )
         if not rows:
             return None
 
         meta = dict(rows[0])
         meta["id"] = meta.pop("project_id")
         meta["allowed_projects"] = meta["allowed_projects"] or []
-        for time_field in ["created_at", "updated_at", "archived_at", "deleted_at", "last_activity_at"]:
+        for time_field in [
+            "created_at",
+            "updated_at",
+            "archived_at",
+            "deleted_at",
+            "last_activity_at",
+        ]:
             if meta.get(time_field):
                 meta[time_field] = meta[time_field].isoformat()
         if "topic_config" in meta:
@@ -175,7 +198,9 @@ class ProjectManager:
                 WHERE user_name = %(user_name)s AND project_id = ANY(%(allowed)s)
                 AND status IN ('active', 'archived')
             """
-            rows = await self.pg.fetch_all(valid_query, {"user_name": self.user_name, "allowed": allowed})
+            rows = await self.pg.fetch_all(
+                valid_query, {"user_name": self.user_name, "allowed": allowed}
+            )
             allowed = [r["project_id"] for r in rows]
 
         return build_readable_project_ids(project_id, allowed)
@@ -249,7 +274,9 @@ class ProjectManager:
             SELECT project_id, status FROM public.projects
             WHERE user_name = %(user_name)s AND project_id = ANY(%(requested)s)
         """
-        rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "requested": requested})
+        rows = await self.pg.fetch_all(
+            query, {"user_name": self.user_name, "requested": requested}
+        )
         stored_projects = {r["project_id"]: r["status"] for r in rows}
 
         readable_statuses = {ProjectStatus.ACTIVE.value, ProjectStatus.ARCHIVED.value}
@@ -259,7 +286,9 @@ class ProjectManager:
             if status not in readable_statuses:
                 unavailable.append(allowed_id)
         if unavailable:
-            raise ValueError(f"Unavailable allowed project IDs for '{project_id}': {unavailable}")
+            raise ValueError(
+                f"Unavailable allowed project IDs for '{project_id}': {unavailable}"
+            )
         return requested
 
     async def update_project(
@@ -341,13 +370,22 @@ class ProjectManager:
 
         active_state = self.active_projects.get(project_id)
         if active_state and active_state.active_runtime_sessions_count > 0:
-            raise RuntimeError(f"Project '{project_id}' has active runtime sessions and cannot be archived")
+            raise RuntimeError(
+                f"Project '{project_id}' has active runtime sessions and cannot be archived"
+            )
         if active_state:
             await active_state.shutdown()
             del self.active_projects[project_id]
 
         query = "UPDATE public.projects SET status = %(status)s, archived_at = now(), updated_at = now() WHERE user_name = %(user_name)s AND project_id = %(project_id)s"
-        await self.pg.execute(query, {"status": ProjectStatus.ARCHIVED.value, "user_name": self.user_name, "project_id": project_id})
+        await self.pg.execute(
+            query,
+            {
+                "status": ProjectStatus.ARCHIVED.value,
+                "user_name": self.user_name,
+                "project_id": project_id,
+            },
+        )
         logger.info(f"Archived project {project_id} with knowledge retained")
         return await self.get_project(project_id)
 
@@ -362,30 +400,130 @@ class ProjectManager:
             return meta
 
         query = "UPDATE public.projects SET status = %(status)s, archived_at = NULL, updated_at = now() WHERE user_name = %(user_name)s AND project_id = %(project_id)s"
-        await self.pg.execute(query, {"status": ProjectStatus.ACTIVE.value, "user_name": self.user_name, "project_id": project_id})
+        await self.pg.execute(
+            query,
+            {
+                "status": ProjectStatus.ACTIVE.value,
+                "user_name": self.user_name,
+                "project_id": project_id,
+            },
+        )
         logger.info(f"Reactivated project {project_id}")
         return await self.get_project(project_id)
 
     async def delete_project(self, project_id: str) -> Optional[dict]:
-        """Hard delete a project, cascading to all owned data (sessions, agents, graphs)."""
-        meta = await self.get_project(project_id)
-        if not meta:
-            return None
+        """Hard delete every PostgreSQL, AGE, and Redis record owned by a project."""
+        async with self._maintenance_lock:
+            meta = await self.get_project(project_id)
+            if not meta:
+                return None
 
-        active_state = self.active_projects.get(project_id)
-        if active_state and active_state.active_runtime_sessions_count > 0:
-            raise RuntimeError(f"Project '{project_id}' has active runtime sessions and cannot be deleted")
-        if active_state:
-            await active_state.shutdown()
-            del self.active_projects[project_id]
+            active_state = self.active_projects.get(project_id)
+            if active_state and active_state.active_runtime_sessions_count > 0:
+                raise RuntimeError(
+                    f"Project '{project_id}' has active runtime sessions and "
+                    "cannot be deleted"
+                )
+            if active_state:
+                await active_state.shutdown()
+                del self.active_projects[project_id]
 
-        # Trigger ON DELETE CASCADE across the database
-        query = "DELETE FROM public.projects WHERE user_name = %(user_name)s AND project_id = %(project_id)s"
-        await self.pg.execute(query, {"user_name": self.user_name, "project_id": project_id})
+            session_ids, agent_ids = await self._project_runtime_member_ids(project_id)
+            await self._delete_project_redis_state(
+                project_id,
+                session_ids=session_ids,
+                agent_ids=agent_ids,
+            )
+            deleted = await self._project_deletion_writer.delete_project(
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+            if deleted is None:
+                raise RuntimeError(
+                    f"Project '{project_id}' disappeared during deletion"
+                )
 
-        logger.info(f"Hard deleted project {project_id} and all cascaded state")
-        meta["status"] = ProjectStatus.DELETED.value
-        return meta
+            logger.info(
+                f"Hard deleted project {project_id} and all owned state: {deleted}"
+            )
+            meta["status"] = ProjectStatus.DELETED.value
+            return meta
+
+    async def _project_runtime_member_ids(
+        self,
+        project_id: str,
+    ) -> tuple[List[str], List[str]]:
+        if getattr(self.resources, "redis", None) is None:
+            return [], []
+        session_rows = await self.pg.fetch_all(
+            """
+            SELECT session_id
+            FROM public.sessions
+            WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+            """,
+            {"user_name": self.user_name, "project_id": project_id},
+        )
+        agent_rows = await self.pg.fetch_all(
+            """
+            SELECT agent_id
+            FROM public.agents
+            WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+            """,
+            {"user_name": self.user_name, "project_id": project_id},
+        )
+        return (
+            [str(row["session_id"]) for row in session_rows],
+            [str(row["agent_id"]) for row in agent_rows],
+        )
+
+    async def _delete_project_redis_state(
+        self,
+        project_id: str,
+        *,
+        session_ids: List[str],
+        agent_ids: List[str],
+    ) -> int:
+        redis = getattr(self.resources, "redis", None)
+        if redis is None:
+            return 0
+
+        keys = set(RedisKeys.project_cleanup_keys(self.user_name, project_id))
+        patterns = list(RedisKeys.project_cleanup_patterns(self.user_name, project_id))
+        for session_id in session_ids:
+            keys.update(RedisKeys.session_keys(self.user_name, session_id))
+            patterns.extend(
+                (
+                    RedisKeys.message_dedup_pattern(self.user_name, session_id),
+                    RedisKeys.session_memory_pattern(self.user_name, session_id),
+                )
+            )
+        for agent_id in agent_ids:
+            keys.add(RedisKeys.agent_directives(self.user_name, agent_id))
+            keys.add(RedisKeys.community_agent_memory(self.user_name, agent_id))
+
+        for pattern in patterns:
+            cursor = 0
+            while True:
+                cursor, matched = await redis.scan(
+                    cursor,
+                    match=pattern,
+                    count=100,
+                )
+                keys.update(matched)
+                if cursor == 0:
+                    break
+
+        deleted = int(await redis.delete(*sorted(keys))) if keys else 0
+        await redis.hdel(RedisKeys.projects(self.user_name), project_id)
+        await redis.hdel(RedisKeys.project_topic_config(self.user_name), project_id)
+        if session_ids:
+            await redis.hdel(RedisKeys.sessions(self.user_name), *session_ids)
+        if agent_ids:
+            await redis.hdel(RedisKeys.agents(self.user_name), *agent_ids)
+            default_key = RedisKeys.agents_default(self.user_name)
+            if await redis.get(default_key) in set(agent_ids):
+                deleted += int(await redis.delete(default_key))
+        return deleted
 
     async def acquire_project_for_session(
         self, project_id: str, session_id: str, topics_config: Optional[dict] = None
@@ -491,9 +629,7 @@ class ProjectManager:
         # Project topic config is the runtime source of truth. Seed it only when
         # this project has no persisted config yet.
         await self._ensure_project_topics_config(project_id, initial_topics_config)
-        t_config = await TopicConfig.load(
-            self.pg, self.user_name, project_id
-        )
+        t_config = await TopicConfig.load(self.pg, self.user_name, project_id)
 
         # Entity Manager
         er_cfg = self.dev_settings.entity_resolution
@@ -636,9 +772,7 @@ class ProjectManager:
                 f"Configured user '{self.user_name}' did not resolve to reserved "
                 f"entity ID {IDENTITY_ENTITY_ID}"
             )
-        logger.info(
-            f"User entity verified: {self.user_name} (id={IDENTITY_ENTITY_ID})"
-        )
+        logger.info(f"User entity verified: {self.user_name} (id={IDENTITY_ENTITY_ID})")
 
     async def _ensure_identity_invariant(self) -> None:
         if self._identity_initialized:

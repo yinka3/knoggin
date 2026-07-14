@@ -48,6 +48,21 @@ async def test_context_add_persists_maps_enqueues_and_signals_consumer(context):
     assert msg.id == 1
     assert ctx.project.scheduler.activity_count == 1
     assert ctx.consumer.signaled == 1
+    assert resources.knowledge_store.saved_message_logs == [
+        [
+            {
+                "id": 1,
+                "content": "hello world",
+                "role": "user",
+                "user_name": "ada",
+                "session_id": "session-1",
+                "project_id": "project-1",
+                "timestamp": timestamp.timestamp() * 1000,
+                "metadata": {},
+                "user_msg_id": 1,
+            }
+        ]
+    ]
 
     conv_key = RedisKeys.conversation("ada", "session-1")
     recent_key = RedisKeys.recent_conversation("ada", "session-1")
@@ -168,6 +183,51 @@ async def test_context_add_releases_dedup_claim_after_failure(context, monkeypat
     assert ctx.consumer.signaled == 1
     assert ctx.project.scheduler.activity_count == 1
     assert len(resources.redis.lists[RedisKeys.buffer("ada", "session-1")]) == 1
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_context_add_keeps_durable_pending_claim_and_recovers_enqueue_failure(
+    context, monkeypatch
+):
+    ctx, resources = context
+    timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
+    original_rpush = resources.redis.rpush
+    attempts = 0
+
+    async def fail_once(key, value):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("temporary queue failure")
+        return await original_rpush(key, value)
+
+    monkeypatch.setattr(resources.redis, "rpush", fail_once)
+
+    with pytest.raises(ConnectionError, match="temporary queue failure"):
+        await ctx.add(Message(content="hello", timestamp=timestamp))
+
+    dedup_keys = [
+        key
+        for key in resources.redis.strings
+        if key.startswith("msg_dedup:ada:session-1:")
+    ]
+    assert len(dedup_keys) == 1
+    dedup_key = dedup_keys[0]
+    assert await resources.redis.get(dedup_key) == "pending:1"
+
+    retried = await ctx.add(Message(content="hello", timestamp=timestamp))
+
+    assert retried.id == 1
+    assert await resources.redis.get(dedup_key) == "accepted:1"
+    assert len(resources.redis.lists[RedisKeys.buffer("ada", "session-1")]) == 1
+    assert ctx.consumer.signaled == 1
+    assert [
+        batch[0]["id"] for batch in resources.knowledge_store.saved_message_logs
+    ] == [
+        1,
+        1,
+    ]
 
 
 @pytest.mark.runtime

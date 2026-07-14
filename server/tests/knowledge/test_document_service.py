@@ -1,5 +1,6 @@
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -26,9 +27,16 @@ class MemoryPostgres:
         self.write_error = None
         self.transaction_error_at_chunk = None
         self.transaction_commit_error = None
+        self.transaction_count = 0
         self.delete_error = None
         self.search_results = []
-        self.async_pool = MemoryPool(self)
+
+    @asynccontextmanager
+    async def transaction(self):
+        self.transaction_count += 1
+        async with MemoryTransaction(self):
+            async with MemoryCursor(self) as cursor:
+                yield cursor
 
     @staticmethod
     def _visible(row, project_id, session_id):
@@ -638,31 +646,6 @@ class MemoryTransaction:
         return False
 
 
-class MemoryConnection:
-    def __init__(self, postgres):
-        self.postgres = postgres
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    def transaction(self):
-        return MemoryTransaction(self.postgres)
-
-    def cursor(self):
-        return MemoryCursor(self.postgres)
-
-
-class MemoryPool:
-    def __init__(self, postgres):
-        self.postgres = postgres
-
-    def connection(self):
-        return MemoryConnection(self.postgres)
-
-
 class FakeEmbeddingService:
     def __init__(self):
         self.calls = []
@@ -720,6 +703,7 @@ async def test_add_document_stores_bytes_and_persists_metadata(document_harness)
 
     assert postgres.contents[metadata["document_id"]] == content
     assert postgres.rows[0]["original_name"] == "Notes.MD"
+    assert postgres.transaction_count == 1
 
 
 @pytest.mark.storage
