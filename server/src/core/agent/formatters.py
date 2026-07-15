@@ -336,10 +336,10 @@ def format_document_focus_context(focus: Optional[Dict]) -> str:
     return "\n".join(lines)
 
 
-def format_fact_results(results: List[Dict]) -> str:
-    """Format fact_check results for the agent prompt."""
+def format_episode_results(results: List[Dict]) -> str:
+    """Format episode_check results with source-message provenance."""
     if not results:
-        return "No facts found."
+        return "No episodes found."
 
     output = []
     for entry in results:
@@ -348,28 +348,64 @@ def format_fact_results(results: List[Dict]) -> str:
 
         if res_type == "fallback":
             header = (
-                "--- Fact Check Fallback: Entity match not found ---\n"
+                "--- Episode Check Fallback: Entity match not found ---\n"
                 "The system could not resolve a specific entity in the knowledge graph. "
                 "Below is a semantic search over conversation context for related clues:\n"
             )
             output.append(f"{header}{format_retrieved_messages(items)}")
         else:
-            block = f"--- Fact Check ({res_type} match) ---\n"
+            block = f"--- Episode Check ({res_type} match) ---\n"
             for item in items:
-                name = item.get("entity_name", "Unknown")
+                name = item.get("entity_name")
                 sim = item.get("similarity", 1.0)
-                facts = item.get("facts", [])
+                episodes = item.get("episodes", [])
 
-                block += f"Entity: {name} (Match confidence: {sim:.2f})\n"
-                if facts:
-                    for fact in facts:
-                        # Handle fact dicts if returned as such
-                        f_text = (
-                            fact.get("content") if isinstance(fact, dict) else str(fact)
-                        )
-                        block += f"  - {f_text}\n"
+                if name:
+                    block += f"Entity: {name} (Match confidence: {sim:.2f})\n"
                 else:
-                    block += "  - No specific facts recorded\n"
+                    block += f"Question: {item.get('query', 'Unknown')}\n"
+                if episodes:
+                    for episode in episodes:
+                        block += (
+                            f"  - [{episode.get('episode_id', '?')}] "
+                            f"{episode.get('summary', '')}\n"
+                        )
+                        entities = episode.get("entities", [])
+                        focus_ids = [
+                            str(entity.get("entity_id"))
+                            for entity in entities
+                            if entity.get("is_focus_entity")
+                        ]
+                        if focus_ids:
+                            block += f"    focus entities: {', '.join(focus_ids)}\n"
+                        entity_ids = [
+                            str(entity.get("entity_id")) for entity in entities
+                        ]
+                        if entity_ids:
+                            block += f"    linked entities: {', '.join(entity_ids)}\n"
+                        relationship_ids = [
+                            str(relationship.get("relationship_id"))
+                            for relationship in episode.get("relationships", [])
+                        ]
+                        if relationship_ids:
+                            block += (
+                                "    linked relationships: "
+                                f"{', '.join(relationship_ids)}\n"
+                            )
+                        for label, values in (
+                            ("developments", episode.get("new_developments", [])),
+                            ("updates", episode.get("updates", [])),
+                            ("unresolved", episode.get("unresolved", [])),
+                        ):
+                            if values:
+                                block += f"    {label}: {'; '.join(values)}\n"
+                        for source in episode.get("evidence", [])[:2]:
+                            block += (
+                                f"    evidence MSG_{source.get('message_id')}: "
+                                f"{source.get('content', '')}\n"
+                            )
+                else:
+                    block += "  - No contextual episodes recorded\n"
             output.append(block)
 
     return "\n\n".join(output)

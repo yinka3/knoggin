@@ -252,6 +252,7 @@ class IngestionPipeline:
                 )
 
                 result.entity_ids = resolution.entity_ids
+                result.entity_message_map = resolution.entity_msg_map
                 result.new_entity_ids = resolution.new_ids
                 result.alias_updated_ids = resolution.alias_ids
                 result.alias_updates = resolution.alias_updates

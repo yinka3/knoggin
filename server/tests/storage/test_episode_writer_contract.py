@@ -1,0 +1,128 @@
+import pytest
+
+from common.schema.primitives import (
+    EntityEpisode,
+    Episode,
+    MessageEpisode,
+    RelationshipEpisode,
+)
+from core.knowledge.db.writers.episode_writer import EpisodeWriter
+from tests.fixtures.fakes import RecordingPostgresClient
+
+
+def make_episode(**overrides):
+    episode = Episode(
+        episode_id="episode-1",
+        project_id="project-1",
+        session_id="session-1",
+        summary="The team selected the episodic-memory storage slice.",
+        importance=0.8,
+        messages=[
+            MessageEpisode(
+                message_id=11,
+                influence_weight=0.6,
+                message_position=0,
+            ),
+            MessageEpisode(
+                message_id=12,
+                influence_weight=0.9,
+                message_position=1,
+            ),
+        ],
+        entities=[
+            EntityEpisode(
+                entity_id=2,
+                prominence_weight=0.95,
+                role="subject",
+                is_focus_entity=True,
+            )
+        ],
+        relationships=[
+            RelationshipEpisode(
+                relationship_id="project-1:2:3",
+                prominence_weight=0.8,
+                is_central_relationship=True,
+            )
+        ],
+    )
+    return episode.model_copy(update=overrides)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_writer_attaches_complete_derived_context_idempotently():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [{"message_id": 11}, {"message_id": 12}],
+            [
+                {"message_id": 11, "entity_id": 2},
+                {"message_id": 12, "entity_id": 2},
+                {"message_id": 12, "entity_id": 3},
+            ],
+            [
+                {"message_id": 11, "relationship_id": "project-1:2:3"},
+                {"message_id": 12, "relationship_id": "project-1:2:3"},
+            ],
+        ],
+        fetch_one_results=[{"episode_id": "episode-1"}],
+    )
+    writer = EpisodeWriter(client)
+
+    await writer.create_episode(make_episode(), user_name="ada")
+
+    sql = [call[1] for call in client.calls]
+    assert any("INSERT INTO episodes" in query for query in sql)
+    assert sum("INSERT INTO episode_messages" in query for query in sql) == 2
+    assert sum("INSERT INTO episode_entities" in query for query in sql) == 2
+    assert sum("INSERT INTO episode_relationships" in query for query in sql) == 1
+    assert all("ON CONFLICT" in query for query in sql if "episode_" in query)
+
+    entity_calls = [
+        call for call in client.calls if "INSERT INTO episode_entities" in call[1]
+    ]
+    assert entity_calls[0][2] == ("episode-1", 2, 1.5, "subject", True, 2)
+    assert entity_calls[1][2] == ("episode-1", 3, 0.9, None, False, 1)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_writer_rejects_ranked_context_outside_source_messages():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [{"message_id": 11}, {"message_id": 12}],
+            [{"message_id": 11, "entity_id": 2}],
+            [],
+        ]
+    )
+    writer = EpisodeWriter(client)
+    episode = make_episode(
+        entities=[EntityEpisode(entity_id=99, is_focus_entity=True)],
+        relationships=[],
+    )
+
+    with pytest.raises(ValueError, match="must be derived from source messages"):
+        await writer.create_episode(episode, user_name="ada")
+
+    assert not any("INSERT INTO episodes" in call[1] for call in client.calls)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_writer_advances_checkpoint_without_regression():
+    client = RecordingPostgresClient(
+        fetch_one_results=[{"last_evaluated_message_id": 12}]
+    )
+    writer = EpisodeWriter(client)
+
+    checkpoint = await writer.advance_checkpoint(
+        11,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert checkpoint == 12
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "ON CONFLICT (project_id, session_id) DO UPDATE" in query
+    assert "GREATEST(" in query
+    assert params == (11, "ada", "project-1", "session-1")

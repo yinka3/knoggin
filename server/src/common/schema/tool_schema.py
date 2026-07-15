@@ -143,7 +143,7 @@ TOOL_SCHEMAS = [
                 "It searches exact words in the chat logs. "
                 "Use this ONLY when: 1) The user asks for a direct quote ('What exactly did I say?'), "
                 "2) You need to find a specific date/time, or "
-                "3) Both search_entity and fact_check failed to find the concept."
+                "3) Both search_entity and episode_check failed to find the concept."
             ),
             "parameters": {
                 "type": "object",
@@ -212,28 +212,46 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "fact_check",
+            "name": "episode_check",
             "description": (
-                "Retrieve and verify stored facts about a specific entity from the knowledge graph. "
-                "Use this when you need to confirm what the system knows, check if something is true, "
-                "or recall detailed history about an entity. This returns the full fact record including "
-                "timestamps and invalidated facts — use it over search_entity when you need comprehensive "
-                "or historical fact data, not just a profile overview. The system handles name resolution "
-                "automatically."
+                "Retrieve contextual episodic memory about a specific entity, including "
+                "summaries and source-message evidence. Use this for remembered decisions, "
+                "developments, and history. Results are contextual memory, not atomic facts."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "entity_name": {
                         "type": "string",
-                        "description": "The entity to look up facts for.",
+                        "description": "Optional entity whose episodic memory to inspect.",
                     },
                     "query": {
                         "type": "string",
                         "description": "A natural language hint describing what you're looking for.",
                     },
                 },
-                "required": ["entity_name", "query"],
+                "required": ["query"],
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_episode",
+            "description": (
+                "Expand a retrieved episode into all of its original source messages. "
+                "Use this to verify, quote, or reconcile an episode's details."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "episode_id": {
+                        "type": "string",
+                        "description": "The episode ID returned by episode_check.",
+                    }
+                },
+                "required": ["episode_id"],
             },
             "tags": ["graph:read", "core"],
         },

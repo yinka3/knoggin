@@ -1,5 +1,17 @@
 # Episodic Memory Implementation Blueprint
 
+## Implementation Status
+
+Completed: episode schema and contracts, ingestion provenance and
+eligibility tracking, atomic episode writes and checkpoints, `EpisodeJob`
+scheduling, and agent retrieval through `episode_check` and `read_episode`.
+
+Not completed: full Fact-system removal. Profile refinement, Fact
+storage/search/projections, merge support, and community Fact views still
+coexist and must be migrated in Phase 4.
+
+Focused tests were added and updated but were not run in this environment.
+
 ## 1. Decision
 
 Knoggin will remove the Fact layer and replace it with an Episodic
@@ -750,6 +762,12 @@ Add focused tests before deleting the Fact suite.
 ## 14. Operational Metrics
 
 Track these from day one:
+
+The initial `EpisodeJob` emits one `episode_processed` job event for every
+checkpointed create, consolidation, or skip. It includes the session scope,
+effective action, episode ID when one was written, and source-message count.
+Per-session failures emit `episode_processing_failed` without advancing that
+session's checkpoint, so the next scheduler pass can retry it safely.
 
 - windows evaluated, created, consolidated, and skipped;
 - average source messages per episode;

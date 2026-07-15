@@ -40,13 +40,13 @@ async def test_agent_manager_create_update_and_lookup_preserves_config(manager):
         created.id,
         model="new-model",
         temperature=0.4,
-        enabled_tools=["fact_check"],
+        enabled_tools=["episode_check"],
     )
     fetched = await agent_manager.get_agent_by_name("researcher")
 
     assert updated.model == "new-model"
     assert updated.temperature == 0.4
-    assert updated.enabled_tools == ["fact_check"]
+    assert updated.enabled_tools == ["episode_check"]
     assert fetched.id == created.id
     create_snapshot_write = next(
         call

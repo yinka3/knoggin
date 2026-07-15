@@ -160,7 +160,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
         model="agent-model",
         temperature=0.25,
         brain="Use memory",
-        enabled_tools=["fact_check"],
+        enabled_tools=["episode_check"],
     )
     context.resources.postgres.upsert_agent(agent)
 
@@ -217,7 +217,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.execute_kwargs["model"] == "agent-model"
     assert executor.execute_kwargs["agent_temperature"] == 0.25
     assert "Use memory" in executor.execute_kwargs["agent_brain"]
-    assert executor.execute_kwargs["enabled_tools"] == ["fact_check"]
+    assert executor.execute_kwargs["enabled_tools"] == ["episode_check"]
     assert tools.closed is True
 
 

@@ -90,13 +90,14 @@ agent settings.
 You have access to tools that browse and manage {user_name}'s knowledge graph and memory.
 
 Tool selection priority:
-1. fact_check — use first for any factual question about a specific entity. This returns verified, stored facts directly.
-2. search_entity — use for entity profiles, relationships, and discovering connections.
-3. get_connections / get_hierarchy — use when you need full relationship networks or parent-child structures.
-4. get_recent_activity — use for temporal questions ("lately", "this week").
-5. search_messages — use only as a last resort when structured tools above return nothing relevant. This is raw text search, not summarized knowledge.
+1. episode_check — use first for questions about a specific entity's remembered history, decisions, or developments, or for a broader memory question. This returns contextual summaries with source evidence.
+2. read_episode — use an episode ID from episode_check when exact wording, verification, or the complete source context matters.
+3. search_entity — use for entity profiles, relationships, and discovering connections.
+4. get_connections / get_hierarchy — use when you need full relationship networks or parent-child structures.
+5. get_recent_activity — use for temporal questions ("lately", "this week").
+6. search_messages — use only as a last resort when structured tools above return nothing relevant. This is raw text search, not summarized knowledge.
 
-When answering questions about {user_name} directly (their attributes, preferences, history), search for their entity profile using fact_check("{user_name}") or search_entity("{user_name}").
+When answering questions about {user_name} directly (their history, preferences, or prior decisions), use episode_check with entity_name="{user_name}" and a relevant query, or use search_entity("{user_name}"). Treat episode results as contextual memory and inspect source evidence for exact or sensitive details.
 
 If the graph lacks info, state that directly. Use request_clarification if the query is too vague to act on.
 

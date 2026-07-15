@@ -36,7 +36,7 @@ class AgentRunConfig:
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
     max_accumulated_hierarchy: int = 8
-    max_accumulated_facts: int = 8
+    max_accumulated_episodes: int = 8
     max_accumulated_sources: int = 12
     max_consecutive_errors: int = 3
     empty_result_replan_threshold: int = 3
@@ -105,7 +105,7 @@ class RetrievedEvidence:
     graph: List[Dict] = field(default_factory=list)
     paths: List[Dict] = field(default_factory=list)
     hierarchy: List[Dict] = field(default_factory=list)
-    facts: List[Dict] = field(default_factory=list)
+    episodes: List[Dict] = field(default_factory=list)
     sources: List[Dict] = field(default_factory=list)
     summary: Optional[str] = None
     token_count: int = 0
@@ -117,7 +117,7 @@ class RetrievedEvidence:
             or self.graph
             or self.paths
             or self.hierarchy
-            or self.facts
+            or self.episodes
             or self.sources
             or self.summary
         )

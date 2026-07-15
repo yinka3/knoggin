@@ -4,12 +4,13 @@ from typing import Dict, List, Optional, Set, Tuple
 from loguru import logger
 
 from common.schema.contracts import CandidateSuggestion, EngineScope
-from common.schema.primitives import FactRecord
+from common.schema.primitives import Episode, FactRecord
 from common.scoping import require_scope_value
 from core.community.community_store import CommunityStore
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.entity_reader import EntityReader
+from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.fact_audit_reader import FactAuditReader
 from core.knowledge.db.readers.fact_reader import FactReader
 from core.knowledge.db.readers.graph_reader import GraphReader
@@ -20,6 +21,7 @@ from core.knowledge.db.writers.candidate_suggestion_writer import (
     CandidateSuggestionWriter,
 )
 from core.knowledge.db.writers.entity_writer import EntityWriter
+from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.fact_audit_writer import FactAuditWriter
 from core.knowledge.db.writers.fact_writer import FactWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
@@ -41,6 +43,7 @@ class KnowledgeStore:
         self._postgres_client = PostgresClient(dsn=dsn)
         self._id_allocator = IdAllocator(self._postgres_client)
         self._entity_writer = EntityWriter(self._postgres_client)
+        self._episode_writer = EpisodeWriter(self._postgres_client)
         self._candidate_suggestion_writer = CandidateSuggestionWriter(
             self._postgres_client
         )
@@ -49,6 +52,7 @@ class KnowledgeStore:
         self._graph_writer = GraphWriter(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
+        self._episode_reader = EpisodeReader(self._postgres_client)
         self._fact_audit_reader = FactAuditReader(self._postgres_client)
         self._fact_reader = FactReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
@@ -95,9 +99,197 @@ class KnowledgeStore:
         return await self._id_allocator.allocate_message_id()
 
     async def write_batch(
-        self, entities: List[Dict], relationships: List[Dict]
+        self,
+        entities: List[Dict],
+        relationships: List[Dict],
+        *,
+        message_entity_refs: Optional[List[Dict]] = None,
+        eligible_message_ids: Optional[List[int]] = None,
+        scope: Optional[EngineScope] = None,
     ) -> bool:
-        return await self._entity_writer.write_batch(entities, relationships)
+        return await self._entity_writer.write_batch(
+            entities,
+            relationships,
+            message_entity_refs=message_entity_refs,
+            eligible_message_ids=eligible_message_ids,
+            message_entity_scope=scope.model_dump() if scope else None,
+        )
+
+    async def create_episode(self, episode: Episode, *, user_name: str) -> None:
+        await self._episode_writer.create_episode(episode, user_name=user_name)
+
+    async def write_episode_window(
+        self,
+        episode: Optional[Episode],
+        window_message_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> bool:
+        return await self._episode_writer.write_episode_window(
+            episode,
+            window_message_ids,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def advance_episode_checkpoint(
+        self,
+        last_evaluated_message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> int:
+        return await self._episode_writer.advance_checkpoint(
+            last_evaluated_message_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_last_evaluated_episode_message_id(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> int:
+        return await self._episode_reader.get_last_evaluated_message_id(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_next_episode_window(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        after_message_id: int,
+        message_count: int,
+    ) -> List[Dict]:
+        return await self._episode_reader.get_next_episode_window(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            after_message_id=after_message_id,
+            message_count=message_count,
+        )
+
+    async def get_episode(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> Optional[Episode]:
+        return await self._episode_reader.get_episode(
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_episodes_for_entity(
+        self,
+        entity_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+    ) -> List[Episode]:
+        return await self._episode_reader.get_episodes_for_entity(
+            entity_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def get_episodes_for_entities(
+        self,
+        entity_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+    ) -> List[Episode]:
+        return await self._episode_reader.get_episodes_for_entities(
+            entity_ids,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def search_episodes(
+        self,
+        query: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+    ) -> List[Episode]:
+        return await self._episode_reader.search_episodes(
+            query,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def get_recent_episodes(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 1,
+    ) -> List[Episode]:
+        return await self._episode_reader.get_recent_episodes(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def get_episode_source_messages(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> List[Dict]:
+        return await self._episode_reader.get_episode_source_messages(
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_episode_graph_context(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> Optional[Dict]:
+        return await self._episode_reader.get_episode_graph_context(
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
 
     async def ensure_identity_entity(
         self, user_name: str, aliases: Optional[List[str]] = None
@@ -323,6 +515,36 @@ class KnowledgeStore:
             user_name=user_name,
             session_ids=session_ids,
             visible_project_ids=visible_project_ids,
+        )
+
+    async def get_entity_ids_for_messages(
+        self,
+        message_ids: List[int],
+        *,
+        user_name: str,
+        session_id: str,
+        project_id: str,
+    ) -> Dict[int, List[int]]:
+        return await self._entity_reader.get_entity_ids_for_messages(
+            message_ids,
+            user_name=user_name,
+            session_id=session_id,
+            project_id=project_id,
+        )
+
+    async def get_relationship_ids_for_messages(
+        self,
+        message_ids: List[int],
+        *,
+        user_name: str,
+        session_id: str,
+        project_id: str,
+    ) -> Dict[int, List[str]]:
+        return await self._episode_reader.get_relationship_ids_for_messages(
+            message_ids,
+            user_name=user_name,
+            session_id=session_id,
+            project_id=project_id,
         )
 
     async def get_recent_project_messages(

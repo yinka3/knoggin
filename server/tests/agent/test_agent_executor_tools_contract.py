@@ -206,11 +206,11 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
 ):
     config = AgentRunConfig(
         max_calls=10,
-        tool_limits=(("search_messages", 1), ("fact_check", 3)),
+        tool_limits=(("search_messages", 1), ("episode_check", 3)),
     )
     state = AgentState()
     state.record_call("search_messages", {"query": "already used"})
-    state.record_call("fact_check", {"entity_name": "Ada", "query": "profile"})
+    state.record_call("episode_check", {"entity_name": "Ada", "query": "profile"})
     executor = make_executor(config=config, state=state)
 
     async def fail_execute_tool(*_args):
@@ -224,7 +224,7 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
             [
                 ToolCall(name="search_messages", args={"query": "new"}),
                 ToolCall(
-                    name="fact_check",
+                    name="episode_check",
                     args={"entity_name": "Ada", "query": "profile"},
                 ),
                 ToolCall(
@@ -256,7 +256,7 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
         {
             "event": "tool_start",
             "data": {
-                "tool": "fact_check",
+                "tool": "episode_check",
                 "args": {"entity_name": "Ada", "query": "profile"},
                 "thinking": None,
                 "call_id": None,
@@ -264,7 +264,7 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
         },
         {
             "event": "tool_error",
-            "data": {"tool": "fact_check", "error": "Duplicate call skipped"},
+            "data": {"tool": "episode_check", "error": "Duplicate call skipped"},
         },
         {
             "event": "tool_start",
@@ -289,8 +289,8 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
             "error": "Tool 'search_messages' has reached its call limit",
         },
         {
-            "tool": "fact_check",
-            "error": "Duplicate call to 'fact_check' with same arguments",
+            "tool": "episode_check",
+            "error": "Duplicate call to 'episode_check' with same arguments",
         },
         {
             "tool": "get_connections",
@@ -304,7 +304,7 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
     assert executor.ctx.state.call_count == 3
     assert executor.ctx.state.tools_used == [
         "search_messages",
-        "fact_check",
+        "episode_check",
         "get_connections",
     ]
 
@@ -374,7 +374,7 @@ async def test_execute_tools_tool_errors_increment_and_success_resets(monkeypatc
             [
                 ToolCall(name="search_messages", args={"query": "one"}),
                 ToolCall(name="search_messages", args={"query": "two"}),
-                ToolCall(name="fact_check", args={"entity_name": "Ada", "query": "q"}),
+                ToolCall(name="episode_check", args={"entity_name": "Ada", "query": "q"}),
             ],
             results,
         )
@@ -391,7 +391,7 @@ async def test_execute_tools_tool_errors_increment_and_success_resets(monkeypatc
     assert "backend unavailable" in events[1]["data"]["error"]
     assert events[3]["data"]["result"] == "Found 1 results"
     assert events[5]["data"] == {
-        "tool": "fact_check",
+        "tool": "episode_check",
         "error": "Internal tool failure",
     }
     assert executor.ctx.state.consecutive_errors == 1

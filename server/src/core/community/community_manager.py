@@ -37,7 +37,8 @@ COMMUNITY_RUN_CONFIG = AgentRunConfig(
     max_consecutive_errors=2,
     tool_limits=(
         ("search_entity", 4),
-        ("fact_check", 6),
+        ("episode_check", 6),
+        ("read_episode", 4),
         ("get_connections", 3),
         ("search_messages", 3),
         ("search_documents", 4),

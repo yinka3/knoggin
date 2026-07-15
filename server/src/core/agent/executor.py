@@ -723,7 +723,7 @@ class AgentExecutor:
             self.ctx.evidence.messages = self.ctx.evidence.messages[-5:]
             self.ctx.evidence.profiles = self.ctx.evidence.profiles[-5:]
             self.ctx.evidence.graph = self.ctx.evidence.graph[-15:]
-            self.ctx.evidence.facts = []
+            self.ctx.evidence.episodes = []
             self.ctx.evidence.paths = []
             self.ctx.evidence.hierarchy = []
 

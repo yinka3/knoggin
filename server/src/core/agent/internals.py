@@ -15,7 +15,7 @@ from common.schema.tool_schema import (
 from common.utils.time_utils import parse_iso_time_or_now
 from core.agent.formatters import (
     format_entity_results,
-    format_fact_results,
+    format_episode_results,
     format_graph_results,
     format_hierarchy_results,
     format_hot_topic_context,
@@ -106,7 +106,8 @@ def build_user_message(
                 "get_connections",
                 "get_recent_activity",
                 "find_path",
-                "fact_check",
+                "episode_check",
+                "read_episode",
                 "get_hierarchy",
                 "search_documents",
                 "read_document",
@@ -163,7 +164,7 @@ def _format_evidence(
                 continue
             if tool == "search_entity":
                 new_profile_ids = {d.get("id") for d in data if d.get("id")}
-            elif tool == "search_messages":
+            elif tool in ("search_messages", "read_episode"):
                 new_message_keys = {
                     _message_evidence_key(d) for d in data if _message_evidence_key(d)
                 }
@@ -175,8 +176,8 @@ def _format_evidence(
                     for d in data
                     if d.get("source") and d.get("target")
                 }
-            elif tool == "fact_check":
-                # For fact_check, we'll treat all results in the latest call as 'new'
+            elif tool == "episode_check":
+                # Episode checks are structured context rather than list evidence.
                 pass
 
     if evidence.summary:
@@ -237,8 +238,11 @@ def _format_evidence(
             f"{format_hierarchy_results(evidence.hierarchy)}\n"
         )
 
-    if evidence.facts:
-        msg += f"\n**Fact check results:**\n{format_fact_results(evidence.facts)}\n"
+    if evidence.episodes:
+        msg += (
+            "\n**Episode check results:**\n"
+            f"{format_episode_results(evidence.episodes)}\n"
+        )
 
     return msg
 
@@ -314,11 +318,11 @@ def _hierarchy_evidence_key(item: Dict) -> Tuple:
     return _stable_evidence_key(item)
 
 
-def _fact_evidence_key(item: Dict) -> Tuple:
+def _episode_evidence_key(item: Dict) -> Tuple:
     if isinstance(item, dict):
-        fact_id = item.get("fact_id", item.get("id"))
-        if fact_id is not None:
-            return ("fact", fact_id)
+        episode_id = item.get("episode_id", item.get("id"))
+        if episode_id is not None:
+            return ("episode", episode_id)
     return _stable_evidence_key(item)
 
 
@@ -434,12 +438,13 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             _hierarchy_evidence_key,
             cfg.max_accumulated_hierarchy,
         ),
-        "fact_check": lambda ev, d, cfg: _acc_unique_extend_or_append(
-            ev.facts,
+        "episode_check": lambda ev, d, cfg: _acc_unique_extend_or_append(
+            ev.episodes,
             d,
-            _fact_evidence_key,
-            cfg.max_accumulated_facts,
+            _episode_evidence_key,
+            cfg.max_accumulated_episodes,
         ),
+        "read_episode": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
         "search_documents": lambda ev, d, cfg: _acc_documents(ev, d, cfg),
         "read_document": lambda ev, d, cfg: _acc_documents(ev, d, cfg),
         "web_search": lambda ev, d, cfg: _acc_unique(
@@ -484,7 +489,7 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Path found: {len(data)} hops", len(data)
         return "No path", 0
 
-    if tool_name == "fact_check":
+    if tool_name == "episode_check":
         if isinstance(data, dict):
             res_type = data.get("resolution", "unknown")
             results = data.get("results", [])

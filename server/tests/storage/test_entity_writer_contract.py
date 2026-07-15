@@ -118,6 +118,66 @@ async def test_entity_writer_write_batch_requires_explicit_write_intent():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_entity_writer_writes_idempotent_message_entity_references():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [{"message_id": 11}],
+            [{"entity_id": 2}],
+        ]
+    )
+    writer = EntityWriter(client)
+
+    await writer.write_batch(
+        [],
+        [],
+        message_entity_refs=[
+            {"message_id": 11, "entity_id": 2},
+            {"message_id": 11, "entity_id": 2},
+        ],
+        message_entity_scope={
+            "user_name": "ada",
+            "session_id": "session-1",
+            "project_id": "project-1",
+        },
+    )
+
+    insert_calls = [
+        call for call in client.calls if "INSERT INTO message_entity_refs" in call[1]
+    ]
+    assert len(insert_calls) == 1
+    assert "ON CONFLICT (message_id, entity_id) DO NOTHING" in insert_calls[0][1]
+    assert insert_calls[0][2] == (11, 2)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_writer_marks_processed_messages_episode_eligible():
+    client = RecordingPostgresClient(fetch_all_results=[[{"message_id": 11}]])
+    writer = EntityWriter(client)
+
+    await writer.write_batch(
+        [],
+        [],
+        eligible_message_ids=[11, 11],
+        message_entity_scope={
+            "user_name": "ada",
+            "session_id": "session-1",
+            "project_id": "project-1",
+        },
+    )
+
+    insert_calls = [
+        call
+        for call in client.calls
+        if "INSERT INTO episode_eligible_messages" in call[1]
+    ]
+    assert len(insert_calls) == 1
+    assert "ON CONFLICT (message_id) DO NOTHING" in insert_calls[0][1]
+    assert insert_calls[0][2] == (11,)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_entity_writer_new_entity_uses_strict_insert():
     client = RecordingPostgresClient()
     writer = EntityWriter(client)

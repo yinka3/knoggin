@@ -64,6 +64,17 @@ def test_batch_result_serializes_candidate_suggestions_without_graph_writes():
     assert restored.candidate_suggestions == [suggestion]
 
 
+def test_batch_result_serializes_entity_message_provenance_for_replay():
+    result = BatchResult(entity_message_map={2: [7, 8], 3: [8]})
+
+    raw = result.to_dict()
+    restored = BatchResult.from_dict(raw)
+
+    assert raw["entity_message_map"] == {"2": [7, 8], "3": [8]}
+    assert restored.entity_message_map == {2: [7, 8], 3: [8]}
+    assert restored.has_graph_writes() is True
+
+
 def test_batch_result_has_graph_writes_for_relationships_entities_and_aliases():
     assert BatchResult().has_graph_writes() is False
     assert BatchResult(
@@ -72,3 +83,5 @@ def test_batch_result_has_graph_writes_for_relationships_entities_and_aliases():
     assert BatchResult(new_entity_ids={1}).has_graph_writes()
     assert BatchResult(alias_updated_ids={1}).has_graph_writes()
     assert BatchResult(alias_updates={1: ["Alice"]}).has_graph_writes()
+    assert BatchResult(entity_message_map={1: [7]}).has_graph_writes()
+    assert BatchResult(trace={"message_ids": [7]}).has_graph_writes()

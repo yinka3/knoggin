@@ -20,6 +20,10 @@ def get_profile_extraction_prompt(user_name: str) -> str:
 def get_contradiction_judgment_prompt() -> str:
     return load_named_prompt("judge_contradiction")
 
+
+def get_episode_generation_prompt(user_name: str) -> str:
+    return load_named_prompt("generate_episode", user_name=user_name)
+
 async def enrich_facts_with_sources(
     facts: list,
     knowledge_store,

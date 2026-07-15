@@ -159,27 +159,21 @@ CREATE TABLE IF NOT EXISTS public.entity_aliases (
 CREATE INDEX IF NOT EXISTS entity_aliases_alias_idx
 ON public.entity_aliases(alias);
 
-CREATE TABLE IF NOT EXISTS public.facts (
-    fact_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS public.message_entity_refs (
+    message_id BIGINT NOT NULL REFERENCES public.messages(message_id)
+        ON DELETE CASCADE,
     entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
         ON DELETE CASCADE,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    content TEXT NOT NULL,
-    valid_at TIMESTAMPTZ,
-    invalid_at TIMESTAMPTZ,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
-    source_msg_id BIGINT,
-    source_user_name TEXT,
-    source_session_id TEXT,
-    source TEXT
+    PRIMARY KEY (message_id, entity_id)
 );
 
-CREATE INDEX IF NOT EXISTS facts_entity_active_idx
-ON public.facts(entity_id, invalid_at);
+CREATE INDEX IF NOT EXISTS message_entity_refs_entity_idx
+ON public.message_entity_refs(entity_id, message_id);
 
-CREATE INDEX IF NOT EXISTS facts_source_message_idx
-ON public.facts(source_user_name, source_session_id, source_msg_id);
+CREATE TABLE IF NOT EXISTS public.episode_eligible_messages (
+    message_id BIGINT PRIMARY KEY REFERENCES public.messages(message_id)
+        ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS public.relationships (
     relationship_id TEXT PRIMARY KEY,
@@ -217,6 +211,89 @@ CREATE TABLE IF NOT EXISTS public.relationship_evidence_refs (
 
 CREATE INDEX IF NOT EXISTS relationship_evidence_refs_message_idx
 ON public.relationship_evidence_refs(user_name, session_id, message_id);
+
+CREATE TABLE IF NOT EXISTS public.episodes (
+    episode_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES public.sessions(session_id)
+        ON DELETE CASCADE,
+    summary TEXT NOT NULL,
+    new_developments JSONB NOT NULL DEFAULT '[]'::jsonb,
+    updates JSONB NOT NULL DEFAULT '[]'::jsonb,
+    unresolved JSONB NOT NULL DEFAULT '[]'::jsonb,
+    importance DOUBLE PRECISION NOT NULL DEFAULT 0.0
+        CHECK (importance >= 0.0 AND importance <= 1.0),
+    generator_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS episodes_session_updated_idx
+ON public.episodes(project_id, session_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.episode_messages (
+    episode_id TEXT NOT NULL REFERENCES public.episodes(episode_id)
+        ON DELETE CASCADE,
+    message_id BIGINT NOT NULL REFERENCES public.messages(message_id)
+        ON DELETE CASCADE,
+    influence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
+        CHECK (influence_weight >= 0.0),
+    influence_reason TEXT,
+    message_position INTEGER NOT NULL CHECK (message_position >= 0),
+    PRIMARY KEY (episode_id, message_id),
+    UNIQUE (episode_id, message_position)
+);
+
+CREATE INDEX IF NOT EXISTS episode_messages_message_idx
+ON public.episode_messages(message_id, episode_id);
+
+CREATE TABLE IF NOT EXISTS public.episode_entities (
+    episode_id TEXT NOT NULL REFERENCES public.episodes(episode_id)
+        ON DELETE CASCADE,
+    entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
+        ON DELETE CASCADE,
+    prominence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
+        CHECK (prominence_weight >= 0.0),
+    role TEXT,
+    is_focus_entity BOOLEAN NOT NULL DEFAULT FALSE,
+    source_message_count INTEGER NOT NULL DEFAULT 0
+        CHECK (source_message_count >= 0),
+    PRIMARY KEY (episode_id, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS episode_entities_focus_lookup_idx
+ON public.episode_entities(entity_id, is_focus_entity, episode_id);
+
+CREATE INDEX IF NOT EXISTS episode_entities_lookup_idx
+ON public.episode_entities(entity_id, episode_id);
+
+CREATE TABLE IF NOT EXISTS public.episode_relationships (
+    episode_id TEXT NOT NULL REFERENCES public.episodes(episode_id)
+        ON DELETE CASCADE,
+    relationship_id TEXT NOT NULL REFERENCES public.relationships(relationship_id)
+        ON DELETE CASCADE,
+    prominence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
+        CHECK (prominence_weight >= 0.0),
+    is_central_relationship BOOLEAN NOT NULL DEFAULT FALSE,
+    source_message_count INTEGER NOT NULL DEFAULT 0
+        CHECK (source_message_count >= 0),
+    PRIMARY KEY (episode_id, relationship_id)
+);
+
+CREATE INDEX IF NOT EXISTS episode_relationships_lookup_idx
+ON public.episode_relationships(relationship_id, episode_id);
+
+CREATE TABLE IF NOT EXISTS public.episode_processing_checkpoints (
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES public.sessions(session_id)
+        ON DELETE CASCADE,
+    last_evaluated_message_id BIGINT NOT NULL DEFAULT 0
+        CHECK (last_evaluated_message_id >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (project_id, session_id)
+);
 
 CREATE TABLE IF NOT EXISTS public.hierarchy_edges (
     project_id TEXT NOT NULL,
@@ -321,45 +398,6 @@ ON public.entity_merge_audits(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS entity_merge_audits_rollback_expiry_idx
 ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
 
-CREATE TABLE IF NOT EXISTS public.fact_change_audits (
-    fact_change_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    entity_id BIGINT NOT NULL,
-    session_id TEXT,
-    actor TEXT NOT NULL,
-    change_type TEXT NOT NULL,
-    reason TEXT,
-    source_msg_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    invalidated_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    invalidated_fact_snapshots JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    replacement_content TEXT,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    status TEXT NOT NULL DEFAULT 'applied',
-    failure_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT fact_change_audits_change_type CHECK (
-        change_type IN (
-            'manual_remove',
-            'manual_correction',
-            'fact_merge',
-            'bad_extraction_report',
-            'profile_extraction',
-            'admin_recovery'
-        )
-    ),
-    CONSTRAINT fact_change_audits_status CHECK (
-        status IN ('applying', 'applied', 'failed')
-    )
-);
-
-CREATE INDEX IF NOT EXISTS fact_change_audits_entity_idx
-ON public.fact_change_audits(user_name, project_id, entity_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS fact_change_audits_project_idx
-ON public.fact_change_audits(user_name, project_id, created_at DESC);
-
 CREATE TABLE IF NOT EXISTS public.ingestion_candidate_suggestions (
     suggestion_id TEXT PRIMARY KEY,
     user_name TEXT NOT NULL,
@@ -456,19 +494,6 @@ CREATE TABLE IF NOT EXISTS public.message_search (
 CREATE INDEX IF NOT EXISTS message_search_fts_idx 
 ON public.message_search USING gin (content_tsvector);
 
-CREATE TABLE IF NOT EXISTS public.fact_search (
-    fact_id TEXT PRIMARY KEY REFERENCES public.facts(fact_id)
-        ON DELETE CASCADE,
-    entity_id BIGINT NOT NULL,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    embedding vector(1024),
-    invalid_at TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS fact_search_embedding_idx 
-ON public.fact_search USING hnsw (embedding vector_cosine_ops);
-
 CREATE INDEX IF NOT EXISTS entity_search_project_idx
 ON public.entity_search(user_name, project_id);
 
@@ -477,9 +502,6 @@ ON public.message_search(user_name, session_id);
 
 CREATE INDEX IF NOT EXISTS message_search_project_idx
 ON public.message_search(user_name, project_id);
-
-CREATE INDEX IF NOT EXISTS fact_search_project_idx
-ON public.fact_search(user_name, project_id);
 
 -- Project-owned folder upload batches.
 CREATE TABLE IF NOT EXISTS public.document_folder_uploads (

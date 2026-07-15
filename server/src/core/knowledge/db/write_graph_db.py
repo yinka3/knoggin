@@ -11,6 +11,7 @@ from common.schema.contracts import (
     EntityWrite,
     GraphMutationPlan,
     GraphWriteSummary,
+    MessageEntityRef,
     RelationshipWrite,
     SkippedRelationship,
     UserRelationshipWrite,
@@ -264,6 +265,14 @@ async def build_graph_mutation_plan(
     graph_work_unit = EngineWorkUnit.for_graph_write(
         scope, batch_id=batch_work_unit_id
     )
+    message_entity_refs = [
+        MessageEntityRef(message_id=message_id, entity_id=entity_id)
+        for entity_id in sorted(safe_entity_ids)
+        for message_id in sorted(set(batch.entity_message_map.get(entity_id, [])))
+    ]
+    eligible_message_ids = sorted(
+        {int(message_id) for message_id in batch.trace.message_ids}
+    )
 
     return GraphMutationPlan(
         work_unit=graph_work_unit,
@@ -273,6 +282,8 @@ async def build_graph_mutation_plan(
         new_entity_ids=new_entity_ids,
         alias_updates=alias_updates,
         entity_writes=entity_writes,
+        message_entity_refs=message_entity_refs,
+        eligible_message_ids=eligible_message_ids,
         relationship_writes=relationship_writes,
         user_relationship_writes=user_relationship_writes,
         skipped_relationships=skipped_relationships,
@@ -318,8 +329,20 @@ async def execute_graph_mutation_plan(
         )
 
     entity_payloads, relationship_payloads = plan.to_graph_payloads()
-    if entity_payloads or relationship_payloads:
-        await knowledge_store.write_batch(entity_payloads, relationship_payloads)
+    message_entity_payloads = plan.to_message_entity_payloads()
+    if (
+        entity_payloads
+        or relationship_payloads
+        or message_entity_payloads
+        or plan.eligible_message_ids
+    ):
+        await knowledge_store.write_batch(
+            entity_payloads,
+            relationship_payloads,
+            message_entity_refs=message_entity_payloads,
+            eligible_message_ids=plan.eligible_message_ids,
+            scope=plan.scope,
+        )
 
     dirty_count = 0
     if redis_client and plan.scope.user_name and plan.dirty_entity_ids:

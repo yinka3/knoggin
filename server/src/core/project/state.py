@@ -63,6 +63,7 @@ class ProjectState:
         )
 
         self.profile_job: Optional[Any] = None
+        self.episode_job: Optional[Any] = None
         self._community_task: Optional[asyncio.Task] = None
         self.active_runtime_sessions_count = 0
         self.config_unsubscribers: list[Any] = []

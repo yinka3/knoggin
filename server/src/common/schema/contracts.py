@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Set
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from common.schema.primitives import (
     ConnectionRecord,
@@ -47,6 +47,80 @@ class EntityProfilesResult(BaseModel):
     """Collection model for profile extraction results."""
 
     profiles: List[ProfileUpdate] = Field(default_factory=list)
+
+
+class EpisodeMessageInfluence(BaseModel):
+    """LLM-selected influence for one message in an eligible episode window."""
+
+    message_id: int = Field(..., gt=0)
+    influence_weight: float = Field(..., ge=0.0)
+    influence_reason: Optional[str] = None
+
+
+class EpisodeFocusEntitySelection(BaseModel):
+    """A focus marker selected from the candidate window's entity set."""
+
+    entity_id: int = Field(..., gt=0)
+    prominence_weight: float = Field(..., ge=0.0)
+    role: Optional[str] = None
+
+
+class EpisodeCentralRelationshipSelection(BaseModel):
+    """A central marker selected from the candidate window's relationships."""
+
+    relationship_id: str = Field(..., min_length=1)
+    prominence_weight: float = Field(..., ge=0.0)
+
+
+class EpisodeDecision(BaseModel):
+    """Strict LLM output for one bounded episodic-memory decision."""
+
+    action: Literal["create", "consolidate", "skip"]
+    target_episode_id: Optional[str] = Field(None, min_length=1)
+    summary: Optional[str] = Field(None, min_length=1)
+    new_developments: List[str] = Field(default_factory=list)
+    updates: List[str] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)
+    importance: float = Field(0.0, ge=0.0, le=1.0)
+    message_influences: List[EpisodeMessageInfluence] = Field(default_factory=list)
+    focus_entities: List[EpisodeFocusEntitySelection] = Field(default_factory=list)
+    central_relationships: List[EpisodeCentralRelationshipSelection] = Field(
+        default_factory=list
+    )
+    skip_reason: Optional[str] = Field(None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_action_shape(self) -> "EpisodeDecision":
+        if self.action == "skip":
+            if not self.skip_reason:
+                raise ValueError("skip decisions require skip_reason")
+            if (
+                self.target_episode_id
+                or self.summary
+                or self.new_developments
+                or self.updates
+                or self.unresolved
+                or self.importance
+                or self.message_influences
+                or self.focus_entities
+                or self.central_relationships
+            ):
+                raise ValueError("skip decisions must not include episode content")
+            return self
+
+        if not self.summary:
+            raise ValueError("create and consolidate decisions require summary")
+        if not self.message_influences:
+            raise ValueError(
+                "create and consolidate decisions require message influences"
+            )
+        if self.action == "consolidate" and not self.target_episode_id:
+            raise ValueError("consolidate decisions require target_episode_id")
+        if self.action == "create" and self.target_episode_id:
+            raise ValueError("create decisions must not include target_episode_id")
+        if self.skip_reason:
+            raise ValueError("non-skip decisions must not include skip_reason")
+        return self
 
 
 class MergeJudgment(BaseModel):
@@ -432,6 +506,13 @@ class UserRelationshipWrite(BaseModel):
         }
 
 
+class MessageEntityRef(BaseModel):
+    """A resolved entity mention grounded to one canonical message."""
+
+    message_id: int = Field(..., gt=0)
+    entity_id: int = Field(..., gt=0)
+
+
 class AliasUpdate(BaseModel):
     """Aliases to persist for a canonical entity."""
 
@@ -459,6 +540,8 @@ class GraphMutationPlan(BaseModel):
     new_entity_ids: Set[int] = Field(default_factory=set)
     alias_updates: List[AliasUpdate] = Field(default_factory=list)
     entity_writes: List[EntityWrite] = Field(default_factory=list)
+    message_entity_refs: List[MessageEntityRef] = Field(default_factory=list)
+    eligible_message_ids: List[int] = Field(default_factory=list)
     relationship_writes: List[RelationshipWrite] = Field(default_factory=list)
     user_relationship_writes: List[UserRelationshipWrite] = Field(default_factory=list)
     skipped_relationships: List[SkippedRelationship] = Field(default_factory=list)
@@ -468,6 +551,8 @@ class GraphMutationPlan(BaseModel):
     def has_writes(self) -> bool:
         return bool(
             self.entity_writes
+            or self.message_entity_refs
+            or self.eligible_message_ids
             or self.relationship_writes
             or self.user_relationship_writes
             or self.alias_updates
@@ -485,6 +570,12 @@ class GraphMutationPlan(BaseModel):
                 for relationship in self.user_relationship_writes
             ],
         )
+
+    def to_message_entity_payloads(self) -> List[dict]:
+        return [
+            reference.model_dump(mode="json")
+            for reference in self.message_entity_refs
+        ]
 
 
 class GraphWriteSummary(BaseModel):
@@ -589,6 +680,7 @@ class BatchResult:
     trace: ExtractionTrace = field(default_factory=ExtractionTrace)
     issues: List[ValidationIssue] = field(default_factory=list)
     entity_ids: List[int] = field(default_factory=list)
+    entity_message_map: Dict[int, List[int]] = field(default_factory=dict)
     new_entity_ids: Set[int] = field(default_factory=set)
     alias_updated_ids: Set[int] = field(default_factory=set)
     alias_updates: Dict[int, List[str]] = field(default_factory=dict)
@@ -634,6 +726,8 @@ class BatchResult:
         return bool(
             self.relationship_observations
             or self.user_relationship_observations
+            or self.entity_message_map
+            or self.trace.message_ids
             or self.new_entity_ids
             or self.alias_updated_ids
             or self.alias_updates
@@ -650,6 +744,10 @@ class BatchResult:
             "trace": self.trace.model_dump(mode="json"),
             "issues": [issue.model_dump(mode="json") for issue in self.issues],
             "entity_ids": self.entity_ids,
+            "entity_message_map": {
+                str(entity_id): message_ids
+                for entity_id, message_ids in self.entity_message_map.items()
+            },
             "new_entity_ids": list(self.new_entity_ids),
             "alias_updated_ids": list(self.alias_updated_ids),
             "alias_updates": {str(k): v for k, v in self.alias_updates.items()},
@@ -688,6 +786,13 @@ class BatchResult:
                 for item in data.get("issues", [])
             ],
             entity_ids=data.get("entity_ids", []),
+            entity_message_map={
+                int(entity_id): [int(message_id) for message_id in message_ids]
+                for entity_id, message_ids in data.get(
+                    "entity_message_map", {}
+                ).items()
+                if str(entity_id).isdigit()
+            },
             new_entity_ids=set(data.get("new_entity_ids", [])),
             alias_updated_ids=set(data.get("alias_updated_ids", [])),
             alias_updates={

@@ -352,6 +352,64 @@ class EntityReader:
             logger.error(f"Failed to fetch entities by ids: {e}")
             return []
 
+    async def get_entity_ids_for_messages(
+        self,
+        message_ids: List[int],
+        *,
+        user_name: str,
+        session_id: str,
+        project_id: str,
+    ) -> Dict[int, List[int]]:
+        """Return every resolved entity ID for each scoped canonical message."""
+
+        user_name = require_scope_value(
+            user_name, "user_name", "get_entity_ids_for_messages"
+        )
+        session_id = require_scope_value(
+            session_id, "session_id", "get_entity_ids_for_messages"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "get_entity_ids_for_messages"
+        )
+        normalized_message_ids = sorted({int(message_id) for message_id in message_ids})
+        if not normalized_message_ids:
+            return {}
+
+        query = """
+        SELECT mer.message_id, mer.entity_id
+        FROM message_entity_refs mer
+        JOIN messages m ON m.message_id = mer.message_id
+        JOIN entities e ON e.entity_id = mer.entity_id
+        WHERE mer.message_id = ANY(%s)
+          AND m.user_name = %s
+          AND m.session_id = %s
+          AND m.project_id = %s
+          AND (e.project_id = %s OR e.entity_id = %s)
+        ORDER BY mer.message_id, mer.entity_id
+        """
+        try:
+            rows = await self.client.fetch_all(
+                query,
+                (
+                    normalized_message_ids,
+                    user_name,
+                    session_id,
+                    project_id,
+                    project_id,
+                    IDENTITY_ENTITY_ID,
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch message entities: {e}")
+            return {}
+
+        entities_by_message = {message_id: [] for message_id in normalized_message_ids}
+        for row in rows:
+            entities_by_message[int(row["message_id"])].append(
+                int(row["entity_id"])
+            )
+        return entities_by_message
+
     async def get_entities_by_names(
         self,
         names: List[str],

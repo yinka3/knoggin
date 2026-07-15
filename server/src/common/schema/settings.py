@@ -125,6 +125,19 @@ class ProfileSettings(BaseModel):
     contradiction_batch_size: int = Field(4, ge=1)
 
 
+class EpisodeSettings(BaseModel):
+    """Configuration for bounded episodic-memory generation windows."""
+
+    enabled: bool = Field(True)
+    batch_multiple: int = Field(3, ge=1)
+    max_message_count: int = Field(72, ge=1)
+    max_age_hours: Optional[float] = Field(None, gt=0)
+    max_sessions_per_run: int = Field(4, ge=1, le=100)
+    prior_episode_candidate_count: int = Field(3, ge=1, le=3)
+    retrieval_episode_limit: int = Field(5, ge=1)
+    retrieval_source_message_limit: int = Field(5, ge=1)
+
+
 class DLQSettings(BaseModel):
     interval_seconds: int = Field(60, ge=10)
     batch_size: int = Field(50, ge=1)
@@ -146,6 +159,7 @@ class MergeRollbackSettings(BaseModel):
 class JobSettings(BaseModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     profile: ProfileSettings = Field(default_factory=ProfileSettings)
+    episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     dlq: DLQSettings = Field(default_factory=DLQSettings)
     archival: ArchivalSettings = Field(default_factory=ArchivalSettings)
     merge_rollback: MergeRollbackSettings = Field(
@@ -177,7 +191,8 @@ class AgentLimitSettings(BaseModel):
             "get_recent_activity": 8,
             "find_path": 8,
             "get_hierarchy": 8,
-            "fact_check": 6,
+            "episode_check": 6,
+            "read_episode": 4,
             "read_brain": 4,
             "list_brain_snapshots": 4,
             "read_brain_snapshot": 4,

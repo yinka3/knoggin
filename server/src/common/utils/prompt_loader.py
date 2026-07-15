@@ -41,6 +41,11 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "prompts/refinement.md",
         "Judge Contradiction",
     ),
+    "generate_episode": PromptDefinition(
+        "prompts/episode.md",
+        "Generate Episode",
+        frozenset({"user_name"}),
+    ),
 }
 
 _prompt_cache: Dict[Path, tuple[int, Dict[str, str]]] = {}

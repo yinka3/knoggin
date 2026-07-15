@@ -23,7 +23,8 @@ def test_agent_prompt_renders_core_identity_mode_and_tool_policy():
     assert "Precise, skeptical, and warm." in prompt
     assert "YOUR CURRENT MODE: Architect" in prompt
     assert "Current time: 2026-04-05 10:30 UTC." in prompt
-    assert 'fact_check("Ada")' in prompt
+    assert 'entity_name="Ada"' in prompt
+    assert "read_episode" in prompt
     assert "search_messages — use only as a last resort" in prompt
 
 

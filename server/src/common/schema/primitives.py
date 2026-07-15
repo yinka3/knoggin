@@ -14,7 +14,7 @@ and provides a `from_extraction()` promotion method to carry metadata forward.
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from common.utils.time_utils import get_now, parse_iso_time
 
@@ -168,6 +168,93 @@ class FactRecord(Fact):
 # ═══════════════════════════════════════════════════════════════════
 #  MESSAGE — a raw user or system input
 # ═══════════════════════════════════════════════════════════════════
+
+
+# EPISODE - a traceable, mutable summary over a set of source messages
+
+
+class MessageEpisode(BaseModel):
+    """A canonical source message and its contribution to an episode."""
+
+    message_id: int = Field(..., gt=0)
+    influence_weight: float = Field(0.0, ge=0.0)
+    influence_reason: Optional[str] = None
+    message_position: int = Field(..., ge=0)
+
+
+class EntityEpisode(BaseModel):
+    """An entity observed in an episode's source messages."""
+
+    entity_id: int = Field(..., gt=0)
+    prominence_weight: float = Field(0.0, ge=0.0)
+    role: Optional[str] = None
+    is_focus_entity: bool = False
+    source_message_count: int = Field(0, ge=0)
+
+
+class RelationshipEpisode(BaseModel):
+    """A relationship evidenced by an episode's source messages."""
+
+    relationship_id: str = Field(..., min_length=1)
+    prominence_weight: float = Field(0.0, ge=0.0)
+    is_central_relationship: bool = False
+    source_message_count: int = Field(0, ge=0)
+
+
+class Episode(BaseModel):
+    """A complete episodic memory and its source-linked graph context."""
+
+    episode_id: str = Field(..., min_length=1)
+    project_id: str = Field(..., min_length=1)
+    session_id: str = Field(..., min_length=1)
+    summary: str = Field(..., min_length=1)
+    new_developments: List[str] = Field(default_factory=list)
+    updates: List[str] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)
+    importance: float = Field(0.0, ge=0.0, le=1.0)
+    messages: List[MessageEpisode] = Field(default_factory=list, min_length=1)
+    entities: List[EntityEpisode] = Field(default_factory=list)
+    relationships: List[RelationshipEpisode] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=get_now)
+    updated_at: datetime = Field(default_factory=get_now)
+    generator_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("messages")
+    @classmethod
+    def validate_messages(
+        cls, messages: List[MessageEpisode]
+    ) -> List[MessageEpisode]:
+        message_ids = [message.message_id for message in messages]
+        if len(set(message_ids)) != len(message_ids):
+            raise ValueError("messages must not contain duplicate message IDs")
+        message_positions = [message.message_position for message in messages]
+        if len(set(message_positions)) != len(message_positions):
+            raise ValueError("messages must not contain duplicate message positions")
+        return messages
+
+    @field_validator("entities")
+    @classmethod
+    def validate_entities(cls, entities: List[EntityEpisode]) -> List[EntityEpisode]:
+        entity_ids = [entity.entity_id for entity in entities]
+        if len(set(entity_ids)) != len(entity_ids):
+            raise ValueError("entities must not contain duplicate entity IDs")
+        if sum(entity.is_focus_entity for entity in entities) > 2:
+            raise ValueError("episodes may contain at most two focus entities")
+        return entities
+
+    @field_validator("relationships")
+    @classmethod
+    def validate_relationships(
+        cls, relationships: List[RelationshipEpisode]
+    ) -> List[RelationshipEpisode]:
+        relationship_ids = [
+            relationship.relationship_id for relationship in relationships
+        ]
+        if len(set(relationship_ids)) != len(relationship_ids):
+            raise ValueError(
+                "relationships must not contain duplicate relationship IDs"
+            )
+        return relationships
 
 
 class Message(BaseModel):

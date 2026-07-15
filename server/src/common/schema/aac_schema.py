@@ -1,6 +1,7 @@
 AAC_READ_TOOL_NAMES = [
     "search_entity",
-    "fact_check",
+    "episode_check",
+    "read_episode",
     "get_connections",
     "search_messages",
     "search_documents",

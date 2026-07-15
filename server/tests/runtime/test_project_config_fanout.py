@@ -133,6 +133,7 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
 
     assert list(project_state.scheduler._jobs) == [
         "profile_refinement",
+        "episode",
         "document_index_recovery",
         "dlq_auto_replay",
         "entity_cleanup",
@@ -144,13 +145,15 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
         "developer_settings.jobs.profile",
+        "developer_settings.jobs.episode",
+        "developer_settings.ingestion",
         "developer_settings.jobs.document_indexing",
         "developer_settings.jobs.dlq",
         "developer_settings.jobs.cleaner",
         "developer_settings.jobs.archival",
         "developer_settings.jobs.merge_rollback",
     ]
-    assert len(project_state.unsubscribers) == 8
+    assert len(project_state.unsubscribers) == 10
 
 
 @pytest.mark.runtime

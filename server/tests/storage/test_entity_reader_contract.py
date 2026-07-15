@@ -71,6 +71,34 @@ async def test_entity_reader_get_entities_by_ids_empty_list_skips_db():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_entity_reader_get_entity_ids_for_messages_scopes_and_groups_results():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {"message_id": 11, "entity_id": 2},
+                {"message_id": 11, "entity_id": 3},
+                {"message_id": 12, "entity_id": 2},
+            ]
+        ]
+    )
+    reader = EntityReader(client)
+
+    result = await reader.get_entity_ids_for_messages(
+        [12, 11],
+        user_name="ada",
+        session_id="session-1",
+        project_id="project-1",
+    )
+
+    assert result == {11: [2, 3], 12: [2]}
+    sql, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM message_entity_refs mer" in sql
+    assert "m.user_name = %s" in sql
+    assert params == ([11, 12], "ada", "session-1", "project-1", "project-1", 1)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_entity_reader_get_entity_by_id_applies_visible_project_scope():
     client = RecordingPostgresClient(
         fetch_one_results=[
