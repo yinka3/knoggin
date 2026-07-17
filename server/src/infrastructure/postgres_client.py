@@ -1,19 +1,43 @@
+import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Optional, TypeAlias
 
 import psycopg
 from loguru import logger
+from psycopg.adapt import Loader
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 QueryParams: TypeAlias = Mapping[str, Any] | Sequence[Any]
 
 
+class _AgtypeLoader(Loader):
+    """Decode AGE scalar, list, and map values into native Python values."""
+
+    def load(self, data) -> Any:
+        raw = bytes(data).decode("utf-8")
+        value, separator, type_name = raw.rpartition("::")
+        if separator and type_name in {"vertex", "edge", "path"}:
+            raw = value
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Preserve unfamiliar AGE extensions without breaking the query.
+            return raw
+
+
 async def _configure_async_conn(conn: psycopg.AsyncConnection):
     """Load Apache AGE and set search path on every async connection."""
     await conn.execute("LOAD 'age';")
     await conn.execute('SET search_path = ag_catalog, "$user", public;')
+    cursor = await conn.execute(
+        "SELECT 'ag_catalog.agtype'::regtype::oid AS agtype_oid;"
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        raise RuntimeError("Apache AGE agtype is unavailable after loading AGE")
+    conn.adapters.register_loader(int(row["agtype_oid"]), _AgtypeLoader)
     await conn.commit()
 
 
@@ -111,9 +135,7 @@ class PostgresClient:
             await cur.execute(query, params)
             return await cur.fetchone()
 
-    async def execute(
-        self, query: str, params: Optional[QueryParams] = None
-    ) -> int:
+    async def execute(self, query: str, params: Optional[QueryParams] = None) -> int:
         """Execute a statement and return its affected-row count."""
         async with self.transaction() as cur:
             await cur.execute(query, params)
@@ -130,6 +152,10 @@ class PostgresClient:
         """
         Wraps a Cypher query in the required Apache AGE SQL syntax.
         Parameters should be passed to psycopg execution as `%s` (a JSON string).
-        `return_types` dictates the expected output columns, e.g., 'id agtype, name agtype'.
+        `return_types` dictates the expected output columns, such as
+        ``id agtype, name agtype``.
         """
-        return f"SELECT * FROM cypher('{graph_name}', $${cypher_query}$$, %s) AS ({return_types})"  # noqa: S608
+        return (
+            f"SELECT * FROM cypher('{graph_name}', $${cypher_query}$$, %s) "
+            f"AS ({return_types})"  # noqa: S608
+        )

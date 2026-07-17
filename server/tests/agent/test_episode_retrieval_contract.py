@@ -96,7 +96,6 @@ async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
     tool.entities = FakeEntities()
     tool.knowledge_store = knowledge_store
     tool.episode_retrieval_limit = 2
-    tool.episode_source_message_limit = 1
 
     result = await tool.episode_check(
         "What did Ada decide?", entity_name="Ada"
@@ -124,7 +123,7 @@ async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
     assert match["episodes"][0]["evidence"][0]["message"] == (
         "Let's use episodic memory."
     )
-    assert len(match["episodes"][0]["evidence"]) == 1
+    assert len(match["episodes"][0]["evidence"]) == 2
 
 
 @pytest.mark.no_network
@@ -188,7 +187,6 @@ async def test_read_recent_episodes_returns_latest_summaries_without_search():
     tool = EpisodeTool()
     tool.knowledge_store = knowledge_store
     tool.episode_retrieval_limit = 2
-    tool.episode_source_message_limit = 1
 
     result = await tool.read_recent_episodes()
 

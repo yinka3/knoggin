@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from common.schema.primitives import EpisodeCheckpoint
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -15,8 +16,8 @@ def episode_row(episode_id="episode-1"):
         "session_id": "session-1",
         "summary": "The team selected the episodic-memory storage slice.",
         "new_developments": '["Episode tables are available."]',
-        "updates": '[]',
-        "unresolved": '[]',
+        "updates": "[]",
+        "unresolved": "[]",
         "importance": 0.8,
         "source_message_count": 1,
         "first_message_at": now,
@@ -298,17 +299,19 @@ async def test_episode_reader_returns_resolved_generation_catalogs():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_episode_reader_returns_zero_checkpoint_before_any_episode_work():
-    client = RecordingPostgresClient(fetch_one_results=[{"message_id": 0}])
+async def test_episode_reader_returns_initial_checkpoint_before_any_episode_work():
+    client = RecordingPostgresClient(
+        fetch_one_results=[{"message_id": 0, "last_evaluated_timestamp_ms": None}]
+    )
     reader = EpisodeReader(client)
 
-    checkpoint = await reader.get_last_evaluated_message_id(
+    checkpoint = await reader.get_episode_checkpoint(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
     )
 
-    assert checkpoint == 0
+    assert checkpoint == EpisodeCheckpoint()
     query, params = client.calls[0][1], client.calls[0][2]
     assert "LEFT JOIN episode_processing_checkpoints" in query
     assert params == ("ada", "project-1", "session-1")
@@ -343,16 +346,36 @@ async def test_episode_reader_requires_a_complete_eligible_window():
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
-        after_message_id=10,
+        checkpoint=EpisodeCheckpoint(
+            last_evaluated_message_id=10,
+            last_evaluated_timestamp_ms=1700000000000,
+        ),
         message_count=2,
     )
 
     assert [message["message_id"] for message in messages] == [11, 12]
     assert all("is_episode_eligible" not in message for message in messages)
     query, params = client.calls[0][1], client.calls[0][2]
-    assert "LEFT JOIN episode_eligible_messages" in query
+    assert "m.episode_eligible AS is_episode_eligible" in query
+    assert "m.episode_type" in query
+    assert "episode_eligible_messages" not in query
     assert "ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id" in query
-    assert params == ("ada", "project-1", "session-1", 10, 2)
+    assert "m.timestamp_ms > %s" in query
+    assert params == (
+        "ada",
+        "project-1",
+        "session-1",
+        10,
+        1700000000000,
+        1700000000000,
+        1700000000000,
+        1700000000000,
+        10,
+        1700000000000,
+        10,
+        10,
+        2,
+    )
 
 
 @pytest.mark.storage
@@ -384,7 +407,10 @@ async def test_episode_reader_rejects_window_with_ineligible_message():
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
-        after_message_id=10,
+        checkpoint=EpisodeCheckpoint(
+            last_evaluated_message_id=10,
+            last_evaluated_timestamp_ms=1700000000000,
+        ),
         message_count=2,
     )
 

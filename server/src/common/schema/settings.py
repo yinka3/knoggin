@@ -126,7 +126,6 @@ class EpisodeSettings(BaseModel):
     max_sessions_per_run: int = Field(4, ge=1, le=100)
     prior_episode_candidate_count: int = Field(3, ge=1, le=3)
     retrieval_episode_limit: int = Field(5, ge=1)
-    retrieval_source_message_limit: int = Field(5, ge=1)
 
 
 class DLQSettings(BaseModel):

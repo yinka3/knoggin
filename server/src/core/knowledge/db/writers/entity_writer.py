@@ -3,16 +3,17 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.schema.contracts import EpisodeEligibility
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     IDENTITY_SCOPE,
     require_scope_value,
 )
 from common.utils.time_utils import get_now_ms
-from infrastructure.postgres_client import PostgresClient
 from core.knowledge.db.writers.age_projection_writer import (
     AgeProjectionWriter,
 )
+from infrastructure.postgres_client import PostgresClient
 
 
 class EntityWriter:
@@ -213,14 +214,14 @@ class EntityWriter:
         relationships: List[Dict],
         *,
         message_entity_refs: Optional[List[Dict]] = None,
-        eligible_message_ids: Optional[List[int]] = None,
+        eligible_messages: Optional[List[EpisodeEligibility]] = None,
         message_entity_scope: Optional[Dict] = None,
     ):
         # We need a transaction for both Graph and Hybrid tables
         now_ms = self._current_time_ms()
         message_entity_refs = message_entity_refs or []
-        eligible_message_ids = eligible_message_ids or []
-        if (message_entity_refs or eligible_message_ids) and not message_entity_scope:
+        eligible_messages = eligible_messages or []
+        if (message_entity_refs or eligible_messages) and not message_entity_scope:
             raise ValueError("Message-derived writes require a write scope")
 
         async with self.client.transaction() as cur:
@@ -406,10 +407,10 @@ class EntityWriter:
                     message_entity_scope,
                 )
 
-            if eligible_message_ids:
-                await self._write_episode_eligible_messages(
+            if eligible_messages:
+                await self._mark_episode_eligible_messages(
                     cur,
-                    eligible_message_ids,
+                    eligible_messages,
                     message_entity_scope,
                 )
 
@@ -619,10 +620,10 @@ class EntityWriter:
                 (message_id, entity_id),
             )
 
-    async def _write_episode_eligible_messages(
+    async def _mark_episode_eligible_messages(
         self,
         cur,
-        message_ids: List[int],
+        eligible_messages: List[EpisodeEligibility],
         scope: Dict,
     ) -> None:
         user_name = require_scope_value(
@@ -634,9 +635,26 @@ class EntityWriter:
         project_id = self._require_project_id(
             scope.get("project_id"), "episode eligibility write"
         )
-        normalized_message_ids = sorted(
-            {int(message_id) for message_id in message_ids}
-        )
+        eligibility_by_message_id: Dict[int, EpisodeEligibility] = {}
+        for eligibility in eligible_messages:
+            message_id = int(eligibility.message_id)
+            prior = eligibility_by_message_id.get(message_id)
+            if (
+                prior
+                and prior.episode_type
+                and eligibility.episode_type
+                and prior.episode_type != eligibility.episode_type
+            ):
+                raise ValueError(
+                    "Episode eligibility has conflicting types for one message"
+                )
+            eligibility_by_message_id[message_id] = EpisodeEligibility(
+                message_id=message_id,
+                episode_type=eligibility.episode_type or (
+                    prior.episode_type if prior else None
+                ),
+            )
+        normalized_message_ids = sorted(eligibility_by_message_id)
         if any(message_id <= 0 for message_id in normalized_message_ids):
             raise ValueError("Episode-eligible messages require positive IDs")
 
@@ -658,13 +676,24 @@ class EntityWriter:
             raise ValueError("Episode-eligible messages include messages outside scope")
 
         for message_id in normalized_message_ids:
+            eligibility = eligibility_by_message_id[message_id]
             await cur.execute(
                 """
-                INSERT INTO episode_eligible_messages (message_id)
-                VALUES (%s)
-                ON CONFLICT (message_id) DO NOTHING
+                UPDATE messages
+                SET episode_eligible = TRUE,
+                    episode_type = COALESCE(%s, episode_type)
+                WHERE message_id = %s
+                  AND user_name = %s
+                  AND session_id = %s
+                  AND project_id = %s
                 """,
-                (message_id,),
+                (
+                    eligibility.episode_type,
+                    message_id,
+                    user_name,
+                    session_id,
+                    project_id,
+                ),
             )
 
     async def update_entity_profile(

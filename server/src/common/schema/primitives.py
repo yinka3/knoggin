@@ -23,18 +23,6 @@ class Entity(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class EntityRecord(Entity):
-    """DB-stored entity with message source tracking."""
-
-    msg_id: int = Field(
-        ..., description="ID of the source message this entity was extracted from"
-    )
-
-    @classmethod
-    def from_extraction(cls, entity: Entity, msg_id: int, **kwargs) -> "EntityRecord":
-        return cls(**entity.model_dump(), msg_id=msg_id, **kwargs)
-
-
 class Connection(BaseModel):
     """Lightweight connection extracted by the LLM."""
 
@@ -91,6 +79,29 @@ class RelationshipEpisode(BaseModel):
     source_message_count: int = Field(0, ge=0)
 
 
+class EpisodeCheckpoint(BaseModel):
+    """Chronological cursor for episode processing within one session."""
+
+    last_evaluated_message_id: int = Field(0, ge=0)
+    last_evaluated_timestamp_ms: Optional[int] = None
+
+
+class EpisodeVersion(BaseModel):
+    """One bounded snapshot of an episode before consolidation."""
+
+    version: int = Field(..., gt=0)
+    saved_at: datetime
+    summary: str = Field(..., min_length=1)
+    new_developments: List[str] = Field(default_factory=list)
+    updates: List[str] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)
+    importance: float = Field(0.0, ge=0.0, le=1.0)
+    first_message_at: Optional[datetime] = None
+    last_message_at: Optional[datetime] = None
+    source_message_ids: List[int] = Field(..., min_length=1)
+    generator_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class Episode(BaseModel):
     """A complete episodic memory and its source-linked graph context."""
 
@@ -109,9 +120,18 @@ class Episode(BaseModel):
     messages: List[MessageEpisode] = Field(default_factory=list, min_length=1)
     entities: List[EntityEpisode] = Field(default_factory=list)
     relationships: List[RelationshipEpisode] = Field(default_factory=list)
+    version_history: List[EpisodeVersion] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=get_now)
     updated_at: datetime = Field(default_factory=get_now)
     generator_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    def model_copy(self, *, update=None, deep=False):
+        """Copy through validation so domain invariants apply to updates."""
+        data = self.model_dump()
+        data["embedding"] = self.embedding
+        if update:
+            data.update(update)
+        return type(self).model_validate(data)
 
     @field_validator("embedding")
     @classmethod
@@ -121,18 +141,14 @@ class Episode(BaseModel):
         if embedding is None:
             return None
         if len(embedding) != 1024:
-            raise ValueError(
-                "episode embedding must contain exactly 1024 dimensions"
-            )
+            raise ValueError("episode embedding must contain exactly 1024 dimensions")
         if not all(math.isfinite(value) for value in embedding):
             raise ValueError("episode embedding must contain only finite values")
         return embedding
 
     @field_validator("messages")
     @classmethod
-    def validate_messages(
-        cls, messages: List[MessageEpisode]
-    ) -> List[MessageEpisode]:
+    def validate_messages(cls, messages: List[MessageEpisode]) -> List[MessageEpisode]:
         message_ids = [message.message_id for message in messages]
         if len(set(message_ids)) != len(message_ids):
             raise ValueError("messages must not contain duplicate message IDs")
@@ -156,9 +172,13 @@ class Episode(BaseModel):
     def validate_relationships(
         cls, relationships: List[RelationshipEpisode]
     ) -> List[RelationshipEpisode]:
-        relationship_ids = [relationship.relationship_id for relationship in relationships]
+        relationship_ids = [
+            relationship.relationship_id for relationship in relationships
+        ]
         if len(set(relationship_ids)) != len(relationship_ids):
-            raise ValueError("relationships must not contain duplicate relationship IDs")
+            raise ValueError(
+                "relationships must not contain duplicate relationship IDs"
+            )
         return relationships
 
 
@@ -169,3 +189,5 @@ class Message(BaseModel):
     id: int = Field(-1, description="DB-assigned message ID")
     timestamp: datetime = Field(default_factory=get_now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    episode_eligible: bool = False
+    episode_type: Optional[str] = None

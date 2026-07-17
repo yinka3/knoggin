@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -520,7 +521,7 @@ class CommunityManager:
         "objective": "what the discussion should achieve",
         "discussion_type": "brainstorm|debate|investigation|synthesis",
         "reasoning": "why this topic is valuable right now",
-        "agent_ids": ["listed-agent-id"]
+        "agent_ids": {json.dumps(list(agent_ids_by_local))}
     }}
     """
 

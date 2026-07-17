@@ -428,6 +428,19 @@ async def test_extract_mentions_resolves_local_llm_msg_id_to_real_message_id():
         llm_ner=True,
     )
 
+    result = await extract(
+        processor,
+        messages=messages,
+        trace=ExtractionTrace(),
+        issues=[],
+    )
+
+    assert result == [(99, "Linear", "tool", "Tools")]
+    assert "[MSG m1]" in llm.calls[0]["user"]
+    assert "[MSG m2]" in llm.calls[0]["user"]
+    assert "[MSG 41]" not in llm.calls[0]["user"]
+    assert "[MSG 99]" not in llm.calls[0]["user"]
+
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
@@ -446,14 +459,6 @@ def test_ner_result_requires_a_local_message_reference():
                 ]
             }
         )
-
-    result = await extract(processor, messages=messages, trace=ExtractionTrace(), issues=[])
-
-    assert result == [(99, "Linear", "tool", "Tools")]
-    assert "[MSG m1]" in llm.calls[0]["user"]
-    assert "[MSG m2]" in llm.calls[0]["user"]
-    assert "[MSG 41]" not in llm.calls[0]["user"]
-    assert "[MSG 99]" not in llm.calls[0]["user"]
 
 
 @pytest.mark.ingestion

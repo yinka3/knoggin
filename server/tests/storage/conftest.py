@@ -58,7 +58,6 @@ async def _reset_storage_db(client: PostgresClient):
             entity_merge_proposals,
             relationship_evidence_refs,
             message_entity_refs,
-            episode_eligible_messages,
             relationships,
             hierarchy_edges,
             entity_aliases,

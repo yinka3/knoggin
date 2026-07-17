@@ -1,9 +1,15 @@
 import os
 
+import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 from infrastructure import postgres_client as postgres_client_module
-from infrastructure.postgres_client import PostgresClient
+from infrastructure.postgres_client import (
+    PostgresClient,
+    _AgtypeLoader,
+    _configure_async_conn,
+)
 
 DB_URL = os.environ.get(
     "KNOGGIN_TEST_DATABASE_URL",
@@ -132,6 +138,59 @@ def test_build_cypher_wraps_query_with_graph_and_return_types():
     assert "cypher('test_graph'" in query
     assert "MATCH (n) RETURN n.id" in query
     assert "AS (id agtype)" in query
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_agtype_loader_decodes_age_json_values():
+    loader = _AgtypeLoader(0)
+
+    assert loader.load(b"true") is True
+    assert loader.load(b"false") is False
+    assert loader.load(b'[1, "two"]') == [1, "two"]
+    assert loader.load(b'{"answer": 42}') == {"answer": 42}
+    assert loader.load(b'{"id": 1}::vertex') == {"id": 1}
+    assert loader.load(b"unsupported::custom") == "unsupported::custom"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_age_connection_configuration_registers_the_agtype_loader():
+    conn = await psycopg.AsyncConnection.connect(DB_URL, row_factory=dict_row)
+    try:
+        await _configure_async_conn(conn)
+        cursor = await conn.execute("SELECT 'false'::agtype AS value;")
+        assert (await cursor.fetchone()) == {"value": False}
+    finally:
+        await conn.close()
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_postgres_client_decodes_real_age_agtype_values(real_postgres_client):
+    row = await real_postgres_client.fetch_one(
+        real_postgres_client.build_cypher(
+            """
+            RETURN true AS truth,
+                   false AS falsity,
+                   [1, 'two'] AS values,
+                   {answer: 42} AS mapping
+            """,
+            "truth agtype, falsity agtype, values agtype, mapping agtype",
+        ),
+        ("{}",),
+    )
+
+    assert row == {
+        "truth": True,
+        "falsity": False,
+        "values": [1, "two"],
+        "mapping": {"answer": 42},
+    }
 
 
 @pytest.mark.storage

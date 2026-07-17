@@ -440,7 +440,7 @@ class IngestionWorker:
         messages: List[Dict],
         result: BatchResult,
     ) -> tuple[bool, bool]:
-        if not result.has_graph_writes():
+        if not result.has_graph_mutations():
             return True, False
 
         try:

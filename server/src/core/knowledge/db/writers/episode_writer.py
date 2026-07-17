@@ -2,7 +2,12 @@ import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
-from common.schema.primitives import Episode, EntityEpisode, RelationshipEpisode
+from common.schema.primitives import (
+    EntityEpisode,
+    Episode,
+    EpisodeCheckpoint,
+    RelationshipEpisode,
+)
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from infrastructure.postgres_client import PostgresClient
 
@@ -57,9 +62,7 @@ class EpisodeWriter:
         means a retry found that this window had already been checkpointed.
         """
 
-        user_name = require_scope_value(
-            user_name, "user_name", "write_episode_window"
-        )
+        user_name = require_scope_value(user_name, "user_name", "write_episode_window")
         project_id = require_scope_value(
             project_id, "project_id", "write_episode_window"
         )
@@ -78,9 +81,7 @@ class EpisodeWriter:
         ):
             raise ValueError("Episode scope must match its checkpoint scope")
         if episode:
-            episode_message_ids = {
-                message.message_id for message in episode.messages
-            }
+            episode_message_ids = {message.message_id for message in episode.messages}
             if not set(normalized_window_ids).issubset(episode_message_ids):
                 raise ValueError(
                     "Episode must include every message in its checkpoint window"
@@ -93,9 +94,16 @@ class EpisodeWriter:
                 project_id=project_id,
                 session_id=session_id,
             )
-            if max(normalized_window_ids) <= checkpoint:
+            if await self._window_is_checkpointed(
+                cur,
+                normalized_window_ids,
+                checkpoint=checkpoint,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+            ):
                 return False
-            await self._validate_next_eligible_window(
+            next_checkpoint = await self._validate_next_eligible_window(
                 cur,
                 normalized_window_ids,
                 checkpoint=checkpoint,
@@ -123,62 +131,19 @@ class EpisodeWriter:
                 """
                 UPDATE episode_processing_checkpoints
                 SET last_evaluated_message_id = %s,
+                    last_evaluated_timestamp_ms = %s,
                     updated_at = NOW()
                 WHERE project_id = %s
                   AND session_id = %s
                 """,
-                (max(normalized_window_ids), project_id, session_id),
-            )
-        return True
-
-    async def advance_checkpoint(
-        self,
-        last_evaluated_message_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> int:
-        """Advance one conversation checkpoint without allowing it to regress."""
-
-        if last_evaluated_message_id < 0:
-            raise ValueError("Episode checkpoint message ID must not be negative")
-        user_name = require_scope_value(
-            user_name, "user_name", "advance_episode_checkpoint"
-        )
-        project_id = require_scope_value(
-            project_id, "project_id", "advance_episode_checkpoint"
-        )
-        session_id = require_scope_value(
-            session_id, "session_id", "advance_episode_checkpoint"
-        )
-        async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                INSERT INTO episode_processing_checkpoints (
+                (
+                    next_checkpoint.last_evaluated_message_id,
+                    next_checkpoint.last_evaluated_timestamp_ms,
                     project_id,
                     session_id,
-                    last_evaluated_message_id
-                )
-                SELECT s.project_id, s.session_id, %s
-                FROM sessions s
-                WHERE s.user_name = %s
-                  AND s.project_id = %s
-                  AND s.session_id = %s
-                ON CONFLICT (project_id, session_id) DO UPDATE
-                SET last_evaluated_message_id = GREATEST(
-                        episode_processing_checkpoints.last_evaluated_message_id,
-                        EXCLUDED.last_evaluated_message_id
-                    ),
-                    updated_at = NOW()
-                RETURNING last_evaluated_message_id
-                """,
-                (last_evaluated_message_id, user_name, project_id, session_id),
+                ),
             )
-            row = await cur.fetchone()
-        if row is None:
-            raise ValueError("Episode checkpoint requires an existing session")
-        return int(row["last_evaluated_message_id"])
+        return True
 
     async def _write_episode(
         self,
@@ -232,7 +197,7 @@ class EpisodeWriter:
         user_name: str,
         project_id: str,
         session_id: str,
-    ) -> int:
+    ) -> EpisodeCheckpoint:
         await cur.execute(
             """
             SELECT session_id
@@ -256,7 +221,7 @@ class EpisodeWriter:
         )
         await cur.execute(
             """
-            SELECT last_evaluated_message_id
+            SELECT last_evaluated_message_id, last_evaluated_timestamp_ms
             FROM episode_processing_checkpoints
             WHERE project_id = %s
               AND session_id = %s
@@ -267,54 +232,144 @@ class EpisodeWriter:
         row = await cur.fetchone()
         if row is None:
             raise RuntimeError("Episode checkpoint could not be locked")
-        return int(row["last_evaluated_message_id"])
+        return EpisodeCheckpoint(
+            last_evaluated_message_id=int(row["last_evaluated_message_id"]),
+            last_evaluated_timestamp_ms=row["last_evaluated_timestamp_ms"],
+        )
+
+    @staticmethod
+    async def _window_is_checkpointed(
+        cur,
+        window_message_ids: List[int],
+        *,
+        checkpoint: EpisodeCheckpoint,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> bool:
+        """Recognize an exact retry without treating a lower ID as stale."""
+
+        if (
+            checkpoint.last_evaluated_message_id == 0
+            and checkpoint.last_evaluated_timestamp_ms is None
+        ):
+            return False
+        await cur.execute(
+            """
+            SELECT message_id, timestamp_ms
+            FROM messages
+            WHERE message_id = ANY(%s)
+              AND user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+            """,
+            (window_message_ids, user_name, project_id, session_id),
+        )
+        rows = await cur.fetchall()
+        if {int(row["message_id"]) for row in rows} != set(window_message_ids):
+            return False
+        return all(
+            EpisodeWriter._message_at_or_before_checkpoint(row, checkpoint)
+            for row in rows
+        )
+
+    @staticmethod
+    def _message_at_or_before_checkpoint(
+        message: Dict, checkpoint: EpisodeCheckpoint
+    ) -> bool:
+        """Compare message and cursor using the SQL NULLS LAST order."""
+
+        timestamp_ms = message["timestamp_ms"]
+        if checkpoint.last_evaluated_timestamp_ms is None:
+            return timestamp_ms is None and int(message["message_id"]) <= (
+                checkpoint.last_evaluated_message_id
+            )
+        if timestamp_ms is None:
+            return False
+        if int(timestamp_ms) != checkpoint.last_evaluated_timestamp_ms:
+            return int(timestamp_ms) < checkpoint.last_evaluated_timestamp_ms
+        return int(message["message_id"]) <= checkpoint.last_evaluated_message_id
 
     @staticmethod
     async def _validate_next_eligible_window(
         cur,
         window_message_ids: List[int],
         *,
-        checkpoint: int,
+        checkpoint: EpisodeCheckpoint,
         user_name: str,
         project_id: str,
         session_id: str,
-    ) -> None:
+    ) -> EpisodeCheckpoint:
         await cur.execute(
             """
-            SELECT message_id
+            SELECT message_id, timestamp_ms
             FROM messages
             WHERE user_name = %s
               AND project_id = %s
               AND session_id = %s
-              AND message_id > %s
+              AND (
+                    (%s = 0 AND %s::BIGINT IS NULL)
+                 OR (
+                        %s::BIGINT IS NOT NULL
+                    AND (
+                           timestamp_ms > %s
+                        OR (timestamp_ms = %s AND message_id > %s)
+                        OR timestamp_ms IS NULL
+                    )
+                 )
+                 OR (
+                        %s::BIGINT IS NULL
+                    AND %s > 0
+                    AND timestamp_ms IS NULL
+                    AND message_id > %s
+                 )
+              )
             ORDER BY timestamp_ms ASC NULLS LAST, message_id
             LIMIT %s
             """,
-            (user_name, project_id, session_id, checkpoint, len(window_message_ids)),
+            (
+                user_name,
+                project_id,
+                session_id,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_message_id,
+                len(window_message_ids),
+            ),
         )
-        next_message_ids = [
-            int(row["message_id"]) for row in await cur.fetchall()
-        ]
+        next_messages = await cur.fetchall()
+        next_message_ids = [int(row["message_id"]) for row in next_messages]
         if next_message_ids != window_message_ids:
-            raise ValueError("Episode window is not the next chronological message range")
+            raise ValueError(
+                "Episode window is not the next chronological message range"
+            )
 
         await cur.execute(
             """
             SELECT m.message_id
             FROM messages m
-            JOIN episode_eligible_messages elm ON elm.message_id = m.message_id
             WHERE m.message_id = ANY(%s)
               AND m.user_name = %s
               AND m.project_id = %s
               AND m.session_id = %s
+              AND m.episode_eligible = TRUE
             """,
             (window_message_ids, user_name, project_id, session_id),
         )
-        eligible_message_ids = {
-            int(row["message_id"]) for row in await cur.fetchall()
-        }
+        eligible_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
         if eligible_message_ids != set(window_message_ids):
             raise ValueError("Episode window includes messages that are not eligible")
+        final_message = next_messages[-1]
+        return EpisodeCheckpoint(
+            last_evaluated_message_id=int(final_message["message_id"]),
+            last_evaluated_timestamp_ms=final_message["timestamp_ms"],
+        )
 
     @staticmethod
     async def _validate_source_messages(
@@ -439,6 +494,14 @@ class EpisodeWriter:
             if timestamps
             else None
         )
+        version_history = [
+            version.model_dump(mode="json") for version in episode.version_history
+        ]
+        if episode.generator_metadata.get("effective_action") == "consolidate":
+            version_history = await EpisodeWriter._snapshot_before_consolidation(
+                cur,
+                episode,
+            )
         await cur.execute(
             """
             INSERT INTO episodes (
@@ -455,12 +518,13 @@ class EpisodeWriter:
                 last_message_at,
                 embedding,
                 generator_metadata,
+                version_history,
                 created_at,
                 updated_at
             )
             VALUES (
                 %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                %s, %s, %s, %s, %s::vector, %s::jsonb, %s, %s
+                %s, %s, %s, %s, %s::vector, %s::jsonb, %s::jsonb, %s, %s
             )
             ON CONFLICT (episode_id) DO UPDATE
             SET summary = EXCLUDED.summary,
@@ -473,6 +537,12 @@ class EpisodeWriter:
                 last_message_at = EXCLUDED.last_message_at,
                 embedding = EXCLUDED.embedding,
                 generator_metadata = EXCLUDED.generator_metadata,
+                version_history = CASE
+                    WHEN EXCLUDED.generator_metadata->>'effective_action'
+                        = 'consolidate'
+                    THEN EXCLUDED.version_history
+                    ELSE episodes.version_history
+                END,
                 updated_at = EXCLUDED.updated_at
             WHERE episodes.project_id = EXCLUDED.project_id
               AND episodes.session_id = EXCLUDED.session_id
@@ -490,14 +560,117 @@ class EpisodeWriter:
                 len(source_message_timestamps),
                 first_message_at,
                 last_message_at,
-                json.dumps(episode.embedding) if episode.embedding is not None else None,
+                (
+                    json.dumps(episode.embedding)
+                    if episode.embedding is not None
+                    else None
+                ),
                 json.dumps(episode.generator_metadata),
+                json.dumps(version_history),
                 episode.created_at,
                 episode.updated_at,
             ),
         )
         if await cur.fetchone() is None:
             raise ValueError("Episode ID belongs to a different episode scope")
+
+    @staticmethod
+    async def _snapshot_before_consolidation(cur, episode: Episode) -> List[Dict]:
+        """Keep at most two prior summaries before replacing one episode."""
+
+        await cur.execute(
+            """
+            SELECT
+                summary,
+                new_developments,
+                updates,
+                unresolved,
+                importance,
+                first_message_at,
+                last_message_at,
+                generator_metadata,
+                version_history
+            FROM episodes
+            WHERE episode_id = %s
+              AND project_id = %s
+              AND session_id = %s
+            FOR UPDATE
+            """,
+            (episode.episode_id, episode.project_id, episode.session_id),
+        )
+        existing = await cur.fetchone()
+        if existing is None:
+            return [
+                version.model_dump(mode="json") for version in episode.version_history
+            ]
+
+        await cur.execute(
+            """
+            SELECT message_id
+            FROM episode_messages
+            WHERE episode_id = %s
+            ORDER BY message_position
+            """,
+            (episode.episode_id,),
+        )
+        source_message_ids = [int(row["message_id"]) for row in await cur.fetchall()]
+        if not source_message_ids:
+            source_message_ids = [
+                message.message_id
+                for message in sorted(
+                    episode.messages,
+                    key=lambda message: message.message_position,
+                )
+            ]
+
+        history = EpisodeWriter._json_list(existing.get("version_history"))
+        next_version = (
+            max(
+                (int(item.get("version") or 0) for item in history),
+                default=0,
+            )
+            + 1
+        )
+        history.append(
+            {
+                "version": next_version,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "summary": str(existing["summary"]),
+                "new_developments": EpisodeWriter._json_list(
+                    existing.get("new_developments")
+                ),
+                "updates": EpisodeWriter._json_list(existing.get("updates")),
+                "unresolved": EpisodeWriter._json_list(existing.get("unresolved")),
+                "importance": float(existing["importance"]),
+                "first_message_at": EpisodeWriter._isoformat(
+                    existing.get("first_message_at")
+                ),
+                "last_message_at": EpisodeWriter._isoformat(
+                    existing.get("last_message_at")
+                ),
+                "source_message_ids": source_message_ids,
+                "generator_metadata": EpisodeWriter._json_dict(
+                    existing.get("generator_metadata")
+                ),
+            }
+        )
+        return history[-2:]
+
+    @staticmethod
+    def _json_list(value) -> List:
+        if isinstance(value, str):
+            value = json.loads(value)
+        return list(value or [])
+
+    @staticmethod
+    def _json_dict(value) -> Dict:
+        if isinstance(value, str):
+            value = json.loads(value)
+        return dict(value or {})
+
+    @staticmethod
+    def _isoformat(value):
+        return value.isoformat() if hasattr(value, "isoformat") else value
 
     @staticmethod
     async def _upsert_messages(cur, episode: Episode) -> None:
@@ -616,8 +789,9 @@ class EpisodeWriter:
         for relationship_id in sorted(relationship_ids):
             source_message_ids = [
                 message_id
-                for message_id, message_relationships
-                in relationships_by_message.items()
+                for message_id, message_relationships in (
+                    relationships_by_message.items()
+                )
                 if relationship_id in message_relationships
             ]
             baseline_prominence = sum(

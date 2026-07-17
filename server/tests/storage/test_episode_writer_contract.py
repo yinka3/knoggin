@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -142,6 +143,55 @@ async def test_episode_writer_persists_an_episode_embedding():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_episode_writer_snapshots_before_consolidation_and_keeps_two_versions():
+    now = datetime.now(timezone.utc)
+    prior_versions = [
+        {
+            "version": version,
+            "saved_at": now.isoformat(),
+            "summary": f"Version {version}",
+            "new_developments": [],
+            "updates": [],
+            "unresolved": [],
+            "importance": 0.5,
+            "source_message_ids": [version],
+            "generator_metadata": {},
+        }
+        for version in (1, 2)
+    ]
+    client = RecordingPostgresClient(
+        fetch_one_results=[
+            {
+                "summary": "Previous summary.",
+                "new_developments": '["Previous development"]',
+                "updates": '["Previous update"]',
+                "unresolved": "[]",
+                "importance": 0.7,
+                "first_message_at": now,
+                "last_message_at": now,
+                "generator_metadata": '{"effective_action": "create"}',
+                "version_history": json.dumps(prior_versions),
+            }
+        ],
+        fetch_all_results=[[{"message_id": 11}, {"message_id": 12}]],
+    )
+
+    async with client.transaction() as cur:
+        history = await EpisodeWriter._snapshot_before_consolidation(
+            cur,
+            make_episode(
+                generator_metadata={"effective_action": "consolidate"},
+            ),
+        )
+
+    assert len(history) == 2
+    assert [item["version"] for item in history] == [2, 3]
+    assert history[-1]["summary"] == "Previous summary."
+    assert history[-1]["source_message_ids"] == [11, 12]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_episode_writer_rejects_ranked_context_outside_source_messages():
     client = RecordingPostgresClient(
         fetch_all_results=[
@@ -164,21 +214,41 @@ async def test_episode_writer_rejects_ranked_context_outside_source_messages():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_episode_writer_advances_checkpoint_without_regression():
+async def test_episode_writer_advances_chronological_checkpoint_for_skip_window():
     client = RecordingPostgresClient(
-        fetch_one_results=[{"last_evaluated_message_id": 12}]
+        fetch_one_results=[
+            {"session_id": "session-1"},
+            {
+                "last_evaluated_message_id": 0,
+                "last_evaluated_timestamp_ms": None,
+            },
+        ],
+        fetch_all_results=[
+            [
+                {"message_id": 102, "timestamp_ms": 1000},
+                {"message_id": 103, "timestamp_ms": 2000},
+            ],
+            [
+                {"message_id": 102, "timestamp_ms": 1000},
+                {"message_id": 103, "timestamp_ms": 2000},
+            ],
+            [{"message_id": 102}, {"message_id": 103}],
+        ],
     )
     writer = EpisodeWriter(client)
 
-    checkpoint = await writer.advance_checkpoint(
-        11,
+    written = await writer.write_episode_window(
+        None,
+        [102, 103],
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
     )
 
-    assert checkpoint == 12
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "ON CONFLICT (project_id, session_id) DO UPDATE" in query
-    assert "GREATEST(" in query
-    assert params == (11, "ada", "project-1", "session-1")
+    assert written is True
+    update_call = next(
+        call
+        for call in client.calls
+        if "UPDATE episode_processing_checkpoints" in call[1]
+    )
+    assert update_call[2] == (103, 2000, "project-1", "session-1")

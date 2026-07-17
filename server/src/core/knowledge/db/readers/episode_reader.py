@@ -5,6 +5,8 @@ from typing import Dict, List
 from common.schema.primitives import (
     EntityEpisode,
     Episode,
+    EpisodeCheckpoint,
+    EpisodeVersion,
     MessageEpisode,
     RelationshipEpisode,
 )
@@ -82,15 +84,11 @@ class EpisodeReader:
     ) -> List[Episode]:
         """Return prior episodes ranked by overlap with a source entity set."""
 
-        normalized_entity_ids = sorted(
-            {int(entity_id) for entity_id in entity_ids}
-        )
+        normalized_entity_ids = sorted({int(entity_id) for entity_id in entity_ids})
         if not normalized_entity_ids or limit <= 0:
             return []
         if any(entity_id <= 0 for entity_id in normalized_entity_ids):
-            raise ValueError(
-                "get_episodes_for_entities requires positive entity IDs"
-            )
+            raise ValueError("get_episodes_for_entities requires positive entity IDs")
         scope = self._require_scope(
             user_name,
             project_id,
@@ -112,6 +110,7 @@ class EpisodeReader:
                 e.first_message_at,
                 e.last_message_at,
                 e.generator_metadata,
+                e.version_history,
                 e.created_at,
                 e.updated_at,
                 COUNT(DISTINCT ee.entity_id) AS entity_overlap
@@ -160,9 +159,7 @@ class EpisodeReader:
             "get_merge_evidence_for_entities",
         )
 
-        evidence_by_entity = {
-            entity_id: [] for entity_id in normalized_entity_ids
-        }
+        evidence_by_entity = {entity_id: [] for entity_id in normalized_entity_ids}
         message_rows = await self.client.fetch_all(
             """
             WITH ranked_messages AS (
@@ -339,6 +336,7 @@ class EpisodeReader:
                 e.first_message_at,
                 e.last_message_at,
                 e.generator_metadata,
+                e.version_history,
                 e.created_at,
                 e.updated_at
             FROM episodes e
@@ -399,6 +397,7 @@ class EpisodeReader:
                 e.last_message_at,
                 e.embedding,
                 e.generator_metadata,
+                e.version_history,
                 e.created_at,
                 e.updated_at,
                 1 - (e.embedding <=> %s::vector) AS similarity
@@ -417,8 +416,7 @@ class EpisodeReader:
             (vector, *scope, vector, score_threshold, vector, limit),
         )
         return [
-            (await self._hydrate_episode(row), float(row["similarity"]))
-            for row in rows
+            (await self._hydrate_episode(row), float(row["similarity"])) for row in rows
         ]
 
     async def get_recent_episodes(
@@ -519,24 +517,26 @@ class EpisodeReader:
             "relationships": episode.relationships,
         }
 
-    async def get_last_evaluated_message_id(
+    async def get_episode_checkpoint(
         self,
         *,
         user_name: str,
         project_id: str,
         session_id: str,
-    ) -> int:
-        """Return zero for a valid conversation with no episode checkpoint yet."""
+    ) -> EpisodeCheckpoint:
+        """Return the chronological cursor for a valid conversation."""
 
         scope = self._require_scope(
             user_name,
             project_id,
             session_id,
-            "get_last_evaluated_message_id",
+            "get_episode_checkpoint",
         )
         row = await self.client.fetch_one(
             """
-            SELECT COALESCE(ec.last_evaluated_message_id, 0) AS message_id
+            SELECT
+                COALESCE(ec.last_evaluated_message_id, 0) AS message_id,
+                ec.last_evaluated_timestamp_ms
             FROM sessions s
             LEFT JOIN episode_processing_checkpoints ec
               ON ec.project_id = s.project_id
@@ -549,7 +549,10 @@ class EpisodeReader:
         )
         if row is None:
             raise ValueError("Episode checkpoint requires an existing session")
-        return int(row["message_id"])
+        return EpisodeCheckpoint(
+            last_evaluated_message_id=int(row["message_id"]),
+            last_evaluated_timestamp_ms=row["last_evaluated_timestamp_ms"],
+        )
 
     async def get_next_episode_window(
         self,
@@ -557,13 +560,11 @@ class EpisodeReader:
         user_name: str,
         project_id: str,
         session_id: str,
-        after_message_id: int,
+        checkpoint: EpisodeCheckpoint,
         message_count: int,
     ) -> List[Dict]:
         """Load the next fully ingested window in chronological message order."""
 
-        if after_message_id < 0:
-            raise ValueError("after_message_id must not be negative")
         if message_count <= 0:
             raise ValueError("message_count must be positive")
         scope = self._require_scope(
@@ -579,29 +580,52 @@ class EpisodeReader:
                 m.role,
                 m.content,
                 m.timestamp_ms,
-                (elm.message_id IS NOT NULL) AS is_episode_eligible
+                m.episode_type,
+                m.episode_eligible AS is_episode_eligible
             FROM messages m
-            LEFT JOIN episode_eligible_messages elm
-              ON elm.message_id = m.message_id
             WHERE m.user_name = %s
               AND m.project_id = %s
               AND m.session_id = %s
-              AND m.message_id > %s
+              AND (
+                    (%s = 0 AND %s::BIGINT IS NULL)
+                 OR (
+                        %s::BIGINT IS NOT NULL
+                    AND (
+                           m.timestamp_ms > %s
+                        OR (m.timestamp_ms = %s AND m.message_id > %s)
+                        OR m.timestamp_ms IS NULL
+                    )
+                 )
+                 OR (
+                        %s::BIGINT IS NULL
+                    AND %s > 0
+                    AND m.timestamp_ms IS NULL
+                    AND m.message_id > %s
+                 )
+              )
             ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id
             LIMIT %s
             """,
-            (*scope, after_message_id, message_count),
+            (
+                *scope,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_message_id,
+                message_count,
+            ),
         )
         if len(rows) < message_count or any(
             not row["is_episode_eligible"] for row in rows
         ):
             return []
         return [
-            {
-                key: value
-                for key, value in row.items()
-                if key != "is_episode_eligible"
-            }
+            {key: value for key, value in row.items() if key != "is_episode_eligible"}
             for row in rows
         ]
 
@@ -615,9 +639,7 @@ class EpisodeReader:
     ) -> Dict[int, List[str]]:
         """Return canonical relationship evidence attached to source messages."""
 
-        normalized_message_ids = sorted(
-            {int(message_id) for message_id in message_ids}
-        )
+        normalized_message_ids = sorted({int(message_id) for message_id in message_ids})
         if not normalized_message_ids:
             return {}
         if any(message_id <= 0 for message_id in normalized_message_ids):
@@ -823,6 +845,7 @@ class EpisodeReader:
             e.last_message_at,
             e.embedding,
             e.generator_metadata,
+            e.version_history,
             e.created_at,
             e.updated_at
         FROM episodes e
@@ -861,6 +884,7 @@ class EpisodeReader:
             messages=messages,
             entities=entities,
             relationships=relationships,
+            version_history=self._episode_version_list(row.get("version_history")),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             generator_metadata=self._json_dict(row.get("generator_metadata")),
@@ -958,6 +982,13 @@ class EpisodeReader:
         if isinstance(value, str):
             value = json.loads(value)
         return dict(value or {})
+
+    @staticmethod
+    def _episode_version_list(value) -> List[EpisodeVersion]:
+        return [
+            EpisodeVersion.model_validate(item)
+            for item in EpisodeReader._json_list(value)
+        ]
 
     @staticmethod
     def _vector_list(value) -> List[float] | None:

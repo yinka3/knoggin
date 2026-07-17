@@ -63,7 +63,8 @@ The first implementation does not need the following:
 
 - Fact records, fact IDs, or a `FactRecord` compatibility layer.
 - Per-fact contradiction classification, invalidation, or audit rows.
-- Version history for episode summaries.
+- Unbounded version history for episode summaries. Keep at most two prior
+  snapshots when consolidation replaces the current summary.
 - An LLM that creates entities or relationships during episode
   generation.
 - A separate permanent "current truth" profile for every entity.
@@ -128,8 +129,9 @@ new one. The target episode gains the new source messages and graph
 context, and its structured summary and influence scores are regenerated
 against the complete source set.
 
-There is no episode-summary version history in this design. The raw
-messages remain the audit trail.
+Episodes keep at most two previous summary snapshots when consolidation
+replaces the current summary. The raw messages remain the primary audit
+trail, and the bounded snapshots show what consolidation replaced.
 
 ## 5. Required Invariants
 
@@ -183,12 +185,14 @@ One row per active episodic memory.
 | `created_at` | Episode creation time. |
 | `updated_at` | Last consolidation/regeneration time. |
 | `embedding` | Vector embedding of the current episode summary for semantic retrieval, if the database supports vector search. |
-| `generator_metadata` | Optional model/prompt/schema version and job metadata for operations. This is not summary versioning. |
+| `generator_metadata` | Optional model/prompt/schema version and job metadata for operations. |
+| `version_history` | JSONB array containing at most two prior summary snapshots and their source message IDs. |
 
 `summary`, `new_developments`, `updates`, and `unresolved` are replaced
-in place on consolidation. Do not add `previous_summary`, an episode
-revision table, or a Fact-style change audit unless a future product
-need specifically requires history.
+in place on consolidation. Before replacement, append the current
+summary fields and source message IDs to `version_history`, then retain
+only the two most recent snapshots. Do not add an episode revision table
+or a Fact-style change audit.
 
 ### 6.2 `episode_messages`
 
@@ -433,17 +437,18 @@ For `create` or `consolidate`, perform one database transaction that:
 For `skip`, only advance the checkpoint after recording enough job-level
 diagnostic data to explain why no write occurred.
 
-### 9.4 No versioning, with operational observability
+### 9.4 Bounded versioning, with operational observability
 
-No historical episode summary needs to be stored. Keep only current
-episode content plus `created_at`, `updated_at`, generator metadata, and
-standard job logs/errors. If a summary needs investigation, inspect its
-current source messages and rerun generation.
+Keep current episode content plus at most two previous snapshots in
+`version_history`, alongside `created_at`, `updated_at`, generator
+metadata, and standard job logs/errors. Each snapshot includes its
+summary fields and source message IDs so an audit view can show what the
+previous summary was based on.
 
-This is deliberately different from fact auditing. The system is not
-trying to prove that a sequence of atomic claims was valid over time.
+This remains deliberately different from fact auditing. The system is
+not trying to prove that a sequence of atomic claims was valid over time.
 It is maintaining a current useful synopsis of a traceable conversation
-segment.
+segment, with only a small amount of consolidation history for review.
 
 ### 9.5 Bounded episode growth
 
@@ -796,8 +801,8 @@ memory or simply moving raw conversation into another table.
 1. No Fact layer remains in the final architecture.
 2. No fact-resolution or contradiction-invalidation subsystem is
    recreated under another name.
-3. No episode version history is required. Raw messages are the
-   canonical inspectable record.
+3. Episode history is bounded to at most two prior snapshots. Raw
+   messages remain the canonical inspectable record.
 4. An episode includes all messages, entities, and relationships from
    its chunk or consolidated source set.
 5. Every observed entity is reverse-linked to the episode.

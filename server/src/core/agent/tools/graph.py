@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from common.utils.events import emit
 
 if TYPE_CHECKING:
-    from infrastructure.knowledge_store import KnowledgeStore
     from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.services.embedding_service import EmbeddingService
+    from infrastructure.knowledge_store import KnowledgeStore
 
 class GraphTools:
     # Attributes provided by the composed Tools class
@@ -363,7 +363,7 @@ class GraphTools:
         similarity_by_episode: Optional[Dict[str, float]] = None,
         metrics: Optional[Dict[str, int | float]] = None,
     ) -> List[Dict]:
-        """Expose bounded summaries with influence-ranked source evidence."""
+        """Expose complete episodes with influence-ranked source evidence."""
 
         serialized = []
         expansion_latency_ms = 0.0
@@ -383,7 +383,7 @@ class GraphTools:
                 (self._as_message_evidence(source) for source in sources),
                 key=lambda source: float(source.get("influence_weight", 0.0)),
                 reverse=True,
-            )[: self._episode_source_message_limit()]
+            )
             returned_evidence_count += len(evidence)
             serialized_episode = {
                 "episode_id": episode.episode_id,
@@ -433,6 +433,10 @@ class GraphTools:
                         "source_message_count": relationship.source_message_count,
                     }
                     for relationship in episode.relationships
+                ],
+                "version_history": [
+                    version.model_dump(mode="json")
+                    for version in episode.version_history
                 ],
                 "evidence": evidence,
             }
@@ -498,9 +502,6 @@ class GraphTools:
 
     def _episode_retrieval_limit(self) -> int:
         return int(getattr(self, "episode_retrieval_limit", 5))
-
-    def _episode_source_message_limit(self) -> int:
-        return int(getattr(self, "episode_source_message_limit", 5))
 
     @staticmethod
     def _as_message_evidence(source: Dict) -> Dict:
@@ -689,7 +690,9 @@ class GraphTools:
 
         return [result]
 
-    async def get_hot_topic_context(self, hot_topics: List[str]) -> Dict[str, Dict]:
+    async def get_hot_topic_context(
+        self, hot_topics: List[str], *, slim: bool = False
+    ) -> Dict[str, Dict]:
         """
         Retrieve pre-cached context for frequently accessed topics.
         Called automatically at start — you already have this data in hot_topic_context.
@@ -703,11 +706,21 @@ class GraphTools:
             return {}
 
         # Fetch context
-        raw = await self.knowledge_store.get_hot_topic_context_with_messages(
-            hot_topics,
-            msg_limit=10,
-            visible_project_ids=self.readable_project_ids,
-        )
+        try:
+            raw = await self.knowledge_store.get_hot_topic_context_with_messages(
+                hot_topics,
+                msg_limit=10,
+                slim=slim,
+                visible_project_ids=self.readable_project_ids,
+            )
+        except TypeError as exc:
+            if "slim" not in str(exc):
+                raise
+            raw = await self.knowledge_store.get_hot_topic_context_with_messages(
+                hot_topics,
+                msg_limit=10,
+                visible_project_ids=self.readable_project_ids,
+            )
         for _, data in raw.items():
             message_refs = data.get("message_refs", data.get("message_ids", []))
             data["messages"] = await self._hydrate_evidence(message_refs)

@@ -123,6 +123,8 @@ CREATE TABLE IF NOT EXISTS public.messages (
     user_msg_id BIGINT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     timestamp_ms BIGINT,
+    episode_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+    episode_type TEXT,
     PRIMARY KEY (user_name, session_id, message_id)
 );
 
@@ -169,11 +171,6 @@ CREATE TABLE IF NOT EXISTS public.message_entity_refs (
 
 CREATE INDEX IF NOT EXISTS message_entity_refs_entity_idx
 ON public.message_entity_refs(entity_id, message_id);
-
-CREATE TABLE IF NOT EXISTS public.episode_eligible_messages (
-    message_id BIGINT PRIMARY KEY REFERENCES public.messages(message_id)
-        ON DELETE CASCADE
-);
 
 CREATE TABLE IF NOT EXISTS public.relationships (
     relationship_id TEXT PRIMARY KEY,
@@ -231,6 +228,7 @@ CREATE TABLE IF NOT EXISTS public.episodes (
     last_message_at TIMESTAMPTZ,
     embedding vector(1024),
     generator_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    version_history JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -245,7 +243,8 @@ ALTER TABLE public.episodes
 ADD COLUMN IF NOT EXISTS source_message_count INTEGER NOT NULL DEFAULT 0
     CHECK (source_message_count >= 0),
 ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;
+ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS version_history JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE INDEX IF NOT EXISTS episodes_session_updated_idx
 ON public.episodes(project_id, session_id, updated_at DESC);
@@ -323,9 +322,13 @@ CREATE TABLE IF NOT EXISTS public.episode_processing_checkpoints (
         ON DELETE CASCADE,
     last_evaluated_message_id BIGINT NOT NULL DEFAULT 0
         CHECK (last_evaluated_message_id >= 0),
+    last_evaluated_timestamp_ms BIGINT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (project_id, session_id)
 );
+
+ALTER TABLE public.episode_processing_checkpoints
+ADD COLUMN IF NOT EXISTS last_evaluated_timestamp_ms BIGINT;
 
 CREATE TABLE IF NOT EXISTS public.hierarchy_edges (
     project_id TEXT NOT NULL,

@@ -120,6 +120,7 @@ class Orchestrator:
                 try:
                     hot_topic_context = await tools.get_hot_topic_context(
                         effective_hot_topics,
+                        slim=True,
                     )
                 except Exception as exc:
                     logger.warning(f"Failed to preload hot topic context: {exc}")
@@ -140,8 +141,10 @@ class Orchestrator:
                 agent_persona=identity["persona"],
                 history=conversation_history or [],
                 maintenance_candidates=maintenance_candidates,
-                use_local_references=(
-                    config.developer_settings.local_references.enabled
+                use_local_references=getattr(
+                    getattr(config.developer_settings, "local_references", None),
+                    "enabled",
+                    True,
                 ),
             )
 

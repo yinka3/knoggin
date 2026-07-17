@@ -1,10 +1,10 @@
+from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from common.schema.contracts import CandidateSuggestion, EngineScope
-from common.schema.primitives import Episode
-from common.scoping import require_scope_value
+from common.schema.contracts import CandidateSuggestion, EngineScope, EpisodeEligibility
+from common.schema.primitives import Episode, EpisodeCheckpoint
 from core.community.community_store import CommunityStore
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
@@ -95,14 +95,14 @@ class KnowledgeStore:
         relationships: List[Dict],
         *,
         message_entity_refs: Optional[List[Dict]] = None,
-        eligible_message_ids: Optional[List[int]] = None,
+        eligible_messages: Optional[List[EpisodeEligibility]] = None,
         scope: Optional[EngineScope] = None,
     ) -> bool:
         return await self._entity_writer.write_batch(
             entities,
             relationships,
             message_entity_refs=message_entity_refs,
-            eligible_message_ids=eligible_message_ids,
+            eligible_messages=eligible_messages,
             message_entity_scope=scope.model_dump() if scope else None,
         )
 
@@ -126,29 +126,14 @@ class KnowledgeStore:
             session_id=session_id,
         )
 
-    async def advance_episode_checkpoint(
-        self,
-        last_evaluated_message_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> int:
-        return await self._episode_writer.advance_checkpoint(
-            last_evaluated_message_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def get_last_evaluated_episode_message_id(
+    async def get_episode_checkpoint(
         self,
         *,
         user_name: str,
         project_id: str,
         session_id: str,
-    ) -> int:
-        return await self._episode_reader.get_last_evaluated_message_id(
+    ) -> EpisodeCheckpoint:
+        return await self._episode_reader.get_episode_checkpoint(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
@@ -160,14 +145,14 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
         session_id: str,
-        after_message_id: int,
+        checkpoint: EpisodeCheckpoint,
         message_count: int,
     ) -> List[Dict]:
         return await self._episode_reader.get_next_episode_window(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
-            after_message_id=after_message_id,
+            checkpoint=checkpoint,
             message_count=message_count,
         )
 

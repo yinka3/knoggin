@@ -13,6 +13,7 @@ class ProjectDeletionWriter:
         "entity_merge_proposals",
         "episode_processing_checkpoints",
         "episodes",
+        "episode_entities",
         "ingestion_candidate_suggestions",
         "agent_tool_audits",
         "document_content",
@@ -22,7 +23,6 @@ class ProjectDeletionWriter:
         "project_document_scan_settings",
         "relationship_evidence_refs",
         "message_entity_refs",
-        "episode_eligible_messages",
         "entity_search",
         "message_search",
         "hierarchy_edges",
@@ -137,12 +137,12 @@ class ProjectDeletionWriter:
                 """,
                 (project_id,),
             )
-        if table == "episode_eligible_messages":
+        if table == "episode_entities":
             return (
                 """
-                DELETE FROM public.episode_eligible_messages
-                WHERE message_id IN (
-                    SELECT message_id FROM public.messages
+                DELETE FROM public.episode_entities
+                WHERE episode_id IN (
+                    SELECT episode_id FROM public.episodes
                     WHERE project_id = %s
                 )
                 """,

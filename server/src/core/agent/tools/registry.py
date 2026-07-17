@@ -817,9 +817,6 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         self.search_cfg = search_config or {}
         episode_settings = episode_settings or EpisodeSettings()
         self.episode_retrieval_limit = episode_settings.retrieval_episode_limit
-        self.episode_source_message_limit = (
-            episode_settings.retrieval_source_message_limit
-        )
         self.agent_id = agent_id or "AGENT_IDENTITY"
         self.topic_refresh_callback = topic_refresh_callback
         self.tool_authorization: Optional[ToolPermissions] = None

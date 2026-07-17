@@ -176,6 +176,7 @@ class RedisKeys:
             "dlq_parked",
             "community_discussion_active",
             "community_pubsub_channel",
+            "dirty_entities",
         }
     )
     LEGACY_NON_AUTHORITATIVE = frozenset(
@@ -233,6 +234,18 @@ class RedisKeys:
         return f"project_heartbeat_counter:{user}:{project_id}"
 
     @staticmethod
+    def dirty_entities(user: str, project_id: str) -> str:
+        return f"dirty_entities:{user}:{project_id}"
+
+    @staticmethod
+    def project_profile_complete(user: str, project_id: str) -> str:
+        return f"profile_complete:{user}:{project_id}"
+
+    @staticmethod
+    def last_profile_update(user: str, project_id: str, entity_id: int | str) -> str:
+        return f"last_profile_update:{user}:{project_id}:{entity_id}"
+
+    @staticmethod
     def project_cleanup_keys(user: str, project_id: str) -> list[str]:
         """Return fixed Redis keys wholly owned by one project."""
         return [
@@ -247,6 +260,7 @@ class RedisKeys:
             RedisKeys.project_last_processed(user, project_id),
             RedisKeys.project_last_activity(user, project_id),
             RedisKeys.project_heartbeat_counter(user, project_id),
+            RedisKeys.dirty_entities(user, project_id),
             RedisKeys.project_sessions(user, project_id),
             RedisKeys.community_discussion_active(user, project_id),
         ]
@@ -260,6 +274,7 @@ class RedisKeys:
             f"job_lease:{user}:{project_id}:*",
             f"maintenance_attempts:{user}:{project_id}:*",
             f"maintenance_cooldown:{user}:{project_id}:*",
+            f"last_profile_update:{user}:{project_id}:*",
         ]
 
     @staticmethod

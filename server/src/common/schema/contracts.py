@@ -238,23 +238,6 @@ class MergeJudgment(BaseModel):
     )
 
 
-class TopicDetail(BaseModel):
-    """Model for a single topic's configuration."""
-
-    active: bool = Field(default=True)
-    labels: List[str] = Field(default_factory=list)
-    aliases: List[str] = Field(default_factory=list)
-    hierarchy: Dict[str, List[str]] = Field(default_factory=dict)
-
-
-class TopicConfigResult(BaseModel):
-    """Model for the full topic configuration."""
-
-    topics: Dict[str, TopicDetail] = Field(
-        ..., description="Map of TopicName to its configuration"
-    )
-
-
 class EngineScope(BaseModel):
     """Execution scope for engine work and serialized batch diagnostics."""
 
@@ -600,6 +583,13 @@ class MessageEntityRef(BaseModel):
     entity_id: int = Field(..., gt=0)
 
 
+class EpisodeEligibility(BaseModel):
+    """Episode-processing eligibility attached to a canonical message."""
+
+    message_id: int = Field(..., gt=0)
+    episode_type: Optional[str] = None
+
+
 class AliasUpdate(BaseModel):
     """Aliases to persist for a canonical entity."""
 
@@ -628,17 +618,18 @@ class GraphMutationPlan(BaseModel):
     alias_updates: List[AliasUpdate] = Field(default_factory=list)
     entity_writes: List[EntityWrite] = Field(default_factory=list)
     message_entity_refs: List[MessageEntityRef] = Field(default_factory=list)
-    eligible_message_ids: List[int] = Field(default_factory=list)
+    eligible_messages: List[EpisodeEligibility] = Field(default_factory=list)
     relationship_writes: List[RelationshipWrite] = Field(default_factory=list)
     user_relationship_writes: List[UserRelationshipWrite] = Field(default_factory=list)
     skipped_relationships: List[SkippedRelationship] = Field(default_factory=list)
     zombie_entity_ids: Set[int] = Field(default_factory=set)
+    dirty_entity_ids: Set[int] = Field(default_factory=set)
 
     def has_writes(self) -> bool:
         return bool(
             self.entity_writes
             or self.message_entity_refs
-            or self.eligible_message_ids
+            or self.eligible_messages
             or self.relationship_writes
             or self.user_relationship_writes
             or self.alias_updates
@@ -671,6 +662,7 @@ class GraphWriteSummary(BaseModel):
     relationships_written: int = 0
     user_relationships_written: int = 0
     aliases_updated: int = 0
+    dirty_entities_marked: int = 0
     zombies_filtered: int = 0
     relationships_skipped: int = 0
 
@@ -775,11 +767,24 @@ class BatchResult:
         self.trace.fallbacks.append({"stage": stage, "fallback": fallback})
 
     def has_graph_writes(self) -> bool:
+        legacy_trace_message_ids = (
+            self.trace.get("message_ids", [])
+            if isinstance(self.trace, dict)
+            else []
+        )
+        trace_message_ids = (
+            self.trace.message_ids
+            if hasattr(self.trace, "message_ids")
+            else legacy_trace_message_ids
+        )
+        return self.has_graph_mutations() or bool(trace_message_ids)
+
+    def has_graph_mutations(self) -> bool:
+        """Return whether entity, alias, or relationship state needs writing."""
         return bool(
             self.relationship_observations
             or self.user_relationship_observations
             or self.entity_message_map
-            or self.trace.message_ids
             or self.new_entity_ids
             or self.alias_updated_ids
             or self.alias_updates

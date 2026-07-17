@@ -1,7 +1,7 @@
-from dataclasses import dataclass
 import json
-from time import perf_counter
 import uuid
+from dataclasses import dataclass
+from time import perf_counter
 from typing import Awaitable, Callable, Optional
 
 from loguru import logger
@@ -62,8 +62,7 @@ class EpisodeCandidateContext:
         return sorted(
             {
                 relationship_id
-                for message_relationship_ids
-                in self.relationship_ids_by_message.values()
+                for message_relationship_ids in self.relationship_ids_by_message.values()
                 for relationship_id in message_relationship_ids
             }
         )
@@ -129,7 +128,6 @@ class EpisodeJob(BaseJob):
         self.max_sessions_per_run = settings.max_sessions_per_run
         self.prior_episode_candidate_count = settings.prior_episode_candidate_count
         self.retrieval_episode_limit = settings.retrieval_episode_limit
-        self.retrieval_source_message_limit = settings.retrieval_source_message_limit
         logger.info(
             "EpisodeJob settings updated: "
             f"target_messages={self.target_message_count}, "
@@ -173,7 +171,7 @@ class EpisodeJob(BaseJob):
     ) -> list[dict]:
         """Load one complete candidate window for a specific conversation."""
 
-        checkpoint = await self.knowledge_store.get_last_evaluated_episode_message_id(
+        checkpoint = await self.knowledge_store.get_episode_checkpoint(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
@@ -182,7 +180,7 @@ class EpisodeJob(BaseJob):
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
-            after_message_id=checkpoint,
+            checkpoint=checkpoint,
             message_count=self.target_message_count,
         )
 
@@ -264,13 +262,14 @@ class EpisodeJob(BaseJob):
                 session_id=session_id,
             )
         )
-        entity_catalog, relationship_catalog = (
-            await self.knowledge_store.get_episode_generation_catalog(
-                message_ids,
-                user_name=user_name,
-                project_id=project_id,
-                session_id=session_id,
-            )
+        (
+            entity_catalog,
+            relationship_catalog,
+        ) = await self.knowledge_store.get_episode_generation_catalog(
+            message_ids,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
         )
         return (
             {
@@ -315,14 +314,12 @@ class EpisodeJob(BaseJob):
         )
         overlapping_episodes = []
         if source_entity_ids:
-            overlapping_episodes = (
-                await self.knowledge_store.get_episodes_for_entities(
-                    source_entity_ids,
-                    user_name=user_name,
-                    project_id=project_id,
-                    session_id=session_id,
-                    limit=self.prior_episode_candidate_count,
-                )
+            overlapping_episodes = await self.knowledge_store.get_episodes_for_entities(
+                source_entity_ids,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                limit=self.prior_episode_candidate_count,
             )
 
         selected = []
@@ -834,8 +831,7 @@ class EpisodeJob(BaseJob):
         context: EpisodeCandidateContext,
     ) -> list[MessageEpisode]:
         influences_by_message = {
-            influence.message_id: influence
-            for influence in decision.message_influences
+            influence.message_id: influence for influence in decision.message_influences
         }
         return [
             MessageEpisode(
@@ -873,9 +869,7 @@ class EpisodeJob(BaseJob):
         session_id: str,
         messages: list[MessageEpisode],
     ) -> str:
-        source_message_ids = ",".join(
-            str(message.message_id) for message in messages
-        )
+        source_message_ids = ",".join(str(message.message_id) for message in messages)
         return str(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
@@ -999,9 +993,7 @@ class EpisodeJob(BaseJob):
                     "context": relationship.get("context"),
                     "evidence_message_ids": [
                         message_local_ids[int(message_id)]
-                        for message_id in relationship.get(
-                            "evidence_message_ids", []
-                        )
+                        for message_id in relationship.get("evidence_message_ids", [])
                     ],
                 }
                 for relationship in context.relationship_catalog
@@ -1197,7 +1189,10 @@ class EpisodeJob(BaseJob):
         if self.llm is None:
             return JobResult(success=False, summary="EpisodeJob has no LLM")
         if self.embedding_service is None:
-            return JobResult(success=False, summary="EpisodeJob has no embedding service")
+            return JobResult(
+                success=False,
+                summary="EpisodeJob has no embedding service",
+            )
         if self.session_ids_provider is None:
             return JobResult(
                 success=False,
@@ -1217,10 +1212,7 @@ class EpisodeJob(BaseJob):
                 )
             except Exception as exc:
                 failures.append(session_id)
-                logger.exception(
-                    "EpisodeJob failed for session "
-                    f"{session_id}: {exc}"
-                )
+                logger.exception(f"EpisodeJob failed for session {session_id}: {exc}")
                 await emit(
                     ctx.project_id,
                     "job",
@@ -1257,8 +1249,7 @@ class EpisodeJob(BaseJob):
                     "relationship_link_count": outcome.relationship_link_count,
                     "consolidation_limit_hit": outcome.consolidation_limit_hit,
                     "episode_at_max_size": (
-                        outcome.episode_source_message_count
-                        >= self.max_message_count
+                        outcome.episode_source_message_count >= self.max_message_count
                     ),
                     "processing_latency_ms": round(
                         (perf_counter() - started_at) * 1000, 3

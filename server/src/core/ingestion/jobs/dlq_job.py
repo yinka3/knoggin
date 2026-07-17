@@ -113,6 +113,16 @@ class DLQReplayJob(BaseJob):
             *[str(entity_id) for entity_id in entity_ids],
         )
 
+    async def remark_dirty_entities(
+        self, user_name: str, project_id: str, entity_ids: list[int | str]
+    ) -> int:
+        if not entity_ids:
+            return 0
+        return await self.redis.sadd(
+            RedisKeys.dirty_entities(user_name, project_id),
+            *[str(entity_id) for entity_id in entity_ids],
+        )
+
     async def requeue_parked_dlq_item(
         self, user_name: str, project_id: str, dlq_id: str
     ) -> bool:

@@ -5,7 +5,7 @@ from common.schema.contracts import (
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,
 )
-from common.schema.primitives import Episode, MessageEpisode
+from common.schema.primitives import Episode, EpisodeCheckpoint, MessageEpisode
 from common.schema.settings import EpisodeSettings, IngestionSettings
 from core.ingestion.jobs.episode_job import EpisodeJob
 from infrastructure.job.base import JobContext
@@ -16,9 +16,12 @@ class FakeEpisodeStore:
         self.checkpoint_calls = []
         self.window_calls = []
 
-    async def get_last_evaluated_episode_message_id(self, **scope):
+    async def get_episode_checkpoint(self, **scope):
         self.checkpoint_calls.append(scope)
-        return 12
+        return EpisodeCheckpoint(
+            last_evaluated_message_id=12,
+            last_evaluated_timestamp_ms=1700000000000,
+        )
 
     async def get_next_episode_window(self, **kwargs):
         self.window_calls.append(kwargs)
@@ -165,9 +168,7 @@ class ConsolidatingEpisodeStore(WritingEpisodeStore):
         entities, relationships = await super().get_episode_generation_catalog(
             [13, 14], **scope
         )
-        return entities, [
-            {**relationships[0], "evidence_message_ids": [11, 13]}
-        ]
+        return entities, [{**relationships[0], "evidence_message_ids": [11, 13]}]
 
     async def get_episode_source_messages(self, episode_id, **scope):
         assert episode_id == "episode-previous"
@@ -195,9 +196,10 @@ async def test_episode_job_derives_target_window_from_ingestion_batches():
     assert job.target_message_count == 24
     assert job.max_message_count == 24
     assert job.prior_episode_candidate_count == 3
-    assert await job.should_run(
-        JobContext(user_name="ada", project_id="project-1")
-    ) is False
+    assert (
+        await job.should_run(JobContext(user_name="ada", project_id="project-1"))
+        is False
+    )
 
 
 def test_episode_job_rejects_a_maximum_smaller_than_its_target_window():
@@ -233,7 +235,10 @@ async def test_episode_job_loads_the_next_window_after_its_checkpoint():
             "user_name": "ada",
             "project_id": "project-1",
             "session_id": "session-1",
-            "after_message_id": 12,
+            "checkpoint": EpisodeCheckpoint(
+                last_evaluated_message_id=12,
+                last_evaluated_timestamp_ms=1700000000000,
+            ),
             "message_count": 24,
         }
     ]
@@ -280,9 +285,7 @@ async def test_episode_job_generates_a_grounded_episode_decision():
             {"message_id": "m2", "influence_weight": 0.5},
         ],
         focus_entities=[{"entity_id": "e1", "prominence_weight": 0.9}],
-        central_relationships=[
-            {"relationship_id": "r1", "prominence_weight": 0.7}
-        ],
+        central_relationships=[{"relationship_id": "r1", "prominence_weight": 0.7}],
     )
     llm = FakeEpisodeLLM(decision)
     job = EpisodeJob(
@@ -548,9 +551,7 @@ async def test_episode_job_regenerates_all_consolidated_message_influences():
             {"message_id": "m2", "influence_weight": 0.5},
         ],
         focus_entities=[{"entity_id": "e1", "prominence_weight": 0.9}],
-        central_relationships=[
-            {"relationship_id": "r1", "prominence_weight": 0.7}
-        ],
+        central_relationships=[{"relationship_id": "r1", "prominence_weight": 0.7}],
     )
     regenerated = LLMEpisodeConsolidation(
         summary="The team adopted traceable episodic summaries and vector search.",
@@ -561,9 +562,7 @@ async def test_episode_job_regenerates_all_consolidated_message_influences():
             {"message_id": "m3", "influence_weight": 0.55},
         ],
         focus_entities=[{"entity_id": "e1", "prominence_weight": 0.9}],
-        central_relationships=[
-            {"relationship_id": "r1", "prominence_weight": 0.7}
-        ],
+        central_relationships=[{"relationship_id": "r1", "prominence_weight": 0.7}],
     )
     store = ConsolidatingEpisodeStore()
     llm = SequenceEpisodeLLM(initial, regenerated)
