@@ -116,25 +116,23 @@ class CleanerSettings(BaseModel):
     stale_junk_days: int = Field(30, ge=1)
 
 
-class ProfileSettings(BaseModel):
-    msg_window: int = Field(30, ge=5)
-    volume_threshold: int = Field(15, ge=1)
-    profile_batch_size: int = Field(8, ge=1)
-    max_facts_context: int = Field(50, ge=1)
-    contradiction_sim_low: float = Field(0.70, ge=0.0, le=1.0)
-    contradiction_batch_size: int = Field(4, ge=1)
+class EpisodeSettings(BaseModel):
+    """Configuration for bounded episodic-memory generation windows."""
+
+    enabled: bool = Field(True)
+    batch_multiple: int = Field(3, ge=1)
+    max_message_count: int = Field(72, ge=1)
+    max_age_hours: Optional[float] = Field(None, gt=0)
+    max_sessions_per_run: int = Field(4, ge=1, le=100)
+    prior_episode_candidate_count: int = Field(3, ge=1, le=3)
+    retrieval_episode_limit: int = Field(5, ge=1)
+    retrieval_source_message_limit: int = Field(5, ge=1)
 
 
 class DLQSettings(BaseModel):
     interval_seconds: int = Field(60, ge=10)
     batch_size: int = Field(50, ge=1)
     max_attempts: int = Field(2, ge=1)
-
-
-class ArchivalSettings(BaseModel):
-    enabled: bool = Field(True)
-    retention_days: int = Field(14, ge=1)
-    fallback_interval_hours: float = Field(24.0, ge=0.5)
 
 
 class MergeRollbackSettings(BaseModel):
@@ -145,9 +143,8 @@ class MergeRollbackSettings(BaseModel):
 
 class JobSettings(BaseModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
-    profile: ProfileSettings = Field(default_factory=ProfileSettings)
+    episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     dlq: DLQSettings = Field(default_factory=DLQSettings)
-    archival: ArchivalSettings = Field(default_factory=ArchivalSettings)
     merge_rollback: MergeRollbackSettings = Field(
         default_factory=MergeRollbackSettings
     )
@@ -177,7 +174,9 @@ class AgentLimitSettings(BaseModel):
             "get_recent_activity": 8,
             "find_path": 8,
             "get_hierarchy": 8,
-            "fact_check": 6,
+            "episode_check": 6,
+            "read_episode": 4,
+            "read_recent_episodes": 4,
             "read_brain": 4,
             "list_brain_snapshots": 4,
             "read_brain_snapshot": 4,
@@ -254,6 +253,12 @@ class CoordinationLogSettings(BaseModel):
     rotation_mb: int = Field(10, ge=1)
 
 
+class LocalReferenceSettings(BaseModel):
+    """Temporary rollout control for model-facing local identifier maps."""
+
+    enabled: bool = Field(True)
+
+
 class DeveloperSettings(BaseModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
@@ -270,12 +275,14 @@ class DeveloperSettings(BaseModel):
     coordination_log: CoordinationLogSettings = Field(
         default_factory=CoordinationLogSettings
     )
+    local_references: LocalReferenceSettings = Field(
+        default_factory=LocalReferenceSettings
+    )
 
 
 class RootConfig(BaseModel):
     user_name: str = Field("")
     user_aliases: List[str] = Field(default_factory=list)
-    user_facts: List[str] = Field(default_factory=list)
     configured_at: Optional[str] = None
     curated_models: List[dict] = Field(
         default_factory=lambda: [

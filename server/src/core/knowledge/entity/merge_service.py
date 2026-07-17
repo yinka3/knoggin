@@ -41,7 +41,8 @@ class EntityMergeService:
         project_id: str,
         primary_id: int,
         duplicate_id: int,
-        evidence_fact_ids: List[str],
+        evidence_message_ids: List[int],
+        evidence_episode_ids: List[str],
         reasoning: str,
         model_confidence: Optional[float] = None,
     ) -> Dict[str, Any]:
@@ -50,15 +51,19 @@ class EntityMergeService:
         if rejection:
             return self._rejected(rejection, checks)
 
-        evidence_ids = list(
+        message_ids = self._positive_int_ids(evidence_message_ids)
+        episode_ids = list(
             dict.fromkeys(
                 str(item).strip()
-                for item in evidence_fact_ids
+                for item in evidence_episode_ids
                 if str(item).strip()
             )
         )
-        if not evidence_ids:
-            return self._rejected("At least one evidence fact ID is required.", checks)
+        if not message_ids and not episode_ids:
+            return self._rejected(
+                "At least one evidence message or episode ID is required.",
+                checks,
+            )
 
         snapshot = await self._snapshot(user_name, project_id, primary_id, duplicate_id)
         entities = snapshot["entities"]
@@ -98,16 +103,36 @@ class EntityMergeService:
                 checks,
             )
 
-        snapshot_fact_ids = {str(fact["fact_id"]) for fact in snapshot["facts"]}
-        missing_evidence = [
-            fact_id for fact_id in evidence_ids if fact_id not in snapshot_fact_ids
+        snapshot_message_ids = {
+            int(message_ref["message_id"])
+            for message_ref in snapshot["message_refs"]
+        }
+        snapshot_episode_ids = {
+            str(episode_entity["episode_id"])
+            for episode_entity in snapshot["episode_entities"]
+        }
+        missing_message_ids = [
+            message_id
+            for message_id in message_ids
+            if message_id not in snapshot_message_ids
         ]
-        checks["evidence_belongs_to_candidate"] = not missing_evidence
-        if missing_evidence:
+        missing_episode_ids = [
+            episode_id
+            for episode_id in episode_ids
+            if episode_id not in snapshot_episode_ids
+        ]
+        checks["evidence_belongs_to_candidate"] = not (
+            missing_message_ids or missing_episode_ids
+        )
+        if missing_message_ids or missing_episode_ids:
             return self._rejected(
-                "Evidence facts must belong to one of the proposed entities in "
-                "the current project.",
-                {**checks, "missing_evidence_fact_ids": missing_evidence},
+                "Evidence messages and episodes must belong to one of the proposed "
+                "entities in the current project.",
+                {
+                    **checks,
+                    "missing_evidence_message_ids": missing_message_ids,
+                    "missing_evidence_episode_ids": missing_episode_ids,
+                },
             )
 
         identifier_conflicts = self._stable_identifier_conflicts(snapshot)
@@ -118,9 +143,9 @@ class EntityMergeService:
                 {**checks, "stable_identifier_conflicts": identifier_conflicts},
             )
 
-        # Free-form facts and timelines cannot be proven compatible by generic
-        # string rules. Keep this explicit and force human review.
-        checks["important_facts_and_timelines"] = "confirmation_required"
+        # Source material can be ambiguous. Keep this explicit and force human
+        # review even when deterministic checks agree.
+        checks["source_evidence_review"] = "confirmation_required"
         checks["model_confidence_is_advisory"] = True
 
         state_hash = self._state_hash(snapshot)
@@ -133,7 +158,8 @@ class EntityMergeService:
             project_id=project_id,
             primary_id=primary_id,
             duplicate_id=duplicate_id,
-            evidence_ids=evidence_ids,
+            evidence_message_ids=message_ids,
+            evidence_episode_ids=episode_ids,
             reasoning=reasoning,
             model_confidence=model_confidence,
             reviewed_state_hash=state_hash,
@@ -219,13 +245,13 @@ class EntityMergeService:
             }
 
         audit_id = str(uuid.uuid4())
-        evidence_ids = proposal["evidence_fact_ids"]
-        if isinstance(evidence_ids, str):
-            evidence_ids = json.loads(evidence_ids)
+        evidence_message_ids = self._json_value(proposal["evidence_message_ids"])
+        evidence_episode_ids = self._json_value(proposal["evidence_episode_ids"])
         await self.merge_audit_writer.create_audit(
             audit_id=audit_id,
             proposal=proposal,
-            evidence_ids=evidence_ids,
+            evidence_message_ids=evidence_message_ids,
+            evidence_episode_ids=evidence_episode_ids,
             before_state=before_state,
             confirmed_by=confirmed_by,
         )
@@ -264,7 +290,6 @@ class EntityMergeService:
         await self.merge_audit_writer.mark_proposal_executed(proposal_id)
         if self.redis:
             merge_key = RedisKeys.merge_queue(proposal["user_name"], project_id)
-            dirty_key = RedisKeys.dirty_entities(proposal["user_name"], project_id)
             await self.redis.srem(merge_key, str(primary_id), str(duplicate_id))
             await emit(
                 project_id,
@@ -280,20 +305,6 @@ class EntityMergeService:
                     "proposal_id": proposal_id,
                     "primary_id": primary_id,
                     "duplicate_id": duplicate_id,
-                },
-            )
-            await self.redis.sadd(dirty_key, str(primary_id))
-            await emit(
-                project_id,
-                "job",
-                "dirty_entities_marked",
-                {
-                    "user_name": proposal["user_name"],
-                    "project_id": project_id,
-                    "dirty_key": dirty_key,
-                    "entity_ids": [primary_id],
-                    "marked_count": 1,
-                    "reason": "merge_executed",
                 },
             )
         return {
@@ -405,10 +416,13 @@ class EntityMergeService:
                 return False
             if entity.get("project_id") != project_id:
                 return False
-        for fact in snapshot["facts"]:
-            if fact.get("user_name") != user_name:
+        for message_ref in snapshot["message_refs"]:
+            if message_ref.get("user_name") != user_name:
                 return False
-            if fact.get("project_id") != project_id:
+            if message_ref.get("project_id") != project_id:
+                return False
+        for episode_entity in snapshot["episode_entities"]:
+            if not episode_entity.get("episode_id"):
                 return False
         for relationship in snapshot["relationships"]:
             if relationship.get("user_name") != user_name:
@@ -420,21 +434,34 @@ class EntityMergeService:
                 return False
         return True
 
+    @staticmethod
+    def _positive_int_ids(values: List[Any]) -> List[int]:
+        normalized = []
+        for value in values:
+            try:
+                identifier = int(value)
+            except (TypeError, ValueError):
+                continue
+            if identifier > 0 and identifier not in normalized:
+                normalized.append(identifier)
+        return normalized
+
     def _stable_identifier_conflicts(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         values: Dict[int, Dict[str, set[str]]] = {}
-        facts_by_entity: Dict[int, List[str]] = {}
-        for fact in snapshot["facts"]:
-            if fact.get("invalid_at") is None:
-                facts_by_entity.setdefault(int(fact["entity_id"]), []).append(
-                    fact["content"]
-                )
+        messages_by_entity: Dict[int, List[str]] = {}
+        for message_ref in snapshot["message_refs"]:
+            content = str(message_ref.get("content") or "").strip()
+            if content:
+                messages_by_entity.setdefault(
+                    int(message_ref["entity_id"]), []
+                ).append(content)
         for entity in snapshot["entities"]:
             entity_id = int(entity["entity_id"])
             text = " ".join(
                 [
                     entity.get("canonical_name") or "",
                     *list(entity.get("aliases") or []),
-                    *facts_by_entity.get(entity_id, []),
+                    *messages_by_entity.get(entity_id, []),
                 ]
             )
             values[entity_id] = {

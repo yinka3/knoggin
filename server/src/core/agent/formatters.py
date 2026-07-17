@@ -57,7 +57,15 @@ def format_retrieved_messages(messages: List[Dict]) -> str:
         score = hit.get("score", 0)
         context = hit.get("context", [])
 
-        block = f"--- Search Result #{idx + 1} (Relevance: {score:.2f}) ---\n"
+        if hit.get("source_type") == "document":
+            reference = hit.get("document_id")
+            reference_hint = f" [{reference}]" if reference else ""
+            block = (
+                f"--- Document Result #{idx + 1}{reference_hint} "
+                f"(Relevance: {score:.2f}) ---\n"
+            )
+        else:
+            block = f"--- Search Result #{idx + 1} (Relevance: {score:.2f}) ---\n"
 
         for msg in context:
             ts_str = msg.get("timestamp", "")
@@ -100,8 +108,6 @@ def format_entity_results(entities: List[Dict], evidence_limit: int = 5) -> str:
         aliases = ent.get("aliases", [])
         topic = ent.get("topic", "General")
         last_mentioned = _format_timestamp(ent.get("last_mentioned"))
-        facts = ent.get("facts", [])
-
         block = f"=== {name} ({ent_type}) ===\n"
 
         if aliases:
@@ -109,13 +115,6 @@ def format_entity_results(entities: List[Dict], evidence_limit: int = 5) -> str:
 
         block += f"Topic: {topic}\n"
         block += f"Last talked about: {last_mentioned}\n"
-
-        if facts:
-            block += "Facts:\n"
-            for fact in facts:
-                block += f"  - {fact}\n"
-        else:
-            block += "Facts: None recorded\n"
 
         connections = ent.get("top_connections", [])
         if connections:
@@ -159,9 +158,6 @@ def format_graph_results(results: List[Dict]) -> str:
             context = r.get("context")
             if context:
                 block += f"Description: {context}\n"
-            target_facts = r.get("target_facts", [])
-            if target_facts:
-                block += f"Facts: {' | '.join(target_facts[:3])}\n"
             block += f"Strength: {strength} | Last talked about: {last_seen}\n"
 
         elif "entity" in r:
@@ -237,13 +233,9 @@ def format_hot_topic_context(context: Dict[str, Dict]) -> str:
             block += "Entities:\n"
             for ent in entities:
                 name = ent.get("name", "")
-                facts = ent.get("facts", [])
 
                 if name:
-                    if facts:
-                        block += f"  - {name}: {' | '.join(facts[:3])}\n"
-                    else:
-                        block += f"  - {name}\n"
+                    block += f"  - {name}\n"
 
         blocks.append(block)
 
@@ -266,16 +258,12 @@ def format_hierarchy_results(results: List[Dict]) -> str:
         if h.get("parents"):
             block += "Parents:\n"
             for p in h["parents"]:
-                facts = p.get("facts", [])
-                fact_str = f" ({', '.join(facts[:2])})" if facts else ""
-                block += f"  ↑ {p.get('canonical_name', '?')}{fact_str}\n"
+                block += f"  ↑ {p.get('canonical_name', '?')}\n"
 
         if h.get("children"):
             block += "Children:\n"
             for c in h["children"]:
-                facts = c.get("facts", [])
-                fact_str = f" ({', '.join(facts[:2])})" if facts else ""
-                block += f"  ↓ {c.get('canonical_name', '?')}{fact_str}\n"
+                block += f"  ↓ {c.get('canonical_name', '?')}\n"
 
         blocks.append(block)
 
@@ -329,17 +317,17 @@ def format_document_focus_context(focus: Optional[Dict]) -> str:
     if target_type == "document":
         lines.append(f"- relative_path: {focus.get('relative_path', '')}")
     elif target_type == "subtree":
-        lines.append(f"- folder_root_id: {focus.get('folder_root_id', '')}")
+        lines.append("- scope: selected folder upload")
         lines.append(f"- path_prefix: {focus.get('path_prefix', '')}")
     elif target_type == "folder_upload":
-        lines.append(f"- folder_root_id: {focus.get('folder_root_id', '')}")
+        lines.append("- scope: selected folder upload")
     return "\n".join(lines)
 
 
-def format_fact_results(results: List[Dict]) -> str:
-    """Format fact_check results for the agent prompt."""
+def format_episode_results(results: List[Dict]) -> str:
+    """Format episode_check results with source-message provenance."""
     if not results:
-        return "No facts found."
+        return "No episodes found."
 
     output = []
     for entry in results:
@@ -348,28 +336,42 @@ def format_fact_results(results: List[Dict]) -> str:
 
         if res_type == "fallback":
             header = (
-                "--- Fact Check Fallback: Entity match not found ---\n"
+                "--- Episode Check Fallback: Entity match not found ---\n"
                 "The system could not resolve a specific entity in the knowledge graph. "
                 "Below is a semantic search over conversation context for related clues:\n"
             )
             output.append(f"{header}{format_retrieved_messages(items)}")
         else:
-            block = f"--- Fact Check ({res_type} match) ---\n"
+            block = f"--- Episode Check ({res_type} match) ---\n"
             for item in items:
-                name = item.get("entity_name", "Unknown")
+                name = item.get("entity_name")
                 sim = item.get("similarity", 1.0)
-                facts = item.get("facts", [])
+                episodes = item.get("episodes", [])
 
-                block += f"Entity: {name} (Match confidence: {sim:.2f})\n"
-                if facts:
-                    for fact in facts:
-                        # Handle fact dicts if returned as such
-                        f_text = (
-                            fact.get("content") if isinstance(fact, dict) else str(fact)
-                        )
-                        block += f"  - {f_text}\n"
+                if name:
+                    block += f"Entity: {name} (Match confidence: {sim:.2f})\n"
                 else:
-                    block += "  - No specific facts recorded\n"
+                    block += f"Question: {item.get('query', 'Unknown')}\n"
+                if episodes:
+                    for episode in episodes:
+                        block += (
+                            f"  - [{episode.get('episode_id', '?')}] "
+                            f"{episode.get('summary', '')}\n"
+                        )
+                        for label, values in (
+                            ("developments", episode.get("new_developments", [])),
+                            ("updates", episode.get("updates", [])),
+                            ("unresolved", episode.get("unresolved", [])),
+                        ):
+                            if values:
+                                block += f"    {label}: {'; '.join(values)}\n"
+                        for source in episode.get("evidence", [])[:2]:
+                            block += (
+                                "    evidence: "
+                                f"{source.get('content', '')}\n"
+                            )
+                else:
+                    block += "  - No contextual episodes recorded\n"
             output.append(block)
 
     return "\n\n".join(output)

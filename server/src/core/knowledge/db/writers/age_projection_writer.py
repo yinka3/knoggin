@@ -116,7 +116,7 @@ class AgeProjectionWriter:
                 }
             ),
         )
-        for label in ("Entity", "Message", "Fact"):
+        for label in ("Entity", "Message"):
             cypher = f"""
             MATCH (n:{label})
             WHERE n.project_id = $project_id
@@ -274,32 +274,6 @@ class AgeProjectionWriter:
             ),
         )
 
-    async def transfer_merged_entity_facts(
-        self,
-        cur,
-        primary_id: int,
-        secondary_id: int,
-    ) -> None:
-        cypher_transfer_facts = """
-        MATCH (s:Entity {id: $secondary_id})-[r:HAS_FACT]->(f:Fact)
-        MATCH (p:Entity {id: $primary_id})
-        MERGE (p)-[:HAS_FACT]->(f)
-        SET f.source_entity_id = $primary_id
-        DELETE r
-        RETURN count(f)
-        """
-        await cur.execute(
-            self._build_cypher(cypher_transfer_facts),
-            (
-                json.dumps(
-                    {
-                        "primary_id": primary_id,
-                        "secondary_id": secondary_id,
-                    }
-                ),
-            ),
-        )
-
     async def update_merged_entity(
         self,
         cur,
@@ -407,18 +381,6 @@ class AgeProjectionWriter:
             "entity_ids": entity_ids,
             "project_id": project_id,
         }
-        fact_cypher = """
-        MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
-        WHERE e.id IN $entity_ids
-          AND e.project_id = $project_id
-        DETACH DELETE f
-        RETURN count(DISTINCT f)
-        """
-        await cur.execute(
-            self._build_cypher(fact_cypher),
-            (json.dumps(params),),
-        )
-
         entity_cypher = """
         MATCH (e:Entity)
         WHERE e.id IN $entity_ids
@@ -429,125 +391,6 @@ class AgeProjectionWriter:
         await cur.execute(
             self._build_cypher(entity_cypher),
             (json.dumps(params),),
-        )
-
-    async def project_facts(
-        self,
-        cur,
-        entity_id: int,
-        facts: List[Dict],
-        user_name: str,
-        session_id: Optional[str],
-        project_id: str,
-    ) -> int:
-        if not facts:
-            return 0
-
-        cypher = """
-        MATCH (e:Entity {id: $entity_id})
-        WHERE e.project_id = $project_id
-        UNWIND $batch AS item
-        MERGE (f:Fact {id: item.id})
-        SET f.source_entity_id = $entity_id,
-            f.content = item.content,
-            f.valid_at = item.valid_at,
-            f.invalid_at = item.invalid_at,
-            f.confidence = item.confidence,
-            f.user_name = $user_name,
-            f.project_id = $project_id,
-            f.source_msg_id = item.source_msg_id,
-            f.source_user_name = item.source_user_name,
-            f.source_session_id = item.source_session_id,
-            f.source = item.source
-        MERGE (e)-[:HAS_FACT]->(f)
-        WITH f, item
-        RETURN count(f) AS projected_count
-        """
-        await cur.execute(
-            self._build_cypher(cypher, "projected_count agtype"),
-            (
-                json.dumps(
-                    {
-                        "entity_id": entity_id,
-                        "batch": facts,
-                        "user_name": user_name,
-                        "session_id": session_id,
-                        "project_id": project_id,
-                    }
-                ),
-            ),
-        )
-        record = await cur.fetchone()
-        return int(record["projected_count"]) if record else 0
-
-    async def project_fact_message_links(self, cur, facts: List[Dict]) -> None:
-        msg_params = [fact for fact in facts if fact["source_msg_id"] is not None]
-        if not msg_params:
-            return
-
-        cypher = """
-        UNWIND $batch AS item
-        MATCH (f:Fact {id: item.id})
-        MATCH (m:Message {
-            user_name: item.source_user_name,
-            session_id: item.source_session_id,
-            id: item.source_msg_id
-        })
-        MERGE (f)-[:EXTRACTED_FROM]->(m)
-        RETURN count(f)
-        """
-        await cur.execute(
-            self._build_cypher(cypher),
-            (json.dumps({"batch": msg_params}),),
-        )
-
-    async def invalidate_fact(
-        self,
-        cur,
-        fact_id: str,
-        invalid_at: str,
-        project_id: str,
-    ) -> None:
-        cypher = """
-        MATCH (f:Fact {id: $fact_id})
-        WHERE f.project_id = $project_id
-        SET f.invalid_at = $invalid_at
-        RETURN f.id
-        """
-        await cur.execute(
-            self._build_cypher(cypher, "id agtype"),
-            (
-                json.dumps(
-                    {
-                        "fact_id": fact_id,
-                        "invalid_at": invalid_at,
-                        "project_id": project_id,
-                    }
-                ),
-            ),
-        )
-
-    async def delete_facts(self, cur, fact_ids: List[str], project_id: str) -> None:
-        if not fact_ids:
-            return
-
-        cypher = """
-        MATCH (f:Fact)
-        WHERE f.id IN $fact_ids
-          AND f.project_id = $project_id
-        DETACH DELETE f
-        RETURN count(f)
-        """
-        await cur.execute(
-            self._build_cypher(cypher, "deleted agtype"),
-            (
-                json.dumps(
-                    {
-                        "fact_ids": fact_ids,
-                        "project_id": project_id,
-                    }
-                ),
-            ),
         )
 
     async def create_hierarchy_edge(

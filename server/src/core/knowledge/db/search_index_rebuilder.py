@@ -1,5 +1,4 @@
 import json
-from collections import defaultdict
 from typing import Dict, List
 
 from loguru import logger
@@ -9,6 +8,7 @@ from infrastructure.postgres_client import PostgresClient
 from core.knowledge.entity.embedding import (
     build_entity_embedding_text,
 )
+from core.knowledge.episode_embedding import build_episode_embedding_text_from_fields
 from core.knowledge.services.embedding_service import EmbeddingService
 
 
@@ -77,32 +77,20 @@ class SearchIndexer:
             )
         messages = await self._fetch_messages(project_id, user_name)
         entities = await self._fetch_entities(project_id, user_name)
-        facts = await self._fetch_facts(project_id, user_name)
+        episodes = await self._fetch_episodes(project_id, user_name)
         identity = await self._fetch_identity(user_name)
         if not identity:
             raise RuntimeError("Canonical identity entity is missing")
-        identity_facts = await self._fetch_identity_facts(
-            user_name,
-            identity_project_ids,
-        )
-
-        active_facts_by_entity = defaultdict(list)
-        for fact in facts:
-            if fact.get("invalid_at") is None:
-                active_facts_by_entity[int(fact["entity_id"])].append(fact)
-
         entity_inputs = [
             build_entity_embedding_text(
                 entity["canonical_name"],
                 entity.get("type"),
-                active_facts_by_entity[int(entity["entity_id"])],
             )
             for entity in entities
         ]
         identity_input = build_entity_embedding_text(
             identity["canonical_name"],
             identity.get("type"),
-            identity_facts,
         )
         entity_vectors = self._validate_embeddings(
             await self.embedding_service.encode(entity_inputs + [identity_input]),
@@ -110,27 +98,27 @@ class SearchIndexer:
             "entity",
         )
         identity_vector = entity_vectors.pop()
-
-        fact_vectors = self._validate_embeddings(
-            await self.embedding_service.encode(
-                [str(fact["content"]) for fact in facts]
-            ),
-            len(facts),
-            "fact",
-        )
+        episode_inputs = [
+            build_episode_embedding_text_from_fields(
+                str(episode["summary"]),
+                self._json_list(episode.get("new_developments")),
+                self._json_list(episode.get("updates")),
+                self._json_list(episode.get("unresolved")),
+            )
+            for episode in episodes
+        ]
+        episode_vectors = []
+        if episode_inputs:
+            episode_vectors = self._validate_embeddings(
+                await self.embedding_service.encode(episode_inputs),
+                len(episode_inputs),
+                "episode",
+            )
 
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
                 DELETE FROM message_search
-                WHERE project_id = %s
-                  AND user_name = %s
-                """,
-                (project_id, user_name),
-            )
-            await cur.execute(
-                """
-                DELETE FROM fact_search
                 WHERE project_id = %s
                   AND user_name = %s
                 """,
@@ -191,29 +179,6 @@ class SearchIndexer:
                     ),
                 )
 
-            for fact, embedding in zip(facts, fact_vectors):
-                await cur.execute(
-                    """
-                    INSERT INTO fact_search (
-                        fact_id,
-                        entity_id,
-                        user_name,
-                        project_id,
-                        embedding,
-                        invalid_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s::vector, %s)
-                    """,
-                    (
-                        fact["fact_id"],
-                        fact["entity_id"],
-                        fact["user_name"],
-                        fact["project_id"],
-                        json.dumps(embedding),
-                        fact["invalid_at"],
-                    ),
-                )
-
             await cur.execute(
                 """
                 INSERT INTO entity_search (
@@ -239,11 +204,26 @@ class SearchIndexer:
                 ),
             )
 
+            for episode, embedding in zip(episodes, episode_vectors):
+                await cur.execute(
+                    """
+                    UPDATE episodes
+                    SET embedding = %s::vector
+                    WHERE episode_id = %s
+                      AND project_id = %s
+                    """,
+                    (
+                        json.dumps(embedding),
+                        episode["episode_id"],
+                        project_id,
+                    ),
+                )
+
         summary = {
             "messages": len(messages),
             "entities": len(entities),
-            "facts": len(facts),
             "identity": 1,
+            "episodes": len(episodes),
         }
         logger.info(f"Rebuilt search indexes for project {project_id}: {summary}")
         return summary
@@ -290,7 +270,7 @@ class SearchIndexer:
             )
         )
 
-    async def _fetch_facts(
+    async def _fetch_episodes(
         self,
         project_id: str,
         user_name: str,
@@ -299,17 +279,18 @@ class SearchIndexer:
             await self.client.fetch_all(
                 """
                 SELECT
-                    fact_id,
-                    entity_id,
-                    user_name,
-                    project_id,
-                    content,
-                    valid_at,
-                    invalid_at
-                FROM facts
-                WHERE project_id = %s
-                  AND user_name = %s
-                ORDER BY entity_id, valid_at NULLS FIRST, fact_id
+                    e.episode_id,
+                    e.summary,
+                    e.new_developments,
+                    e.updates,
+                    e.unresolved
+                FROM episodes e
+                JOIN sessions s
+                  ON s.session_id = e.session_id
+                 AND s.project_id = e.project_id
+                WHERE e.project_id = %s
+                  AND s.user_name = %s
+                ORDER BY e.episode_id
                 """,
                 (project_id, user_name),
             )
@@ -327,33 +308,8 @@ class SearchIndexer:
         )
         return row or {}
 
-    async def _fetch_identity_facts(
-        self,
-        user_name: str,
-        identity_project_ids: List[str],
-    ) -> List[Dict]:
-        return list(
-            await self.client.fetch_all(
-                """
-                SELECT DISTINCT
-                    f.fact_id,
-                    f.content,
-                    f.valid_at,
-                    f.invalid_at
-                FROM facts f
-                LEFT JOIN messages m
-                  ON m.message_id = f.source_msg_id
-                 AND m.user_name = f.source_user_name
-                 AND m.session_id = f.source_session_id
-                WHERE f.entity_id = %s
-                  AND f.user_name = %s
-                  AND f.invalid_at IS NULL
-                  AND (
-                      f.source_msg_id IS NULL
-                      OR m.project_id = ANY(%s)
-                  )
-                ORDER BY f.valid_at NULLS FIRST, f.fact_id
-                """,
-                (IDENTITY_ENTITY_ID, user_name, identity_project_ids),
-            )
-        )
+    @staticmethod
+    def _json_list(value) -> List[str]:
+        if isinstance(value, str):
+            value = json.loads(value)
+        return [str(item) for item in value or []]

@@ -64,22 +64,75 @@ def test_policy_allows_candidate_failure_events_with_safe_fields_only():
         ts="2026-06-29T12:00:00Z",
         scope_id="project-1",
         component="job",
-        event="facts_write_failed",
+        event="episodes_write_failed",
         data={
             "entity_id": 42,
-            "fact_count": 3,
-            "failed_fact_ids": ["fact-1", "fact-2"],
+            "episode_count": 3,
+            "failed_episode_ids": ["episode-1", "episode-2"],
             "error": "write failed",
-            "content": "raw fact text must not be logged",
+            "content": "raw episode text must not be logged",
         },
     )
 
     assert record is not None
-    assert record.fields["event"] == "job.facts_write_failed"
+    assert record.fields["event"] == "job.episodes_write_failed"
     assert record.fields["entity_id"] == 42
-    assert record.fields["fact_count"] == 3
-    assert record.fields["failed_fact_ids"] == "fact-1,fact-2"
+    assert record.fields["episode_count"] == 3
+    assert record.fields["failed_episode_ids"] == "episode-1,episode-2"
     assert record.fields["error"] == "write failed"
+    assert "content" not in record.fields
+
+
+def test_policy_persists_episode_metrics_without_episode_content():
+    record = normalize_coordination_event(
+        ts="2026-06-29T12:00:00Z",
+        scope_id="project-1",
+        component="agent",
+        event="episode_retrieval_completed",
+        data={
+            "project_id": "project-1",
+            "session_id": "session-1",
+            "strategy": "semantic",
+            "episode_count": 3,
+            "focus_episode_count": 1,
+            "retrieval_latency_ms": 12.5,
+            "used_raw_message_fallback": False,
+            "summary": "episode summary must not be logged",
+            "content": "raw evidence must not be logged",
+        },
+    )
+
+    assert record is not None
+    assert record.fields["event"] == "agent.episode_retrieval_completed"
+    assert record.fields["strategy"] == "semantic"
+    assert record.fields["episode_count"] == 3
+    assert record.fields["retrieval_latency_ms"] == 12.5
+    assert record.fields["used_raw_message_fallback"] is False
+    assert "summary" not in record.fields
+    assert "content" not in record.fields
+
+
+def test_policy_persists_local_reference_failure_metrics_without_ids():
+    record = normalize_coordination_event(
+        ts="2026-06-29T12:00:00Z",
+        scope_id="project-1",
+        component="agent",
+        event="local_reference_resolution_failed",
+        data={
+            "pipeline": "agent_tool_loop",
+            "reference_type": "episode",
+            "reason": "unknown_or_wrong_type",
+            "episode_id": "must-not-be-persisted",
+            "content": "raw model context must not be logged",
+        },
+    )
+
+    assert record is not None
+    assert record.fields["event"] == "agent.local_reference_resolution_failed"
+    assert record.fields["pipeline"] == "agent_tool_loop"
+    assert record.fields["reference_type"] == "episode"
+    assert record.fields["reason"] == "unknown_or_wrong_type"
+    assert "episode_id" not in record.fields
     assert "content" not in record.fields
 
 

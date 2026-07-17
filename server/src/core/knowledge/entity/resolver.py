@@ -10,7 +10,6 @@ from cachetools import LRUCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
 
-from common.schema.primitives import FactRecord
 from common.schema.settings import EntityResolutionSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.core_utils import is_substring_match
@@ -28,8 +27,8 @@ if TYPE_CHECKING:
 
 
 VECTOR_MERGE_SIM_THRESHOLD = 0.90
-VECTOR_MERGE_SPARSE_FACT_SIM_THRESHOLD = 0.97
-MERGE_FACT_NLI_PAIR_LIMIT = 8
+VECTOR_MERGE_SPARSE_EVIDENCE_SIM_THRESHOLD = 0.97
+MERGE_EVIDENCE_NLI_PAIR_LIMIT = 8
 
 
 @dataclass
@@ -242,17 +241,6 @@ class EntityResolver:
         return await self.knowledge_store.get_neighbor_ids_batch(
             candidate_ids,
             visible_project_ids=self.readable_project_ids,
-        )
-
-    async def search_relevant_facts(
-        self, entity_id: int, embedding: List[float], limit: int = 5
-    ) -> List[FactRecord]:
-        """Search relevant facts for a specific entity."""
-        return await self.knowledge_store.search_relevant_facts(
-            entity_id,
-            embedding,
-            visible_project_ids=self.readable_project_ids,
-            limit=limit,
         )
 
     def validate_existing(
@@ -604,10 +592,9 @@ class EntityResolver:
             entity_ids.add(id_a)
             entity_ids.add(id_b)
 
-        facts_by_entity = await self.knowledge_store.get_facts_for_entities(
+        evidence_by_entity = await self.knowledge_store.get_merge_evidence_for_entities(
             sorted(entity_ids),
-            visible_project_ids=self.readable_project_ids,
-            active_only=True,
+            project_id=self.project_id,
         )
 
         candidates = []
@@ -616,7 +603,7 @@ class EntityResolver:
                 id_a,
                 id_b,
                 candidate_meta,
-                facts_by_entity,
+                evidence_by_entity,
             )
             if result:
                 result["reasons"] = list(candidate_meta["reasons"])
@@ -750,7 +737,7 @@ class EntityResolver:
         id_a: int,
         id_b: int,
         candidate_meta: dict,
-        facts_by_entity: Dict[int, List[FactRecord]],
+        evidence_by_entity: Dict[int, List[dict]],
     ) -> Optional[dict]:
         """
         Evaluate one pair for merge or hierarchy relationship.
@@ -819,21 +806,21 @@ class EntityResolver:
             if not high_confidence:
                 return None
 
-        facts_a = facts_by_entity.get(id_a, [])
-        facts_b = facts_by_entity.get(id_b, [])
-        fact_support, fact_support_pairs = await self._classify_fact_support(
-            facts_a,
-            facts_b,
+        evidence_a = evidence_by_entity.get(id_a, [])
+        evidence_b = evidence_by_entity.get(id_b, [])
+        evidence_support, evidence_support_pairs = await self._classify_evidence_support(
+            evidence_a,
+            evidence_b,
         )
 
         if vector_only:
-            if fact_support == "contradiction":
+            if evidence_support == "contradiction":
                 return None
-            if fact_support == "neutral":
+            if evidence_support == "neutral":
                 return None
-            if fact_support == "insufficient_facts" and (
+            if evidence_support == "insufficient_evidence" and (
                 cosine_score is None
-                or cosine_score < VECTOR_MERGE_SPARSE_FACT_SIM_THRESHOLD
+                or cosine_score < VECTOR_MERGE_SPARSE_EVIDENCE_SIM_THRESHOLD
             ):
                 return None
 
@@ -846,12 +833,12 @@ class EntityResolver:
             "secondary_type": type_b,
             "topic_a": topic_a,
             "topic_b": topic_b,
-            "facts_a": facts_a,
-            "facts_b": facts_b,
+            "evidence_a": evidence_a,
+            "evidence_b": evidence_b,
             "fuzz_score": fuzz_score,
             "cosine_score": cosine_score,
-            "fact_support": fact_support,
-            "fact_support_pairs": fact_support_pairs,
+            "evidence_support": evidence_support,
+            "evidence_support_pairs": evidence_support_pairs,
             "shared_neighbor_count": len(shared_neighbors),
         }
 
@@ -867,21 +854,21 @@ class EntityResolver:
         norm_b = (topic_b or "General").strip().casefold()
         return norm_a == norm_b or "general" in {norm_a, norm_b}
 
-    async def _classify_fact_support(
+    async def _classify_evidence_support(
         self,
-        facts_a: List[FactRecord],
-        facts_b: List[FactRecord],
+        evidence_a: List[dict],
+        evidence_b: List[dict],
     ) -> Tuple[str, List[dict]]:
-        pairs = self._fact_text_pairs(facts_a, facts_b)
+        pairs = self._evidence_text_pairs(evidence_a, evidence_b)
         if not pairs:
-            return "insufficient_facts", []
+            return "insufficient_evidence", []
 
         try:
             classifications = await self.embedding_service.classify_text_pairs(
-                [(left.content, right.content) for left, right in pairs]
+                [(left["text"], right["text"]) for left, right in pairs]
             )
         except Exception as exc:
-            logger.warning(f"Merge fact NLI support failed: {exc}")
+            logger.warning(f"Merge evidence NLI support failed: {exc}")
             return "neutral", []
 
         support_pairs = []
@@ -891,8 +878,8 @@ class EntityResolver:
             labels.append(label)
             support_pairs.append(
                 {
-                    "fact_a_id": left.id,
-                    "fact_b_id": right.id,
+                    "evidence_a": self._evidence_reference(left),
+                    "evidence_b": self._evidence_reference(right),
                     "label": label,
                     "scores": dict(classification.scores or {}),
                 }
@@ -905,16 +892,26 @@ class EntityResolver:
         return "neutral", support_pairs
 
     @staticmethod
-    def _fact_text_pairs(
-        facts_a: List[FactRecord],
-        facts_b: List[FactRecord],
-    ) -> List[Tuple[FactRecord, FactRecord]]:
-        active_a = [fact for fact in facts_a if str(fact.content or "").strip()]
-        active_b = [fact for fact in facts_b if str(fact.content or "").strip()]
+    def _evidence_text_pairs(
+        evidence_a: List[dict],
+        evidence_b: List[dict],
+    ) -> List[Tuple[dict, dict]]:
+        active_a = [item for item in evidence_a if str(item.get("text") or "").strip()]
+        active_b = [item for item in evidence_b if str(item.get("text") or "").strip()]
         pairs = []
-        for fact_a in active_a:
-            for fact_b in active_b:
-                pairs.append((fact_a, fact_b))
-                if len(pairs) >= MERGE_FACT_NLI_PAIR_LIMIT:
+        for item_a in active_a:
+            for item_b in active_b:
+                pairs.append((item_a, item_b))
+                if len(pairs) >= MERGE_EVIDENCE_NLI_PAIR_LIMIT:
                     return pairs
         return pairs
+
+    @staticmethod
+    def _evidence_reference(item: dict) -> dict:
+        """Keep provenance identifiers while excluding raw text from diagnostics."""
+
+        reference = {"kind": item.get("kind")}
+        for key in ("message_id", "episode_id", "session_id"):
+            if item.get(key) is not None:
+                reference[key] = item[key]
+        return reference

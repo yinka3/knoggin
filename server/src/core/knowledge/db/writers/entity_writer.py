@@ -207,9 +207,21 @@ class EntityWriter:
 
         return identity
 
-    async def write_batch(self, entities: List[Dict], relationships: List[Dict]):
+    async def write_batch(
+        self,
+        entities: List[Dict],
+        relationships: List[Dict],
+        *,
+        message_entity_refs: Optional[List[Dict]] = None,
+        eligible_message_ids: Optional[List[int]] = None,
+        message_entity_scope: Optional[Dict] = None,
+    ):
         # We need a transaction for both Graph and Hybrid tables
         now_ms = self._current_time_ms()
+        message_entity_refs = message_entity_refs or []
+        eligible_message_ids = eligible_message_ids or []
+        if (message_entity_refs or eligible_message_ids) and not message_entity_scope:
+            raise ValueError("Message-derived writes require a write scope")
 
         async with self.client.transaction() as cur:
             # Write Entities to Graph
@@ -387,6 +399,20 @@ class EntityWriter:
                                 ),
                             )
 
+            if message_entity_refs:
+                await self._write_message_entity_refs(
+                    cur,
+                    message_entity_refs,
+                    message_entity_scope,
+                )
+
+            if eligible_message_ids:
+                await self._write_episode_eligible_messages(
+                    cur,
+                    eligible_message_ids,
+                    message_entity_scope,
+                )
+
             # 3. Write Relationships to Graph
             if relationships:
                 rel_params = []
@@ -422,13 +448,14 @@ class EntityWriter:
                             project_id,
                             entity_a_id,
                             entity_b_id,
+                            relationship_type,
                             weight,
                             confidence,
                             context,
                             last_seen_ms
                         )
                         SELECT
-                            %s, %s, %s, %s, %s, 1, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
                         WHERE EXISTS (
                             SELECT 1
                             FROM entities
@@ -452,6 +479,10 @@ class EntityWriter:
                             project_id = EXCLUDED.project_id,
                             entity_a_id = EXCLUDED.entity_a_id,
                             entity_b_id = EXCLUDED.entity_b_id,
+                            relationship_type = COALESCE(
+                                EXCLUDED.relationship_type,
+                                relationships.relationship_type
+                            ),
                             weight = relationships.weight + 1,
                             confidence = GREATEST(
                                 relationships.confidence,
@@ -470,6 +501,7 @@ class EntityWriter:
                             r["project_id"],
                             a_id,
                             b_id,
+                            r.get("relationship"),
                             r.get("confidence", 1.0),
                             r.get("context"),
                             now_ms,
@@ -517,6 +549,123 @@ class EntityWriter:
                 await self.projection.project_relationships(cur, rel_params)
 
         return True
+
+    async def _write_message_entity_refs(
+        self,
+        cur,
+        references: List[Dict],
+        scope: Dict,
+    ) -> None:
+        user_name = require_scope_value(
+            scope.get("user_name"), "user_name", "message-entity write"
+        )
+        session_id = require_scope_value(
+            scope.get("session_id"), "session_id", "message-entity write"
+        )
+        project_id = self._require_project_id(
+            scope.get("project_id"), "message-entity write"
+        )
+        normalized_references = {
+            (int(reference["message_id"]), int(reference["entity_id"]))
+            for reference in references
+        }
+        if any(
+            message_id <= 0 or entity_id <= 0
+            for message_id, entity_id in normalized_references
+        ):
+            raise ValueError("Message-entity references require positive IDs")
+
+        message_ids = sorted({message_id for message_id, _ in normalized_references})
+        entity_ids = sorted({entity_id for _, entity_id in normalized_references})
+        await cur.execute(
+            """
+            SELECT message_id
+            FROM messages
+            WHERE message_id = ANY(%s)
+              AND user_name = %s
+              AND session_id = %s
+              AND project_id = %s
+            """,
+            (message_ids, user_name, session_id, project_id),
+        )
+        scoped_message_ids = {
+            int(row["message_id"]) for row in await cur.fetchall()
+        }
+        if scoped_message_ids != set(message_ids):
+            raise ValueError("Message-entity references include messages outside scope")
+
+        await cur.execute(
+            """
+            SELECT entity_id
+            FROM entities
+            WHERE entity_id = ANY(%s)
+              AND (project_id = %s OR entity_id = %s)
+            """,
+            (entity_ids, project_id, IDENTITY_ENTITY_ID),
+        )
+        scoped_entity_ids = {
+            int(row["entity_id"]) for row in await cur.fetchall()
+        }
+        if scoped_entity_ids != set(entity_ids):
+            raise ValueError("Message-entity references include entities outside scope")
+
+        for message_id, entity_id in sorted(normalized_references):
+            await cur.execute(
+                """
+                INSERT INTO message_entity_refs (message_id, entity_id)
+                VALUES (%s, %s)
+                ON CONFLICT (message_id, entity_id) DO NOTHING
+                """,
+                (message_id, entity_id),
+            )
+
+    async def _write_episode_eligible_messages(
+        self,
+        cur,
+        message_ids: List[int],
+        scope: Dict,
+    ) -> None:
+        user_name = require_scope_value(
+            scope.get("user_name"), "user_name", "episode eligibility write"
+        )
+        session_id = require_scope_value(
+            scope.get("session_id"), "session_id", "episode eligibility write"
+        )
+        project_id = self._require_project_id(
+            scope.get("project_id"), "episode eligibility write"
+        )
+        normalized_message_ids = sorted(
+            {int(message_id) for message_id in message_ids}
+        )
+        if any(message_id <= 0 for message_id in normalized_message_ids):
+            raise ValueError("Episode-eligible messages require positive IDs")
+
+        await cur.execute(
+            """
+            SELECT message_id
+            FROM messages
+            WHERE message_id = ANY(%s)
+              AND user_name = %s
+              AND session_id = %s
+              AND project_id = %s
+            """,
+            (normalized_message_ids, user_name, session_id, project_id),
+        )
+        scoped_message_ids = {
+            int(row["message_id"]) for row in await cur.fetchall()
+        }
+        if scoped_message_ids != set(normalized_message_ids):
+            raise ValueError("Episode-eligible messages include messages outside scope")
+
+        for message_id in normalized_message_ids:
+            await cur.execute(
+                """
+                INSERT INTO episode_eligible_messages (message_id)
+                VALUES (%s)
+                ON CONFLICT (message_id) DO NOTHING
+                """,
+                (message_id,),
+            )
 
     async def update_entity_profile(
         self,

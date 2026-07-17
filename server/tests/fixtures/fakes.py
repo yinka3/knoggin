@@ -445,7 +445,7 @@ class FakeKnowledgeStore:
             "identity_project_ids": list(identity_project_ids),
         }
         self.search_rebuild_calls.append(call)
-        return {"messages": 0, "entities": 0, "facts": 0, "identity": 1}
+        return {"messages": 0, "entities": 0, "episodes": 0, "identity": 1}
 
     async def ensure_identity_entity(self, user_name, aliases=None):
         self.identity_calls.append((user_name, list(aliases or [])))

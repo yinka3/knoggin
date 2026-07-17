@@ -1,10 +1,15 @@
 import json
 import uuid
+from copy import deepcopy
 from typing import Dict, List, Optional, Tuple, Union
 
 from loguru import logger
 
 from common.exceptions import ToolExecutionError
+from common.utils.local_references import (
+    register_short_uuid_references,
+    resolve_local_id,
+)
 from common.schema.tool_schema import (
     READ_CAPABILITY,
     TOOL_SCHEMAS,
@@ -15,7 +20,7 @@ from common.schema.tool_schema import (
 from common.utils.time_utils import parse_iso_time_or_now
 from core.agent.formatters import (
     format_entity_results,
-    format_fact_results,
+    format_episode_results,
     format_graph_results,
     format_hierarchy_results,
     format_hot_topic_context,
@@ -31,6 +36,235 @@ for _schema in TOOL_SCHEMAS:
     _name = _fn.get("name", "")
     _props = _fn.get("parameters", {}).get("properties", {})
     _TOOL_PARAM_TYPES[_name] = {k: v.get("type", "string") for k, v in _props.items()}
+
+
+# UUID-backed IDs that can be selected again in a later agent tool call.  The
+# model sees compact typed handles (for example ``ep_a3f91c``), not UUIDs.
+# Numeric entity and message IDs stay numeric; they are already concise and
+# should not be forced through this UUID lookup.
+_RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
+    "episode_check": {"episode_id": "ep"},
+    "read_recent_episodes": {"episode_id": "ep"},
+    "list_documents": {
+        "document_id": "doc",
+        "folder_root_id": "folder",
+    },
+    "list_folder_uploads": {"folder_root_id": "folder"},
+    "get_folder_upload_summary": {
+        "document_id": "doc",
+        "folder_root_id": "folder",
+    },
+    "list_folder_tree": {
+        "document_id": "doc",
+        "folder_root_id": "folder",
+    },
+    "get_document_info": {
+        "document_id": "doc",
+        "folder_root_id": "folder",
+    },
+    "read_document": {
+        "document_id": "doc",
+        "folder_root_id": "folder",
+    },
+    "search_documents": {
+        "document_id": "doc",
+        "folder_root_id": "folder",
+    },
+    "check_graph_health": {
+        "episode_id": "ep",
+        "evidence_episode_ids": "ep",
+    },
+    "propose_entity_merge": {
+        "episode_id": "ep",
+        "evidence_episode_ids": "ep",
+    },
+}
+
+_TOOL_ARGUMENT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
+    "read_episode": {"episode_id": "ep"},
+    "list_documents": {"folder_root_id": "folder"},
+    "get_folder_upload_summary": {"folder_root_id": "folder"},
+    "list_folder_tree": {"folder_root_id": "folder"},
+    "get_document_info": {"document_id": "doc"},
+    "read_document": {"document_id": "doc"},
+    "search_documents": {"folder_root_id": "folder"},
+    "propose_entity_merge": {
+        "evidence_episode_ids": "ep",
+    },
+}
+
+# These scope and graph-internal IDs are not useful to the model and can be
+# UUIDs themselves. Keep concise numeric entity/message evidence intact.
+_HIDDEN_MODEL_ID_FIELDS = {
+    "project_id",
+    "session_id",
+    "user_id",
+    "agent_id",
+    "run_id",
+    "relationship_id",
+}
+
+def _iter_uuid_reference_values(value, field_prefixes: Dict[str, str]):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            prefix = field_prefixes.get(key)
+            if prefix is not None:
+                if isinstance(item, list):
+                    yield prefix, [
+                        identifier
+                        for identifier in item
+                        if isinstance(identifier, str)
+                    ]
+                elif isinstance(item, str):
+                    yield prefix, [item]
+            yield from _iter_uuid_reference_values(item, field_prefixes)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _iter_uuid_reference_values(item, field_prefixes)
+
+
+def _register_result_uuid_references(
+    ctx: AgentContext,
+    tool_name: str,
+    data,
+) -> Dict[str, Dict[str, str]]:
+    """Return real-ID-to-handle maps and retain handles for this execution."""
+
+    field_prefixes = _RESULT_UUID_FIELDS.get(tool_name, {})
+    identifiers_by_prefix: Dict[str, List[str]] = {}
+    for prefix, identifiers in _iter_uuid_reference_values(data, field_prefixes):
+        identifiers_by_prefix.setdefault(prefix, []).extend(identifiers)
+
+    return {
+        prefix: register_short_uuid_references(
+            identifiers,
+            prefix,
+            ctx.state.short_uuid_references,
+        )
+        for prefix, identifiers in identifiers_by_prefix.items()
+    }
+
+
+def _localize_uuid_value(
+    actual_to_short: Dict[str, str],
+    value,
+):
+    if isinstance(value, list):
+        return [_localize_uuid_value(actual_to_short, item) for item in value]
+    if not isinstance(value, str):
+        return value
+    try:
+        return actual_to_short[value]
+    except KeyError as exc:
+        raise ValueError(
+            "Missing compact UUID handle for model-facing tool result."
+        ) from exc
+
+
+def _localize_tool_data(
+    value,
+    field_prefixes: Dict[str, str],
+    actual_to_short_by_prefix: Dict[str, Dict[str, str]],
+):
+    if isinstance(value, list):
+        return [
+            _localize_tool_data(item, field_prefixes, actual_to_short_by_prefix)
+            for item in value
+        ]
+    if not isinstance(value, dict):
+        return value
+
+    localized = {}
+    for key, item in value.items():
+        prefix = field_prefixes.get(key)
+        if prefix is not None:
+            localized[key] = _localize_uuid_value(
+                actual_to_short_by_prefix[prefix], item
+            )
+        elif key in _HIDDEN_MODEL_ID_FIELDS:
+            continue
+        else:
+            localized[key] = _localize_tool_data(
+                item,
+                field_prefixes,
+                actual_to_short_by_prefix,
+            )
+    return localized
+
+
+def localize_agent_tool_result(
+    ctx: AgentContext,
+    tool_name: str,
+    result: Dict,
+) -> Dict:
+    """Return the model-only version of a backend tool result.
+
+    The backend result remains untouched for hooks and operational handling.
+    The returned copy is what enters the agent's evidence and the next LLM turn.
+    """
+
+    localized_result = deepcopy(result)
+    if not isinstance(localized_result, dict) or "data" not in localized_result:
+        return localized_result
+
+    actual_to_short_by_prefix = _register_result_uuid_references(
+        ctx,
+        tool_name,
+        localized_result["data"],
+    )
+    localized_result["data"] = _localize_tool_data(
+        localized_result["data"],
+        _RESULT_UUID_FIELDS.get(tool_name, {}),
+        actual_to_short_by_prefix,
+    )
+    return localized_result
+
+
+def resolve_agent_tool_arguments(tools: Tools, tool_name: str, args: Dict) -> Dict:
+    """Resolve compact UUID handles through the active execution's lookup."""
+
+    local_to_actual = getattr(tools, "short_uuid_references", None)
+    if local_to_actual is None:
+        return args
+
+    resolved = dict(args)
+    for field_name, prefix in _TOOL_ARGUMENT_UUID_FIELDS.get(
+        tool_name, {}
+    ).items():
+        value = resolved.get(field_name)
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            local_values = [str(item) for item in value]
+            if len(local_values) != len(set(local_values)):
+                raise ValueError(
+                    f"Duplicate local {prefix} references are not allowed."
+                )
+            resolved[field_name] = [
+                _resolve_short_uuid_reference(item, prefix, local_to_actual)
+                for item in value
+            ]
+        else:
+            resolved[field_name] = _resolve_short_uuid_reference(
+                value,
+                prefix,
+                local_to_actual,
+            )
+
+    return resolved
+
+
+def _resolve_short_uuid_reference(
+    value,
+    prefix: str,
+    local_to_actual: Dict[str, str],
+) -> str:
+    """Resolve one correctly typed compact UUID handle."""
+
+    if not isinstance(value, str) or not value.startswith(f"{prefix}_"):
+        raise ValueError(f"Expected a {prefix}_ UUID handle for this argument.")
+    return str(resolve_local_id(value, local_to_actual))
 
 
 def _coerce_arg(value, expected_type: str):
@@ -100,13 +334,27 @@ def build_user_message(
 
             if "error" in r:
                 msg += f"- `{tool}`: Error - {r['error']}\n"
+            elif tool in ("episode_check", "read_recent_episodes"):
+                result_groups = data.get("results", []) if isinstance(data, dict) else []
+                count = sum(
+                    len(group.get("episodes", []))
+                    for group in result_groups
+                    if isinstance(group, dict)
+                )
+                if count > 0:
+                    msg += (
+                        f"- `{tool}`: Found {count} episode(s). "
+                        "(See 'Retrieved Context' below)\n"
+                    )
+                else:
+                    msg += f"- `{tool}`: No results found.\n"
             elif tool in (
                 "search_messages",
                 "search_entity",
                 "get_connections",
                 "get_recent_activity",
                 "find_path",
-                "fact_check",
+                "read_episode",
                 "get_hierarchy",
                 "search_documents",
                 "read_document",
@@ -163,7 +411,7 @@ def _format_evidence(
                 continue
             if tool == "search_entity":
                 new_profile_ids = {d.get("id") for d in data if d.get("id")}
-            elif tool == "search_messages":
+            elif tool in ("search_messages", "read_episode"):
                 new_message_keys = {
                     _message_evidence_key(d) for d in data if _message_evidence_key(d)
                 }
@@ -175,8 +423,8 @@ def _format_evidence(
                     for d in data
                     if d.get("source") and d.get("target")
                 }
-            elif tool == "fact_check":
-                # For fact_check, we'll treat all results in the latest call as 'new'
+            elif tool in ("episode_check", "read_recent_episodes"):
+                # Episode checks are structured context rather than list evidence.
                 pass
 
     if evidence.summary:
@@ -237,8 +485,11 @@ def _format_evidence(
             f"{format_hierarchy_results(evidence.hierarchy)}\n"
         )
 
-    if evidence.facts:
-        msg += f"\n**Fact check results:**\n{format_fact_results(evidence.facts)}\n"
+    if evidence.episodes:
+        msg += (
+            "\n**Episode check results:**\n"
+            f"{format_episode_results(evidence.episodes)}\n"
+        )
 
     return msg
 
@@ -314,11 +565,11 @@ def _hierarchy_evidence_key(item: Dict) -> Tuple:
     return _stable_evidence_key(item)
 
 
-def _fact_evidence_key(item: Dict) -> Tuple:
+def _episode_evidence_key(item: Dict) -> Tuple:
     if isinstance(item, dict):
-        fact_id = item.get("fact_id", item.get("id"))
-        if fact_id is not None:
-            return ("fact", fact_id)
+        episode_id = item.get("episode_id", item.get("id"))
+        if episode_id is not None:
+            return ("episode", episode_id)
     return _stable_evidence_key(item)
 
 
@@ -434,12 +685,19 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
             _hierarchy_evidence_key,
             cfg.max_accumulated_hierarchy,
         ),
-        "fact_check": lambda ev, d, cfg: _acc_unique_extend_or_append(
-            ev.facts,
+        "episode_check": lambda ev, d, cfg: _acc_unique_extend_or_append(
+            ev.episodes,
             d,
-            _fact_evidence_key,
-            cfg.max_accumulated_facts,
+            _episode_evidence_key,
+            cfg.max_accumulated_episodes,
         ),
+        "read_recent_episodes": lambda ev, d, cfg: _acc_unique_extend_or_append(
+            ev.episodes,
+            d,
+            _episode_evidence_key,
+            cfg.max_accumulated_episodes,
+        ),
+        "read_episode": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
         "search_documents": lambda ev, d, cfg: _acc_documents(ev, d, cfg),
         "read_document": lambda ev, d, cfg: _acc_documents(ev, d, cfg),
         "web_search": lambda ev, d, cfg: _acc_unique(
@@ -484,7 +742,7 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Path found: {len(data)} hops", len(data)
         return "No path", 0
 
-    if tool_name == "fact_check":
+    if tool_name in ("episode_check", "read_recent_episodes"):
         if isinstance(data, dict):
             res_type = data.get("resolution", "unknown")
             results = data.get("results", [])
@@ -612,6 +870,9 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         else:
             kwargs = {k: args.get(k) for k in param_keys if k in args}
 
+        # Tool schemas validate the model-facing local values first. Only then
+        # resolve them for the scoped backend reader/writer call.
+        kwargs = resolve_agent_tool_arguments(tools, name, kwargs)
         result = await method(**kwargs)
         if audit_id:
             audit_status = (

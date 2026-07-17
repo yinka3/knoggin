@@ -75,12 +75,12 @@ def patch_events(monkeypatch):
     return events
 
 
-def make_resources(*, redis=None):
+def make_resources(*, redis=None, llm_service=None):
     return SimpleNamespace(
         redis=redis or FakeRedis(),
         postgres=FakePostgresClient(),
         knowledge_store=RecordingKnowledgeStore(),
-        llm_service=object(),
+        llm_service=llm_service or object(),
     )
 
 
@@ -108,6 +108,16 @@ async def save_agent(postgres, agent_id, *, name=None, persona=None, **overrides
     return agent
 
 
+class RecordingSeedingLLM:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    async def generate_text(self, system, user, **kwargs):
+        self.calls.append({"system": system, "user": user, **kwargs})
+        return self.response
+
+
 @pytest.mark.no_network
 async def test_trigger_discussion_skips_when_active_discussion_exists(monkeypatch):
     patch_manager_config(monkeypatch)
@@ -125,6 +135,83 @@ async def test_trigger_discussion_skips_when_active_discussion_exists(monkeypatc
 
     assert resources.knowledge_store.community.created == []
     assert manager._discussion_task is None
+
+
+@pytest.mark.no_network
+async def test_seed_discussion_uses_local_agent_references(monkeypatch):
+    config = root_config()
+    config.developer_settings.community.seeding_agent_id = "agent-omega"
+    monkeypatch.setattr(
+        "core.community.community_manager.ConfigManager.get",
+        staticmethod(lambda: SimpleNamespace(config=config)),
+    )
+    events = patch_events(monkeypatch)
+    llm = RecordingSeedingLLM(
+        '{"topic":"Episode quality","agent_ids":["a1","a2","a99"]}'
+    )
+    resources = make_resources(llm_service=llm)
+    await save_agent(
+        resources.postgres,
+        "agent-alpha",
+        name="Analyst",
+        persona="Careful evidence analyst",
+    )
+    await save_agent(
+        resources.postgres,
+        "agent-omega",
+        name="Explorer",
+        persona="Curious systems explorer",
+    )
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    seeded = await manager._seed_discussion()
+
+    assert seeded is not None
+    assert seeded["agent_ids"] == ["agent-alpha", "agent-omega"]
+    prompt = llm.calls[0]["user"]
+    assert "- a1: Analyst:" in prompt
+    assert "- a2: Explorer:" in prompt
+    assert "agent-alpha" not in prompt
+    assert "agent-omega" not in prompt
+    assert '"agent_ids": ["a1", "a2"]' in prompt
+    assert events[-1][2] == "discussion_seeded"
+    assert events[-1][3]["agent_ids"] == ["agent-alpha", "agent-omega"]
+
+
+@pytest.mark.no_network
+async def test_seed_discussion_falls_back_to_the_seeding_agent_for_invalid_refs(
+    monkeypatch,
+):
+    config = root_config()
+    config.developer_settings.community.seeding_agent_id = "agent-omega"
+    monkeypatch.setattr(
+        "core.community.community_manager.ConfigManager.get",
+        staticmethod(lambda: SimpleNamespace(config=config)),
+    )
+    patch_events(monkeypatch)
+    resources = make_resources(
+        llm_service=RecordingSeedingLLM(
+            '{"topic":"Episode quality","agent_ids":["a99"]}'
+        )
+    )
+    await save_agent(
+        resources.postgres,
+        "agent-alpha",
+        name="Analyst",
+        persona="Careful evidence analyst",
+    )
+    await save_agent(
+        resources.postgres,
+        "agent-omega",
+        name="Explorer",
+        persona="Curious systems explorer",
+    )
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    seeded = await manager._seed_discussion()
+
+    assert seeded is not None
+    assert seeded["agent_ids"] == ["agent-omega"]
 
 
 @pytest.mark.no_network

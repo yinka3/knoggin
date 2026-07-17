@@ -11,7 +11,8 @@ class ProjectDeletionWriter:
     _PROJECT_TABLES = (
         "entity_merge_audits",
         "entity_merge_proposals",
-        "fact_change_audits",
+        "episode_processing_checkpoints",
+        "episodes",
         "ingestion_candidate_suggestions",
         "agent_tool_audits",
         "document_content",
@@ -20,12 +21,12 @@ class ProjectDeletionWriter:
         "document_folder_uploads",
         "project_document_scan_settings",
         "relationship_evidence_refs",
+        "message_entity_refs",
+        "episode_eligible_messages",
         "entity_search",
         "message_search",
-        "fact_search",
         "hierarchy_edges",
         "relationships",
-        "facts",
         "entity_aliases",
         "entities",
         "messages",
@@ -120,6 +121,28 @@ class ProjectDeletionWriter:
                 DELETE FROM public.relationship_evidence_refs
                 WHERE relationship_id IN (
                     SELECT relationship_id FROM public.relationships
+                    WHERE project_id = %s
+                )
+                """,
+                (project_id,),
+            )
+        if table == "message_entity_refs":
+            return (
+                """
+                DELETE FROM public.message_entity_refs
+                WHERE message_id IN (
+                    SELECT message_id FROM public.messages
+                    WHERE project_id = %s
+                )
+                """,
+                (project_id,),
+            )
+        if table == "episode_eligible_messages":
+            return (
+                """
+                DELETE FROM public.episode_eligible_messages
+                WHERE message_id IN (
+                    SELECT message_id FROM public.messages
                     WHERE project_id = %s
                 )
                 """,

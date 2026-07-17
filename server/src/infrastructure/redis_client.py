@@ -161,7 +161,6 @@ class RedisKeys:
             "message_dedup",
             "heartbeat_counter",
             "project_heartbeat_counter",
-            "dirty_entities",
             "merge_queue",
             "merge_proposals",
             "merge_intent",
@@ -175,9 +174,6 @@ class RedisKeys:
             "dlq_state",
             "dlq_claims",
             "dlq_parked",
-            "project_profile_complete",
-            "project_user_profile_ran",
-            "last_profile_update",
             "community_discussion_active",
             "community_pubsub_channel",
         }
@@ -195,10 +191,6 @@ class RedisKeys:
             "community_agent_memory",
         }
     )
-
-    @staticmethod
-    def dirty_entities(user: str, project_id: str) -> str:
-        return f"dirty_entities:{user}:{project_id}"
 
     @staticmethod
     def merge_queue(user_name: str, project_id: str) -> str:
@@ -229,18 +221,6 @@ class RedisKeys:
         return f"dlq:parked:{user}:{project_id}"
 
     @staticmethod
-    def last_profile_update(user: str, project_id: str, entity_id: int) -> str:
-        return f"last_profile_update:{user}:{project_id}:{entity_id}"
-
-    @staticmethod
-    def project_profile_complete(user: str, project_id: str) -> str:
-        return f"project_profile_complete:{user}:{project_id}"
-
-    @staticmethod
-    def project_user_profile_ran(user: str, project_id: str) -> str:
-        return f"project_user_profile_ran:{user}:{project_id}"
-
-    @staticmethod
     def project_last_processed(user: str, project_id: str) -> str:
         return f"project_last_processed_msg:{user}:{project_id}"
 
@@ -256,7 +236,6 @@ class RedisKeys:
     def project_cleanup_keys(user: str, project_id: str) -> list[str]:
         """Return fixed Redis keys wholly owned by one project."""
         return [
-            RedisKeys.dirty_entities(user, project_id),
             RedisKeys.merge_queue(user, project_id),
             RedisKeys.merge_proposals(user, project_id),
             RedisKeys.merge_intents_index(user, project_id),
@@ -265,8 +244,6 @@ class RedisKeys:
             RedisKeys.dlq_state(user, project_id),
             RedisKeys.dlq_claims(user, project_id),
             RedisKeys.dlq_parked(user, project_id),
-            RedisKeys.project_profile_complete(user, project_id),
-            RedisKeys.project_user_profile_ran(user, project_id),
             RedisKeys.project_last_processed(user, project_id),
             RedisKeys.project_last_activity(user, project_id),
             RedisKeys.project_heartbeat_counter(user, project_id),
@@ -278,7 +255,6 @@ class RedisKeys:
     def project_cleanup_patterns(user: str, project_id: str) -> list[str]:
         """Return variable-suffix Redis key patterns owned by one project."""
         return [
-            f"last_profile_update:{user}:{project_id}:*",
             f"merge_intent:{user}:{project_id}:*",
             f"last_run:*:{user}:{project_id}",
             f"job_lease:{user}:{project_id}:*",

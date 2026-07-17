@@ -673,7 +673,7 @@ async def test_manage_context_size_summarizes_and_trims_large_evidence():
             {"source": "Ada", "target": f"Entity {index}"}
             for index in range(20)
         ],
-        facts=[{"resolution": "exact"}],
+        episodes=[{"resolution": "exact"}],
         paths=[{"entity_a": "Ada", "entity_b": "Knoggin"}],
         hierarchy=[{"entity": "Knoggin"}],
     )
@@ -693,7 +693,7 @@ async def test_manage_context_size_summarizes_and_trims_large_evidence():
     ]
     assert [profile["id"] for profile in evidence.profiles] == [3, 4, 5, 6, 7]
     assert len(evidence.graph) == 15
-    assert evidence.facts == []
+    assert evidence.episodes == []
     assert evidence.paths == []
     assert evidence.hierarchy == []
     assert llm.call_llm_calls[0]["temperature"] == 0.0
@@ -708,7 +708,7 @@ async def test_manage_context_size_truncates_when_summary_generation_fails():
             {"source": "Ada", "target": f"Entity {index}"}
             for index in range(18)
         ],
-        facts=[{"resolution": "exact"}],
+        episodes=[{"resolution": "exact"}],
         paths=[{"entity_a": "Ada", "entity_b": "Knoggin"}],
         hierarchy=[{"entity": "Knoggin"}],
     )
@@ -728,6 +728,6 @@ async def test_manage_context_size_truncates_when_summary_generation_fails():
     ]
     assert [profile["id"] for profile in evidence.profiles] == [2, 3, 4, 5, 6]
     assert len(evidence.graph) == 15
-    assert evidence.facts == []
+    assert evidence.episodes == []
     assert evidence.paths == []
     assert evidence.hierarchy == []

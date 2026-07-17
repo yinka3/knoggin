@@ -1,6 +1,7 @@
 import pytest
+from pydantic import ValidationError
 
-from common.schema.contracts import ConnectionsResult, MessageConnections
+from common.schema.contracts import ConnectionMention, ConnectionsResult, MessageConnections
 from common.schema.primitives import ConnectionRecord
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.profile import EntityProfile
@@ -47,7 +48,7 @@ async def test_connections_result_accepts_source_message_ids():
         {
             "connections": [
                 {
-                    "msg_id": 42,
+                    "msg_id": "m1",
                     "entity_a": "Alice",
                     "entity_b": "Bob",
                     "relationship": "met",
@@ -58,7 +59,27 @@ async def test_connections_result_accepts_source_message_ids():
         }
     )
 
-    assert result.connections[0].msg_id == 42
+    assert result.connections[0].msg_id == "m1"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+def test_connections_result_requires_a_local_message_reference():
+    with pytest.raises(ValidationError):
+        ConnectionsResult.model_validate(
+            {
+                "connections": [
+                    {
+                        "msg_id": 42,
+                        "entity_a": "Alice",
+                        "entity_b": "Bob",
+                        "relationship": "met",
+                        "confidence": 0.9,
+                        "context": "Alice met Bob.",
+                    }
+                ]
+            }
+        )
 
 
 @pytest.mark.ingestion
@@ -83,8 +104,8 @@ async def test_connection_extraction_keeps_valid_connections():
     processor = make_processor(
         ConnectionsResult(
             connections=[
-                ConnectionRecord(
-                    msg_id=7,
+                ConnectionMention(
+                    msg_id="m1",
                     entity_a="Alice",
                     entity_b="Bob",
                     relationship="met",

@@ -32,23 +32,25 @@ APPROVED_EVENTS = frozenset(
         ("pipeline", "graph_write_failed"),
         ("pipeline", "buffer_invalid_entries"),
         ("pipeline", "drain_complete"),
+        ("pipeline", "local_reference_resolution_failed"),
         ("job", "dlq_parked"),
         ("job", "dlq_retry_success"),
         ("job", "dlq_retry_failed"),
         ("job", "dlq_reprocess_success"),
         ("job", "dlq_graph_write_success"),
-        ("job", "dirty_entities_marked"),
-        ("job", "dirty_entities_cleared"),
         ("job", "merge_queue_marked"),
         ("job", "merge_queue_removed"),
-        ("job", "invalidation_failures"),
-        ("job", "facts_write_failed"),
         ("job", "maintenance_deferred"),
-        ("job", "profile_refinement_failed"),
-        ("job", "profiles_refined"),
-        ("job", "user_profile_refined"),
+        ("job", "episode_processed"),
+        ("job", "episode_processing_failed"),
+        ("job", "episode_validation_failed"),
+        ("job", "local_reference_resolution_failed"),
+        ("job", "episodes_write_failed"),
         ("job", "failed"),
         ("job", "timeout"),
+        ("agent", "episode_retrieval_completed"),
+        ("agent", "episode_source_messages_expanded"),
+        ("agent", "local_reference_resolution_failed"),
         ("entities", "entity_merged"),
     }
 )
@@ -65,6 +67,8 @@ SAFE_FIELDS = frozenset(
         "attempt",
         "max_attempts",
         "reason",
+        "pipeline",
+        "reference_type",
         "error",
         "error_type",
         "redis_key",
@@ -85,19 +89,44 @@ SAFE_FIELDS = frozenset(
         "duplicate_id",
         "audit_id",
         "proposal_id",
-        "failed_fact_ids",
         "entity_count",
-        "fact_count",
-        "facts_created",
-        "facts_invalidated",
+        "entity_link_count",
         "msg_count",
         "message_count",
+        "source_message_count",
+        "episode_source_message_count",
+        "episode_count",
+        "focus_episode_count",
+        "relationship_link_count",
+        "returned_evidence_count",
+        "expanded_source_message_count",
         "dlq_count",
         "count",
         "cleared_count",
         "marked_count",
         "partial_flush",
         "status",
+        "action",
+        "episode_id",
+        "failed_episode_ids",
+        "strategy",
+        "processing_latency_ms",
+        "retrieval_latency_ms",
+        "source_message_expansion_latency_ms",
+        "consolidation_limit_hit",
+        "episode_at_max_size",
+        "invalid_identifier",
+        "focus_entity_retrieval",
+        "used_raw_message_fallback",
+    }
+)
+
+LOCAL_REFERENCE_FAILURE_FIELDS = frozenset(
+    {
+        "pipeline",
+        "reference_type",
+        "reason",
+        "stage",
     }
 )
 
@@ -136,8 +165,13 @@ def normalize_coordination_event(
     if project_id:
         fields["project_id"] = project_id
 
+    allowed_fields = (
+        LOCAL_REFERENCE_FAILURE_FIELDS
+        if event == "local_reference_resolution_failed"
+        else SAFE_FIELDS
+    )
     for key, value in payload.items():
-        if key in CONTENT_KEYS or key not in SAFE_FIELDS:
+        if key in CONTENT_KEYS or key not in allowed_fields:
             continue
         normalized_key = _normalize_field_name(key)
         if normalized_key in fields:
