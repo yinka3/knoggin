@@ -1,5 +1,4 @@
 import json
-from collections import defaultdict
 from datetime import date, datetime
 from typing import Dict, List, Optional
 
@@ -57,20 +56,6 @@ class GraphBuilder:
             )
         return params
 
-    @classmethod
-    def _fact_projection_params(cls, row: Dict) -> Dict:
-        return {
-            "id": row["fact_id"],
-            "content": row["content"],
-            "valid_at": cls._to_iso(row["valid_at"]),
-            "invalid_at": cls._to_iso(row["invalid_at"]),
-            "confidence": float(row["confidence"] or 0),
-            "source_msg_id": row["source_msg_id"],
-            "source_user_name": row["source_user_name"],
-            "source_session_id": row["source_session_id"],
-            "source": row["source"],
-        }
-
     @staticmethod
     def _hierarchy_projection_params(rows: List[Dict]) -> List[Dict]:
         return [
@@ -117,7 +102,6 @@ class GraphBuilder:
                     project_id,
                     user_name,
                 )
-                facts = await self._fetch_facts(cur, project_id, user_name)
                 hierarchy_edges = await self._fetch_hierarchy_edges(
                     cur,
                     project_id,
@@ -140,31 +124,6 @@ class GraphBuilder:
                     self._relationship_projection_params(relationships),
                 )
 
-                fact_params_by_entity = defaultdict(list)
-                fact_user_by_entity = {}
-                for fact in facts:
-                    entity_id = int(fact["entity_id"])
-                    fact_params_by_entity[entity_id].append(
-                        self._fact_projection_params(fact)
-                    )
-                    fact_user_by_entity[entity_id] = fact["user_name"]
-
-                all_fact_params = []
-                for entity_id, fact_params in fact_params_by_entity.items():
-                    all_fact_params.extend(fact_params)
-                    await self.projection.project_facts(
-                        cur,
-                        entity_id,
-                        fact_params,
-                        fact_user_by_entity[entity_id],
-                        None,
-                        project_id,
-                    )
-                await self.projection.project_fact_message_links(
-                    cur,
-                    all_fact_params,
-                )
-
                 await self.projection.replace_hierarchy_edges_for_entities(
                     cur,
                     project_id,
@@ -176,7 +135,6 @@ class GraphBuilder:
                     "messages": len(messages),
                     "entities": len(entities),
                     "relationships": len(relationships),
-                    "facts": len(facts),
                     "hierarchy_edges": len(hierarchy_edges),
                 }
                 logger.info(
@@ -192,7 +150,6 @@ class GraphBuilder:
                 "messages": 0,
                 "entities": 0,
                 "relationships": 0,
-                "facts": 0,
                 "hierarchy_edges": 0,
             }
 
@@ -272,6 +229,7 @@ class GraphBuilder:
                 rel.project_id,
                 rel.entity_a_id,
                 rel.entity_b_id,
+                rel.relationship_type,
                 rel.weight,
                 rel.confidence,
                 rel.context,
@@ -294,36 +252,6 @@ class GraphBuilder:
               AND rel.user_name = %s
             GROUP BY rel.relationship_id
             ORDER BY rel.relationship_id
-            """,
-            (project_id, user_name),
-        )
-        return list(await cur.fetchall())
-
-    async def _fetch_facts(
-        self,
-        cur,
-        project_id: str,
-        user_name: str,
-    ) -> List[Dict]:
-        await cur.execute(
-            """
-            SELECT
-                fact_id,
-                entity_id,
-                user_name,
-                project_id,
-                content,
-                valid_at,
-                invalid_at,
-                confidence,
-                source_msg_id,
-                source_user_name,
-                source_session_id,
-                source
-            FROM facts
-            WHERE project_id = %s
-              AND user_name = %s
-            ORDER BY entity_id, fact_id
             """,
             (project_id, user_name),
         )

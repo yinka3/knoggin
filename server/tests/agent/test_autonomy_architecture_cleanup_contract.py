@@ -200,6 +200,7 @@ def test_agent_tool_module_defaults_preserve_current_limits():
         "search_entity": 8,
         "episode_check": 6,
         "read_episode": 4,
+        "read_recent_episodes": 4,
         "get_recent_activity": 8,
         "find_path": 8,
         "get_hierarchy": 8,

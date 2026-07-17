@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -17,6 +18,9 @@ def episode_row(episode_id="episode-1"):
         "updates": '[]',
         "unresolved": '[]',
         "importance": 0.8,
+        "source_message_count": 1,
+        "first_message_at": now,
+        "last_message_at": now,
         "generator_metadata": '{"prompt_version": "episode-v1"}',
         "created_at": now,
         "updated_at": now,
@@ -31,6 +35,7 @@ def attachment_results(*, focus=False):
                 "influence_weight": 0.9,
                 "influence_reason": "introduced the decision",
                 "message_position": 0,
+                "attached_at": datetime.now(timezone.utc),
             }
         ],
         [
@@ -40,6 +45,8 @@ def attachment_results(*, focus=False):
                 "role": "subject",
                 "is_focus_entity": focus,
                 "source_message_count": 1,
+                "first_seen_at": datetime.now(timezone.utc),
+                "last_seen_at": datetime.now(timezone.utc),
             }
         ],
         [
@@ -71,8 +78,12 @@ async def test_episode_reader_hydrates_one_complete_episode_aggregate():
 
     assert episode is not None
     assert episode.new_developments == ["Episode tables are available."]
+    assert episode.source_message_count == 1
+    assert episode.first_message_at is not None
     assert episode.messages[0].message_id == 11
+    assert episode.messages[0].attached_at is not None
     assert episode.entities[0].is_focus_entity is True
+    assert episode.entities[0].first_seen_at is not None
     assert episode.relationships[0].is_central_relationship is True
     query, params = client.calls[0][1], client.calls[0][2]
     assert "JOIN sessions s" in query
@@ -100,6 +111,38 @@ async def test_episode_reader_entity_lookup_includes_non_focus_memberships():
     assert "ee.is_focus_entity DESC" in query
     assert "ee.is_focus_entity = TRUE" not in query
     assert params == (2, "ada", "project-1", "session-1", 10)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_reader_returns_scoped_semantic_matches():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [{**episode_row(), "similarity": 0.86}],
+            *attachment_results(),
+        ]
+    )
+    reader = EpisodeReader(client)
+
+    matches = await reader.search_episodes_by_embedding(
+        [0.1] * 1024,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        limit=3,
+        score_threshold=0.5,
+    )
+
+    assert [(episode.episode_id, score) for episode, score in matches] == [
+        ("episode-1", 0.86)
+    ]
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "e.embedding <=> %s::vector" in query
+    assert "e.embedding IS NOT NULL" in query
+    assert json.loads(params[0]) == [0.1] * 1024
+    assert params[1:4] == ("ada", "project-1", "session-1")
+    assert params[5] == 0.5
+    assert params[-1] == 3
 
 
 @pytest.mark.storage
@@ -159,6 +202,7 @@ async def test_episode_reader_expands_source_messages_in_episode_order():
                     "influence_weight": 0.9,
                     "influence_reason": "introduced the decision",
                     "message_position": 0,
+                    "attached_at": datetime.now(timezone.utc),
                 }
             ]
         ]
@@ -183,6 +227,72 @@ async def test_episode_reader_expands_source_messages_in_episode_order():
         "ada",
         "project-1",
         "session-1",
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_reader_returns_resolved_generation_catalogs():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "entity_id": 2,
+                    "canonical_name": "Ada",
+                    "type": "person",
+                    "aliases": ["Ada Lovelace"],
+                }
+            ],
+            [
+                {
+                    "relationship_id": "project-1:2:3",
+                    "entity_a_id": 2,
+                    "entity_a_name": "Ada",
+                    "entity_a_type": "person",
+                    "entity_b_id": 3,
+                    "entity_b_name": "episodic memory",
+                    "entity_b_type": "concept",
+                    "relationship_type": "adopted",
+                    "confidence": 0.9,
+                    "context": "Ada selected episodic memory.",
+                    "evidence_message_ids": [11, 12],
+                }
+            ],
+        ]
+    )
+    reader = EpisodeReader(client)
+
+    entities, relationships = await reader.get_episode_generation_catalog(
+        [12, 11, 12],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert entities == [
+        {
+            "entity_id": 2,
+            "canonical_name": "Ada",
+            "type": "person",
+            "aliases": ["Ada Lovelace"],
+        }
+    ]
+    assert relationships[0]["relationship_type"] == "adopted"
+    assert relationships[0]["entity_b"]["canonical_name"] == "episodic memory"
+    assert relationships[0]["evidence_message_ids"] == [11, 12]
+    entity_query, entity_params = client.calls[0][1], client.calls[0][2]
+    relationship_query, relationship_params = client.calls[1][1], client.calls[1][2]
+    assert "entity_aliases" in entity_query
+    assert entity_params == ([11, 12], "ada", "project-1", "session-1", "project-1", 1)
+    assert "relationship_type" in relationship_query
+    assert relationship_params == (
+        [11, 12],
+        "ada",
+        "session-1",
+        "ada",
+        "project-1",
+        "session-1",
+        "project-1",
     )
 
 
@@ -241,6 +351,7 @@ async def test_episode_reader_requires_a_complete_eligible_window():
     assert all("is_episode_eligible" not in message for message in messages)
     query, params = client.calls[0][1], client.calls[0][2]
     assert "LEFT JOIN episode_eligible_messages" in query
+    assert "ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id" in query
     assert params == ("ada", "project-1", "session-1", 10, 2)
 
 

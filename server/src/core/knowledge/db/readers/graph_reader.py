@@ -347,18 +347,9 @@ class GraphReader:
         SELECT
             parent.entity_id AS id,
             parent.canonical_name,
-            parent.type,
-            COALESCE(
-                array_agg(f.content ORDER BY f.valid_at DESC)
-                    FILTER (WHERE f.content IS NOT NULL),
-                '{}'
-            ) AS facts
+            parent.type
         FROM hierarchy_edges edge
         JOIN entities parent ON parent.entity_id = edge.parent_id
-        LEFT JOIN facts f
-          ON f.entity_id = parent.entity_id
-         AND f.invalid_at IS NULL
-         AND f.project_id = ANY(%s)
         WHERE edge.child_id = %s
           AND edge.project_id = ANY(%s)
           AND (parent.project_id = ANY(%s) OR parent.entity_id = %s)
@@ -369,7 +360,6 @@ class GraphReader:
             res = await self.client.fetch_all(
                 query,
                 (
-                    visible_project_ids,
                     entity_id,
                     visible_project_ids,
                     visible_project_ids,
@@ -381,7 +371,6 @@ class GraphReader:
                     "id": int(r["id"]),
                     "canonical_name": self._clean_string(r["canonical_name"]),
                     "type": self._clean_string(r["type"]),
-                    "facts": r["facts"] or [],
                 }
                 for r in res
             ]
@@ -440,18 +429,9 @@ class GraphReader:
         SELECT
             child.entity_id AS id,
             child.canonical_name,
-            child.type,
-            COALESCE(
-                array_agg(f.content ORDER BY f.valid_at DESC)
-                    FILTER (WHERE f.content IS NOT NULL),
-                '{}'
-            ) AS facts
+            child.type
         FROM hierarchy_edges edge
         JOIN entities child ON child.entity_id = edge.child_id
-        LEFT JOIN facts f
-          ON f.entity_id = child.entity_id
-         AND f.invalid_at IS NULL
-         AND f.project_id = ANY(%s)
         WHERE edge.parent_id = %s
           AND edge.project_id = ANY(%s)
           AND (child.project_id = ANY(%s) OR child.entity_id = %s)
@@ -462,7 +442,6 @@ class GraphReader:
             res = await self.client.fetch_all(
                 query,
                 (
-                    visible_project_ids,
                     entity_id,
                     visible_project_ids,
                     visible_project_ids,
@@ -474,7 +453,6 @@ class GraphReader:
                     "id": int(r["id"]),
                     "canonical_name": self._clean_string(r["canonical_name"]),
                     "type": self._clean_string(r["type"]),
-                    "facts": r["facts"] or [],
                 }
                 for r in res
             ]
@@ -567,18 +545,18 @@ class GraphReader:
             s.last_mentioned_ms AS s_last,
             (
                 SELECT count(*)
-                FROM facts
-                WHERE project_id = %s
-                  AND entity_id = %s
-                  AND invalid_at IS NULL
-            ) AS p_fact_count,
+                FROM episode_entities episode_entity
+                JOIN episodes episode ON episode.episode_id = episode_entity.episode_id
+                WHERE episode.project_id = %s
+                  AND episode_entity.entity_id = %s
+            ) AS p_episode_count,
             (
                 SELECT count(*)
-                FROM facts
-                WHERE project_id = %s
-                  AND entity_id = %s
-                  AND invalid_at IS NULL
-            ) AS s_fact_count,
+                FROM episode_entities episode_entity
+                JOIN episodes episode ON episode.episode_id = episode_entity.episode_id
+                WHERE episode.project_id = %s
+                  AND episode_entity.entity_id = %s
+            ) AS s_episode_count,
             (
                 SELECT count(*)
                 FROM relationships
@@ -778,10 +756,9 @@ class GraphReader:
             ) AS entities,
             (
                 SELECT count(*)
-                FROM facts
-                WHERE invalid_at IS NULL
-                  AND project_id = ANY(%s)
-            ) AS facts,
+                FROM episodes
+                WHERE project_id = ANY(%s)
+            ) AS episodes,
             (
                 SELECT count(*)
                 FROM relationships
@@ -799,15 +776,15 @@ class GraphReader:
                 ),
             )
             if not row:
-                return {"entities": 0, "facts": 0, "relationships": 0}
+                return {"entities": 0, "episodes": 0, "relationships": 0}
             return {
                 "entities": int(row["entities"] or 0),
-                "facts": int(row["facts"] or 0),
+                "episodes": int(row["episodes"] or 0),
                 "relationships": int(row["relationships"] or 0),
             }
         except Exception as e:
             logger.error(f"Failed to get graph stats: {e}")
-            return {"entities": 0, "facts": 0, "relationships": 0}
+            return {"entities": 0, "episodes": 0, "relationships": 0}
 
     async def get_neighbor_ids_batch(
         self,

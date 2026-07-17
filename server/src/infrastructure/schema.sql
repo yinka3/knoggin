@@ -183,6 +183,7 @@ CREATE TABLE IF NOT EXISTS public.relationships (
         ON DELETE CASCADE,
     entity_b_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
         ON DELETE CASCADE,
+    relationship_type TEXT,
     weight INTEGER NOT NULL DEFAULT 1,
     confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     context TEXT,
@@ -224,13 +225,34 @@ CREATE TABLE IF NOT EXISTS public.episodes (
     unresolved JSONB NOT NULL DEFAULT '[]'::jsonb,
     importance DOUBLE PRECISION NOT NULL DEFAULT 0.0
         CHECK (importance >= 0.0 AND importance <= 1.0),
+    source_message_count INTEGER NOT NULL DEFAULT 0
+        CHECK (source_message_count >= 0),
+    first_message_at TIMESTAMPTZ,
+    last_message_at TIMESTAMPTZ,
+    embedding vector(1024),
     generator_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE public.relationships
+ADD COLUMN IF NOT EXISTS relationship_type TEXT;
+
+ALTER TABLE public.episodes
+ADD COLUMN IF NOT EXISTS embedding vector(1024);
+
+ALTER TABLE public.episodes
+ADD COLUMN IF NOT EXISTS source_message_count INTEGER NOT NULL DEFAULT 0
+    CHECK (source_message_count >= 0),
+ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS episodes_session_updated_idx
 ON public.episodes(project_id, session_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS episodes_embedding_idx
+ON public.episodes USING hnsw (embedding vector_cosine_ops)
+WHERE embedding IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.episode_messages (
     episode_id TEXT NOT NULL REFERENCES public.episodes(episode_id)
@@ -241,12 +263,16 @@ CREATE TABLE IF NOT EXISTS public.episode_messages (
         CHECK (influence_weight >= 0.0),
     influence_reason TEXT,
     message_position INTEGER NOT NULL CHECK (message_position >= 0),
+    attached_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (episode_id, message_id),
     UNIQUE (episode_id, message_position)
 );
 
 CREATE INDEX IF NOT EXISTS episode_messages_message_idx
 ON public.episode_messages(message_id, episode_id);
+
+ALTER TABLE public.episode_messages
+ADD COLUMN IF NOT EXISTS attached_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS public.episode_entities (
     episode_id TEXT NOT NULL REFERENCES public.episodes(episode_id)
@@ -259,6 +285,8 @@ CREATE TABLE IF NOT EXISTS public.episode_entities (
     is_focus_entity BOOLEAN NOT NULL DEFAULT FALSE,
     source_message_count INTEGER NOT NULL DEFAULT 0
         CHECK (source_message_count >= 0),
+    first_seen_at TIMESTAMPTZ,
+    last_seen_at TIMESTAMPTZ,
     PRIMARY KEY (episode_id, entity_id)
 );
 
@@ -267,6 +295,10 @@ ON public.episode_entities(entity_id, is_focus_entity, episode_id);
 
 CREATE INDEX IF NOT EXISTS episode_entities_lookup_idx
 ON public.episode_entities(entity_id, episode_id);
+
+ALTER TABLE public.episode_entities
+ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS public.episode_relationships (
     episode_id TEXT NOT NULL REFERENCES public.episodes(episode_id)
@@ -328,7 +360,8 @@ CREATE TABLE IF NOT EXISTS public.entity_merge_proposals (
     project_id TEXT NOT NULL,
     primary_entity_id BIGINT NOT NULL,
     duplicate_entity_id BIGINT NOT NULL,
-    evidence_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     reasoning TEXT NOT NULL,
     model_confidence DOUBLE PRECISION,
     reviewed_state_hash TEXT NOT NULL,
@@ -369,7 +402,8 @@ CREATE TABLE IF NOT EXISTS public.entity_merge_audits (
     project_id TEXT NOT NULL,
     primary_entity_id BIGINT NOT NULL,
     duplicate_entity_id BIGINT NOT NULL,
-    evidence_fact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     reasoning TEXT NOT NULL,
     confirmed_by TEXT NOT NULL,
     before_state JSONB,

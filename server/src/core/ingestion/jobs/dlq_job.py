@@ -103,16 +103,6 @@ class DLQReplayJob(BaseJob):
     def _is_transient(self, error: str) -> bool:
         return any(t.lower() in error.lower() for t in self.TRANSIENT_ERRORS)
 
-    async def remark_dirty_entities(
-        self, user_name: str, project_id: str, entity_ids: list[int | str]
-    ) -> int:
-        if not entity_ids:
-            return 0
-        return await self.redis.sadd(
-            RedisKeys.dirty_entities(user_name, project_id),
-            *[str(entity_id) for entity_id in entity_ids],
-        )
-
     async def remark_merge_candidates(
         self, user_name: str, project_id: str, entity_ids: list[int | str]
     ) -> int:

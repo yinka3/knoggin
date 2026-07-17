@@ -24,9 +24,10 @@ from common.schema.contracts import (
     ValidationIssue,
 )
 from common.schema.primitives import ConnectionRecord
-from common.schema.settings import EntityResolutionSettings
+from common.schema.settings import EntityResolutionSettings, LocalReferenceSettings
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
+from common.utils.local_references import build_local_id_maps, resolve_local_id
 from common.utils.time_utils import get_now_unix
 from core.ingestion.dlq_state import (
     DLQ_STATUS_PROCESSING,
@@ -73,6 +74,7 @@ class IngestionPipeline:
         common_word_frequency_threshold: Optional[float] = None,
         sparse_context_verbs: Optional[List[str]] = None,
         knowledge_store=None,
+        local_reference_settings: Optional[LocalReferenceSettings] = None,
     ):
         if not project_id:
             raise ValueError("IngestionPipeline requires project_id")
@@ -106,6 +108,11 @@ class IngestionPipeline:
             )
             if verb and verb.strip()
         }
+        self.local_references_enabled = (
+            local_reference_settings.enabled
+            if local_reference_settings is not None
+            else True
+        )
         self._work_unit_context: ContextVar[Optional[EngineWorkUnit]] = ContextVar(
             "ingestion_work_unit",
             default=None,
@@ -140,6 +147,14 @@ class IngestionPipeline:
 
         if hasattr(self.processor, "update_settings"):
             self.processor.update_settings(config)
+
+    def update_local_reference_settings(
+        self,
+        config: LocalReferenceSettings,
+    ) -> None:
+        self.local_references_enabled = config.enabled
+        if hasattr(self.processor, "update_local_reference_settings"):
+            self.processor.update_local_reference_settings(config)
 
     async def _run_with_work_unit(self, work_unit, operation, *args):
         token = self._work_unit_context.set(work_unit)
@@ -1027,12 +1042,23 @@ class IngestionPipeline:
             return [], []
 
         system_03 = get_connection_reasoning_prompt(self.user_name)
+        if not self.local_references_enabled:
+            system_03 += (
+                "\n\nLegacy ID mode is active. Return only the exact message IDs "
+                "shown in this call's input; ignore local-reference examples."
+            )
 
+        message_local_ids, message_ids_by_local = build_local_id_maps(
+            (message["id"] for message in messages),
+            "m",
+            use_local_references=self.local_references_enabled,
+        )
         user_03 = format_vp02_input(
             candidates,
             [{"id": m["id"], "text": m["message"]} for m in messages],
             session_text,
             user_name=self.user_name,
+            message_local_ids=message_local_ids,
         )
 
         await emit(
@@ -1096,19 +1122,45 @@ class IngestionPipeline:
             entity_b_key = self._normalize_name(conn.entity_b)
             canonical_a = canonical_name_by_name.get(entity_a_key)
             canonical_b = canonical_name_by_name.get(entity_b_key)
-            if conn.msg_id not in valid_msg_ids:
+            try:
+                actual_msg_id = int(
+                    resolve_local_id(conn.msg_id, message_ids_by_local)
+                )
+            except ValueError:
+                if trace is not None:
+                    trace.relationships_rejected += 1
+                await emit(
+                    session_id,
+                    "pipeline",
+                    "local_reference_resolution_failed",
+                    {
+                        "pipeline": "relationships",
+                        "reference_type": "message",
+                        "reason": "unknown_id",
+                    },
+                )
+                self._record_issue(
+                    issues,
+                    stage="connections",
+                    code="invalid_msg_id",
+                    message=f"VP-02 returned invalid local msg_id {conn.msg_id}",
+                    item_ref=f"{conn.entity_a}->{conn.entity_b}",
+                    metadata={
+                        "msg_id": conn.msg_id,
+                        "valid_msg_ids": sorted(message_ids_by_local),
+                    },
+                )
+                continue
+            if actual_msg_id not in valid_msg_ids:
                 if trace is not None:
                     trace.relationships_rejected += 1
                 self._record_issue(
                     issues,
                     stage="connections",
                     code="invalid_msg_id",
-                    message=f"VP-02 returned invalid msg_id {conn.msg_id}",
+                    message="VP-02 local msg_id resolved outside the current message set",
                     item_ref=f"{conn.entity_a}->{conn.entity_b}",
-                    metadata={
-                        "msg_id": conn.msg_id,
-                        "valid_msg_ids": sorted(valid_msg_ids),
-                    },
+                    metadata={"msg_id": conn.msg_id},
                 )
                 continue
             if (
@@ -1152,8 +1204,8 @@ class IngestionPipeline:
                 entity_b_key, set()
             )
             if (
-                conn.msg_id not in entity_a_source_msgs
-                or conn.msg_id not in entity_b_source_msgs
+                actual_msg_id not in entity_a_source_msgs
+                or actual_msg_id not in entity_b_source_msgs
             ):
                 if trace is not None:
                     trace.relationships_rejected += 1
@@ -1174,7 +1226,7 @@ class IngestionPipeline:
                 )
                 continue
             relationship_key = (
-                conn.msg_id,
+                actual_msg_id,
                 tuple(
                     sorted(
                         (
@@ -1203,16 +1255,16 @@ class IngestionPipeline:
                 )
                 continue
             seen_relationships.add(relationship_key)
-            if conn.msg_id not in msg_map:
-                msg_map[conn.msg_id] = []
-            msg_map[conn.msg_id].append(
+            if actual_msg_id not in msg_map:
+                msg_map[actual_msg_id] = []
+            msg_map[actual_msg_id].append(
                 ConnectionRecord(
                     entity_a=canonical_a,
                     entity_b=canonical_b,
                     confidence=conn.confidence,
                     context=conn.context or conn.relationship,
                     relationship=conn.relationship,
-                    msg_id=conn.msg_id,
+                    msg_id=actual_msg_id,
                 )
             )
             if trace is not None:
@@ -1224,7 +1276,39 @@ class IngestionPipeline:
         for conn in conn_result.user_connections:
             entity_name_key = self._normalize_name(conn.entity_name)
             canonical_entity_name = canonical_name_by_name.get(entity_name_key)
-            if conn.msg_id not in valid_msg_ids:
+            try:
+                actual_msg_id = int(
+                    resolve_local_id(conn.msg_id, message_ids_by_local)
+                )
+            except ValueError:
+                if trace is not None:
+                    trace.user_relationships_rejected += 1
+                await emit(
+                    session_id,
+                    "pipeline",
+                    "local_reference_resolution_failed",
+                    {
+                        "pipeline": "relationships",
+                        "reference_type": "message",
+                        "reason": "unknown_id",
+                    },
+                )
+                self._record_issue(
+                    issues,
+                    stage="connections",
+                    code="invalid_user_connection_msg_id",
+                    message=(
+                        "VP-02 returned invalid local user connection msg_id "
+                        f"{conn.msg_id}"
+                    ),
+                    item_ref=f"user->{conn.entity_name}",
+                    metadata={
+                        "msg_id": conn.msg_id,
+                        "valid_msg_ids": sorted(message_ids_by_local),
+                    },
+                )
+                continue
+            if actual_msg_id not in valid_msg_ids:
                 if trace is not None:
                     trace.user_relationships_rejected += 1
                 self._record_issue(
@@ -1232,13 +1316,11 @@ class IngestionPipeline:
                     stage="connections",
                     code="invalid_user_connection_msg_id",
                     message=(
-                        f"VP-02 returned invalid user connection msg_id {conn.msg_id}"
+                        "VP-02 local user connection msg_id resolved outside the "
+                        "current message set"
                     ),
                     item_ref=f"user->{conn.entity_name}",
-                    metadata={
-                        "msg_id": conn.msg_id,
-                        "valid_msg_ids": sorted(valid_msg_ids),
-                    },
+                    metadata={"msg_id": conn.msg_id},
                 )
                 continue
             if entity_name_key not in valid_entity_names:
@@ -1258,7 +1340,7 @@ class IngestionPipeline:
             entity_source_msgs = entity_source_msgs_by_name.get(
                 entity_name_key, set()
             )
-            if conn.msg_id not in entity_source_msgs:
+            if actual_msg_id not in entity_source_msgs:
                 if trace is not None:
                     trace.user_relationships_rejected += 1
                 self._record_issue(
@@ -1291,7 +1373,7 @@ class IngestionPipeline:
                 )
                 continue
             user_relationship_key = (
-                conn.msg_id,
+                actual_msg_id,
                 self._normalize_name(canonical_entity_name),
                 self._normalize_name(conn.relationship),
             )
@@ -1312,15 +1394,15 @@ class IngestionPipeline:
                 )
                 continue
             seen_user_connections.add(user_relationship_key)
-            if conn.msg_id not in user_msg_map:
-                user_msg_map[conn.msg_id] = []
-            user_msg_map[conn.msg_id].append(
+            if actual_msg_id not in user_msg_map:
+                user_msg_map[actual_msg_id] = []
+            user_msg_map[actual_msg_id].append(
                 UserConnectionRecord(
                     entity_name=canonical_entity_name,
                     confidence=conn.confidence,
                     context=conn.context or conn.relationship,
                     relationship=conn.relationship,
-                    msg_id=conn.msg_id,
+                    msg_id=actual_msg_id,
                 )
             )
             if trace is not None:

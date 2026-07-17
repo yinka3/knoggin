@@ -111,17 +111,6 @@ class EntityReader:
             return [float(x) for x in parsed if str(x).strip()]
         return [float(x) for x in val]
 
-    def _scope_params(self, visible_project_ids: List[str]) -> Dict:
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "entity query",
-        )
-        return {
-            "filter_projects": True,
-            "visible_project_ids": visible_project_ids,
-            "identity_entity_id": IDENTITY_ENTITY_ID,
-        }
-
     async def get_entity_embedding(
         self,
         entity_id: int,
@@ -191,19 +180,9 @@ class EntityReader:
             e.canonical_name,
             e.type,
             e.topic,
-            e.last_mentioned_ms AS last_mentioned,
-            COALESCE(
-                array_agg(f.content ORDER BY f.valid_at DESC)
-                    FILTER (WHERE f.content IS NOT NULL),
-                '{{}}'
-            )[1:2] AS fact_snippets
+            e.last_mentioned_ms AS last_mentioned
         FROM entities e
-        LEFT JOIN facts f
-          ON f.entity_id = e.entity_id
-         AND f.invalid_at IS NULL
-         AND f.project_id = ANY(%s)
         {where_str}
-        GROUP BY e.entity_id
         ORDER BY e.last_mentioned_ms DESC NULLS LAST
         OFFSET %s
         LIMIT %s
@@ -218,13 +197,10 @@ class EntityReader:
 
             entities_res = await self.client.fetch_all(
                 data_query,
-                (visible_project_ids, *params, offset, limit),
+                (*params, offset, limit),
             )
             entities = []
             for row in entities_res:
-                snippets = row["fact_snippets"] or []
-                summary = ". ".join(filter(None, snippets)) if snippets else None
-
                 entities.append(
                     {
                         "id": int(row["id"]),
@@ -235,7 +211,7 @@ class EntityReader:
                         "last_mentioned": self._ms_to_seconds(
                             row["last_mentioned"]
                         ),
-                        "summary": summary,
+                        "summary": None,
                     }
                 )
             return entities, total
@@ -424,12 +400,7 @@ class EntityReader:
             return []
 
         lower_names = [n.lower() for n in names]
-        params = [
-            lower_names,
-            lower_names,
-            visible_project_ids,
-            IDENTITY_ENTITY_ID,
-        ]
+        params = [lower_names, lower_names, visible_project_ids, IDENTITY_ENTITY_ID]
 
         query = f"""
         SELECT
@@ -442,17 +413,8 @@ class EntityReader:
                     FILTER (WHERE a.alias IS NOT NULL),
                 '{{}}'
             ) AS aliases,
-            COALESCE(
-                array_agg(DISTINCT f.content)
-                    FILTER (WHERE f.content IS NOT NULL),
-                '{{}}'
-            ) AS facts
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
-        LEFT JOIN facts f
-          ON f.entity_id = e.entity_id
-         AND f.invalid_at IS NULL
-         AND f.project_id = ANY(%s)
         WHERE (
             lower(e.canonical_name) = ANY(%s)
             OR EXISTS (
@@ -468,7 +430,7 @@ class EntityReader:
         try:
             res = await self.client.fetch_all(
                 query,
-                (visible_project_ids, *params),
+                params,
             )
             return [
                 {
@@ -477,7 +439,6 @@ class EntityReader:
                     "canonical_name": self._clean_string(row["canonical_name"]),
                     "type": self._clean_string(row["type"]),
                     "aliases": self._parse_aliases(row["aliases"]),
-                    "facts": row["facts"] or [],
                 }
                 for row in res
             ]
@@ -613,10 +574,10 @@ class EntityReader:
           AND e.project_id = %s
           AND NOT EXISTS (
               SELECT 1
-              FROM facts f
-              WHERE f.entity_id = e.entity_id
-                AND f.project_id = e.project_id
-                AND f.invalid_at IS NULL
+              FROM episode_entities ee
+              JOIN episodes ep ON ep.episode_id = ee.episode_id
+              WHERE ee.entity_id = e.entity_id
+                AND ep.project_id = e.project_id
           )
           AND (
               (
@@ -876,51 +837,44 @@ class EntityReader:
         days: int = 7,
         limit: int = 10,
     ) -> List[Dict]:
-        scope = self._scope_params(visible_project_ids)
-        cutoff = (get_now() - timedelta(days=days)).isoformat()
-        cypher = """
-        MATCH (e:Entity)-[:HAS_FACT]->(f:Fact)
-        WHERE ($filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
-        AND f.project_id IN $visible_project_ids
-        AND f.valid_at > $cutoff
-        AND f.invalid_at IS NULL
-        WITH e, count(f) as recent_facts, max(f.valid_at) as last_activity
-        OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
-        RETURN e.id as id,
-            e.canonical_name as name,
-            e.type as type,
-            t.name as topic,
-            recent_facts,
-            last_activity
-        ORDER BY recent_facts DESC, last_activity DESC
-        LIMIT $limit
-        """
-        query = self.client.build_cypher(
-            cypher,
-            "id agtype, name agtype, type agtype, topic agtype, "
-            "recent_facts agtype, last_activity agtype",
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_recently_active_entities",
         )
+        cutoff = get_now() - timedelta(days=days)
+        query = """
+        SELECT
+            e.entity_id AS id,
+            e.canonical_name AS name,
+            e.type,
+            e.topic,
+            count(DISTINCT episode_entity.episode_id) AS recent_episode_count,
+            max(episode.updated_at) AS last_activity
+        FROM entities e
+        JOIN episode_entities episode_entity
+          ON episode_entity.entity_id = e.entity_id
+        JOIN episodes episode
+          ON episode.episode_id = episode_entity.episode_id
+        WHERE e.project_id = ANY(%s)
+          AND episode.project_id = ANY(%s)
+          AND episode.updated_at > %s
+        GROUP BY e.entity_id
+        ORDER BY recent_episode_count DESC, last_activity DESC
+        LIMIT %s
+        """
         try:
             res = await self.client.fetch_all(
                 query,
-                (json.dumps({"cutoff": cutoff, "limit": limit, **scope}),),
+                (visible_project_ids, visible_project_ids, cutoff, limit),
             )
             return [
                 {
                     "id": int(r["id"]),
-                    "name": r["name"].strip('"')
-                    if isinstance(r["name"], str)
-                    else r["name"],
-                    "type": r["type"].strip('"')
-                    if isinstance(r["type"], str)
-                    else r["type"],
-                    "topic": r["topic"].strip('"')
-                    if isinstance(r["topic"], str)
-                    else r["topic"],
-                    "recent_facts": int(r["recent_facts"]),
-                    "last_activity": r["last_activity"].strip('"')
-                    if isinstance(r["last_activity"], str)
-                    else r["last_activity"],
+                    "name": r["name"],
+                    "type": r["type"],
+                    "topic": r["topic"],
+                    "recent_episode_count": int(r["recent_episode_count"]),
+                    "last_activity": r["last_activity"],
                 }
                 for r in res
             ]
@@ -931,52 +885,57 @@ class EntityReader:
     async def get_notable_entities(
         self, *, visible_project_ids: List[str], limit: int = 10
     ) -> List[Dict]:
-        scope = self._scope_params(visible_project_ids)
-        cypher = """
-        MATCH (e:Entity)
-        WHERE e.canonical_name IS NOT NULL
-        AND ($filter_projects = false OR e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
-        OPTIONAL MATCH (e)-[r]-()
-        WHERE r IS NULL OR r.project_id IN $visible_project_ids
-        WITH e, count(DISTINCT r) as connection_count
-        OPTIONAL MATCH (e)-[:HAS_FACT]->(f:Fact)
-        WHERE f.invalid_at IS NULL
-          AND f.project_id IN $visible_project_ids
-        WITH e, connection_count, count(f) as fact_count
-        OPTIONAL MATCH (e)-[:BELONGS_TO]->(t:Topic)
-        RETURN e.id as id,
-            e.canonical_name as name,
-            e.type as type,
-            t.name as topic,
-            connection_count,
-            fact_count
-        ORDER BY connection_count DESC
-        LIMIT $limit
-        """
-        query = self.client.build_cypher(
-            cypher,
-            "id agtype, name agtype, type agtype, topic agtype, "
-            "connection_count agtype, fact_count agtype",
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_notable_entities",
         )
+        query = """
+        SELECT
+            e.entity_id AS id,
+            e.canonical_name AS name,
+            e.type,
+            e.topic,
+            (
+                SELECT count(*)
+                FROM relationships relationship
+                WHERE relationship.project_id = ANY(%s)
+                  AND (
+                      relationship.entity_a_id = e.entity_id
+                      OR relationship.entity_b_id = e.entity_id
+                  )
+            ) AS connection_count,
+            (
+                SELECT count(*)
+                FROM episode_entities episode_entity
+                JOIN episodes episode ON episode.episode_id = episode_entity.episode_id
+                WHERE episode_entity.entity_id = e.entity_id
+                  AND episode.project_id = ANY(%s)
+            ) AS episode_count
+        FROM entities e
+        WHERE e.canonical_name IS NOT NULL
+          AND (e.project_id = ANY(%s) OR e.entity_id = %s)
+        ORDER BY connection_count DESC, episode_count DESC
+        LIMIT %s
+        """
         try:
             res = await self.client.fetch_all(
                 query,
-                (json.dumps({"limit": limit, **scope}),),
+                (
+                    visible_project_ids,
+                    visible_project_ids,
+                    visible_project_ids,
+                    IDENTITY_ENTITY_ID,
+                    limit,
+                ),
             )
             return [
                 {
                     "id": int(r["id"]),
-                    "name": r["name"].strip('"')
-                    if isinstance(r["name"], str)
-                    else r["name"],
-                    "type": r["type"].strip('"')
-                    if isinstance(r["type"], str)
-                    else r["type"],
-                    "topic": r["topic"].strip('"')
-                    if isinstance(r["topic"], str)
-                    else r["topic"],
+                    "name": r["name"],
+                    "type": r["type"],
+                    "topic": r["topic"],
                     "connection_count": int(r["connection_count"]),
-                    "fact_count": int(r["fact_count"]),
+                    "episode_count": int(r["episode_count"]),
                 }
                 for r in res
             ]

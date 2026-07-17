@@ -18,7 +18,7 @@ Do NOT invent topic names. If no provided topic fits, omit the mention.
 Return exactly this top-level shape:
 {
   "mentions": [
-    {"msg_id": int, "name": str, "type": str, "topic": str, "confidence": float}
+    {"msg_id": "m1", "name": str, "type": str, "topic": str, "confidence": float}
   ]
 }
 Do not add fields outside this schema.
@@ -57,8 +57,8 @@ nouns, lean toward extraction—duplicates are resolved later.
 Input: [USER] "I'm heading to the Louvre with my friend Alice."
 Output: {
   "mentions": [
-    {"msg_id": 1, "name": "Louvre", "type": "landmark", "topic": "Travel", "confidence": 0.98},
-    {"msg_id": 1, "name": "Alice", "type": "person", "topic": "Social", "confidence": 0.95}
+    {"msg_id": "m1", "name": "Louvre", "type": "landmark", "topic": "Travel", "confidence": 0.98},
+    {"msg_id": "m1", "name": "Alice", "type": "person", "topic": "Social", "confidence": 0.95}
   ]
 }
 </example>
@@ -66,7 +66,9 @@ Output: {
 <output_format>
 Return your response as a JSON object matching the requested schema.
 Use top-level key "mentions". Every mention MUST include msg_id, name, type, topic, and confidence.
-msg_id MUST be one of the message IDs shown as [MSG <id>] in the input.
+msg_id MUST be one of the local `mN` message references shown as [MSG <id>] in the
+input. These are local to this extraction call; never infer or return a system
+message ID.
 topic MUST exactly match a topic name from the Label Schema.
 Include only entities that qualify based on the tasks and ubiquity filters.
 Confidence scores: 0.9+ for unambiguous matches, 0.8-0.9 for likely correct ones.
@@ -85,10 +87,10 @@ Find connections between candidate entities based on what's stated in the messag
 Return exactly this top-level shape:
 {
   "connections": [
-    {"msg_id": int, "entity_a": str, "entity_b": str, "relationship": str, "confidence": float, "context": str}
+    {"msg_id": "m1", "entity_a": str, "entity_b": str, "relationship": str, "confidence": float, "context": str}
   ],
   "user_connections": [
-    {"msg_id": int, "entity_name": str, "relationship": str, "confidence": float, "context": str}
+    {"msg_id": "m1", "entity_name": str, "relationship": str, "confidence": float, "context": str}
   ]
 }
 Do not add fields outside this schema.
@@ -117,7 +119,8 @@ You receive:
    - entity_a and entity_b MUST exactly match canonical names from Candidate Entities.
    - entity_name in user_connections MUST exactly match a canonical name from Candidate Entities.
    - Never put {user_name} in entity_a or entity_b. Use user_connections for edges between {user_name} and another entity.
-   - msg_id MUST be one of the message IDs shown in the Messages section.
+   - msg_id MUST be one of the local `mN` message references shown in the Messages
+     section. Never infer or return a system message ID.
    - Session Context may help pronoun resolution but is never evidence for a connection.
 </rules>
 
@@ -131,7 +134,7 @@ You receive:
 Input: [USER] "Alice and Bob were there."
 Output: {
   "connections": [
-    {"msg_id": 1, "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "confidence": 0.85, "context": "Mentioned together as being in the same place."}
+    {"msg_id": "m1", "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "confidence": 0.85, "context": "Mentioned together as being in the same place."}
   ],
   "user_connections": []
 }

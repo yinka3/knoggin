@@ -120,7 +120,6 @@ async def test_execute_tools_success_records_state_and_accumulates_evidence(
         {
             "id": "msg_1",
             "user_name": "ada",
-            "session_id": "session-1",
             "message": "profile evidence",
             "score": 0.9,
         }
@@ -133,7 +132,6 @@ async def test_execute_tools_success_records_state_and_accumulates_evidence(
                     {
                         "id": "msg_1",
                         "user_name": "ada",
-                        "session_id": "session-1",
                         "message": "profile evidence",
                         "score": 0.9,
                     }

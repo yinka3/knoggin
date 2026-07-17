@@ -71,6 +71,9 @@ class AgentState:
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     last_error: Optional[str] = None
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
+    # Compact UUID handles shown to the model during this execution only.
+    # Values are never persisted and are cleared when the execution ends.
+    short_uuid_references: Dict[str, str] = field(default_factory=dict)
     usage: StreamUsage = field(
         default_factory=lambda: {
             "prompt_tokens": 0,
@@ -94,6 +97,11 @@ class AgentState:
         self.call_count += 1
         self.tools_used.append(tool_name)
         self.tool_call_counts[tool_name] = self.tool_call_counts.get(tool_name, 0) + 1
+
+    def clear_short_uuid_references(self) -> None:
+        """Discard model-only UUID handles when this run is finished."""
+
+        self.short_uuid_references.clear()
 
 
 @dataclass
@@ -145,6 +153,7 @@ class AgentContext:
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
     maintenance_candidates: List[MaintenanceCandidate] = field(default_factory=list)
+    use_local_references: bool = True
 
 
 @dataclass

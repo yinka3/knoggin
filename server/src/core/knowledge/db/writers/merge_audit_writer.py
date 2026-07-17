@@ -19,7 +19,8 @@ class MergeAuditWriter:
         project_id: str,
         primary_id: int,
         duplicate_id: int,
-        evidence_ids: list[str],
+        evidence_message_ids: list[int],
+        evidence_episode_ids: list[str],
         reasoning: str,
         model_confidence: Optional[float],
         reviewed_state_hash: str,
@@ -35,7 +36,8 @@ class MergeAuditWriter:
                 project_id,
                 primary_entity_id,
                 duplicate_entity_id,
-                evidence_fact_ids,
+                evidence_message_ids,
+                evidence_episode_ids,
                 reasoning,
                 model_confidence,
                 reviewed_state_hash,
@@ -44,7 +46,7 @@ class MergeAuditWriter:
                 confirmation_token_hash
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s::jsonb, %s, %s,
+                %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s,
                 %s, %s::jsonb, %s::jsonb, %s
             )
             """,
@@ -54,7 +56,8 @@ class MergeAuditWriter:
                 project_id,
                 primary_id,
                 duplicate_id,
-                json.dumps(evidence_ids),
+                json.dumps(evidence_message_ids),
+                json.dumps(evidence_episode_ids),
                 reasoning.strip(),
                 model_confidence,
                 reviewed_state_hash,
@@ -102,7 +105,8 @@ class MergeAuditWriter:
         *,
         audit_id: str,
         proposal: Dict[str, Any],
-        evidence_ids: list[str],
+        evidence_message_ids: list[int],
+        evidence_episode_ids: list[str],
         before_state: Dict[str, Any],
         confirmed_by: str,
     ) -> None:
@@ -115,13 +119,14 @@ class MergeAuditWriter:
                 project_id,
                 primary_entity_id,
                 duplicate_entity_id,
-                evidence_fact_ids,
+                evidence_message_ids,
+                evidence_episode_ids,
                 reasoning,
                 confirmed_by,
                 before_state
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb
+                %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb
             )
             """,
             (
@@ -131,7 +136,8 @@ class MergeAuditWriter:
                 proposal["project_id"],
                 int(proposal["primary_entity_id"]),
                 int(proposal["duplicate_entity_id"]),
-                json.dumps(evidence_ids),
+                json.dumps(evidence_message_ids),
+                json.dumps(evidence_episode_ids),
                 proposal["reasoning"],
                 confirmed_by,
                 json.dumps(before_state, default=str),
@@ -236,11 +242,17 @@ class MergeAuditWriter:
             )
             await cur.execute(
                 """
-                DELETE FROM facts
-                WHERE project_id = %s
-                  AND entity_id = ANY(%s)
+                DELETE FROM message_entity_refs
+                WHERE entity_id = ANY(%s)
                 """,
-                (project_id, ids),
+                (ids,),
+            )
+            await cur.execute(
+                """
+                DELETE FROM episode_entities
+                WHERE entity_id = ANY(%s)
+                """,
+                (ids,),
             )
             await cur.execute(
                 """
@@ -303,38 +315,50 @@ class MergeAuditWriter:
                         (int(entity["entity_id"]), alias),
                     )
 
-            for fact in before_state["facts"]:
+            for message_ref in before_state["message_refs"]:
                 await cur.execute(
                     """
-                    INSERT INTO facts (
-                        fact_id,
-                        entity_id,
-                        user_name,
-                        project_id,
-                        content,
-                        valid_at,
-                        invalid_at,
-                        confidence,
-                        source_msg_id,
-                        source_user_name,
-                        source_session_id,
-                        source
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO message_entity_refs (message_id, entity_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (message_id, entity_id) DO NOTHING
                     """,
                     (
-                        fact["fact_id"],
-                        int(fact["entity_id"]),
-                        fact["user_name"],
-                        fact["project_id"],
-                        fact["content"],
-                        fact.get("valid_at"),
-                        fact.get("invalid_at"),
-                        float(fact.get("confidence") or 1.0),
-                        fact.get("source_msg_id"),
-                        fact.get("source_user_name"),
-                        fact.get("source_session_id"),
-                        fact.get("source"),
+                        int(message_ref["message_id"]),
+                        int(message_ref["entity_id"]),
+                    ),
+                )
+
+            for episode_entity in before_state["episode_entities"]:
+                await cur.execute(
+                    """
+                    INSERT INTO episode_entities (
+                        episode_id,
+                        entity_id,
+                        prominence_weight,
+                        role,
+                        is_focus_entity,
+                        source_message_count,
+                        first_seen_at,
+                        last_seen_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (episode_id, entity_id) DO UPDATE SET
+                        prominence_weight = EXCLUDED.prominence_weight,
+                        role = EXCLUDED.role,
+                        is_focus_entity = EXCLUDED.is_focus_entity,
+                        source_message_count = EXCLUDED.source_message_count,
+                        first_seen_at = EXCLUDED.first_seen_at,
+                        last_seen_at = EXCLUDED.last_seen_at
+                    """,
+                    (
+                        episode_entity["episode_id"],
+                        int(episode_entity["entity_id"]),
+                        float(episode_entity.get("prominence_weight") or 0.0),
+                        episode_entity.get("role"),
+                        bool(episode_entity.get("is_focus_entity")),
+                        int(episode_entity.get("source_message_count") or 0),
+                        episode_entity.get("first_seen_at"),
+                        episode_entity.get("last_seen_at"),
                     ),
                 )
 
@@ -347,12 +371,13 @@ class MergeAuditWriter:
                         project_id,
                         entity_a_id,
                         entity_b_id,
+                        relationship_type,
                         weight,
                         confidence,
                         context,
                         last_seen_ms
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         relationship["relationship_id"],
@@ -360,6 +385,7 @@ class MergeAuditWriter:
                         relationship["project_id"],
                         int(relationship["entity_a_id"]),
                         int(relationship["entity_b_id"]),
+                        relationship.get("relationship_type"),
                         int(relationship.get("weight") or 1),
                         float(relationship.get("confidence") or 1.0),
                         relationship.get("context"),

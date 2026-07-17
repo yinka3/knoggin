@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from common.schema.primitives import (
@@ -53,7 +55,10 @@ def make_episode(**overrides):
 async def test_episode_writer_attaches_complete_derived_context_idempotently():
     client = RecordingPostgresClient(
         fetch_all_results=[
-            [{"message_id": 11}, {"message_id": 12}],
+            [
+                {"message_id": 11, "timestamp_ms": 1700000000000},
+                {"message_id": 12, "timestamp_ms": 1700000001000},
+            ],
             [
                 {"message_id": 11, "entity_id": 2},
                 {"message_id": 12, "entity_id": 2},
@@ -80,8 +85,59 @@ async def test_episode_writer_attaches_complete_derived_context_idempotently():
     entity_calls = [
         call for call in client.calls if "INSERT INTO episode_entities" in call[1]
     ]
-    assert entity_calls[0][2] == ("episode-1", 2, 1.5, "subject", True, 2)
-    assert entity_calls[1][2] == ("episode-1", 3, 0.9, None, False, 1)
+    assert entity_calls[0][2] == (
+        "episode-1",
+        2,
+        1.5,
+        "subject",
+        True,
+        2,
+        datetime.fromtimestamp(1700000000000 / 1000, tz=timezone.utc),
+        datetime.fromtimestamp(1700000001000 / 1000, tz=timezone.utc),
+    )
+    assert entity_calls[1][2] == (
+        "episode-1",
+        3,
+        0.9,
+        None,
+        False,
+        1,
+        datetime.fromtimestamp(1700000001000 / 1000, tz=timezone.utc),
+        datetime.fromtimestamp(1700000001000 / 1000, tz=timezone.utc),
+    )
+    episode_call = next(
+        call for call in client.calls if "INSERT INTO episodes" in call[1]
+    )
+    assert episode_call[2][8:11] == (
+        2,
+        datetime.fromtimestamp(1700000000000 / 1000, tz=timezone.utc),
+        datetime.fromtimestamp(1700000001000 / 1000, tz=timezone.utc),
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_writer_persists_an_episode_embedding():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [{"message_id": 11}, {"message_id": 12}],
+            [{"message_id": 11, "entity_id": 2}],
+            [],
+        ],
+        fetch_one_results=[{"episode_id": "episode-1"}],
+    )
+    writer = EpisodeWriter(client)
+
+    await writer.create_episode(
+        make_episode(entities=[], relationships=[], embedding=[0.25] * 1024),
+        user_name="ada",
+    )
+
+    insert_call = next(
+        call for call in client.calls if "INSERT INTO episodes" in call[1]
+    )
+    assert "embedding" in insert_call[1]
+    assert insert_call[2][11].startswith("[0.25")
 
 
 @pytest.mark.storage

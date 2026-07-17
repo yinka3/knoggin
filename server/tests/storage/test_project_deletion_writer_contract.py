@@ -89,7 +89,7 @@ async def test_project_deletion_returns_none_without_mutating_missing_project():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_project_deletion_failure_escapes_atomic_transaction():
-    client = RecordingClient(fail_on_table="facts")
+    client = RecordingClient(fail_on_table="episode_entities")
     writer = ProjectDeletionWriter(client)
 
     with pytest.raises(RuntimeError, match="injected aggregate delete failure"):

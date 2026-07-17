@@ -4,7 +4,7 @@ import pytest
 
 from common.schema.agent_contracts import AgentConfig
 from common.schema.contracts import DLQEntry, EngineScope, EngineWorkUnit
-from common.schema.primitives import FactRecord, Message
+from common.schema.primitives import Message
 from common.utils.time_utils import (
     SystemClock,
     TestClock,
@@ -83,11 +83,6 @@ def test_parse_iso_time_or_now_uses_active_clock_fallback():
 def test_schema_default_factories_use_active_clock():
     set_test_clock("2024-01-02T03:04:05+00:00")
 
-    fact = FactRecord(
-        id="fact-1",
-        content="Ada likes clocks",
-        source_entity_id=1,
-    )
     message = Message(content="hello")
     agent = AgentConfig(id="agent-1", name="Ada", persona="curious")
     work = EngineWorkUnit.for_graph_write(
@@ -95,7 +90,6 @@ def test_schema_default_factories_use_active_clock():
     )
     dlq = DLQEntry(messages=[{"id": 1}], session_text="hello", error="boom")
 
-    assert fact.valid_at == get_now()
     assert message.timestamp == get_now()
     assert agent.created_at == get_now()
     assert work.trace.created_at == get_now()

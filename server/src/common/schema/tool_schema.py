@@ -216,7 +216,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "Retrieve contextual episodic memory about a specific entity, including "
                 "summaries and source-message evidence. Use this for remembered decisions, "
-                "developments, and history. Results are contextual memory, not atomic facts."
+                "developments, and history. Results are contextual memory, not atomic claims."
             ),
             "parameters": {
                 "type": "object",
@@ -248,10 +248,40 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "episode_id": {
                         "type": "string",
-                        "description": "The episode ID returned by episode_check.",
+                        "description": (
+                            "The episode ID (for example ep_a3f91c) returned "
+                            "by episode_check or read_recent_episodes."
+                        ),
                     }
                 },
                 "required": ["episode_id"],
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_recent_episodes",
+            "description": (
+                "Return the most recently updated episode summaries in the current "
+                "conversation without searching or requiring an episode ID. Use for "
+                "requests such as 'what was the last episode?' or 'show the last few memories'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 2,
+                        "description": (
+                            "Optional number of recent episodes to return; defaults to 2 "
+                            "and is bounded by the configured episode retrieval limit."
+                        ),
+                    }
+                },
+                "required": [],
             },
             "tags": ["graph:read", "core"],
         },
@@ -413,7 +443,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "folder_root_id": {
                         "type": "string",
-                        "description": "Optional folder upload UUID filter.",
+                        "description": "Optional folder ID (for example folder_a3f91c).",
                     },
                     "path_prefix": {
                         "type": "string",
@@ -481,7 +511,8 @@ TOOL_SCHEMAS = [
                     "folder_root_id": {
                         "type": "string",
                         "description": (
-                            "The folder upload UUID; optional with folder focus."
+                            "The folder ID (for example folder_a3f91c); "
+                            "optional with folder focus."
                         ),
                     },
                     "use_focus": {
@@ -507,7 +538,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "folder_root_id": {
                         "type": "string",
-                        "description": "The folder upload UUID.",
+                        "description": "The folder ID (for example folder_a3f91c).",
                     },
                     "path_prefix": {
                         "type": "string",
@@ -543,7 +574,8 @@ TOOL_SCHEMAS = [
                     "document_id": {
                         "type": "string",
                         "description": (
-                            "The exact document UUID returned by list_documents."
+                            "The document ID (for example doc_a3f91c) returned "
+                            "by a document tool."
                         ),
                     },
                     "relative_path": {
@@ -576,7 +608,8 @@ TOOL_SCHEMAS = [
                     "document_id": {
                         "type": "string",
                         "description": (
-                            "The exact document UUID returned by list_documents."
+                            "The document ID (for example doc_a3f91c) returned "
+                            "by a document tool."
                         ),
                     },
                     "relative_path": {
@@ -631,7 +664,7 @@ TOOL_SCHEMAS = [
                     },
                     "folder_root_id": {
                         "type": "string",
-                        "description": "Optional folder upload UUID filter.",
+                        "description": "Optional folder ID (for example folder_a3f91c).",
                     },
                     "limit": {
                         "type": "integer",
@@ -763,28 +796,33 @@ TOOL_SCHEMAS = [
             "description": (
                 "Propose that a duplicate entity be merged into a primary entity. "
                 "This never grants permission to execute the destructive merge. "
-                "Ground the proposal with fact IDs returned by graph tools."
+                "Ground the proposal with message or episode IDs returned by "
+                "graph tools."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "primary_id": {
                         "type": "integer",
-                        "description": "The ID of the entity that will be kept."
+                        "description": "The numeric ID of the entity that will be kept."
                     },
                     "duplicate_id": {
                         "type": "integer",
-                        "description": "The ID of the duplicate entity that will be destroyed and merged into the primary."
+                        "description": "The numeric ID of the entity that will be merged into the primary."
                     },
                     "reasoning": {
                         "type": "string",
                         "description": "Explanation of why these two entities are being merged."
                     },
-                    "evidence_fact_ids": {
+                    "evidence_message_ids": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "minItems": 1,
-                        "description": "Fact IDs belonging to these entities that support the proposal."
+                        "items": {"type": "integer", "minimum": 1},
+                        "description": "Numeric message IDs that support the proposal."
+                    },
+                    "evidence_episode_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 4},
+                        "description": "Episode IDs (for example ep_a3f91c) that support the proposal."
                     },
                     "confidence": {
                         "type": "number",
@@ -796,8 +834,11 @@ TOOL_SCHEMAS = [
                 "required": [
                     "primary_id",
                     "duplicate_id",
-                    "evidence_fact_ids",
                     "reasoning"
+                ],
+                "anyOf": [
+                    {"required": ["evidence_message_ids"]},
+                    {"required": ["evidence_episode_ids"]}
                 ]
             },
             "tags": ["graph", "core"]

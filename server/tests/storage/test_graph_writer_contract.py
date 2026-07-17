@@ -515,7 +515,8 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
             merge_validation_row(),
             {"creates_cycle": False},
             {
-                "fact_count": 0,
+                "message_ref_count": 0,
+                "episode_entity_count": 0,
                 "relationship_count": 0,
                 "hierarchy_count": 0,
             },
@@ -686,7 +687,7 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     )
     assert any(
         call[0] == "execute"
-        and "UPDATE fact_search" in call[1]
+        and "UPDATE message_entity_refs" in call[1]
         and call[2] == (2, 3)
         for call in client.calls
     )
@@ -698,8 +699,8 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     )
     assert any(
         call[0] == "execute"
-        and "UPDATE facts" in call[1]
-        and call[2] == (2, 3, "project-1")
+        and "INSERT INTO episode_entities" in call[1]
+        and call[2] == (2, 3)
         for call in client.calls
     )
     assert any(
@@ -753,9 +754,10 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     dependency_check = next(
         call
         for call in client.calls
-        if call[0] == "execute" and "AS fact_count" in call[1]
+        if call[0] == "execute" and "AS message_ref_count" in call[1]
     )
     assert dependency_check[2] == (
+        3,
         3,
         3,
         3,
@@ -812,7 +814,8 @@ async def test_graph_writer_merge_aborts_when_secondary_dependencies_remain():
             ),
             {"creates_cycle": False},
             {
-                "fact_count": 1,
+                "message_ref_count": 1,
+                "episode_entity_count": 0,
                 "relationship_count": 0,
                 "hierarchy_count": 0,
             },

@@ -1,18 +1,15 @@
-from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
 from common.schema.contracts import CandidateSuggestion, EngineScope
-from common.schema.primitives import Episode, FactRecord
+from common.schema.primitives import Episode
 from common.scoping import require_scope_value
 from core.community.community_store import CommunityStore
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
-from core.knowledge.db.readers.fact_audit_reader import FactAuditReader
-from core.knowledge.db.readers.fact_reader import FactReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from core.knowledge.db.search_index_rebuilder import SearchIndexer
@@ -22,8 +19,6 @@ from core.knowledge.db.writers.candidate_suggestion_writer import (
 )
 from core.knowledge.db.writers.entity_writer import EntityWriter
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
-from core.knowledge.db.writers.fact_audit_writer import FactAuditWriter
-from core.knowledge.db.writers.fact_writer import FactWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.services.embedding_service import EmbeddingService
@@ -47,14 +42,10 @@ class KnowledgeStore:
         self._candidate_suggestion_writer = CandidateSuggestionWriter(
             self._postgres_client
         )
-        self._fact_writer = FactWriter(self._postgres_client)
-        self._fact_audit_writer = FactAuditWriter(self._postgres_client)
         self._graph_writer = GraphWriter(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
         self._episode_reader = EpisodeReader(self._postgres_client)
-        self._fact_audit_reader = FactAuditReader(self._postgres_client)
-        self._fact_reader = FactReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._tools = ToolQueries(self._postgres_client)
@@ -229,6 +220,36 @@ class KnowledgeStore:
             limit=limit,
         )
 
+    async def get_episode_generation_catalog(
+        self,
+        message_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> tuple[List[Dict], List[Dict]]:
+        return await self._episode_reader.get_episode_generation_catalog(
+            message_ids,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_merge_evidence_for_entities(
+        self,
+        entity_ids: List[int],
+        *,
+        project_id: str,
+        evidence_limit: int = 4,
+        source_message_limit: int = 2,
+    ) -> Dict[int, List[Dict]]:
+        return await self._episode_reader.get_merge_evidence_for_entities(
+            entity_ids,
+            project_id=project_id,
+            evidence_limit=evidence_limit,
+            source_message_limit=source_message_limit,
+        )
+
     async def search_episodes(
         self,
         query: str,
@@ -244,6 +265,25 @@ class KnowledgeStore:
             project_id=project_id,
             session_id=session_id,
             limit=limit,
+        )
+
+    async def search_episodes_by_embedding(
+        self,
+        embedding: List[float],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+        score_threshold: float = 0.35,
+    ) -> List[tuple[Episode, float]]:
+        return await self._episode_reader.search_episodes_by_embedding(
+            embedding,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+            score_threshold=score_threshold,
         )
 
     async def get_recent_episodes(
@@ -295,64 +335,6 @@ class KnowledgeStore:
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
         return await self._entity_writer.ensure_identity_entity(user_name, aliases)
-
-    async def create_facts_batch(
-        self,
-        entity_id: int,
-        facts: List[FactRecord],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: Optional[str] = None,
-    ) -> int:
-        require_scope_value(user_name, "user_name", "create_facts_batch")
-        require_scope_value(project_id, "project_id", "create_facts_batch")
-        return await self._fact_writer.create_facts_batch(
-            entity_id,
-            facts,
-            user_name=user_name,
-            session_id=session_id,
-            project_id=project_id,
-        )
-
-    async def invalidate_fact(
-        self, fact_id: str, invalid_at: datetime, *, project_id: str
-    ) -> bool:
-        return await self._fact_writer.invalidate_fact(
-            fact_id, invalid_at, project_id=project_id
-        )
-
-    async def remove_fact_with_audit(self, **kwargs) -> dict:
-        return await self._fact_writer.remove_fact_with_audit(**kwargs)
-
-    async def replace_facts_with_audit(self, **kwargs) -> dict:
-        return await self._fact_writer.replace_facts_with_audit(**kwargs)
-
-    async def apply_fact_changes_with_audit(self, **kwargs) -> dict:
-        return await self._fact_writer.apply_fact_changes_with_audit(**kwargs)
-
-    async def create_applied_fact_change_audit(self, **kwargs) -> None:
-        return await self._fact_audit_writer.create_applied_audit(**kwargs)
-
-    async def get_fact_change_audit(
-        self,
-        fact_change_id: str,
-        **kwargs,
-    ) -> Optional[Dict]:
-        return await self._fact_audit_reader.get_fact_change_audit(
-            fact_change_id,
-            **kwargs,
-        )
-
-    async def list_fact_change_audits_for_entity(self, **kwargs) -> List[Dict]:
-        return await self._fact_audit_reader.list_fact_change_audits_for_entity(
-            **kwargs
-        )
-
-    async def list_fact_change_audits_for_project(self, **kwargs) -> List[Dict]:
-        return await self._fact_audit_reader.list_fact_change_audits_for_project(
-            **kwargs
-        )
 
     async def update_entity_profile(
         self,
@@ -428,13 +410,6 @@ class KnowledgeStore:
     ) -> List[int]:
         return await self._entity_writer.bulk_delete_entities(
             entity_ids, project_id=project_id
-        )
-
-    async def delete_old_invalidated_facts(
-        self, cutoff: datetime, *, project_id: str
-    ) -> int:
-        return await self._fact_writer.delete_old_invalidated_facts(
-            cutoff, project_id=project_id
         )
 
     async def expire_merge_rollback_states(
@@ -578,62 +553,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
             forward=forward,
             target_total=target_total,
-        )
-
-    async def get_facts_for_entity(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        active_only: bool = True,
-    ) -> List[FactRecord]:
-        return await self._fact_reader.get_facts_for_entity(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-            active_only=active_only,
-        )
-
-    async def search_relevant_facts(
-        self,
-        entity_id: int,
-        query_embedding: List[float],
-        *,
-        visible_project_ids: List[str],
-        limit: int = 5,
-    ) -> List[FactRecord]:
-        return await self._fact_reader.search_relevant_facts(
-            entity_id,
-            query_embedding,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def get_facts_for_entities(
-        self,
-        entity_ids: List[int],
-        *,
-        visible_project_ids: List[str],
-        active_only: bool = True,
-    ) -> Dict[int, List[FactRecord]]:
-        return await self._fact_reader.get_facts_for_entities(
-            entity_ids,
-            visible_project_ids=visible_project_ids,
-            active_only=active_only,
-        )
-
-    async def get_facts_from_message(
-        self,
-        msg_id: int,
-        *,
-        user_name: str,
-        session_id: str,
-        visible_project_ids: List[str],
-    ) -> List[FactRecord]:
-        return await self._fact_reader.get_facts_from_message(
-            msg_id,
-            user_name=user_name,
-            session_id=session_id,
-            visible_project_ids=visible_project_ids,
         )
 
     async def validate_existing_ids(
@@ -843,15 +762,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_recent_facts(
-        self, *, visible_project_ids: List[str], days: int = 7, limit: int = 20
-    ) -> List[Dict]:
-        return await self._fact_reader.get_recent_facts(
-            visible_project_ids=visible_project_ids,
-            days=days,
-            limit=limit,
-        )
-
     async def get_recently_active_entities(
         self, *, visible_project_ids: List[str], days: int = 7, limit: int = 10
     ) -> List[Dict]:
@@ -883,13 +793,11 @@ class KnowledgeStore:
         *,
         visible_project_ids: List[str],
         msg_limit: int = 5,
-        slim: bool = False,
     ) -> Dict:
         return await self._tools.get_hot_topic_context_with_messages(
             hot_topic_names,
             visible_project_ids=visible_project_ids,
             msg_limit=msg_limit,
-            slim=slim,
         )
 
     async def search_messages_fts(

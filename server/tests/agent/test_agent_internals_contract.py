@@ -46,7 +46,7 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
                 "entities": [
                     {
                         "name": "Ada",
-                        "facts": ["prefers scoped profile updates"],
+                        "episodes": ["prefers scoped profile updates"],
                     }
                 ]
             }

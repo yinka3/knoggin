@@ -46,16 +46,34 @@ class MergeAuditReader:
             """,
             (user_name, project_id, list(ids)),
         )
-        facts = await self.client.fetch_all(
+        message_refs = await self.client.fetch_all(
             """
-            SELECT *
-            FROM facts
-            WHERE user_name = %s
-              AND project_id = %s
-              AND entity_id = ANY(%s)
-            ORDER BY fact_id
+            SELECT
+                ref.message_id,
+                ref.entity_id,
+                message.user_name,
+                message.project_id,
+                message.session_id,
+                message.content
+            FROM message_entity_refs ref
+            JOIN messages message ON message.message_id = ref.message_id
+            WHERE message.user_name = %s
+              AND message.project_id = %s
+              AND ref.entity_id = ANY(%s)
+            ORDER BY ref.message_id, ref.entity_id
             """,
             (user_name, project_id, list(ids)),
+        )
+        episode_entities = await self.client.fetch_all(
+            """
+            SELECT episode_entity.*
+            FROM episode_entities episode_entity
+            JOIN episodes episode ON episode.episode_id = episode_entity.episode_id
+            WHERE episode.project_id = %s
+              AND episode_entity.entity_id = ANY(%s)
+            ORDER BY episode_entity.episode_id, episode_entity.entity_id
+            """,
+            (project_id, list(ids)),
         )
         relationships = await self.client.fetch_all(
             """
@@ -107,7 +125,8 @@ class MergeAuditReader:
         )
         return {
             "entities": entities,
-            "facts": facts,
+            "message_refs": message_refs,
+            "episode_entities": episode_entities,
             "relationships": relationships,
             "hierarchy": hierarchy,
         }

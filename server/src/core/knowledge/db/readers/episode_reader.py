@@ -1,4 +1,5 @@
 import json
+import math
 from typing import Dict, List
 
 from common.schema.primitives import (
@@ -7,7 +8,7 @@ from common.schema.primitives import (
     MessageEpisode,
     RelationshipEpisode,
 )
-from common.scoping import require_scope_value
+from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -107,6 +108,9 @@ class EpisodeReader:
                 e.updates,
                 e.unresolved,
                 e.importance,
+                e.source_message_count,
+                e.first_message_at,
+                e.last_message_at,
                 e.generator_metadata,
                 e.created_at,
                 e.updated_at,
@@ -127,6 +131,174 @@ class EpisodeReader:
             (normalized_entity_ids, *scope, limit),
         )
         return [await self._hydrate_episode(row) for row in rows]
+
+    async def get_merge_evidence_for_entities(
+        self,
+        entity_ids: List[int],
+        *,
+        project_id: str,
+        evidence_limit: int = 4,
+        source_message_limit: int = 2,
+    ) -> Dict[int, List[Dict]]:
+        """Return bounded message and episode evidence for merge classification.
+
+        This intentionally returns canonical messages and episodic summaries,
+        never derived atomic records. The resolver has already scoped the candidate IDs to
+        the active project before calling this reader.
+        """
+
+        normalized_entity_ids = sorted({int(entity_id) for entity_id in entity_ids})
+        if not normalized_entity_ids or evidence_limit <= 0:
+            return {}
+        if any(entity_id <= 0 for entity_id in normalized_entity_ids):
+            raise ValueError(
+                "get_merge_evidence_for_entities requires positive entity IDs"
+            )
+        project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "get_merge_evidence_for_entities",
+        )
+
+        evidence_by_entity = {
+            entity_id: [] for entity_id in normalized_entity_ids
+        }
+        message_rows = await self.client.fetch_all(
+            """
+            WITH ranked_messages AS (
+                SELECT
+                    mer.entity_id,
+                    m.message_id,
+                    m.session_id,
+                    m.role,
+                    m.content,
+                    m.timestamp_ms,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY mer.entity_id
+                        ORDER BY m.timestamp_ms DESC NULLS LAST, m.message_id DESC
+                    ) AS evidence_rank
+                FROM message_entity_refs mer
+                JOIN messages m ON m.message_id = mer.message_id
+                WHERE mer.entity_id = ANY(%s)
+                  AND m.project_id = %s
+            )
+            SELECT *
+            FROM ranked_messages
+            WHERE evidence_rank <= %s
+            ORDER BY entity_id, evidence_rank
+            """,
+            (normalized_entity_ids, project_id, evidence_limit),
+        )
+        for row in message_rows:
+            entity_id = int(row["entity_id"])
+            evidence_by_entity[entity_id].append(
+                {
+                    "kind": "message",
+                    "message_id": int(row["message_id"]),
+                    "session_id": str(row["session_id"]),
+                    "text": str(row.get("content") or ""),
+                    "role": row.get("role"),
+                    "timestamp_ms": row.get("timestamp_ms"),
+                }
+            )
+
+        episode_rows = await self.client.fetch_all(
+            """
+            WITH ranked_episodes AS (
+                SELECT
+                    ee.entity_id,
+                    e.episode_id,
+                    e.session_id,
+                    e.summary,
+                    e.importance,
+                    ee.is_focus_entity,
+                    ee.prominence_weight,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ee.entity_id
+                        ORDER BY
+                            ee.is_focus_entity DESC,
+                            ee.prominence_weight DESC,
+                            e.importance DESC,
+                            e.updated_at DESC
+                    ) AS evidence_rank
+                FROM episode_entities ee
+                JOIN episodes e ON e.episode_id = ee.episode_id
+                WHERE ee.entity_id = ANY(%s)
+                  AND e.project_id = %s
+            )
+            SELECT *
+            FROM ranked_episodes
+            WHERE evidence_rank <= %s
+            ORDER BY entity_id, evidence_rank
+            """,
+            (normalized_entity_ids, project_id, evidence_limit),
+        )
+        episode_ids = sorted({str(row["episode_id"]) for row in episode_rows})
+        source_messages_by_episode: Dict[str, List[Dict]] = {
+            episode_id: [] for episode_id in episode_ids
+        }
+        if episode_ids and source_message_limit > 0:
+            source_rows = await self.client.fetch_all(
+                """
+                WITH ranked_sources AS (
+                    SELECT
+                        em.episode_id,
+                        m.message_id,
+                        m.session_id,
+                        m.role,
+                        m.content,
+                        m.timestamp_ms,
+                        em.influence_weight,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY em.episode_id
+                            ORDER BY em.influence_weight DESC, em.message_position
+                        ) AS source_rank
+                    FROM episode_messages em
+                    JOIN episodes e ON e.episode_id = em.episode_id
+                    JOIN messages m ON m.message_id = em.message_id
+                    WHERE em.episode_id = ANY(%s)
+                      AND e.project_id = %s
+                      AND m.project_id = %s
+                )
+                SELECT *
+                FROM ranked_sources
+                WHERE source_rank <= %s
+                ORDER BY episode_id, source_rank
+                """,
+                (episode_ids, project_id, project_id, source_message_limit),
+            )
+            for row in source_rows:
+                source_messages_by_episode[str(row["episode_id"])].append(
+                    {
+                        "kind": "episode_message",
+                        "episode_id": str(row["episode_id"]),
+                        "message_id": int(row["message_id"]),
+                        "session_id": str(row["session_id"]),
+                        "text": str(row.get("content") or ""),
+                        "role": row.get("role"),
+                        "timestamp_ms": row.get("timestamp_ms"),
+                        "influence_weight": float(row["influence_weight"]),
+                    }
+                )
+
+        for row in episode_rows:
+            entity_id = int(row["entity_id"])
+            episode_id = str(row["episode_id"])
+            evidence_by_entity[entity_id].append(
+                {
+                    "kind": "episode",
+                    "episode_id": episode_id,
+                    "session_id": str(row["session_id"]),
+                    "text": str(row.get("summary") or ""),
+                    "importance": float(row["importance"]),
+                    "is_focus_entity": bool(row["is_focus_entity"]),
+                    "prominence_weight": float(row["prominence_weight"]),
+                }
+            )
+            evidence_by_entity[entity_id].extend(
+                source_messages_by_episode.get(episode_id, [])
+            )
+        return evidence_by_entity
 
     async def search_episodes(
         self,
@@ -163,6 +335,9 @@ class EpisodeReader:
                 e.updates,
                 e.unresolved,
                 e.importance,
+                e.source_message_count,
+                e.first_message_at,
+                e.last_message_at,
                 e.generator_metadata,
                 e.created_at,
                 e.updated_at
@@ -183,6 +358,68 @@ class EpisodeReader:
             (*scope, normalized_query, normalized_query, limit),
         )
         return [await self._hydrate_episode(row) for row in rows]
+
+    async def search_episodes_by_embedding(
+        self,
+        embedding: List[float],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+        score_threshold: float = 0.35,
+    ) -> List[tuple[Episode, float]]:
+        """Return scoped episodes ranked by cosine similarity to a query vector."""
+
+        if limit <= 0:
+            return []
+        if not 0.0 <= score_threshold <= 1.0:
+            raise ValueError("episode score_threshold must be between 0 and 1")
+        normalized_embedding = self._normalize_embedding(embedding)
+        scope = self._require_scope(
+            user_name,
+            project_id,
+            session_id,
+            "search_episodes_by_embedding",
+        )
+        vector = json.dumps(normalized_embedding)
+        rows = await self.client.fetch_all(
+            """
+            SELECT
+                e.episode_id,
+                e.project_id,
+                e.session_id,
+                e.summary,
+                e.new_developments,
+                e.updates,
+                e.unresolved,
+                e.importance,
+                e.source_message_count,
+                e.first_message_at,
+                e.last_message_at,
+                e.embedding,
+                e.generator_metadata,
+                e.created_at,
+                e.updated_at,
+                1 - (e.embedding <=> %s::vector) AS similarity
+            FROM episodes e
+            JOIN sessions s
+              ON s.session_id = e.session_id
+             AND s.project_id = e.project_id
+            WHERE s.user_name = %s
+              AND e.project_id = %s
+              AND e.session_id = %s
+              AND e.embedding IS NOT NULL
+              AND 1 - (e.embedding <=> %s::vector) >= %s
+            ORDER BY e.embedding <=> %s::vector ASC
+            LIMIT %s
+            """,
+            (vector, *scope, vector, score_threshold, vector, limit),
+        )
+        return [
+            (await self._hydrate_episode(row), float(row["similarity"]))
+            for row in rows
+        ]
 
     async def get_recent_episodes(
         self,
@@ -237,7 +474,8 @@ class EpisodeReader:
             m.timestamp_ms,
             em.influence_weight,
             em.influence_reason,
-            em.message_position
+            em.message_position,
+            em.attached_at
         FROM episodes e
         JOIN sessions s
           ON s.session_id = e.session_id
@@ -322,7 +560,7 @@ class EpisodeReader:
         after_message_id: int,
         message_count: int,
     ) -> List[Dict]:
-        """Load the next contiguous, fully ingested source-message window."""
+        """Load the next fully ingested window in chronological message order."""
 
         if after_message_id < 0:
             raise ValueError("after_message_id must not be negative")
@@ -349,7 +587,7 @@ class EpisodeReader:
               AND m.project_id = %s
               AND m.session_id = %s
               AND m.message_id > %s
-            ORDER BY m.message_id
+            ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id
             LIMIT %s
             """,
             (*scope, after_message_id, message_count),
@@ -418,6 +656,137 @@ class EpisodeReader:
             )
         return relationships_by_message
 
+    async def get_episode_generation_catalog(
+        self,
+        message_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> tuple[List[Dict], List[Dict]]:
+        """Return the resolved entity and relationship catalogs for source messages."""
+
+        normalized_message_ids = sorted({int(message_id) for message_id in message_ids})
+        if not normalized_message_ids:
+            return [], []
+        if any(message_id <= 0 for message_id in normalized_message_ids):
+            raise ValueError(
+                "get_episode_generation_catalog requires positive message IDs"
+            )
+        scope = self._require_scope(
+            user_name,
+            project_id,
+            session_id,
+            "get_episode_generation_catalog",
+        )
+        entity_rows = await self.client.fetch_all(
+            """
+            SELECT
+                e.entity_id,
+                e.canonical_name,
+                e.type,
+                COALESCE(
+                    array_agg(DISTINCT ea.alias)
+                        FILTER (WHERE ea.alias IS NOT NULL),
+                    ARRAY[]::text[]
+                ) AS aliases
+            FROM message_entity_refs mer
+            JOIN messages m ON m.message_id = mer.message_id
+            JOIN entities e ON e.entity_id = mer.entity_id
+            LEFT JOIN entity_aliases ea ON ea.entity_id = e.entity_id
+            WHERE mer.message_id = ANY(%s)
+              AND m.user_name = %s
+              AND m.project_id = %s
+              AND m.session_id = %s
+              AND (e.project_id = %s OR e.entity_id = %s)
+            GROUP BY e.entity_id, e.canonical_name, e.type
+            ORDER BY e.entity_id
+            """,
+            (normalized_message_ids, *scope, project_id, IDENTITY_ENTITY_ID),
+        )
+        relationship_rows = await self.client.fetch_all(
+            """
+            SELECT
+                r.relationship_id,
+                r.entity_a_id,
+                entity_a.canonical_name AS entity_a_name,
+                entity_a.type AS entity_a_type,
+                r.entity_b_id,
+                entity_b.canonical_name AS entity_b_name,
+                entity_b.type AS entity_b_type,
+                r.relationship_type,
+                r.confidence,
+                r.context,
+                array_agg(DISTINCT rer.message_id ORDER BY rer.message_id)
+                    AS evidence_message_ids
+            FROM relationship_evidence_refs rer
+            JOIN relationships r ON r.relationship_id = rer.relationship_id
+            JOIN messages m ON m.message_id = rer.message_id
+            JOIN entities entity_a ON entity_a.entity_id = r.entity_a_id
+            JOIN entities entity_b ON entity_b.entity_id = r.entity_b_id
+            WHERE rer.message_id = ANY(%s)
+              AND rer.user_name = %s
+              AND rer.session_id = %s
+              AND m.user_name = %s
+              AND m.project_id = %s
+              AND m.session_id = %s
+              AND r.project_id = %s
+            GROUP BY
+                r.relationship_id,
+                r.entity_a_id,
+                entity_a.canonical_name,
+                entity_a.type,
+                r.entity_b_id,
+                entity_b.canonical_name,
+                entity_b.type,
+                r.relationship_type,
+                r.confidence,
+                r.context
+            ORDER BY r.relationship_id
+            """,
+            (
+                normalized_message_ids,
+                scope[0],
+                scope[2],
+                *scope,
+                project_id,
+            ),
+        )
+        return (
+            [
+                {
+                    "entity_id": int(row["entity_id"]),
+                    "canonical_name": str(row["canonical_name"]),
+                    "type": row.get("type"),
+                    "aliases": list(row.get("aliases") or []),
+                }
+                for row in entity_rows
+            ],
+            [
+                {
+                    "relationship_id": str(row["relationship_id"]),
+                    "entity_a": {
+                        "entity_id": int(row["entity_a_id"]),
+                        "canonical_name": str(row["entity_a_name"]),
+                        "type": row.get("entity_a_type"),
+                    },
+                    "entity_b": {
+                        "entity_id": int(row["entity_b_id"]),
+                        "canonical_name": str(row["entity_b_name"]),
+                        "type": row.get("entity_b_type"),
+                    },
+                    "relationship_type": row.get("relationship_type"),
+                    "confidence": float(row["confidence"]),
+                    "context": row.get("context"),
+                    "evidence_message_ids": [
+                        int(message_id)
+                        for message_id in row.get("evidence_message_ids") or []
+                    ],
+                }
+                for row in relationship_rows
+            ],
+        )
+
     @staticmethod
     def _require_scope(
         user_name: str,
@@ -449,6 +818,10 @@ class EpisodeReader:
             e.updates,
             e.unresolved,
             e.importance,
+            e.source_message_count,
+            e.first_message_at,
+            e.last_message_at,
+            e.embedding,
             e.generator_metadata,
             e.created_at,
             e.updated_at
@@ -481,6 +854,10 @@ class EpisodeReader:
             updates=self._json_list(row.get("updates")),
             unresolved=self._json_list(row.get("unresolved")),
             importance=float(row["importance"]),
+            source_message_count=int(row.get("source_message_count") or 0),
+            first_message_at=row.get("first_message_at"),
+            last_message_at=row.get("last_message_at"),
+            embedding=self._vector_list(row.get("embedding")),
             messages=messages,
             entities=entities,
             relationships=relationships,
@@ -492,7 +869,12 @@ class EpisodeReader:
     async def _load_messages(self, episode_id: str) -> List[MessageEpisode]:
         rows = await self.client.fetch_all(
             """
-            SELECT message_id, influence_weight, influence_reason, message_position
+            SELECT
+                message_id,
+                influence_weight,
+                influence_reason,
+                message_position,
+                attached_at
             FROM episode_messages
             WHERE episode_id = %s
             ORDER BY message_position
@@ -505,6 +887,7 @@ class EpisodeReader:
                 influence_weight=float(row["influence_weight"]),
                 influence_reason=row.get("influence_reason"),
                 message_position=int(row["message_position"]),
+                attached_at=row.get("attached_at"),
             )
             for row in rows
         ]
@@ -517,7 +900,9 @@ class EpisodeReader:
                 prominence_weight,
                 role,
                 is_focus_entity,
-                source_message_count
+                source_message_count,
+                first_seen_at,
+                last_seen_at
             FROM episode_entities
             WHERE episode_id = %s
             ORDER BY is_focus_entity DESC, prominence_weight DESC, entity_id
@@ -531,6 +916,8 @@ class EpisodeReader:
                 role=row.get("role"),
                 is_focus_entity=bool(row["is_focus_entity"]),
                 source_message_count=int(row["source_message_count"]),
+                first_seen_at=row.get("first_seen_at"),
+                last_seen_at=row.get("last_seen_at"),
             )
             for row in rows
         ]
@@ -571,3 +958,20 @@ class EpisodeReader:
         if isinstance(value, str):
             value = json.loads(value)
         return dict(value or {})
+
+    @staticmethod
+    def _vector_list(value) -> List[float] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = json.loads(value)
+        return [float(item) for item in value]
+
+    @staticmethod
+    def _normalize_embedding(embedding: List[float]) -> List[float]:
+        normalized = [float(value) for value in embedding]
+        if len(normalized) != 1024:
+            raise ValueError("episode embedding must contain exactly 1024 dimensions")
+        if not all(math.isfinite(value) for value in normalized):
+            raise ValueError("episode embedding must contain only finite values")
+        return normalized

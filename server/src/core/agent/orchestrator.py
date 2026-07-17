@@ -120,7 +120,6 @@ class Orchestrator:
                 try:
                     hot_topic_context = await tools.get_hot_topic_context(
                         effective_hot_topics,
-                        slim=True,
                     )
                 except Exception as exc:
                     logger.warning(f"Failed to preload hot topic context: {exc}")
@@ -141,6 +140,9 @@ class Orchestrator:
                 agent_persona=identity["persona"],
                 history=conversation_history or [],
                 maintenance_candidates=maintenance_candidates,
+                use_local_references=(
+                    config.developer_settings.local_references.enabled
+                ),
             )
 
             # Execution via AgentExecutor
@@ -217,6 +219,7 @@ class Orchestrator:
             postgres=context.resources.postgres,
             redis=context.redis_client,
             agent_id=agent_id,
+            episode_settings=config.developer_settings.jobs.episode,
             topic_refresh_callback=(
                 context.project.refresh_topic_mappings
                 if context.project

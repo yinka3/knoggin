@@ -50,7 +50,6 @@ class ToolQueries:
         *,
         visible_project_ids: List[str],
         msg_limit: int = 5,
-        slim: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
@@ -67,16 +66,6 @@ class ToolQueries:
                 (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = e.entity_id),
                 '{}'::text[]
             ) as aliases,
-            CASE WHEN %s THEN '{}'::text[] ELSE COALESCE(
-                (
-                    SELECT array_agg(content)
-                    FROM facts f
-                    WHERE f.entity_id = e.entity_id
-                      AND f.invalid_at IS NULL
-                      AND f.project_id = ANY(%s)
-                ),
-                '{}'::text[]
-            ) END as facts,
             COALESCE(
                 (
                     SELECT jsonb_agg(
@@ -107,8 +96,6 @@ class ToolQueries:
             data = await self.client.fetch_all(
                 query,
                 (
-                    slim,
-                    visible_project_ids,
                     visible_project_ids,
                     hot_topic_names,
                     visible_project_ids,
@@ -134,8 +121,6 @@ class ToolQueries:
                 ):
                     topics_map[t_name]["_entity_names"].add(e_name)
                     ent = {"name": e_name, "aliases": row["aliases"] or []}
-                    if not slim:
-                        ent["facts"] = row["facts"] or []
                     topics_map[t_name]["entities"].append(ent)
 
                 if row["msg_ids"]:
@@ -277,16 +262,6 @@ class ToolQueries:
                     (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = e.entity_id),
                     '{}'::text[]
                 ) as aliases,
-                COALESCE(
-                    (
-                        SELECT array_agg(content)
-                        FROM facts f
-                        WHERE f.entity_id = e.entity_id
-                          AND f.invalid_at IS NULL
-                          AND f.project_id = ANY(%s)
-                    ),
-                    '{}'::text[]
-                ) as facts,
                 (
                     SELECT canonical_name
                     FROM entities p
@@ -303,22 +278,25 @@ class ToolQueries:
                 ) as children_count
             FROM entities e
             WHERE e.entity_id = ANY(%s)
+              AND (e.project_id = ANY(%s) OR e.entity_id = %s)
             """
             if active_topics:
                 entity_sql += " AND e.topic = ANY(%s)"
                 params = (
                     visible_project_ids,
                     visible_project_ids,
-                    visible_project_ids,
                     entity_ids,
+                    visible_project_ids,
+                    IDENTITY_ENTITY_ID,
                     active_topics,
                 )
             else:
                 params = (
                     visible_project_ids,
                     visible_project_ids,
-                    visible_project_ids,
                     entity_ids,
+                    visible_project_ids,
+                    IDENTITY_ENTITY_ID,
                 )
 
             entity_data = await self.client.fetch_all(entity_sql, params)
@@ -331,7 +309,6 @@ class ToolQueries:
                     "canonical_name": row["canonical_name"],
                     "aliases": row["aliases"] or [],
                     "type": row["type"],
-                    "facts": row["facts"] or [],
                     "topic": row["topic"],
                     "last_mentioned": row["last_mentioned"],
                     "last_updated": row["last_updated"],
@@ -357,16 +334,6 @@ class ToolQueries:
                     (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = conn.entity_id),
                     '{}'::text[]
                 ) as conn_aliases,
-                COALESCE(
-                    (
-                        SELECT array_agg(content)
-                        FROM facts f
-                        WHERE f.entity_id = conn.entity_id
-                          AND f.invalid_at IS NULL
-                          AND f.project_id = ANY(%s)
-                    ),
-                    '{}'::text[]
-                ) as conn_facts,
                 COALESCE(
                     (
                         SELECT jsonb_agg(
@@ -395,7 +362,6 @@ class ToolQueries:
             rel_data = await self.client.fetch_all(
                 rel_sql,
                 (
-                    visible_project_ids,
                     valid_ids,
                     valid_ids,
                     valid_ids,
@@ -425,7 +391,6 @@ class ToolQueries:
                             "weight": row["conn_weight"],
                             "evidence_refs": (row["evidence_refs"] or [])[:evidence_limit],
                             "context": row["conn_context"],
-                            "facts": row["conn_facts"] or [],
                         }
                     )
 
@@ -461,16 +426,6 @@ class ToolQueries:
         SELECT
             source.canonical_name as source,
             target.canonical_name as target,
-            COALESCE(
-                (
-                    SELECT array_agg(content)
-                    FROM facts f
-                    WHERE f.entity_id = target.entity_id
-                      AND f.invalid_at IS NULL
-                      AND f.project_id = ANY(%s)
-                ),
-                '{}'::text[]
-            ) as target_facts,
             r.weight as connection_strength,
             COALESCE(
                 (
@@ -503,7 +458,6 @@ class ToolQueries:
         if active_topics is not None:
             query += " AND target.topic = ANY(%s)"
             params = (
-                visible_project_ids,
                 entity_names,
                 visible_project_ids,
                 IDENTITY_ENTITY_ID,
@@ -514,7 +468,6 @@ class ToolQueries:
             )
         else:
             params = (
-                visible_project_ids,
                 entity_names,
                 visible_project_ids,
                 IDENTITY_ENTITY_ID,
@@ -532,7 +485,6 @@ class ToolQueries:
                 {
                     "source": r["source"],
                     "target": r["target"],
-                    "target_facts": r["target_facts"] or [],
                     "connection_strength": float(r["connection_strength"] or 1.0),
                     "evidence_refs": r["evidence_refs"] or [],
                     "confidence": float(r["confidence"] or 1.0),

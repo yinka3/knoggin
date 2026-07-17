@@ -12,6 +12,7 @@ from common.schema.agent_contracts import AgentConfig
 from common.scoping import IDENTITY_SCOPE
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
+from common.utils.local_references import build_local_id_maps, resolve_local_id
 from common.utils.time_utils import get_now
 from core.agent.executor import AgentExecutor
 from core.agent.services.agent_manager import AgentManager
@@ -371,6 +372,9 @@ class CommunityManager:
             history=history,
             is_community=True,
             current_participants=participants,
+            use_local_references=(
+                ConfigManager.get().config.developer_settings.local_references.enabled
+            ),
         )
 
         executor = AgentExecutor(
@@ -478,8 +482,8 @@ class CommunityManager:
        explore a connection, brainstorm applications, debate a decision)
     3. DISCUSSION_TYPE: "brainstorm" | "debate" | "investigation" | "synthesis"
     4. REASONING: Why this topic now? What makes it valuable?
-    5. AGENT_IDS: Which agents should participate? Pick 2-4 agents whose
-       personas are relevant. You may include yourself.
+    5. AGENT_IDS: Which listed agent IDs should participate? Pick
+       2-4 agents whose personas are relevant. You may include yourself.
 
     Guidelines:
     - Prioritize topics with recent activity or unresolved questions
@@ -490,10 +494,16 @@ class CommunityManager:
     </seeding_role>
     """
 
-        system_prompt = base_prompt + seeding_instructions
-
         graph_context = await self._build_seeding_context()
-        agent_ids, agent_descriptions = await self._build_agent_pool_context()
+        agent_ids_by_local, agent_descriptions = await self._build_agent_pool_context(
+            required_agent=seeding_agent,
+        )
+        system_prompt = base_prompt + seeding_instructions
+        if not ConfigManager.get().config.developer_settings.local_references.enabled:
+            system_prompt += (
+                "\nLegacy ID mode is active. Return only exact agent IDs listed "
+                "in this call."
+            )
 
         user_prompt = f"""
     {graph_context}
@@ -510,7 +520,7 @@ class CommunityManager:
         "objective": "what the discussion should achieve",
         "discussion_type": "brainstorm|debate|investigation|synthesis",
         "reasoning": "why this topic is valuable right now",
-        "agent_ids": ["id1", "id2"]
+        "agent_ids": ["listed-agent-id"]
     }}
     """
 
@@ -552,11 +562,28 @@ class CommunityManager:
                 raise ValueError(f"Missing required keys. Got: {list(data.keys())}")
 
             valid_agent_ids = []
-            for aid in data["agent_ids"]:
-                if aid in agent_ids or aid == seeding_agent.id:
-                    valid_agent_ids.append(aid)
-                else:
-                    logger.warning(f"AAC: Seeded agent_id '{aid}' not found, skipping")
+            for local_agent_id in data["agent_ids"]:
+                try:
+                    agent_id = str(
+                        resolve_local_id(local_agent_id, agent_ids_by_local)
+                    )
+                except ValueError:
+                    logger.warning(
+                        "AAC: Seeded an unknown local agent reference "
+                        f"'{local_agent_id}', skipping"
+                    )
+                    await emit_community(
+                        self.user_name,
+                        "community",
+                        "local_reference_resolution_failed",
+                        {
+                            "pipeline": "community_seeding",
+                            "reference_type": "agent",
+                            "reason": "unknown_id",
+                        },
+                    )
+                    continue
+                valid_agent_ids.append(agent_id)
 
             if not valid_agent_ids:
                 logger.warning("AAC: No valid agents selected, using seeding agent")
@@ -604,22 +631,6 @@ class CommunityManager:
             stats = await self.resources.knowledge_store.get_graph_stats(
                 visible_project_ids=visible_project_ids
             )
-            notable = await self.resources.knowledge_store.get_notable_entities(
-                visible_project_ids=visible_project_ids,
-                limit=8,
-            )
-            recent_entities = (
-                await self.resources.knowledge_store.get_recently_active_entities(
-                    visible_project_ids=visible_project_ids,
-                    days=7,
-                    limit=5,
-                )
-            )
-            recent_facts = await self.resources.knowledge_store.get_recent_facts(
-                visible_project_ids=visible_project_ids,
-                days=7,
-                limit=10,
-            )
             past_discussions = (
                 await self.resources.knowledge_store.community.get_recent_discussions(5)
             )
@@ -633,45 +644,11 @@ class CommunityManager:
         if isinstance(stats, dict):
             lines.append("=== GRAPH OVERVIEW ===")
             lines.append(f"Entities: {stats.get('entities', 0)}")
-            lines.append(f"Facts: {stats.get('facts', 0)}")
+            lines.append(f"Episodes: {stats.get('episodes', 0)}")
             lines.append(f"Relationships: {stats.get('relationships', 0)}")
             lines.append("")
         elif isinstance(stats, Exception):
             logger.warning(f"Failed to get graph stats: {stats}")
-
-        if not isinstance(notable, Exception) and notable:
-            lines.append("=== NOTABLE ENTITIES ===")
-            for ent in notable:
-                lines.append(
-                    f"- {ent['name']} ({ent['type']}, {ent['topic']}): "
-                    f"{ent['connection_count']} connections, {ent['fact_count']} facts"
-                )
-            lines.append("")
-        elif isinstance(notable, Exception):
-            logger.warning(f"Failed to get notable entities: {notable}")
-
-        if not isinstance(recent_entities, Exception) and recent_entities:
-            lines.append("=== RECENTLY ACTIVE (last 7 days) ===")
-            for ent in recent_entities:
-                lines.append(
-                    f"- {ent['name']} ({ent['type']}): {ent['recent_facts']} new facts"
-                )
-            lines.append("")
-        elif isinstance(recent_entities, Exception):
-            logger.warning(f"Failed to get recent entities: {recent_entities}")
-
-        if not isinstance(recent_facts, Exception) and recent_facts:
-            lines.append("=== RECENT FACTS ===")
-            for fact in recent_facts:
-                content = (
-                    fact["content"][:100] + "..."
-                    if len(fact["content"]) > 100
-                    else fact["content"]
-                )
-                lines.append(f"- [{fact['entity_name']}] {content}")
-            lines.append("")
-        elif isinstance(recent_facts, Exception):
-            logger.warning(f"Failed to get recent facts: {recent_facts}")
 
         if not isinstance(past_discussions, Exception) and past_discussions:
             lines.append("=== PREVIOUS DISCUSSIONS ===")
@@ -699,8 +676,13 @@ class CommunityManager:
             else "Knowledge graph is available for exploration."
         )
 
-    async def _build_agent_pool_context(self) -> tuple[List[str], str]:
-        """Build descriptive agent pool. Returns (agent_ids, formatted_description)."""
+    async def _build_agent_pool_context(
+        self,
+        *,
+        required_agent: AgentConfig | None = None,
+    ) -> tuple[dict[str, str], str]:
+        """Build the model-facing agent pool with one local-reference map."""
+
         manager = AgentManager(self.resources, self.user_name, {})
         agents = await manager.list_agents()
         pool_ids = set(
@@ -714,12 +696,23 @@ class CommunityManager:
             default_agent = await manager.get_agent(default_id)
             agents = [default_agent] if default_agent else []
 
-        agent_ids = [agent.id for agent in agents]
+        if required_agent and all(agent.id != required_agent.id for agent in agents):
+            agents.append(required_agent)
+        agents = sorted(agents, key=lambda agent: agent.id)
+        use_local_references = (
+            ConfigManager.get().config.developer_settings.local_references.enabled
+        )
+        agent_local_ids, agent_ids_by_local = build_local_id_maps(
+            (agent.id for agent in agents),
+            "a",
+            use_local_references=use_local_references,
+        )
         descriptions = []
         for agent in agents:
             spawned_tag = " [spawned]" if agent.is_spawned else ""
             persona_preview = " ".join(agent.persona_markdown.split())[:160]
             descriptions.append(
-                f"- {agent.name}{spawned_tag} (id: {agent.id}): {persona_preview}"
+                f"- {agent_local_ids[agent.id]}: "
+                f"{agent.name}{spawned_tag}: {persona_preview}"
             )
-        return agent_ids, "\n".join(descriptions)
+        return agent_ids_by_local, "\n".join(descriptions)

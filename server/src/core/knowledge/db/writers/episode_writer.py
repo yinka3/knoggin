@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
 from common.schema.primitives import Episode, EntityEpisode, RelationshipEpisode
@@ -189,7 +190,7 @@ class EpisodeWriter:
         project_id: str,
         session_id: str,
     ) -> None:
-        await self._validate_source_messages(
+        source_message_timestamps = await self._validate_source_messages(
             cur,
             source_message_ids,
             user_name=user_name,
@@ -214,9 +215,14 @@ class EpisodeWriter:
             entities_by_message,
             relationships_by_message,
         )
-        await self._upsert_episode(cur, episode)
+        await self._upsert_episode(cur, episode, source_message_timestamps)
         await self._upsert_messages(cur, episode)
-        await self._upsert_entities(cur, episode, entities_by_message)
+        await self._upsert_entities(
+            cur,
+            episode,
+            entities_by_message,
+            source_message_timestamps,
+        )
         await self._upsert_relationships(cur, episode, relationships_by_message)
 
     @staticmethod
@@ -281,7 +287,7 @@ class EpisodeWriter:
               AND project_id = %s
               AND session_id = %s
               AND message_id > %s
-            ORDER BY message_id
+            ORDER BY timestamp_ms ASC NULLS LAST, message_id
             LIMIT %s
             """,
             (user_name, project_id, session_id, checkpoint, len(window_message_ids)),
@@ -289,8 +295,8 @@ class EpisodeWriter:
         next_message_ids = [
             int(row["message_id"]) for row in await cur.fetchall()
         ]
-        if next_message_ids != sorted(window_message_ids):
-            raise ValueError("Episode window is not the next contiguous message range")
+        if next_message_ids != window_message_ids:
+            raise ValueError("Episode window is not the next chronological message range")
 
         await cur.execute(
             """
@@ -318,10 +324,10 @@ class EpisodeWriter:
         user_name: str,
         project_id: str,
         session_id: str,
-    ) -> None:
+    ) -> Dict[int, int | None]:
         await cur.execute(
             """
-            SELECT message_id
+            SELECT message_id, timestamp_ms
             FROM messages
             WHERE message_id = ANY(%s)
               AND user_name = %s
@@ -330,11 +336,16 @@ class EpisodeWriter:
             """,
             (message_ids, user_name, project_id, session_id),
         )
-        persisted_message_ids = {
-            int(row["message_id"]) for row in await cur.fetchall()
+        message_timestamps = {
+            int(row["message_id"]): row.get("timestamp_ms")
+            for row in await cur.fetchall()
         }
-        if persisted_message_ids != set(message_ids):
+        if set(message_timestamps) != set(message_ids):
             raise ValueError("Episode source messages must exist in the episode scope")
+        return {
+            message_id: int(timestamp) if timestamp is not None else None
+            for message_id, timestamp in message_timestamps.items()
+        }
 
     @staticmethod
     async def _load_entities_by_message(
@@ -408,7 +419,26 @@ class EpisodeWriter:
             )
 
     @staticmethod
-    async def _upsert_episode(cur, episode: Episode) -> None:
+    async def _upsert_episode(
+        cur,
+        episode: Episode,
+        source_message_timestamps: Dict[int, int | None],
+    ) -> None:
+        timestamps = [
+            timestamp
+            for timestamp in source_message_timestamps.values()
+            if timestamp is not None
+        ]
+        first_message_at = (
+            datetime.fromtimestamp(min(timestamps) / 1000, tz=timezone.utc)
+            if timestamps
+            else None
+        )
+        last_message_at = (
+            datetime.fromtimestamp(max(timestamps) / 1000, tz=timezone.utc)
+            if timestamps
+            else None
+        )
         await cur.execute(
             """
             INSERT INTO episodes (
@@ -420,13 +450,17 @@ class EpisodeWriter:
                 updates,
                 unresolved,
                 importance,
+                source_message_count,
+                first_message_at,
+                last_message_at,
+                embedding,
                 generator_metadata,
                 created_at,
                 updated_at
             )
             VALUES (
                 %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                %s, %s::jsonb, %s, %s
+                %s, %s, %s, %s, %s::vector, %s::jsonb, %s, %s
             )
             ON CONFLICT (episode_id) DO UPDATE
             SET summary = EXCLUDED.summary,
@@ -434,6 +468,10 @@ class EpisodeWriter:
                 updates = EXCLUDED.updates,
                 unresolved = EXCLUDED.unresolved,
                 importance = EXCLUDED.importance,
+                source_message_count = EXCLUDED.source_message_count,
+                first_message_at = EXCLUDED.first_message_at,
+                last_message_at = EXCLUDED.last_message_at,
+                embedding = EXCLUDED.embedding,
                 generator_metadata = EXCLUDED.generator_metadata,
                 updated_at = EXCLUDED.updated_at
             WHERE episodes.project_id = EXCLUDED.project_id
@@ -449,6 +487,10 @@ class EpisodeWriter:
                 json.dumps(episode.updates),
                 json.dumps(episode.unresolved),
                 episode.importance,
+                len(source_message_timestamps),
+                first_message_at,
+                last_message_at,
+                json.dumps(episode.embedding) if episode.embedding is not None else None,
                 json.dumps(episode.generator_metadata),
                 episode.created_at,
                 episode.updated_at,
@@ -489,6 +531,7 @@ class EpisodeWriter:
         cur,
         episode: Episode,
         entities_by_message: Dict[int, Set[int]],
+        source_message_timestamps: Dict[int, int | None],
     ) -> None:
         messages_by_id = {message.message_id: message for message in episode.messages}
         supplied_entities = {entity.entity_id: entity for entity in episode.entities}
@@ -509,6 +552,21 @@ class EpisodeWriter:
                 baseline_prominence,
                 ranked.prominence_weight if ranked else 0.0,
             )
+            timestamps = [
+                source_message_timestamps[message_id]
+                for message_id in source_message_ids
+                if source_message_timestamps[message_id] is not None
+            ]
+            first_seen_at = (
+                datetime.fromtimestamp(min(timestamps) / 1000, tz=timezone.utc)
+                if timestamps
+                else None
+            )
+            last_seen_at = (
+                datetime.fromtimestamp(max(timestamps) / 1000, tz=timezone.utc)
+                if timestamps
+                else None
+            )
             await cur.execute(
                 """
                 INSERT INTO episode_entities (
@@ -517,14 +575,18 @@ class EpisodeWriter:
                     prominence_weight,
                     role,
                     is_focus_entity,
-                    source_message_count
+                    source_message_count,
+                    first_seen_at,
+                    last_seen_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (episode_id, entity_id) DO UPDATE
                 SET prominence_weight = EXCLUDED.prominence_weight,
                     role = EXCLUDED.role,
                     is_focus_entity = EXCLUDED.is_focus_entity,
-                    source_message_count = EXCLUDED.source_message_count
+                    source_message_count = EXCLUDED.source_message_count,
+                    first_seen_at = EXCLUDED.first_seen_at,
+                    last_seen_at = EXCLUDED.last_seen_at
                 """,
                 (
                     episode.episode_id,
@@ -533,6 +595,8 @@ class EpisodeWriter:
                     ranked.role if ranked else None,
                     ranked.is_focus_entity if ranked else False,
                     len(source_message_ids),
+                    first_seen_at,
+                    last_seen_at,
                 ),
             )
 

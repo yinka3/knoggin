@@ -204,8 +204,6 @@ class GraphWriter:
                         f"{msg['id']}"
                     )
 
-            # Temporarily keep AGE Message nodes for Fact EXTRACTED_FROM
-            # links until facts are moved to canonical Postgres tables.
             await self.projection.project_messages(cur, batch_params)
 
             # Write to Hybrid Full Text Search Table
@@ -574,12 +572,70 @@ class GraphWriter:
 
                 await cur.execute(
                     """
-                    UPDATE facts
+                    DELETE FROM message_entity_refs secondary_ref
+                    WHERE secondary_ref.entity_id = %s
+                      AND EXISTS (
+                          SELECT 1
+                          FROM message_entity_refs primary_ref
+                          WHERE primary_ref.message_id = secondary_ref.message_id
+                            AND primary_ref.entity_id = %s
+                      )
+                    """,
+                    (secondary_id, primary_id),
+                )
+                await cur.execute(
+                    """
+                    UPDATE message_entity_refs
                     SET entity_id = %s
                     WHERE entity_id = %s
-                      AND project_id = %s
                     """,
-                    (primary_id, secondary_id, project_id),
+                    (primary_id, secondary_id),
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO episode_entities (
+                        episode_id,
+                        entity_id,
+                        prominence_weight,
+                        role,
+                        is_focus_entity,
+                        source_message_count
+                    )
+                    SELECT
+                        episode_id,
+                        %s,
+                        prominence_weight,
+                        role,
+                        is_focus_entity,
+                        source_message_count
+                    FROM episode_entities
+                    WHERE entity_id = %s
+                    ON CONFLICT (episode_id, entity_id) DO UPDATE SET
+                        prominence_weight = GREATEST(
+                            episode_entities.prominence_weight,
+                            EXCLUDED.prominence_weight
+                        ),
+                        role = COALESCE(
+                            episode_entities.role,
+                            EXCLUDED.role
+                        ),
+                        is_focus_entity = (
+                            episode_entities.is_focus_entity
+                            OR EXCLUDED.is_focus_entity
+                        ),
+                        source_message_count = GREATEST(
+                            episode_entities.source_message_count,
+                            EXCLUDED.source_message_count
+                        )
+                    """,
+                    (primary_id, secondary_id),
+                )
+                await cur.execute(
+                    """
+                    DELETE FROM episode_entities
+                    WHERE entity_id = %s
+                    """,
+                    (secondary_id,),
                 )
 
                 await cur.execute(
@@ -632,17 +688,22 @@ class GraphWriter:
                             project_id,
                             entity_a_id,
                             entity_b_id,
+                            relationship_type,
                             weight,
                             confidence,
                             context,
                             last_seen_ms
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (relationship_id) DO UPDATE SET
                             weight = relationships.weight + EXCLUDED.weight,
                             confidence = GREATEST(
                                 relationships.confidence,
                                 EXCLUDED.confidence
+                            ),
+                            relationship_type = COALESCE(
+                                EXCLUDED.relationship_type,
+                                relationships.relationship_type
                             ),
                             context = COALESCE(
                                 EXCLUDED.context,
@@ -659,6 +720,7 @@ class GraphWriter:
                             project_id,
                             new_a,
                             new_b,
+                            rel.get("relationship_type"),
                             rel["weight"],
                             rel["confidence"],
                             rel["context"],
@@ -778,6 +840,7 @@ class GraphWriter:
                         rel.project_id,
                         rel.entity_a_id,
                         rel.entity_b_id,
+                        rel.relationship_type,
                         rel.weight,
                         rel.confidence,
                         rel.context,
@@ -833,20 +896,17 @@ class GraphWriter:
 
                 await cur.execute(
                     """
-                    UPDATE fact_search
-                    SET entity_id = %s
-                    WHERE entity_id = %s
-                    """,
-                    (primary_id, secondary_id),
-                )
-                await cur.execute(
-                    """
                     SELECT
                         (
                             SELECT count(*)
-                            FROM facts
+                            FROM message_entity_refs
                             WHERE entity_id = %s
-                        ) AS fact_count,
+                        ) AS message_ref_count,
+                        (
+                            SELECT count(*)
+                            FROM episode_entities
+                            WHERE entity_id = %s
+                        ) AS episode_entity_count,
                         (
                             SELECT count(*)
                             FROM relationships
@@ -866,13 +926,15 @@ class GraphWriter:
                         secondary_id,
                         secondary_id,
                         secondary_id,
+                        secondary_id,
                     ),
                 )
                 remaining = await cur.fetchone() or {}
                 if any(
                     int(remaining.get(field, 0))
                     for field in (
-                        "fact_count",
+                        "message_ref_count",
+                        "episode_entity_count",
                         "relationship_count",
                         "hierarchy_count",
                     )
@@ -890,11 +952,6 @@ class GraphWriter:
                     new_conf,
                     new_last,
                     now_ms,
-                )
-                await self.projection.transfer_merged_entity_facts(
-                    cur,
-                    primary_id,
-                    secondary_id,
                 )
                 await self.projection.project_entity_topics(
                     cur,

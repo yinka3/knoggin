@@ -32,18 +32,14 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Extract Relationships",
         frozenset({"user_name"}),
     ),
-    "extract_facts": PromptDefinition(
-        "prompts/refinement.md",
-        "Extract Facts",
-        frozenset({"user_name"}),
-    ),
-    "judge_contradiction": PromptDefinition(
-        "prompts/refinement.md",
-        "Judge Contradiction",
-    ),
     "generate_episode": PromptDefinition(
         "prompts/episode.md",
         "Generate Episode",
+        frozenset({"user_name"}),
+    ),
+    "regenerate_episode_consolidation": PromptDefinition(
+        "prompts/episode.md",
+        "Regenerate Consolidated Episode",
         frozenset({"user_name"}),
     ),
 }

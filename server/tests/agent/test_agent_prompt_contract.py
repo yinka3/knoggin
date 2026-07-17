@@ -25,6 +25,8 @@ def test_agent_prompt_renders_core_identity_mode_and_tool_policy():
     assert "Current time: 2026-04-05 10:30 UTC." in prompt
     assert 'entity_name="Ada"' in prompt
     assert "read_episode" in prompt
+    assert "episode ID (for example `ep_a3f91c`)" in prompt
+    assert "read_recent_episodes" in prompt
     assert "search_messages — use only as a last resort" in prompt
 
 
@@ -147,4 +149,4 @@ def test_fallback_summary_prompt_renders_query_and_evidence():
     assert 'The user Ada asked: "What did we learn about retrieval tests?"' in prompt
     assert "Here is the evidence gathered:" in prompt
     assert "Relevant Messages:\n- retrieval ranking passed" in prompt
-    assert "State facts found or explicitly state what is missing." in prompt
+    assert "State what was found or explicitly state what is missing." in prompt

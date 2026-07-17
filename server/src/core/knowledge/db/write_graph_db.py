@@ -17,9 +17,7 @@ from common.schema.contracts import (
     UserRelationshipWrite,
 )
 from common.scoping import IDENTITY_ENTITY_ID
-from common.utils.events import emit
 from infrastructure.knowledge_store import KnowledgeStore
-from infrastructure.redis_client import RedisKeys
 from core.knowledge.entity.resolver import EntityResolver
 
 
@@ -287,7 +285,6 @@ async def build_graph_mutation_plan(
         relationship_writes=relationship_writes,
         user_relationship_writes=user_relationship_writes,
         skipped_relationships=skipped_relationships,
-        dirty_entity_ids=safe_entity_ids,
         zombie_entity_ids=zombie_entity_ids,
     )
 
@@ -344,40 +341,11 @@ async def execute_graph_mutation_plan(
             scope=plan.scope,
         )
 
-    dirty_count = 0
-    if redis_client and plan.scope.user_name and plan.dirty_entity_ids:
-        dirty_key = RedisKeys.dirty_entities(
-            plan.scope.user_name, plan.scope.project_id
-        )
-        await redis_client.sadd(
-            dirty_key, *[str(entity_id) for entity_id in plan.dirty_entity_ids]
-        )
-        await redis_client.delete(
-            RedisKeys.project_profile_complete(
-                plan.scope.user_name, plan.scope.project_id
-            )
-        )
-        dirty_count = len(plan.dirty_entity_ids)
-        await emit(
-            plan.scope.project_id,
-            "job",
-            "dirty_entities_marked",
-            {
-                "user_name": plan.scope.user_name,
-                "project_id": plan.scope.project_id,
-                "dirty_key": dirty_key,
-                "entity_ids": sorted(plan.dirty_entity_ids),
-                "marked_count": dirty_count,
-                "reason": "graph_write",
-            },
-        )
-
     return GraphWriteSummary(
         entities_written=len(entity_payloads),
         relationships_written=len(relationship_payloads),
         user_relationships_written=len(plan.user_relationship_writes),
         aliases_updated=len(alias_update_map),
-        dirty_entities_marked=dirty_count,
         zombies_filtered=len(plan.zombie_entity_ids),
         relationships_skipped=len(plan.skipped_relationships),
     )

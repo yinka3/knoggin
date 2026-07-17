@@ -39,9 +39,13 @@ class RecordingJob:
         self.name = name
         self.kwargs = kwargs
         self.updates = []
+        self.local_reference_updates = []
 
-    def update_settings(self, settings):
-        self.updates.append(settings)
+    def update_settings(self, *settings):
+        self.updates.append(settings if len(settings) > 1 else settings[0])
+
+    def update_local_reference_settings(self, settings):
+        self.local_reference_updates.append(settings)
 
 
 class RecordingProjectState:
@@ -58,9 +62,13 @@ class RecordingProjectState:
 class RecordingProcessor:
     def __init__(self):
         self.updates = []
+        self.local_reference_updates = []
 
     def update_settings(self, settings):
         self.updates.append(settings)
+
+    def update_local_reference_settings(self, settings):
+        self.local_reference_updates.append(settings)
 
 
 class RecordingEntities:
@@ -89,7 +97,7 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
     project_state = RecordingProjectState()
     entities = RecordingEntities()
     processor = RecordingProcessor()
-    profile = RecordingJob("profile_refinement")
+    episode = RecordingJob("episode")
 
     monkeypatch.setattr(
         "core.project.project_manager.ConfigManager.get",
@@ -102,10 +110,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
     monkeypatch.setattr(
         "core.project.project_manager.EntityCleanupJob",
         lambda **kwargs: RecordingJob("entity_cleanup", **kwargs),
-    )
-    monkeypatch.setattr(
-        "core.project.project_manager.FactArchivalJob",
-        lambda **kwargs: RecordingJob("fact_archival", **kwargs),
     )
     monkeypatch.setattr(
         "core.project.project_manager.MergeCleanupJob",
@@ -128,29 +132,27 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         project_state,
         entities,
         processor,
-        profile,
+        episode,
     )
 
     assert list(project_state.scheduler._jobs) == [
-        "profile_refinement",
         "episode",
         "document_index_recovery",
         "dlq_auto_replay",
         "entity_cleanup",
-        "fact_archival",
         "merge_rollback_cleanup",
         "aac_discussion",
     ]
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
-        "developer_settings.jobs.profile",
+        "developer_settings.local_references",
+        "developer_settings.local_references",
         "developer_settings.jobs.episode",
         "developer_settings.ingestion",
         "developer_settings.jobs.document_indexing",
         "developer_settings.jobs.dlq",
         "developer_settings.jobs.cleaner",
-        "developer_settings.jobs.archival",
         "developer_settings.jobs.merge_rollback",
     ]
     assert len(project_state.unsubscribers) == 10
@@ -174,7 +176,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     state = RecordingProjectState()
     entities = RecordingEntities()
     processor = RecordingProcessor()
-    profile = RecordingJob("profile_refinement")
+    episode = RecordingJob("episode")
 
     monkeypatch.setattr(
         "core.project.project_manager.ConfigManager.get",
@@ -189,10 +191,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         lambda **kwargs: RecordingJob("entity_cleanup", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.FactArchivalJob",
-        lambda **kwargs: RecordingJob("fact_archival", **kwargs),
-    )
-    monkeypatch.setattr(
         "core.project.project_manager.MergeCleanupJob",
         lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
     )
@@ -204,25 +202,26 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         "core.project.project_manager.AACJob",
         lambda *_: RecordingJob("aac_discussion"),
     )
-    manager._register_background_jobs(state, entities, processor, profile)
+    manager._register_background_jobs(state, entities, processor, episode)
 
     marker = object()
     config_manager.emit("developer_settings.entity_resolution", marker)
     config_manager.emit("developer_settings.nlp_pipeline", marker)
-    config_manager.emit("developer_settings.jobs.profile", marker)
+    config_manager.emit("developer_settings.local_references", marker)
+    config_manager.emit("developer_settings.jobs.episode", marker)
     config_manager.emit("developer_settings.jobs.document_indexing", marker)
     config_manager.emit("developer_settings.jobs.dlq", marker)
     config_manager.emit("developer_settings.jobs.cleaner", marker)
-    config_manager.emit("developer_settings.jobs.archival", marker)
     config_manager.emit("developer_settings.jobs.merge_rollback", marker)
 
     assert entities.updates[-1] is marker
     assert processor.updates[-2:] == [marker, marker]
-    assert profile.updates[-1] is marker
+    assert processor.local_reference_updates[-1] is marker
+    assert episode.local_reference_updates[-1] is marker
+    assert episode.updates[-1][0] is marker
     assert state.scheduler._jobs["document_index_recovery"].updates[-1] is marker
     assert state.scheduler._jobs["dlq_auto_replay"].updates[-1] is marker
     assert state.scheduler._jobs["entity_cleanup"].updates[-1] is marker
-    assert state.scheduler._jobs["fact_archival"].updates[-1] is marker
     assert state.scheduler._jobs["merge_rollback_cleanup"].updates[-1] is marker
     assert "merge_detection" not in state.scheduler._jobs
     assert "topic_config" not in state.scheduler._jobs

@@ -5,12 +5,14 @@
 Completed: episode schema and contracts, ingestion provenance and
 eligibility tracking, atomic episode writes and checkpoints, `EpisodeJob`
 scheduling, and agent retrieval through `episode_check` and `read_episode`.
+Phase 4 is also complete in the runtime: Fact persistence, projections,
+search, refinement and archival jobs, prompts, and their consumers have been
+removed. Merge, community, graph, and rebuild flows now use episode evidence.
 
-Not completed: full Fact-system removal. Profile refinement, Fact
-storage/search/projections, merge support, and community Fact views still
-coexist and must be migrated in Phase 4.
+Completed: legacy Fact-oriented tests and stale runtime-job contracts have
+been removed or updated for episode-only behavior.
 
-Focused tests were added and updated but were not run in this environment.
+Not completed: the implementation has not been run in this environment.
 
 ## 1. Decision
 
@@ -768,6 +770,14 @@ checkpointed create, consolidation, or skip. It includes the session scope,
 effective action, episode ID when one was written, and source-message count.
 Per-session failures emit `episode_processing_failed` without advancing that
 session's checkpoint, so the next scheduler pass can retry it safely.
+
+`episode_processed` also includes the full episode source-message count,
+entity/relationship link counts, consolidation-limit and maximum-size flags,
+and processing latency. `episode_validation_failed` records the validation
+stage and whether the failure involved an invalid identifier. Agent retrieval
+emits `episode_retrieval_completed` with strategy, episode/focus hit counts,
+retrieval and source-expansion latency, and raw-message fallback use;
+`episode_source_messages_expanded` records full-detail expansion latency.
 
 - windows evaluated, created, consolidated, and skipped;
 - average source messages per episode;

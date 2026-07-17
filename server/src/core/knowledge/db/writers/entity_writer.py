@@ -448,13 +448,14 @@ class EntityWriter:
                             project_id,
                             entity_a_id,
                             entity_b_id,
+                            relationship_type,
                             weight,
                             confidence,
                             context,
                             last_seen_ms
                         )
                         SELECT
-                            %s, %s, %s, %s, %s, 1, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
                         WHERE EXISTS (
                             SELECT 1
                             FROM entities
@@ -478,6 +479,10 @@ class EntityWriter:
                             project_id = EXCLUDED.project_id,
                             entity_a_id = EXCLUDED.entity_a_id,
                             entity_b_id = EXCLUDED.entity_b_id,
+                            relationship_type = COALESCE(
+                                EXCLUDED.relationship_type,
+                                relationships.relationship_type
+                            ),
                             weight = relationships.weight + 1,
                             confidence = GREATEST(
                                 relationships.confidence,
@@ -496,6 +501,7 @@ class EntityWriter:
                             r["project_id"],
                             a_id,
                             b_id,
+                            r.get("relationship"),
                             r.get("confidence", 1.0),
                             r.get("context"),
                             now_ms,

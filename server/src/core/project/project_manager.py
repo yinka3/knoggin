@@ -11,11 +11,9 @@ from common.conf.manager import ConfigManager
 from common.conf.topics_config import TopicConfig, load_topic_seed
 from common.scoping import IDENTITY_ENTITY_ID, build_readable_project_ids
 from core.community.community_job import AACJob
-from core.ingestion.jobs.archive_job import FactArchivalJob
 from core.ingestion.jobs.cleaner_job import EntityCleanupJob
 from core.ingestion.jobs.dlq_job import DLQReplayJob
 from core.ingestion.jobs.episode_job import EpisodeJob
-from core.ingestion.jobs.profile_job import ProfileRefinementJob
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.db.write_graph_db import write_batch_callback
@@ -661,6 +659,7 @@ class ProjectManager:
                 gliner=self.resources.gliner,
                 spacy=self.resources.spacy,
                 settings=nlp_cfg,
+                local_reference_settings=self.dev_settings.local_references,
                 model_work=getattr(self.resources, "model_work", None),
             ),
         )
@@ -679,6 +678,7 @@ class ProjectManager:
             resolution_threshold=er_cfg.resolution_threshold,
             common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
             sparse_context_verbs=er_cfg.sparse_context_verbs,
+            local_reference_settings=self.dev_settings.local_references,
         )
 
         await self._verify_user_entity(entities)
@@ -689,7 +689,6 @@ class ProjectManager:
             self.resources.redis,
             background_work=getattr(self.resources, "background_work", None),
         )
-        profile_job = self._init_profile_job(entities)
         episode_job = self._init_episode_job(project_id)
 
         project_state = ProjectState(
@@ -706,14 +705,12 @@ class ProjectManager:
             batch_processor=project_processor,
             background_work=getattr(self.resources, "background_work", None),
         )
-        project_state.profile_job = profile_job
         project_state.episode_job = episode_job
 
         self._register_background_jobs(
             project_state,
             entities,
             project_processor,
-            profile_job,
             episode_job,
         )
         project_state.active_runtime_sessions_count = 1
@@ -788,20 +785,6 @@ class ProjectManager:
         )
         self._identity_initialized = True
 
-    def _init_profile_job(self, entities: EntityResolver) -> ProfileRefinementJob:
-        jobs_cfg = self.dev_settings.jobs
-        prof_cfg = jobs_cfg.profile
-
-        return ProfileRefinementJob(
-            llm=self.resources.llm_service,
-            entities=entities,
-            knowledge_store=self.resources.knowledge_store,
-            executor=self.resources.executor,
-            embedding_service=self.resources.embedding,
-            redis_client=self.resources.redis,
-            settings=prof_cfg,
-        )
-
     def _init_episode_job(self, project_id: str) -> EpisodeJob:
         jobs_cfg = self.dev_settings.jobs
         return EpisodeJob(
@@ -809,7 +792,9 @@ class ProjectManager:
             settings=jobs_cfg.episode,
             ingestion_settings=self.dev_settings.ingestion,
             llm=self.resources.llm_service,
+            embedding_service=self.resources.embedding,
             session_ids_provider=lambda: self.get_session_ids(project_id),
+            local_reference_settings=self.dev_settings.local_references,
         )
 
     def _register_background_jobs(
@@ -817,7 +802,6 @@ class ProjectManager:
         project_state: ProjectState,
         entities: EntityResolver,
         processor: IngestionPipeline,
-        profile_job: ProfileRefinementJob,
         episode_job: Optional[EpisodeJob] = None,
     ):
         scheduler = project_state.scheduler
@@ -856,11 +840,16 @@ class ProjectManager:
         )
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(
-                profile_job.update_settings, "developer_settings.jobs.profile"
+                processor.update_local_reference_settings,
+                "developer_settings.local_references",
             )
         )
-        scheduler.register(profile_job)
-
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                episode_job.update_local_reference_settings,
+                "developer_settings.local_references",
+            )
+        )
         scheduler.register(episode_job)
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(
@@ -917,18 +906,6 @@ class ProjectManager:
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(
                 cleaner_job.update_settings, "developer_settings.jobs.cleaner"
-            )
-        )
-
-        archival_job = FactArchivalJob(
-            knowledge_store=self.resources.knowledge_store,
-            redis_client=self.resources.redis,
-            settings=jobs_cfg.archival,
-        )
-        scheduler.register(archival_job)
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                archival_job.update_settings, "developer_settings.jobs.archival"
             )
         )
 
