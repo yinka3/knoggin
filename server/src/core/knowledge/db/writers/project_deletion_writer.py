@@ -33,6 +33,7 @@ class ProjectDeletionWriter:
         "messages",
         "sessions",
         "agents",
+        "project_search_revisions",
         "project_read_scopes",
     )
 

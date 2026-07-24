@@ -136,6 +136,12 @@ async def test_resume_session_uses_persisted_project_and_updates_last_active(
     monkeypatch, session_manager
 ):
     manager, resources, project_manager, active_sessions = session_manager
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "model": "resume-model",
+    }
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
         "session-1",
@@ -161,17 +167,23 @@ async def test_resume_session_uses_persisted_project_and_updates_last_active(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_resume_session_without_project_id_is_rejected(session_manager):
+async def test_resume_session_does_not_trust_redis_only_metadata(
+    monkeypatch,
+    session_manager,
+):
     manager, resources, project_manager, active_sessions = session_manager
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
         "session-1",
-        json.dumps({"model": "legacy-model"}),
+        json.dumps({"project_id": "project-1", "model": "legacy-model"}),
     )
 
-    with pytest.raises(ValueError, match="has no valid project_id"):
-        await manager.get_or_resume_session("session-1")
+    async def should_not_create(**_kwargs):
+        raise AssertionError("Redis-only session metadata must not resume a session")
 
+    monkeypatch.setattr(Session, "create", should_not_create)
+
+    assert await manager.get_or_resume_session("session-1") is None
     assert project_manager.acquire_calls == []
     assert active_sessions == {}
 
@@ -182,6 +194,12 @@ async def test_resume_session_releases_project_state_when_context_create_fails(
     monkeypatch, session_manager
 ):
     manager, resources, project_manager, active_sessions = session_manager
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "model": "resume-model",
+    }
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
         "session-1",
@@ -196,6 +214,35 @@ async def test_resume_session_releases_project_state_when_context_create_fails(
     with pytest.raises(RuntimeError, match="resume failed"):
         await manager.get_or_resume_session("session-1")
 
+    assert project_manager.release_calls == ["project-1"]
+    assert active_sessions == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_resume_session_aborts_when_durable_session_disappears(
+    monkeypatch,
+    session_manager,
+):
+    manager, resources, project_manager, active_sessions = session_manager
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "model": "resume-model",
+    }
+    context = FakeSession(session_id="session-1", project_id="project-1")
+    resources.postgres.write_count = 0
+
+    async def fake_create(**_kwargs):
+        return context
+
+    monkeypatch.setattr(Session, "create", fake_create)
+
+    with pytest.raises(RuntimeError, match="Session disappeared while resuming"):
+        await manager.get_or_resume_session("session-1")
+
+    assert context.shutdown_count == 1
     assert project_manager.release_calls == ["project-1"]
     assert active_sessions == {}
 
@@ -445,6 +492,12 @@ async def test_document_focus_survives_session_resume(
     session_manager,
 ):
     manager, resources, _, active_sessions = session_manager
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "model": None,
+    }
     focus = {
         "mode": "pinned",
         "target_type": "folder_upload",

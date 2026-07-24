@@ -1,5 +1,6 @@
 import pytest
 
+from common.exceptions import StorageUnavailableError
 from core.knowledge.db.readers.entity_reader import EntityReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -88,3 +89,61 @@ async def test_entity_reader_rejects_invalid_bounded_query_inputs_before_queryin
         )
 
     assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_name_lookup_uses_valid_scoped_sql_and_returns_matches():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "id": 2,
+                    "project_id": "project-1",
+                    "canonical_name": "Widget",
+                    "type": "concept",
+                    "aliases": ["widget-service"],
+                }
+            ]
+        ]
+    )
+
+    matches = await EntityReader(client).get_entities_by_names(
+        ["Widget", "widget-service"],
+        visible_project_ids=["project-1"],
+    )
+
+    assert matches == [
+        {
+            "id": 2,
+            "project_id": "project-1",
+            "canonical_name": "Widget",
+            "type": "concept",
+            "aliases": ["widget-service"],
+        }
+    ]
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "AS aliases,\n        FROM" not in query
+    assert params == [
+        ["widget", "widget-service"],
+        ["widget", "widget-service"],
+        ["project-1"],
+        1,
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_entity_name_lookup_does_not_report_storage_failure_as_absence():
+    reader = EntityReader(
+        RecordingPostgresClient(fetch_all_exceptions=[RuntimeError("database down")])
+    )
+
+    with pytest.raises(StorageUnavailableError) as error:
+        await reader.get_entities_by_names(
+            ["Widget"],
+            visible_project_ids=["project-1"],
+        )
+
+    assert error.value.code == "storage_unavailable"
+    assert error.value.details["operation"] == "get_entities_by_names"

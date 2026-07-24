@@ -134,7 +134,11 @@ CREATE TABLE IF NOT EXISTS public.messages (
     CONSTRAINT messages_scope_project_key
         UNIQUE (user_name, session_id, message_id, project_id),
     CONSTRAINT messages_id_project_session_key
-        UNIQUE (message_id, project_id, session_id)
+        UNIQUE (message_id, project_id, session_id),
+    CONSTRAINT messages_session_project_fk
+        FOREIGN KEY (session_id, project_id)
+        REFERENCES public.sessions(session_id, project_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS messages_project_idx
@@ -434,6 +438,18 @@ BEGIN
         ALTER TABLE public.messages
         ADD CONSTRAINT messages_id_project_session_key
         UNIQUE (message_id, project_id, session_id);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'messages_session_project_fk'
+          AND conrelid = 'public.messages'::regclass
+    ) THEN
+        ALTER TABLE public.messages
+        ADD CONSTRAINT messages_session_project_fk
+        FOREIGN KEY (session_id, project_id)
+        REFERENCES public.sessions(session_id, project_id)
+        ON DELETE CASCADE;
     END IF;
 
     IF NOT EXISTS (

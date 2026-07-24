@@ -138,9 +138,9 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
     await real_postgres_client.execute(
         """
         INSERT INTO public.document_chunks (
-            chunk_id, document_id, chunk_index, content, embedding
+            chunk_id, document_id, chunk_index, content, relative_path, embedding
         )
-        VALUES (%s, %s, 0, 'hello', %s::vector)
+        VALUES (%s, %s, 0, 'hello', 'notes.md', %s::vector)
         """,
         (chunk_id, document_id, embedding),
     )
@@ -153,6 +153,10 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.entities WHERE project_id = 'project-1'"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.project_search_revisions "
+        "WHERE project_id = 'project-1'"
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "

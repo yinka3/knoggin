@@ -192,6 +192,10 @@ warrant workload review.
 | DB-036 | Fixed: episode selection and persistence now share a nullable-last `(timestamp_ms, message_id)` cursor. A real-Postgres regression test proves IDs 102/103 can be processed before the later-timestamp ID 101 without skipping 101. |
 | DB-032 | Fixed: `ResourceManager` now owns and connects the one general `PostgresClient`, then injects it into `KnowledgeStore`. The knowledge facade no longer exposes a raw client or owns connection lifecycle. Project, session, agent, and community managers remain explicit owners of their non-knowledge tables through the general resource boundary, rather than misleading `KnowledgeStore` bypasses. Resource lifecycle contracts cover the injection, startup failure cleanup, and shutdown path. |
 | DB-037 | Fixed: episodes have a stored `search_tsvector` over the summary and structured narrative fields, with a GIN index. `EpisodeReader.search_episodes()` now calculates its `websearch_to_tsquery('simple', ...)` term once and filters/ranks against the stored vector. A real-Postgres contract proves the vector matches narrative content, the GIN index exists, and PostgreSQL can produce a bitmap index plan when sequential and ordinary index scans are disabled. This proves index compatibility, not a representative-workload latency claim. |
+| DB-038 | Fixed: PostgreSQL is now the sole authority for session existence. Redis-only metadata cannot resume a runtime session; a resume verifies its durable `last_active_at` update before becoming active. Canonical messages also have a composite `(session_id, project_id)` foreign key with delete cascade, so no message can outlive or cross its owning session. Runtime and real-Postgres contracts cover Redis-only resume rejection, concurrent disappearance during resume, invalid/mismatched session writes, and cascade cleanup. |
+| DB-039 | Fixed: `EntityReader.get_entities_by_names()` now produces a valid scoped query and reserves an empty list for ordinary no-match absence. Database failures surface as `StorageUnavailableError` instead of being silently treated as a missing identity by maintenance. Snapshot and real-Postgres contracts cover canonical and alias lookup, project scope, and failure semantics. |
+| DB-040 | Fixed: aggregate project deletion now removes its derived `project_search_revisions` row after message, entity, and episode deletions have fired revision triggers. A real-Postgres regression proves no search-revision row remains once the project is gone. |
+| DB-041 | Fixed: session deletion now removes every document root carrying that session ID—manual documents, folder batches, and workspace sources—before it deletes the session. Document content and chunks cascade from their document rows. The rule is ownership by non-null `session_id`, not visibility scope, so a project-visible row with a session ID is also removed. Real-Postgres coverage proves other-session and no-session project documents remain. |
 | DB-007 | Retired: no fact ID upsert, fact ownership transfer, or Fact AGE edge exists. |
 | DB-009 | Retired in its reviewed form: graph writes no longer have the post-commit Redis/event step that caused committed writes to be retried. Alias and graph writes are still separate operations. |
 | DB-020 | Retired: fact audit writer and applied-fact audit flow no longer exist. |
@@ -231,6 +235,15 @@ Current targeted evidence includes:
   protected session columns;
 - real-Postgres lexical episode-search coverage for its stored tsvector, GIN
   index, and index-compatible bitmap plan;
+- runtime and real-Postgres session-ownership coverage proving stale Redis
+  metadata cannot resume a deleted session and invalid message/session scope is
+  rejected at the database boundary;
+- entity-name lookup snapshot and real-Postgres coverage for canonical/alias
+  matches, project scope, and surfaced storage failures;
+- real-Postgres aggregate-deletion coverage proving search-revision trigger
+  output is removed with its project;
+- real-Postgres session-deletion coverage for manual, folder, and workspace
+  document roots, their cascaded content, and preserved unrelated documents;
 - a successful no-flush execution of `verify_storage_ownership.py --seed`,
   which counted its episodic roots, attachments, checkpoint, merge, and
   document state.

@@ -184,26 +184,25 @@ class SessionManager:
             if session_id in self.active_sessions:
                 return self.active_sessions[session_id]
 
-            query = "SELECT project_id, model FROM public.sessions WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
-            rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "session_id": session_id})
-
-            redis_metadata = None
+            query = """
+                SELECT project_id, model
+                FROM public.sessions
+                WHERE user_name = %(user_name)s
+                  AND session_id = %(session_id)s
+            """
+            rows = await self.pg.fetch_all(
+                query,
+                {"user_name": self.user_name, "session_id": session_id},
+            )
             if not rows:
-                redis_metadata = await self._read_redis_session_metadata(session_id)
-                if not redis_metadata:
-                    return None
-                metadata = redis_metadata
-            else:
-                metadata = rows[0]
+                return None
+            metadata = rows[0]
 
             project_id = metadata.get("project_id")
             if not project_id:
                 raise ValueError(f"Session {session_id} has no valid project_id")
 
             model = metadata.get("model")
-
-            if not rows and redis_metadata is None:
-                return None
 
             project_state = await self.project_manager.acquire_project_for_session(
                 project_id, session_id
@@ -218,13 +217,23 @@ class SessionManager:
                     model=model,
                     project_state=project_state,
                 )
-                update_query = "UPDATE public.sessions SET last_active_at = now() WHERE session_id = %(session_id)s"
-                await self.pg.execute(update_query, {"session_id": session_id})
-                redis_metadata = (
-                    redis_metadata
-                    or await self._read_redis_session_metadata(session_id)
-                    or {"project_id": project_id, "model": model}
+                update_query = """
+                    UPDATE public.sessions
+                    SET last_active_at = now()
+                    WHERE user_name = %(user_name)s
+                      AND session_id = %(session_id)s
+                """
+                updated = await self.pg.execute(
+                    update_query,
+                    {"user_name": self.user_name, "session_id": session_id},
                 )
+                if updated != 1:
+                    raise RuntimeError("Session disappeared while resuming")
+                redis_metadata = (
+                    await self._read_redis_session_metadata(session_id) or {}
+                )
+                redis_metadata["project_id"] = project_id
+                redis_metadata["model"] = model
                 redis_metadata["last_active"] = get_now_iso()
                 await self._write_redis_session_metadata(session_id, redis_metadata)
 

@@ -719,6 +719,29 @@ class FakePostgresClient:
 
     def _execute_against_stores(self, query, params):
         normalized = " ".join(query.lower().split())
+        if "insert into public.projects" in normalized:
+            project_id = params.get("project_id")
+            if not project_id:
+                return
+            now = self._now()
+            self.projects[project_id] = {
+                "project_id": project_id,
+                "user_name": params.get("user_name"),
+                "name": params.get("name"),
+                "description": params.get("description"),
+                "access_mode": params.get("access_mode", "open"),
+                "status": params.get("status", "active"),
+                "topic_config": json.loads(params["topic_config"])
+                if isinstance(params.get("topic_config"), str)
+                else params.get("topic_config", {}),
+                "created_at": now,
+                "updated_at": now,
+                "archived_at": None,
+                "deleted_at": None,
+                "last_activity_at": None,
+            }
+            return
+
         if "insert into public.project_read_scopes" in normalized:
             key = (params.get("user_name"), params.get("project_id"))
             self.project_read_scopes[key].add(params.get("readable"))

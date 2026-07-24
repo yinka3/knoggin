@@ -6,6 +6,56 @@ from psycopg.errors import ForeignKeyViolation
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
+async def test_messages_must_belong_to_an_existing_session_in_the_same_project(
+    real_postgres_client,
+):
+    await real_postgres_client.execute(
+        """
+        INSERT INTO sessions (session_id, user_name, project_id)
+        VALUES
+            ('session-1', 'ada', 'project-1'),
+            ('session-2', 'ada', 'project-2')
+        """
+    )
+
+    with pytest.raises(ForeignKeyViolation):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO messages (
+                user_name, session_id, message_id, project_id, role, content
+            ) VALUES ('ada', 'missing-session', 101, 'project-1', 'user', 'Invalid.')
+            """
+        )
+
+    with pytest.raises(ForeignKeyViolation):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO messages (
+                user_name, session_id, message_id, project_id, role, content
+            ) VALUES ('ada', 'session-2', 102, 'project-1', 'user', 'Wrong project.')
+            """
+        )
+
+    await real_postgres_client.execute(
+        """
+        INSERT INTO messages (
+            user_name, session_id, message_id, project_id, role, content
+        ) VALUES ('ada', 'session-1', 103, 'project-1', 'user', 'Valid.')
+        """
+    )
+    await real_postgres_client.execute(
+        "DELETE FROM sessions WHERE session_id = 'session-1'"
+    )
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM messages WHERE message_id = 103"
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
 async def test_episode_and_source_messages_must_share_project_session_scope(
     real_postgres_client,
 ):
