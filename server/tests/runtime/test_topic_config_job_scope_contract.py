@@ -2,8 +2,8 @@ import pytest
 
 from common.conf.topics_config import TopicConfig
 from common.schema.settings import TopicSchema
-from infrastructure.redis_client import RedisKeys
 from core.agent.tools.topic_tools import TopicTools
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis
 
 

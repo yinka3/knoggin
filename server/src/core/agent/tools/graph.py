@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+from time import perf_counter
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from common.utils.events import emit
+
 if TYPE_CHECKING:
-    from infrastructure.knowledge_store import KnowledgeStore
     from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.services.embedding_service import EmbeddingService
-
-from common.utils.data_utils import cosine_similarity
-
+    from infrastructure.knowledge_store import KnowledgeStore
 
 class GraphTools:
     # Attributes provided by the composed Tools class
@@ -103,94 +103,435 @@ class GraphTools:
 
         return results
 
-    async def fact_check(self, entity_name: str, query: str) -> Dict:
+    async def episode_check(
+        self, query: str, entity_name: Optional[str] = None
+    ) -> Dict:
         """
-        Retrieve and verify stored facts about an entity.
-        Uses exact lookup, vector search, then message search fallback.
+        Retrieve contextual episodic memory for an entity or a natural-language
+        question. Uses entity-first lookup when an entity is supplied, then
+        searches episode summaries before falling back to raw messages.
 
         Args:
-            entity_name: The entity to look up facts for.
-            query: A natural language hint describing what you're looking for.
+            query: The question or natural-language retrieval hint.
+            entity_name: Optional entity whose episodic memory to inspect.
 
         Returns:
-            Dict with resolution method and matching facts or search results.
+            Dict with resolution method and matching episodes or search results.
         """
-        entity_id = await self.entities.get_id(entity_name)
+        entity_name = (entity_name or "").strip()
+        query = query.strip()
+        retrieval_started_at = perf_counter()
+        entity_id = await self.entities.get_id(entity_name) if entity_name else None
 
         if entity_id is not None:
-            facts = await self.knowledge_store.get_facts_for_entity(
+            episodes = await self.knowledge_store.get_episodes_for_entity(
                 entity_id,
-                visible_project_ids=self.readable_project_ids,
-                active_only=False,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                session_id=self.session_id,
+                limit=self._episode_retrieval_limit(),
             )
-
             profile = await self.entities.get_profile(entity_id)
             canonical = profile.canonical_name if profile else entity_name
-
+            retrieval_metrics: Dict[str, int | float] = {}
+            serialized = await self._serialize_episodes(
+                episodes,
+                metrics=retrieval_metrics,
+            )
+            await self._emit_episode_retrieval(
+                strategy="exact_entity",
+                started_at=retrieval_started_at,
+                episode_count=len(episodes),
+                focus_episode_count=self._focus_episode_count(episodes, entity_id),
+                metrics=retrieval_metrics,
+            )
             return {
                 "resolution": "exact",
                 "results": [
                     {
                         "entity_name": canonical,
                         "similarity": 1.0,
-                        "facts": [f.to_dict() for f in (facts or [])],
+                        "episodes": serialized,
                     }
                 ],
             }
 
-        embedding = await self.embedding_service.encode_single(entity_name)
+        if entity_name:
+            embedding = await self.embedding_service.encode_single(entity_name)
 
-        candidates = await self.knowledge_store.search_entities_by_embedding(
-            embedding,
-            limit=5,
-            score_threshold=0.69,
-            visible_project_ids=self.readable_project_ids,
-        )
-
-        if candidates:
-            candidate_ids = [eid for eid, _ in candidates]
-            similarity_map = {eid: sim for eid, sim in candidates}
-
-            facts_by_entity = await self.knowledge_store.get_facts_for_entities(
-                candidate_ids,
+            candidates = await self.knowledge_store.search_entities_by_embedding(
+                embedding,
+                limit=5,
+                score_threshold=0.69,
                 visible_project_ids=self.readable_project_ids,
-                active_only=False,
             )
 
-            total_facts = sum(len(facts) for facts in facts_by_entity.values())
+            if candidates:
+                candidate_ids = [eid for eid, _ in candidates]
+                similarity_map = {eid: sim for eid, sim in candidates}
 
-            if total_facts > 1000:
-                query_embedding = await self.embedding_service.encode_single(query)
+                results = []
+                retrieval_metrics: Dict[str, int | float] = {}
+                retrieved_episode_count = 0
+                focus_episode_count = 0
+                for eid in candidate_ids:
+                    profile = await self.entities.get_profile(eid)
+                    canonical = profile.canonical_name if profile else str(eid)
+                    episodes = await self.knowledge_store.get_episodes_for_entity(
+                        eid,
+                        user_name=self.user_name,
+                        project_id=self.project_id,
+                        session_id=self.session_id,
+                        limit=self._episode_retrieval_limit(),
+                    )
 
-                for eid, facts in facts_by_entity.items():
-                    scored = []
-                    for fact in facts:
-                        if fact.embedding:
-                            sim = cosine_similarity(query_embedding, fact.embedding)
-                            scored.append((fact, sim))
-                        else:
-                            scored.append((fact, 0.0))
+                    retrieved_episode_count += len(episodes)
+                    focus_episode_count += self._focus_episode_count(episodes, eid)
+                    results.append(
+                        {
+                            "entity_name": canonical,
+                            "similarity": similarity_map[eid],
+                            "episodes": await self._serialize_episodes(
+                                episodes,
+                                metrics=retrieval_metrics,
+                            ),
+                        }
+                    )
 
-                    scored.sort(key=lambda x: x[1], reverse=True)
-                    facts_by_entity[eid] = [f for f, _ in scored[:500]]
-
-            results = []
-            for eid in candidate_ids:
-                profile = await self.entities.get_profile(eid)
-                canonical = profile.canonical_name if profile else str(eid)
-
-                results.append(
-                    {
-                        "entity_name": canonical,
-                        "similarity": similarity_map[eid],
-                        "facts": [f.to_dict() for f in facts_by_entity.get(eid, [])],
-                    }
+                await self._emit_episode_retrieval(
+                    strategy="vector_entity",
+                    started_at=retrieval_started_at,
+                    episode_count=retrieved_episode_count,
+                    focus_episode_count=focus_episode_count,
+                    metrics=retrieval_metrics,
                 )
+                return {"resolution": "vector", "results": results}
 
-            return {"resolution": "vector", "results": results}
+        embedding_service = getattr(self, "embedding_service", None)
+        if embedding_service is not None:
+            query_embedding = await embedding_service.encode_single(query)
+            semantic_matches = await self.knowledge_store.search_episodes_by_embedding(
+                query_embedding,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                session_id=self.session_id,
+                limit=self._episode_retrieval_limit(),
+            )
+            if semantic_matches:
+                episodes, similarities = zip(*semantic_matches)
+                similarity_by_episode = {
+                    episode.episode_id: similarity
+                    for episode, similarity in zip(episodes, similarities)
+                }
+                retrieval_metrics: Dict[str, int | float] = {}
+                serialized = await self._serialize_episodes(
+                    episodes,
+                    similarity_by_episode=similarity_by_episode,
+                    metrics=retrieval_metrics,
+                )
+                await self._emit_episode_retrieval(
+                    strategy="semantic",
+                    started_at=retrieval_started_at,
+                    episode_count=len(episodes),
+                    focus_episode_count=0,
+                    metrics=retrieval_metrics,
+                )
+                return {
+                    "resolution": "semantic",
+                    "results": [
+                        {
+                            "query": query,
+                            "episodes": serialized,
+                        }
+                    ],
+                }
+
+        episodes = await self.knowledge_store.search_episodes(
+            query,
+            user_name=self.user_name,
+            project_id=self.project_id,
+            session_id=self.session_id,
+            limit=self._episode_retrieval_limit(),
+        )
+        if episodes:
+            retrieval_metrics: Dict[str, int | float] = {}
+            serialized = await self._serialize_episodes(
+                episodes,
+                metrics=retrieval_metrics,
+            )
+            await self._emit_episode_retrieval(
+                strategy="lexical",
+                started_at=retrieval_started_at,
+                episode_count=len(episodes),
+                focus_episode_count=0,
+                metrics=retrieval_metrics,
+            )
+            return {
+                "resolution": "question",
+                "results": [
+                    {
+                        "query": query,
+                        "episodes": serialized,
+                    }
+                ],
+            }
 
         fallback = await self.search_messages(query)
+        await self._emit_episode_retrieval(
+            strategy="raw_message_fallback",
+            started_at=retrieval_started_at,
+            episode_count=0,
+            focus_episode_count=0,
+            metrics={"used_raw_message_fallback": 1},
+        )
         return {"resolution": "fallback", "results": fallback}
+
+    async def read_episode(self, episode_id: str) -> List[Dict]:
+        """Expand one retrieved episode into all of its source messages."""
+
+        episode = await self.knowledge_store.get_episode(
+            episode_id,
+            user_name=self.user_name,
+            project_id=self.project_id,
+            session_id=self.session_id,
+        )
+        if episode is None:
+            return []
+        expansion_started_at = perf_counter()
+        sources = await self.knowledge_store.get_episode_source_messages(
+            episode.episode_id,
+            user_name=self.user_name,
+            project_id=self.project_id,
+            session_id=self.session_id,
+        )
+        await emit(
+            self.session_id,
+            "agent",
+            "episode_source_messages_expanded",
+            {
+                "project_id": self.project_id,
+                "session_id": self.session_id,
+                "episode_id": episode.episode_id,
+                "source_message_count": len(sources),
+                "source_message_expansion_latency_ms": round(
+                    (perf_counter() - expansion_started_at) * 1000,
+                    3,
+                ),
+            },
+        )
+        return [self._as_message_evidence(source) for source in sources]
+
+    async def read_recent_episodes(self, limit: int = 2) -> Dict:
+        """Return the most recently updated episode summaries without searching."""
+
+        if limit <= 0:
+            raise ValueError("read_recent_episodes limit must be positive")
+        effective_limit = min(limit, self._episode_retrieval_limit())
+        retrieval_started_at = perf_counter()
+        episodes = await self.knowledge_store.get_recent_episodes(
+            user_name=self.user_name,
+            project_id=self.project_id,
+            session_id=self.session_id,
+            limit=effective_limit,
+        )
+        retrieval_metrics: Dict[str, int | float] = {}
+        serialized = await self._serialize_episodes(
+            episodes,
+            metrics=retrieval_metrics,
+        )
+        await self._emit_episode_retrieval(
+            strategy="recent",
+            started_at=retrieval_started_at,
+            episode_count=len(episodes),
+            focus_episode_count=0,
+            metrics=retrieval_metrics,
+        )
+        return {
+            "resolution": "recent",
+            "results": [
+                {
+                    "query": f"{effective_limit} most recently updated episodes",
+                    "episodes": serialized,
+                }
+            ],
+        }
+
+    async def _serialize_episodes(
+        self,
+        episodes,
+        *,
+        similarity_by_episode: Optional[Dict[str, float]] = None,
+        metrics: Optional[Dict[str, int | float]] = None,
+    ) -> List[Dict]:
+        """Expose complete episodes with influence-ranked source evidence."""
+
+        serialized = []
+        expansion_latency_ms = 0.0
+        expanded_source_message_count = 0
+        returned_evidence_count = 0
+        for episode in episodes or []:
+            expansion_started_at = perf_counter()
+            sources = await self.knowledge_store.get_episode_source_messages(
+                episode.episode_id,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                session_id=self.session_id,
+            )
+            expansion_latency_ms += (perf_counter() - expansion_started_at) * 1000
+            expanded_source_message_count += len(sources)
+            evidence = sorted(
+                (self._as_message_evidence(source) for source in sources),
+                key=lambda source: float(source.get("influence_weight", 0.0)),
+                reverse=True,
+            )
+            returned_evidence_count += len(evidence)
+            serialized_episode = {
+                "episode_id": episode.episode_id,
+                "summary": episode.summary,
+                "new_developments": episode.new_developments,
+                "updates": episode.updates,
+                "unresolved": episode.unresolved,
+                "importance": episode.importance,
+                "source_message_count": episode.source_message_count,
+                "first_message_at": (
+                    episode.first_message_at.isoformat()
+                    if episode.first_message_at
+                    else None
+                ),
+                "last_message_at": (
+                    episode.last_message_at.isoformat()
+                    if episode.last_message_at
+                    else None
+                ),
+                "entities": [
+                    {
+                        "entity_id": entity.entity_id,
+                        "prominence_weight": entity.prominence_weight,
+                        "role": entity.role,
+                        "is_focus_entity": entity.is_focus_entity,
+                        "source_message_count": entity.source_message_count,
+                        "first_seen_at": (
+                            entity.first_seen_at.isoformat()
+                            if entity.first_seen_at
+                            else None
+                        ),
+                        "last_seen_at": (
+                            entity.last_seen_at.isoformat()
+                            if entity.last_seen_at
+                            else None
+                        ),
+                    }
+                    for entity in episode.entities
+                ],
+                "relationships": [
+                    {
+                        "relationship_id": relationship.relationship_id,
+                        "prominence_weight": relationship.prominence_weight,
+                        "is_central_relationship": (
+                            relationship.is_central_relationship
+                        ),
+                        "source_message_count": relationship.source_message_count,
+                    }
+                    for relationship in episode.relationships
+                ],
+                "version_history": [
+                    version.model_dump(mode="json")
+                    for version in episode.version_history
+                ],
+                "evidence": evidence,
+            }
+            if similarity_by_episode and episode.episode_id in similarity_by_episode:
+                serialized_episode["similarity"] = similarity_by_episode[
+                    episode.episode_id
+                ]
+            serialized.append(serialized_episode)
+        if metrics is not None:
+            metrics["source_message_expansion_latency_ms"] = round(
+                float(metrics.get("source_message_expansion_latency_ms", 0))
+                + expansion_latency_ms,
+                3,
+            )
+            metrics["expanded_source_message_count"] = int(
+                metrics.get("expanded_source_message_count", 0)
+            ) + expanded_source_message_count
+            metrics["returned_evidence_count"] = int(
+                metrics.get("returned_evidence_count", 0)
+            ) + returned_evidence_count
+        return serialized
+
+    async def _emit_episode_retrieval(
+        self,
+        *,
+        strategy: str,
+        started_at: float,
+        episode_count: int,
+        focus_episode_count: int,
+        metrics: Dict[str, int | float],
+    ) -> None:
+        await emit(
+            self.session_id,
+            "agent",
+            "episode_retrieval_completed",
+            {
+                "project_id": self.project_id,
+                "session_id": self.session_id,
+                "strategy": strategy,
+                "episode_count": episode_count,
+                "focus_episode_count": focus_episode_count,
+                "focus_entity_retrieval": strategy in {
+                    "exact_entity",
+                    "vector_entity",
+                },
+                "retrieval_latency_ms": round(
+                    (perf_counter() - started_at) * 1000,
+                    3,
+                ),
+                **metrics,
+            },
+        )
+
+    @staticmethod
+    def _focus_episode_count(episodes, entity_id: int) -> int:
+        return sum(
+            any(
+                entity.entity_id == entity_id and entity.is_focus_entity
+                for entity in episode.entities
+            )
+            for episode in episodes
+        )
+
+    def _episode_retrieval_limit(self) -> int:
+        return int(getattr(self, "episode_retrieval_limit", 5))
+
+    @staticmethod
+    def _as_message_evidence(source: Dict) -> Dict:
+        """Normalize episode provenance for the agent's message formatter."""
+
+        return {
+            "id": source.get("message_id"),
+            "message_id": source.get("message_id"),
+            "message": source.get("content", ""),
+            "content": source.get("content", ""),
+            "role": source.get("role", "assistant"),
+            "timestamp_ms": source.get("timestamp_ms"),
+            "influence_weight": source.get("influence_weight", 0.0),
+            "influence_reason": source.get("influence_reason"),
+            "attached_at": (
+                source["attached_at"].isoformat()
+                if source.get("attached_at")
+                and hasattr(source["attached_at"], "isoformat")
+                else source.get("attached_at")
+            ),
+            "score": source.get("influence_weight", 0.0),
+            "context": [
+                {
+                    "role": source.get("role", "assistant"),
+                    "timestamp": source.get("timestamp_ms", ""),
+                    "content": source.get("content", ""),
+                    "is_hit": True,
+                }
+            ],
+        }
 
     async def find_path(self, entity_a: str, entity_b: str) -> List[Dict]:
         """
@@ -350,7 +691,7 @@ class GraphTools:
         return [result]
 
     async def get_hot_topic_context(
-        self, hot_topics: List[str], slim: bool = False
+        self, hot_topics: List[str], *, slim: bool = False
     ) -> Dict[str, Dict]:
         """
         Retrieve pre-cached context for frequently accessed topics.
@@ -359,20 +700,27 @@ class GraphTools:
 
         Args:
             hot_topics: List of topic names marked as "hot"
-            slim: Returns if you want more information or not
-
         Returns: Dict mapping topic name to list of top entities with summaries.
         """
         if not hot_topics:
             return {}
 
         # Fetch context
-        raw = await self.knowledge_store.get_hot_topic_context_with_messages(
-            hot_topics,
-            msg_limit=10,
-            slim=slim,
-            visible_project_ids=self.readable_project_ids,
-        )
+        try:
+            raw = await self.knowledge_store.get_hot_topic_context_with_messages(
+                hot_topics,
+                msg_limit=10,
+                slim=slim,
+                visible_project_ids=self.readable_project_ids,
+            )
+        except TypeError as exc:
+            if "slim" not in str(exc):
+                raise
+            raw = await self.knowledge_store.get_hot_topic_context_with_messages(
+                hot_topics,
+                msg_limit=10,
+                visible_project_ids=self.readable_project_ids,
+            )
         for _, data in raw.items():
             message_refs = data.get("message_refs", data.get("message_ids", []))
             data["messages"] = await self._hydrate_evidence(message_refs)

@@ -46,7 +46,7 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
                 "entities": [
                     {
                         "name": "Ada",
-                        "facts": ["prefers scoped profile updates"],
+                        "episodes": ["prefers scoped profile updates"],
                     }
                 ]
             }
@@ -74,7 +74,7 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
                     }
                 },
             },
-            {"tool": "fact_check", "result": {"data": []}},
+            {"tool": "episode_check", "result": {"data": []}},
             {"tool": "search_messages", "error": "boom"},
         ],
     )
@@ -89,7 +89,7 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     assert "`search_entity`: Found 1 items" in message
     assert '`edit_brain`: {\n  "success": true,' in message
     assert '"section": "Project Context"' in message
-    assert "`fact_check`: No results found." in message
+    assert "`episode_check`: No results found." in message
     assert "`search_messages`: Error - boom" in message
     assert "[HOT: Identity]" in message
     assert "Ada: prefers scoped profile updates" in message
@@ -193,8 +193,8 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
     )
     update_accumulators(ctx, "get_hierarchy", {"data": {"entity": "Knoggin"}})
     update_accumulators(ctx, "get_hierarchy", {"data": {"entity": "Knoggin"}})
-    update_accumulators(ctx, "fact_check", {"data": {"resolution": "exact"}})
-    update_accumulators(ctx, "fact_check", {"data": {"resolution": "exact"}})
+    update_accumulators(ctx, "episode_check", {"data": {"resolution": "exact"}})
+    update_accumulators(ctx, "episode_check", {"data": {"resolution": "exact"}})
     update_accumulators(
         ctx,
         "search_documents",
@@ -248,7 +248,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
     ]
     assert ctx.evidence.paths == [{"entity_a": "Ada", "entity_b": "Knoggin"}]
     assert ctx.evidence.hierarchy == [{"entity": "Knoggin"}]
-    assert ctx.evidence.facts == [{"resolution": "exact"}]
+    assert ctx.evidence.episodes == [{"resolution": "exact"}]
     assert [
         (msg["id"], msg["source_type"], msg["message"])
         for msg in ctx.evidence.messages
@@ -276,7 +276,7 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
             max_accumulated_graph=2,
             max_accumulated_paths=1,
             max_accumulated_hierarchy=1,
-            max_accumulated_facts=1,
+            max_accumulated_episodes=1,
             max_accumulated_sources=1,
         )
     )
@@ -320,8 +320,8 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
     )
     update_accumulators(
         ctx,
-        "fact_check",
-        {"data": [{"id": "fact-1"}, {"id": "fact-2"}]},
+        "episode_check",
+        {"data": [{"id": "episode-1"}, {"id": "episode-2"}]},
     )
     update_accumulators(
         ctx,
@@ -364,7 +364,7 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
     ]
     assert ctx.evidence.paths == [{"entity_a": "Ada", "entity_b": "Beta"}]
     assert ctx.evidence.hierarchy == [{"entity": "Beta"}]
-    assert ctx.evidence.facts == [{"id": "fact-2"}]
+    assert ctx.evidence.episodes == [{"id": "episode-2"}]
     assert ctx.evidence.sources == [{"url": "https://example.test/new"}]
     assert [message["chunk_index"] for message in ctx.evidence.messages] == [2, 3]
 
@@ -389,11 +389,11 @@ def test_update_accumulators_ignores_errors_and_empty_results():
         ("find_path", {"data": [{"hop": 1}]}, ("Path found: 1 hops", 1)),
         ("find_path", {"data": []}, ("No path", 0)),
         (
-            "fact_check",
+            "episode_check",
             {"data": {"resolution": "exact", "results": [{}, {}]}},
             ("Resolved via exact (2 matches)", 2),
         ),
-        ("fact_check", {"data": []}, ("No results", 0)),
+        ("episode_check", {"data": []}, ("No results", 0)),
         ("edit_brain", {"data": {"success": True}}, ("Brain updated", 1)),
         ("read_brain", {"data": {"content": "brain"}}, ("Brain loaded", 1)),
         (

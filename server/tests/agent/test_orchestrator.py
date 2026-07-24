@@ -1,13 +1,14 @@
 import pytest
 
 from common.schema.agent_contracts import AgentConfig
-from infrastructure.redis_client import RedisKeys
 from core.agent.orchestrator import Orchestrator
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeResources
 
 
 class FakeLimits:
     max_tool_calls = 9
+    tool_timeout = 1.5
     max_attempts = 8
     agent_history_turns = 3
     max_accumulated_messages = 12
@@ -160,7 +161,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
         model="agent-model",
         temperature=0.25,
         brain="Use memory",
-        enabled_tools=["fact_check"],
+        enabled_tools=["episode_check"],
     )
     context.resources.postgres.upsert_agent(agent)
 
@@ -204,6 +205,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.user_query == "hello"
     assert executor.ctx.history == [{"role": "user", "content": "prior"}]
     assert executor.ctx.config.max_calls == 9
+    assert executor.ctx.config.tool_timeout == 1.5
     assert executor.ctx.config.get_tool_limit("search_entity") == 4
     assert executor.ctx.hot_topics == ["Research"]
     assert executor.ctx.active_topics == ["Research", "Identity"]
@@ -217,8 +219,96 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.execute_kwargs["model"] == "agent-model"
     assert executor.execute_kwargs["agent_temperature"] == 0.25
     assert "Use memory" in executor.execute_kwargs["agent_brain"]
-    assert executor.execute_kwargs["enabled_tools"] == ["fact_check"]
+    assert executor.execute_kwargs["enabled_tools"] == ["episode_check"]
     assert tools.closed is True
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_hides_unexpected_error_details(monkeypatch):
+    context = FakeSession()
+
+    monkeypatch.setattr(
+        "core.agent.orchestrator.ConfigManager.get",
+        staticmethod(lambda: FakeConfigManager()),
+    )
+
+    async def fail_bootstrap_services(*_args):
+        raise RuntimeError("postgres://internal-host/knoggin")
+
+    monkeypatch.setattr(
+        Orchestrator, "_bootstrap_services", fail_bootstrap_services
+    )
+
+    events = [
+        event
+        async for event in Orchestrator().run_stream(
+            user_query="hello",
+            user_name="ada",
+            session_id="session-1",
+            context=context,
+        )
+    ]
+
+    assert events == [
+        {
+            "event": "error",
+            "data": {
+                "message": "The agent couldn't complete this request. "
+                "Please try again."
+            },
+        }
+    ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
+    monkeypatch,
+):
+    context = FakeSession()
+    tools = FakeTools()
+    agent = AgentConfig(
+        id="agent-1",
+        name="Researcher",
+        persona="Careful",
+        enabled_tools=[],
+    )
+    context.resources.postgres.upsert_agent(agent)
+
+    monkeypatch.setattr(
+        "core.agent.orchestrator.ConfigManager.get",
+        staticmethod(lambda: FakeConfigManager()),
+    )
+    monkeypatch.setattr(
+        "core.agent.orchestrator.AgentExecutor", FakeExecutor
+    )
+
+    async def fake_bootstrap_services(self, context_arg, agent_id):
+        assert context_arg is context
+        assert agent_id == "agent-1"
+        return {
+            "topic_config": FakeTopicConfig(),
+            "tools": tools,
+        }
+
+    monkeypatch.setattr(
+        Orchestrator, "_bootstrap_services", fake_bootstrap_services
+    )
+
+    events = [
+        event
+        async for event in Orchestrator().run_stream(
+            user_query="hello",
+            user_name="ada",
+            session_id="session-1",
+            context=context,
+            agent_id="agent-1",
+        )
+    ]
+
+    assert events == [{"event": "final", "data": {"content": "done"}}]
+    assert FakeExecutor.instances[0].execute_kwargs["enabled_tools"] == []
 
 
 @pytest.mark.runtime

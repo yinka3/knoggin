@@ -96,8 +96,10 @@ Concrete examples:
 
 `src/infrastructure/resources.py` owns process-wide resources.
 
-- `KnowledgeStore` owns the single `PostgresClient`.
-- `ResourceManager.postgres` points at `KnowledgeStore.postgres`.
+- `ResourceManager` owns the single `PostgresClient`, including connection
+  lifecycle, and injects it into `KnowledgeStore`.
+- `KnowledgeStore` owns the knowledge-specific reader/writer facade; it does
+  not expose the raw PostgreSQL client.
 - `AsyncRedisClient` owns the Redis connection.
 - `ResourceManager` also owns embeddings, reranking, LLM access, GLiNER, spaCy,
   the worker pool, and the document storage root.

@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -23,22 +24,31 @@ class RecordingCommunityStore:
         self.messages = []
         self.spawns = []
 
-    async def add_message(self, discussion_id, agent_id, content, role="agent"):
+    async def add_message(
+        self, discussion_id, agent_id, content, role="agent", *, user_name, project_id
+    ):
         self.messages.append(
             {
                 "discussion_id": discussion_id,
                 "agent_id": agent_id,
                 "content": content,
                 "role": role,
+                "user_name": user_name,
+                "project_id": project_id,
             }
         )
 
-    async def register_agent_spawn(self, parent_id, child_id, detail=""):
+    async def register_agent_spawn(
+        self, parent_id, child_id, detail="", *, user_name, project_id, cursor=None
+    ):
         self.spawns.append(
             {
                 "parent_id": parent_id,
                 "child_id": child_id,
                 "detail": detail,
+                "user_name": user_name,
+                "project_id": project_id,
+                "cursor": cursor,
             }
         )
 
@@ -48,6 +58,7 @@ class RecordingPostgres:
         self.spawned_count = spawned_count
         self.write_count = write_count
         self.calls = []
+        self.transaction_enters = 0
 
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
@@ -56,6 +67,11 @@ class RecordingPostgres:
     async def execute(self, query, params=None):
         self.calls.append(("execute", query, params))
         return self.write_count
+
+    @asynccontextmanager
+    async def transaction(self):
+        self.transaction_enters += 1
+        yield self
 
 
 def make_tool(*, postgres=None, participants=None):
@@ -124,6 +140,8 @@ async def test_save_insight_writes_only_to_discussion_store():
             "agent_id": "system",
             "content": "INSIGHT: Prefer direct evidence",
             "role": "insight",
+            "user_name": "ada",
+            "project_id": "project-1",
         }
     ]
 
@@ -162,6 +180,10 @@ async def test_spawn_specialist_persists_agent_and_initial_brain(monkeypatch):
 
     assert store.spawns[0]["child_id"] == result["id"]
     assert store.spawns[0]["detail"] == result["persona_markdown"]
+    assert store.spawns[0]["user_name"] == "ada"
+    assert store.spawns[0]["project_id"] == "project-1"
+    assert store.spawns[0]["cursor"] is postgres
+    assert postgres.transaction_enters == 1
     assert events[0][2] == "agent_spawned"
 
 

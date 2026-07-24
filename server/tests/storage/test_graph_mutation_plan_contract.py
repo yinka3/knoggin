@@ -1,9 +1,12 @@
+from dataclasses import asdict
+
 import pytest
 
 from common.schema.contracts import (
     BatchResult,
     EngineScope,
     EngineWorkUnit,
+    EpisodeEligibility,
     GraphMutationPlan,
     MessageConnections,
     MessageUserConnections,
@@ -11,7 +14,6 @@ from common.schema.contracts import (
 )
 from common.schema.primitives import ConnectionRecord
 from common.scoping import IDENTITY_ENTITY_ID
-from infrastructure.redis_client import RedisKeys
 from core.knowledge.db import write_graph_db
 from core.knowledge.db.write_graph_db import (
     build_graph_mutation_plan,
@@ -20,6 +22,7 @@ from core.knowledge.db.write_graph_db import (
     write_batch_to_graph,
 )
 from core.knowledge.entity.profile import EntityProfile
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -50,11 +53,27 @@ class FakeKnowledgeStore:
         self.call_order.append("update_entity_aliases")
         self.update_alias_calls.append((dict(alias_updates), project_id))
 
-    async def write_batch(self, entities, relationships):
+    async def write_batch(
+        self,
+        entities,
+        relationships,
+        *,
+        message_entity_refs=None,
+        eligible_messages=None,
+        scope=None,
+    ):
         self.call_order.append("write_batch")
         if self.fail_on_write:
             raise RuntimeError("graph write failed")
-        self.write_batch_calls.append((list(entities), list(relationships)))
+        self.write_batch_calls.append(
+            (
+                list(entities),
+                list(relationships),
+                list(message_entity_refs or []),
+                list(eligible_messages or []),
+                scope,
+            )
+        )
         return True
 
 
@@ -303,6 +322,64 @@ async def test_graph_mutation_plan_builds_writes_and_filters_zombies():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_graph_mutation_plan_keeps_only_safe_message_entity_references():
+    batch = scoped_batch(
+        entity_ids=[2, 3, 5],
+        new_entity_ids={2},
+        entity_message_map={2: [7, 7], 3: [8], 5: [9]},
+    )
+    entities = FakeEntityResolverForPlan()
+    knowledge_store = FakeKnowledgeStore(validation_result={3})
+
+    plan = await build_graph_mutation_plan(
+        batch,
+        knowledge_store,
+        entities,
+        session_id="session-1",
+        project_id="project-1",
+        user_name="ada",
+    )
+
+    assert [asdict(reference) for reference in plan.message_entity_refs] == [
+        {"message_id": 7, "entity_id": 2},
+        {"message_id": 8, "entity_id": 3},
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_graph_mutation_plan_marks_processed_messages_episode_eligible():
+    batch = scoped_batch()
+    batch.trace.message_ids = [8, 7, 8]
+
+    plan = await build_graph_mutation_plan(
+        batch,
+        FakeKnowledgeStore(),
+        FakeEntityResolverForPlan(),
+        session_id="session-1",
+        project_id="project-1",
+        user_name="ada",
+    )
+
+    assert [asdict(eligibility) for eligibility in plan.eligible_messages] == [
+        {"message_id": 7, "episode_type": None},
+        {"message_id": 8, "episode_type": None},
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_episode_eligibility_supports_an_optional_type():
+    eligibility = EpisodeEligibility(message_id=7, episode_type="decision")
+
+    assert asdict(eligibility) == {
+        "message_id": 7,
+        "episode_type": "decision",
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_graph_mutation_plan_treats_unknown_validation_as_valid():
     batch = scoped_batch(entity_ids=[3], alias_updated_ids={3})
     entities = FakeEntityResolverForPlan()
@@ -370,12 +447,21 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
 
     assert knowledge_store.call_order == ["update_entity_aliases", "write_batch"]
     assert knowledge_store.update_alias_calls == [({3: ["Rear Admiral"]}, "project-1")]
-    entity_payloads, relationship_payloads = knowledge_store.write_batch_calls[0]
+    (
+        entity_payloads,
+        relationship_payloads,
+        message_entity_payloads,
+        eligible_messages,
+        write_scope,
+    ) = knowledge_store.write_batch_calls[0]
     assert [payload["id"] for payload in entity_payloads] == [2, 3]
     assert len(relationship_payloads) == 2
     assert relationship_payloads[0]["entity_a"] == "Ada Lovelace"
     assert relationship_payloads[1]["entity_a"] == "ada"
     assert relationship_payloads[1]["entity_a_id"] == IDENTITY_ENTITY_ID
+    assert message_entity_payloads == []
+    assert eligible_messages == []
+    assert write_scope == plan.scope
 
     dirty_key = RedisKeys.dirty_entities("ada", "project-1")
     assert redis.sets[dirty_key] == {"2", "3", "4"}
@@ -398,7 +484,7 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
             {},
         )
     ]
-    assert summary.model_dump() == {
+    assert asdict(summary) == {
         "entities_written": 2,
         "relationships_written": 2,
         "user_relationships_written": 1,
@@ -424,7 +510,7 @@ async def test_write_batch_to_graph_marks_skipped_work_unit_metadata():
         user_name="ada",
     )
 
-    assert summary.model_dump() == {
+    assert asdict(summary) == {
         "entities_written": 0,
         "relationships_written": 0,
         "user_relationships_written": 0,
@@ -437,7 +523,7 @@ async def test_write_batch_to_graph_marks_skipped_work_unit_metadata():
     assert graph_work["kind"] == "graph_write"
     assert graph_work["status"] == "skipped"
     assert graph_work["trace"]["summary"] == "No graph writes"
-    assert batch.work_unit.metadata["graph_write"] == summary.model_dump()
+    assert batch.work_unit.metadata["graph_write"] == asdict(summary)
 
 
 @pytest.mark.storage

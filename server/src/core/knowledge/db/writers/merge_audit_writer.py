@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -11,6 +12,20 @@ class MergeAuditWriter:
     def __init__(self, client: PostgresClient):
         self.client = client
 
+    @asynccontextmanager
+    async def _restore_cursor(self, cur):
+        if cur is not None:
+            yield cur
+            return
+        async with self.client.transaction() as transaction_cursor:
+            yield transaction_cursor
+
+    async def _execute(self, cur, query: str, params) -> int:
+        if cur is None:
+            return await self.client.execute(query, params)
+        await cur.execute(query, params)
+        return cur.rowcount
+
     async def create_proposal(
         self,
         *,
@@ -19,7 +34,8 @@ class MergeAuditWriter:
         project_id: str,
         primary_id: int,
         duplicate_id: int,
-        evidence_ids: list[str],
+        evidence_message_ids: list[int],
+        evidence_episode_ids: list[str],
         reasoning: str,
         model_confidence: Optional[float],
         reviewed_state_hash: str,
@@ -35,7 +51,8 @@ class MergeAuditWriter:
                 project_id,
                 primary_entity_id,
                 duplicate_entity_id,
-                evidence_fact_ids,
+                evidence_message_ids,
+                evidence_episode_ids,
                 reasoning,
                 model_confidence,
                 reviewed_state_hash,
@@ -44,7 +61,7 @@ class MergeAuditWriter:
                 confirmation_token_hash
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s::jsonb, %s, %s,
+                %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s,
                 %s, %s::jsonb, %s::jsonb, %s
             )
             """,
@@ -54,7 +71,8 @@ class MergeAuditWriter:
                 project_id,
                 primary_id,
                 duplicate_id,
-                json.dumps(evidence_ids),
+                json.dumps(evidence_message_ids),
+                json.dumps(evidence_episode_ids),
                 reasoning.strip(),
                 model_confidence,
                 reviewed_state_hash,
@@ -84,8 +102,11 @@ class MergeAuditWriter:
         self,
         proposal_id: str,
         confirmed_by: str,
+        *,
+        cur=None,
     ) -> int:
-        return await self.client.execute(
+        return await self._execute(
+            cur,
             """
             UPDATE entity_merge_proposals
             SET status = 'executing',
@@ -102,11 +123,14 @@ class MergeAuditWriter:
         *,
         audit_id: str,
         proposal: Dict[str, Any],
-        evidence_ids: list[str],
+        evidence_message_ids: list[int],
+        evidence_episode_ids: list[str],
         before_state: Dict[str, Any],
         confirmed_by: str,
+        cur=None,
     ) -> None:
-        await self.client.execute(
+        await self._execute(
+            cur,
             """
             INSERT INTO entity_merge_audits (
                 audit_id,
@@ -115,13 +139,14 @@ class MergeAuditWriter:
                 project_id,
                 primary_entity_id,
                 duplicate_entity_id,
-                evidence_fact_ids,
+                evidence_message_ids,
+                evidence_episode_ids,
                 reasoning,
                 confirmed_by,
                 before_state
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb
+                %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb
             )
             """,
             (
@@ -131,7 +156,8 @@ class MergeAuditWriter:
                 proposal["project_id"],
                 int(proposal["primary_entity_id"]),
                 int(proposal["duplicate_entity_id"]),
-                json.dumps(evidence_ids),
+                json.dumps(evidence_message_ids),
+                json.dumps(evidence_episode_ids),
                 proposal["reasoning"],
                 confirmed_by,
                 json.dumps(before_state, default=str),
@@ -155,8 +181,10 @@ class MergeAuditWriter:
         audit_id: str,
         after_state: Dict[str, Any],
         rollback_retention_hours: float,
+        cur=None,
     ) -> None:
-        await self.client.execute(
+        await self._execute(
+            cur,
             """
             UPDATE entity_merge_audits
             SET status = 'executed',
@@ -172,8 +200,9 @@ class MergeAuditWriter:
             ),
         )
 
-    async def mark_proposal_executed(self, proposal_id: str) -> None:
-        await self.client.execute(
+    async def mark_proposal_executed(self, proposal_id: str, *, cur=None) -> None:
+        await self._execute(
+            cur,
             """
             UPDATE entity_merge_proposals
             SET status = 'executed',
@@ -183,8 +212,11 @@ class MergeAuditWriter:
             (proposal_id,),
         )
 
-    async def mark_rollback_failure(self, audit_id: str, reason: str) -> None:
-        await self.client.execute(
+    async def mark_rollback_failure(
+        self, audit_id: str, reason: str, *, cur=None
+    ) -> None:
+        await self._execute(
+            cur,
             """
             UPDATE entity_merge_audits
             SET rollback_status = 'failed',
@@ -203,9 +235,10 @@ class MergeAuditWriter:
         duplicate_id: int,
         audit_id: str,
         actor: str,
+        cur=None,
     ) -> None:
         ids = [primary_id, duplicate_id]
-        async with self.client.transaction() as cur:
+        async with self._restore_cursor(cur) as cur:
             await cur.execute(
                 """
                 DELETE FROM relationship_evidence_refs
@@ -236,11 +269,17 @@ class MergeAuditWriter:
             )
             await cur.execute(
                 """
-                DELETE FROM facts
-                WHERE project_id = %s
-                  AND entity_id = ANY(%s)
+                DELETE FROM message_entity_refs
+                WHERE entity_id = ANY(%s)
                 """,
-                (project_id, ids),
+                (ids,),
+            )
+            await cur.execute(
+                """
+                DELETE FROM episode_entities
+                WHERE entity_id = ANY(%s)
+                """,
+                (ids,),
             )
             await cur.execute(
                 """
@@ -303,38 +342,52 @@ class MergeAuditWriter:
                         (int(entity["entity_id"]), alias),
                     )
 
-            for fact in before_state["facts"]:
+            for message_ref in before_state["message_refs"]:
                 await cur.execute(
                     """
-                    INSERT INTO facts (
-                        fact_id,
-                        entity_id,
-                        user_name,
-                        project_id,
-                        content,
-                        valid_at,
-                        invalid_at,
-                        confidence,
-                        source_msg_id,
-                        source_user_name,
-                        source_session_id,
-                        source
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO message_entity_refs (message_id, entity_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (message_id, entity_id) DO NOTHING
                     """,
                     (
-                        fact["fact_id"],
-                        int(fact["entity_id"]),
-                        fact["user_name"],
-                        fact["project_id"],
-                        fact["content"],
-                        fact.get("valid_at"),
-                        fact.get("invalid_at"),
-                        float(fact.get("confidence") or 1.0),
-                        fact.get("source_msg_id"),
-                        fact.get("source_user_name"),
-                        fact.get("source_session_id"),
-                        fact.get("source"),
+                        int(message_ref["message_id"]),
+                        int(message_ref["entity_id"]),
+                    ),
+                )
+
+            for episode_entity in before_state["episode_entities"]:
+                await cur.execute(
+                    """
+                    INSERT INTO episode_entities (
+                        episode_id,
+                        project_id,
+                        entity_id,
+                        prominence_weight,
+                        role,
+                        is_focus_entity,
+                        source_message_count,
+                        first_seen_at,
+                        last_seen_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (episode_id, entity_id) DO UPDATE SET
+                        prominence_weight = EXCLUDED.prominence_weight,
+                        role = EXCLUDED.role,
+                        is_focus_entity = EXCLUDED.is_focus_entity,
+                        source_message_count = EXCLUDED.source_message_count,
+                        first_seen_at = EXCLUDED.first_seen_at,
+                        last_seen_at = EXCLUDED.last_seen_at
+                    """,
+                    (
+                        episode_entity["episode_id"],
+                        project_id,
+                        int(episode_entity["entity_id"]),
+                        float(episode_entity.get("prominence_weight") or 0.0),
+                        episode_entity.get("role"),
+                        bool(episode_entity.get("is_focus_entity")),
+                        int(episode_entity.get("source_message_count") or 0),
+                        episode_entity.get("first_seen_at"),
+                        episode_entity.get("last_seen_at"),
                     ),
                 )
 
@@ -347,12 +400,13 @@ class MergeAuditWriter:
                         project_id,
                         entity_a_id,
                         entity_b_id,
+                        relationship_type,
                         weight,
                         confidence,
                         context,
                         last_seen_ms
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         relationship["relationship_id"],
@@ -360,6 +414,7 @@ class MergeAuditWriter:
                         relationship["project_id"],
                         int(relationship["entity_a_id"]),
                         int(relationship["entity_b_id"]),
+                        relationship.get("relationship_type"),
                         int(relationship.get("weight") or 1),
                         float(relationship.get("confidence") or 1.0),
                         relationship.get("context"),
@@ -371,11 +426,12 @@ class MergeAuditWriter:
                         """
                         INSERT INTO relationship_evidence_refs (
                             relationship_id,
+                            project_id,
                             user_name,
                             session_id,
                             message_id
                         )
-                        VALUES (%s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s)
                         ON CONFLICT (
                             relationship_id,
                             user_name,
@@ -385,11 +441,39 @@ class MergeAuditWriter:
                         """,
                         (
                             relationship["relationship_id"],
+                            relationship["project_id"],
                             ref["user_name"],
                             ref["session_id"],
                             int(ref["message_id"]),
                         ),
                     )
+
+            for episode_relationship in before_state.get("episode_relationships", []):
+                await cur.execute(
+                    """
+                    INSERT INTO episode_relationships (
+                        episode_id,
+                        project_id,
+                        relationship_id,
+                        prominence_weight,
+                        is_central_relationship,
+                        source_message_count
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
+                        prominence_weight = EXCLUDED.prominence_weight,
+                        is_central_relationship = EXCLUDED.is_central_relationship,
+                        source_message_count = EXCLUDED.source_message_count
+                    """,
+                    (
+                        episode_relationship["episode_id"],
+                        project_id,
+                        episode_relationship["relationship_id"],
+                        float(episode_relationship.get("prominence_weight") or 0.0),
+                        bool(episode_relationship.get("is_central_relationship")),
+                        int(episode_relationship.get("source_message_count") or 0),
+                    ),
+                )
 
             for edge in before_state["hierarchy"]:
                 await cur.execute(

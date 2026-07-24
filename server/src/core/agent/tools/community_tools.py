@@ -2,6 +2,8 @@ import json
 import uuid
 from typing import Dict, List, Mapping
 
+from loguru import logger
+
 from common.conf.manager import ConfigManager
 from common.schema.aac_schema import AAC_DEFAULT_ENABLED_TOOLS
 from common.schema.agent_contracts import PersonaProfile
@@ -58,6 +60,8 @@ class CommunityTools(Tools):
             agent_id="system",
             content=f"INSIGHT: {content}",
             role="insight",
+            user_name=self.user_name,
+            project_id=self.project_id,
         )
         return {"saved": True, "type": "insight"}
 
@@ -95,8 +99,10 @@ class CommunityTools(Tools):
         brain = normalize_agent_brain(directives, persona_markdown)
         model = ConfigManager.get().config.llm.agent_model
 
-        inserted = await self.postgres.execute(
-            """
+        try:
+            async with self.postgres.transaction() as cursor:
+                await cursor.execute(
+                    """
             WITH new_agent AS (
                 INSERT INTO public.agents (
                     agent_id, user_name, project_id, name, persona, brain,
@@ -123,29 +129,32 @@ class CommunityTools(Tools):
                 %(change_summary)s
             FROM new_agent
             """,
-            {
-                "agent_id": agent_id,
-                "user_name": self.user_name,
-                "project_id": self.project_id,
-                "name": clean_name,
-                "persona": persona_markdown,
-                "brain": brain,
-                "model": model,
-                "enabled_tools": json.dumps(AAC_DEFAULT_ENABLED_TOOLS),
-                "spawned_by": self.agent_id,
-                "change_summary": build_brain_snapshot_summary(
-                    "specialist_spawn"
-                ),
-            },
-        )
-        if inserted != 1:
+                    {
+                        "agent_id": agent_id,
+                        "user_name": self.user_name,
+                        "project_id": self.project_id,
+                        "name": clean_name,
+                        "persona": persona_markdown,
+                        "brain": brain,
+                        "model": model,
+                        "enabled_tools": json.dumps(AAC_DEFAULT_ENABLED_TOOLS),
+                        "spawned_by": self.agent_id,
+                        "change_summary": build_brain_snapshot_summary(
+                            "specialist_spawn"
+                        ),
+                    },
+                )
+                await self.community_store.register_agent_spawn(
+                    parent_id=self.agent_id,
+                    child_id=agent_id,
+                    detail=persona_markdown,
+                    user_name=self.user_name,
+                    project_id=self.project_id,
+                    cursor=cursor,
+                )
+        except Exception:
+            logger.exception("AAC: Failed to create specialist and lineage")
             return {"error": "Specialist could not be created."}
-
-        await self.community_store.register_agent_spawn(
-            parent_id=self.agent_id,
-            child_id=agent_id,
-            detail=persona_markdown,
-        )
         if agent_id not in self.current_participants:
             self.current_participants.append(agent_id)
 

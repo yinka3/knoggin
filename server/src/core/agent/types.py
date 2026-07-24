@@ -36,7 +36,7 @@ class AgentRunConfig:
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
     max_accumulated_hierarchy: int = 8
-    max_accumulated_facts: int = 8
+    max_accumulated_episodes: int = 8
     max_accumulated_sources: int = 12
     max_consecutive_errors: int = 3
     empty_result_replan_threshold: int = 3
@@ -71,6 +71,9 @@ class AgentState:
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     last_error: Optional[str] = None
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
+    # Compact UUID handles shown to the model during this execution only.
+    # Values are never persisted and are cleared when the execution ends.
+    short_uuid_references: Dict[str, str] = field(default_factory=dict)
     usage: StreamUsage = field(
         default_factory=lambda: {
             "prompt_tokens": 0,
@@ -95,6 +98,11 @@ class AgentState:
         self.tools_used.append(tool_name)
         self.tool_call_counts[tool_name] = self.tool_call_counts.get(tool_name, 0) + 1
 
+    def clear_short_uuid_references(self) -> None:
+        """Discard model-only UUID handles when this run is finished."""
+
+        self.short_uuid_references.clear()
+
 
 @dataclass
 class RetrievedEvidence:
@@ -105,7 +113,7 @@ class RetrievedEvidence:
     graph: List[Dict] = field(default_factory=list)
     paths: List[Dict] = field(default_factory=list)
     hierarchy: List[Dict] = field(default_factory=list)
-    facts: List[Dict] = field(default_factory=list)
+    episodes: List[Dict] = field(default_factory=list)
     sources: List[Dict] = field(default_factory=list)
     summary: Optional[str] = None
     token_count: int = 0
@@ -117,7 +125,7 @@ class RetrievedEvidence:
             or self.graph
             or self.paths
             or self.hierarchy
-            or self.facts
+            or self.episodes
             or self.sources
             or self.summary
         )
@@ -145,6 +153,7 @@ class AgentContext:
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
     maintenance_candidates: List[MaintenanceCandidate] = field(default_factory=list)
+    use_local_references: bool = True
 
 
 @dataclass

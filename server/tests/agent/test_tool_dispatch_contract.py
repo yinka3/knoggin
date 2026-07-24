@@ -21,9 +21,13 @@ class DispatchTools:
         self.calls.append(("get_recent_activity", entity_name, hours))
         return [{"entity": entity_name}]
 
-    async def fact_check(self, entity_name, query):
-        self.calls.append(("fact_check", entity_name, query))
+    async def episode_check(self, query, entity_name=None):
+        self.calls.append(("episode_check", query, entity_name))
         return {"resolution": "exact"}
+
+    async def read_episode(self, episode_id):
+        self.calls.append(("read_episode", episode_id))
+        return [{"id": episode_id}]
 
     async def read_document(
         self,
@@ -113,6 +117,16 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
             "use_focus": "false",
         },
     )
+    episode = await execute_tool(
+        tools,
+        "episode_check",
+        {"query": "What changed?", "entity_name": 7},
+    )
+    expanded_episode = await execute_tool(
+        tools,
+        "read_episode",
+        {"episode_id": 42},
+    )
 
     assert result == {"data": [{"id": "msg_1"}]}
     assert activity == {"data": [{"entity": "Knoggin"}]}
@@ -123,6 +137,8 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     assert uploads == {"data": [{"folder_root_id": "folder-1"}]}
     assert summary == {"data": {"folder_root_id": "folder-1"}}
     assert tree == {"data": [{"name": "src", "type": "directory"}]}
+    assert episode == {"data": {"resolution": "exact"}}
+    assert expanded_episode == {"data": [{"id": "42"}]}
     assert tools.calls == [
         ("search_messages", "1234", 5),
         ("get_recent_activity", "Knoggin", 48),
@@ -131,6 +147,8 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         ("list_folder_uploads", "project", 7),
         ("get_folder_upload_summary", "folder-1"),
         ("list_folder_tree", "folder-1", "src", 4, False),
+        ("episode_check", "What changed?", "7"),
+        ("read_episode", "42"),
     ]
 
 

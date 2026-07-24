@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -10,9 +11,10 @@ from core.ingestion.services.processor import TextProcessor
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.services.embedding_service import EmbeddingService
+from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.postgres_client import PostgresClient
-from infrastructure.background_work import BackgroundWorkCoordinator
+from infrastructure.resource_profile import ResourceProfile
 
 
 class ProjectState:
@@ -55,14 +57,24 @@ class ProjectState:
         self.postgres_client = postgres_client
         self.embedding_service = embedding_service
         self.batch_processor = batch_processor
+        resource_profile = ResourceProfile.from_environment()
         self.document_service = DocumentService(
             project_id=project_id,
             postgres_client=postgres_client,
             embedding_service=embedding_service,
             background_work=background_work,
+            document_rerank_enabled=os.getenv(
+                "KNOGGIN_DOCUMENT_RERANK_ENABLED", "true"
+            ).strip().lower() in {"1", "true", "yes", "on"},
+            document_rerank_candidates=int(
+                os.getenv("KNOGGIN_DOCUMENT_RERANK_CANDIDATES", "15")
+            ),
+            workspace_prepare_concurrency=(
+                resource_profile.workspace_prepare_concurrency
+            ),
         )
 
-        self.profile_job: Optional[Any] = None
+        self.episode_job: Optional[Any] = None
         self._community_task: Optional[asyncio.Task] = None
         self.active_runtime_sessions_count = 0
         self.config_unsubscribers: list[Any] = []

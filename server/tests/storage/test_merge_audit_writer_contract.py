@@ -16,7 +16,8 @@ async def test_merge_audit_writer_creates_merge_proposal():
         project_id="project-1",
         primary_id=2,
         duplicate_id=3,
-        evidence_ids=["fact-1"],
+        evidence_message_ids=[7],
+        evidence_episode_ids=["episode-1"],
         reasoning="same",
         model_confidence=0.9,
         reviewed_state_hash="hash",
@@ -29,8 +30,9 @@ async def test_merge_audit_writer_creates_merge_proposal():
     assert call[0] == "execute_command"
     assert "INSERT INTO entity_merge_proposals" in call[1]
     assert call[2][0] == "proposal-1"
-    assert call[2][5] == '["fact-1"]'
-    assert call[2][10] == '{"ok": true}'
+    assert call[2][5] == "[7]"
+    assert call[2][6] == '["episode-1"]'
+    assert call[2][11] == '{"ok": true}'
 
 
 @pytest.mark.storage
@@ -66,7 +68,8 @@ async def test_merge_audit_writer_updates_audit_lifecycle():
     await writer.create_audit(
         audit_id="audit-1",
         proposal=proposal,
-        evidence_ids=["fact-1"],
+        evidence_message_ids=[7],
+        evidence_episode_ids=["episode-1"],
         before_state={"entities": []},
         confirmed_by="ada",
     )
@@ -121,20 +124,20 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
                 "aliases": ["Ada"],
             }
         ],
-        "facts": [
+        "message_refs": [
             {
-                "fact_id": "fact-1",
+                "message_id": 1,
                 "entity_id": 2,
-                "user_name": "ada",
-                "project_id": "project-1",
-                "content": "fact",
-                "valid_at": None,
-                "invalid_at": None,
-                "confidence": 1.0,
-                "source_msg_id": 1,
-                "source_user_name": "ada",
-                "source_session_id": "session-1",
-                "source": "message",
+            }
+        ],
+        "episode_entities": [
+            {
+                "episode_id": "episode-1",
+                "entity_id": 2,
+                "prominence_weight": 0.8,
+                "role": "subject",
+                "is_focus_entity": True,
+                "source_message_count": 1,
             }
         ],
         "relationships": [
@@ -155,6 +158,15 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
                         "message_id": 1,
                     }
                 ],
+            }
+        ],
+        "episode_relationships": [
+            {
+                "episode_id": "episode-1",
+                "relationship_id": "project-1:2:9",
+                "prominence_weight": 0.7,
+                "is_central_relationship": True,
+                "source_message_count": 1,
             }
         ],
         "hierarchy": [
@@ -180,9 +192,11 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
     assert "DELETE FROM relationship_evidence_refs" in executed_sql
     assert "INSERT INTO entities" in executed_sql
     assert "INSERT INTO entity_aliases" in executed_sql
-    assert "INSERT INTO facts" in executed_sql
+    assert "INSERT INTO message_entity_refs" in executed_sql
+    assert "INSERT INTO episode_entities" in executed_sql
     assert "INSERT INTO relationships" in executed_sql
     assert "INSERT INTO relationship_evidence_refs" in executed_sql
+    assert "INSERT INTO episode_relationships" in executed_sql
     assert "INSERT INTO hierarchy_edges" in executed_sql
     assert "rollback_status = 'rolled_back'" in executed_sql
 

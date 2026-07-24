@@ -3,15 +3,13 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from common.schema.contracts import CandidateSuggestion, EngineScope
-from common.schema.primitives import FactRecord
-from common.scoping import require_scope_value
+from common.schema.contracts import CandidateSuggestion, EngineScope, EpisodeEligibility
+from common.schema.primitives import Episode, EpisodeCheckpoint
 from core.community.community_store import CommunityStore
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.entity_reader import EntityReader
-from core.knowledge.db.readers.fact_audit_reader import FactAuditReader
-from core.knowledge.db.readers.fact_reader import FactReader
+from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from core.knowledge.db.search_index_rebuilder import SearchIndexer
@@ -20,10 +18,10 @@ from core.knowledge.db.writers.candidate_suggestion_writer import (
     CandidateSuggestionWriter,
 )
 from core.knowledge.db.writers.entity_writer import EntityWriter
-from core.knowledge.db.writers.fact_audit_writer import FactAuditWriter
-from core.knowledge.db.writers.fact_writer import FactWriter
+from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
+from core.knowledge.db.writers.retention_writer import RetentionWriter
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
@@ -32,25 +30,28 @@ class KnowledgeStore:
     """
     Application-facing facade over durable knowledge persistence.
 
-    Owns one PostgresClient and composes the focused readers, writers,
-    rebuilders, tool queries, and community store that share it. Callers use
-    this boundary without depending on the underlying SQL, AGE, or index layout.
+    Composes focused readers, writers, rebuilders, tool queries, and the
+    community store over the application-owned PostgresClient. Callers use this
+    boundary without depending on the underlying SQL, AGE, or index layout.
     """
 
-    def __init__(self, dsn: str, embedding_service: EmbeddingService):
-        self._postgres_client = PostgresClient(dsn=dsn)
+    def __init__(
+        self,
+        postgres_client: PostgresClient,
+        embedding_service: EmbeddingService,
+    ):
+        self._postgres_client = postgres_client
         self._id_allocator = IdAllocator(self._postgres_client)
         self._entity_writer = EntityWriter(self._postgres_client)
+        self._episode_writer = EpisodeWriter(self._postgres_client)
         self._candidate_suggestion_writer = CandidateSuggestionWriter(
             self._postgres_client
         )
-        self._fact_writer = FactWriter(self._postgres_client)
-        self._fact_audit_writer = FactAuditWriter(self._postgres_client)
         self._graph_writer = GraphWriter(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
+        self._retention_writer = RetentionWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
-        self._fact_audit_reader = FactAuditReader(self._postgres_client)
-        self._fact_reader = FactReader(self._postgres_client)
+        self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._tools = ToolQueries(self._postgres_client)
@@ -61,16 +62,6 @@ class KnowledgeStore:
         )
         self._community = CommunityStore(self._postgres_client)
         logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
-
-    async def connect(self):
-        await self._postgres_client.connect()
-
-    async def close(self):
-        await self._postgres_client.close()
-
-    @property
-    def postgres(self) -> PostgresClient:
-        return self._postgres_client
 
     @property
     def community(self) -> CommunityStore:
@@ -95,72 +86,236 @@ class KnowledgeStore:
         return await self._id_allocator.allocate_message_id()
 
     async def write_batch(
-        self, entities: List[Dict], relationships: List[Dict]
+        self,
+        entities: List[Dict],
+        relationships: List[Dict],
+        *,
+        message_entity_refs: Optional[List[Dict]] = None,
+        eligible_messages: Optional[List[EpisodeEligibility]] = None,
+        scope: Optional[EngineScope] = None,
     ) -> bool:
-        return await self._entity_writer.write_batch(entities, relationships)
+        return await self._entity_writer.write_batch(
+            entities,
+            relationships,
+            message_entity_refs=message_entity_refs,
+            eligible_messages=eligible_messages,
+            message_entity_scope=scope.model_dump() if scope else None,
+        )
+
+    async def create_episode(self, episode: Episode, *, user_name: str) -> None:
+        await self._episode_writer.create_episode(episode, user_name=user_name)
+
+    async def write_episode_window(
+        self,
+        episode: Optional[Episode],
+        window_message_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> bool:
+        return await self._episode_writer.write_episode_window(
+            episode,
+            window_message_ids,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_episode_checkpoint(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> EpisodeCheckpoint:
+        return await self._episode_reader.get_episode_checkpoint(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_next_episode_window(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        checkpoint: EpisodeCheckpoint,
+        message_count: int,
+    ) -> List[Dict]:
+        return await self._episode_reader.get_next_episode_window(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            checkpoint=checkpoint,
+            message_count=message_count,
+        )
+
+    async def get_episode(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> Optional[Episode]:
+        return await self._episode_reader.get_episode(
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_episodes_for_entity(
+        self,
+        entity_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+    ) -> List[Episode]:
+        return await self._episode_reader.get_episodes_for_entity(
+            entity_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def get_episodes_for_entities(
+        self,
+        entity_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+    ) -> List[Episode]:
+        return await self._episode_reader.get_episodes_for_entities(
+            entity_ids,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def get_episode_generation_catalog(
+        self,
+        message_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> tuple[List[Dict], List[Dict]]:
+        return await self._episode_reader.get_episode_generation_catalog(
+            message_ids,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_merge_evidence_for_entities(
+        self,
+        entity_ids: List[int],
+        *,
+        project_id: str,
+        evidence_limit: int = 4,
+        source_message_limit: int = 2,
+    ) -> Dict[int, List[Dict]]:
+        return await self._episode_reader.get_merge_evidence_for_entities(
+            entity_ids,
+            project_id=project_id,
+            evidence_limit=evidence_limit,
+            source_message_limit=source_message_limit,
+        )
+
+    async def search_episodes(
+        self,
+        query: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+    ) -> List[Episode]:
+        return await self._episode_reader.search_episodes(
+            query,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def search_episodes_by_embedding(
+        self,
+        embedding: List[float],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 10,
+        score_threshold: float = 0.35,
+    ) -> List[tuple[Episode, float]]:
+        return await self._episode_reader.search_episodes_by_embedding(
+            embedding,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+            score_threshold=score_threshold,
+        )
+
+    async def get_recent_episodes(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        limit: int = 1,
+    ) -> List[Episode]:
+        return await self._episode_reader.get_recent_episodes(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def get_episode_source_messages(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> List[Dict]:
+        return await self._episode_reader.get_episode_source_messages(
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_episode_graph_context(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> Optional[Dict]:
+        return await self._episode_reader.get_episode_graph_context(
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
 
     async def ensure_identity_entity(
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
         return await self._entity_writer.ensure_identity_entity(user_name, aliases)
-
-    async def create_facts_batch(
-        self,
-        entity_id: int,
-        facts: List[FactRecord],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: Optional[str] = None,
-    ) -> int:
-        require_scope_value(user_name, "user_name", "create_facts_batch")
-        require_scope_value(project_id, "project_id", "create_facts_batch")
-        return await self._fact_writer.create_facts_batch(
-            entity_id,
-            facts,
-            user_name=user_name,
-            session_id=session_id,
-            project_id=project_id,
-        )
-
-    async def invalidate_fact(
-        self, fact_id: str, invalid_at: datetime, *, project_id: str
-    ) -> bool:
-        return await self._fact_writer.invalidate_fact(
-            fact_id, invalid_at, project_id=project_id
-        )
-
-    async def remove_fact_with_audit(self, **kwargs) -> dict:
-        return await self._fact_writer.remove_fact_with_audit(**kwargs)
-
-    async def replace_facts_with_audit(self, **kwargs) -> dict:
-        return await self._fact_writer.replace_facts_with_audit(**kwargs)
-
-    async def apply_fact_changes_with_audit(self, **kwargs) -> dict:
-        return await self._fact_writer.apply_fact_changes_with_audit(**kwargs)
-
-    async def create_applied_fact_change_audit(self, **kwargs) -> None:
-        return await self._fact_audit_writer.create_applied_audit(**kwargs)
-
-    async def get_fact_change_audit(
-        self,
-        fact_change_id: str,
-        **kwargs,
-    ) -> Optional[Dict]:
-        return await self._fact_audit_reader.get_fact_change_audit(
-            fact_change_id,
-            **kwargs,
-        )
-
-    async def list_fact_change_audits_for_entity(self, **kwargs) -> List[Dict]:
-        return await self._fact_audit_reader.list_fact_change_audits_for_entity(
-            **kwargs
-        )
-
-    async def list_fact_change_audits_for_project(self, **kwargs) -> List[Dict]:
-        return await self._fact_audit_reader.list_fact_change_audits_for_project(
-            **kwargs
-        )
 
     async def update_entity_profile(
         self,
@@ -217,12 +372,14 @@ class KnowledgeStore:
         *,
         project_id: str,
         final_topic: Optional[str] = None,
+        cur=None,
     ) -> bool:
         return await self._graph_writer.merge_entities(
             primary_id,
             secondary_id,
             project_id=project_id,
             final_topic=final_topic,
+            cur=cur,
         )
 
     async def cleanup_null_entities(self, *, project_id: str) -> List[int]:
@@ -238,13 +395,6 @@ class KnowledgeStore:
             entity_ids, project_id=project_id
         )
 
-    async def delete_old_invalidated_facts(
-        self, cutoff: datetime, *, project_id: str
-    ) -> int:
-        return await self._fact_writer.delete_old_invalidated_facts(
-            cutoff, project_id=project_id
-        )
-
     async def expire_merge_rollback_states(
         self,
         cutoff: datetime,
@@ -256,6 +406,23 @@ class KnowledgeStore:
             cutoff,
             user_name=user_name,
             project_id=project_id,
+        )
+
+    async def purge_expired_operational_records(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        candidate_suggestion_cutoff: datetime,
+        tool_audit_cutoff: datetime,
+        merge_history_cutoff: datetime,
+    ) -> Dict[str, int]:
+        return await self._retention_writer.purge_expired_records(
+            user_name=user_name,
+            project_id=project_id,
+            candidate_suggestion_cutoff=candidate_suggestion_cutoff,
+            tool_audit_cutoff=tool_audit_cutoff,
+            merge_history_cutoff=merge_history_cutoff,
         )
 
     async def delete_relationship(
@@ -325,6 +492,36 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
+    async def get_entity_ids_for_messages(
+        self,
+        message_ids: List[int],
+        *,
+        user_name: str,
+        session_id: str,
+        project_id: str,
+    ) -> Dict[int, List[int]]:
+        return await self._entity_reader.get_entity_ids_for_messages(
+            message_ids,
+            user_name=user_name,
+            session_id=session_id,
+            project_id=project_id,
+        )
+
+    async def get_relationship_ids_for_messages(
+        self,
+        message_ids: List[int],
+        *,
+        user_name: str,
+        session_id: str,
+        project_id: str,
+    ) -> Dict[int, List[str]]:
+        return await self._episode_reader.get_relationship_ids_for_messages(
+            message_ids,
+            user_name=user_name,
+            session_id=session_id,
+            project_id=project_id,
+        )
+
     async def get_recent_project_messages(
         self,
         user_name: str,
@@ -356,62 +553,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
             forward=forward,
             target_total=target_total,
-        )
-
-    async def get_facts_for_entity(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        active_only: bool = True,
-    ) -> List[FactRecord]:
-        return await self._fact_reader.get_facts_for_entity(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-            active_only=active_only,
-        )
-
-    async def search_relevant_facts(
-        self,
-        entity_id: int,
-        query_embedding: List[float],
-        *,
-        visible_project_ids: List[str],
-        limit: int = 5,
-    ) -> List[FactRecord]:
-        return await self._fact_reader.search_relevant_facts(
-            entity_id,
-            query_embedding,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def get_facts_for_entities(
-        self,
-        entity_ids: List[int],
-        *,
-        visible_project_ids: List[str],
-        active_only: bool = True,
-    ) -> Dict[int, List[FactRecord]]:
-        return await self._fact_reader.get_facts_for_entities(
-            entity_ids,
-            visible_project_ids=visible_project_ids,
-            active_only=active_only,
-        )
-
-    async def get_facts_from_message(
-        self,
-        msg_id: int,
-        *,
-        user_name: str,
-        session_id: str,
-        visible_project_ids: List[str],
-    ) -> List[FactRecord]:
-        return await self._fact_reader.get_facts_from_message(
-            msg_id,
-            user_name=user_name,
-            session_id=session_id,
-            visible_project_ids=visible_project_ids,
         )
 
     async def validate_existing_ids(
@@ -621,15 +762,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_recent_facts(
-        self, *, visible_project_ids: List[str], days: int = 7, limit: int = 20
-    ) -> List[Dict]:
-        return await self._fact_reader.get_recent_facts(
-            visible_project_ids=visible_project_ids,
-            days=days,
-            limit=limit,
-        )
-
     async def get_recently_active_entities(
         self, *, visible_project_ids: List[str], days: int = 7, limit: int = 10
     ) -> List[Dict]:
@@ -661,13 +793,11 @@ class KnowledgeStore:
         *,
         visible_project_ids: List[str],
         msg_limit: int = 5,
-        slim: bool = False,
     ) -> Dict:
         return await self._tools.get_hot_topic_context_with_messages(
             hot_topic_names,
             visible_project_ids=visible_project_ids,
             msg_limit=msg_limit,
-            slim=slim,
         )
 
     async def search_messages_fts(

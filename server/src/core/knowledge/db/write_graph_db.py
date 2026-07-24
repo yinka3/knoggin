@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -9,17 +10,19 @@ from common.schema.contracts import (
     EngineScope,
     EngineWorkUnit,
     EntityWrite,
+    EpisodeEligibility,
     GraphMutationPlan,
     GraphWriteSummary,
+    MessageEntityRef,
     RelationshipWrite,
     SkippedRelationship,
     UserRelationshipWrite,
 )
 from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.events import emit
+from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
-from core.knowledge.entity.resolver import EntityResolver
 
 
 def _resolve_scope(
@@ -264,6 +267,17 @@ async def build_graph_mutation_plan(
     graph_work_unit = EngineWorkUnit.for_graph_write(
         scope, batch_id=batch_work_unit_id
     )
+    message_entity_refs = [
+        MessageEntityRef(message_id=message_id, entity_id=entity_id)
+        for entity_id in sorted(safe_entity_ids)
+        for message_id in sorted(set(batch.entity_message_map.get(entity_id, [])))
+    ]
+    eligible_messages = [
+        EpisodeEligibility(message_id=message_id)
+        for message_id in sorted(
+            {int(message_id) for message_id in batch.trace.message_ids}
+        )
+    ]
 
     return GraphMutationPlan(
         work_unit=graph_work_unit,
@@ -273,11 +287,13 @@ async def build_graph_mutation_plan(
         new_entity_ids=new_entity_ids,
         alias_updates=alias_updates,
         entity_writes=entity_writes,
+        message_entity_refs=message_entity_refs,
+        eligible_messages=eligible_messages,
         relationship_writes=relationship_writes,
         user_relationship_writes=user_relationship_writes,
         skipped_relationships=skipped_relationships,
-        dirty_entity_ids=safe_entity_ids,
         zombie_entity_ids=zombie_entity_ids,
+        dirty_entity_ids=set(safe_entity_ids),
     )
 
 
@@ -293,7 +309,7 @@ def _attach_graph_work_summary(
 ) -> None:
     if not batch.work_unit:
         return
-    batch.work_unit.metadata["graph_write"] = summary.model_dump(mode="json")
+    batch.work_unit.metadata["graph_write"] = asdict(summary)
     batch.work_unit.metadata["graph_write_work_unit_id"] = plan.work_unit.id
     batch.work_unit.metadata["graph_write_work_unit"] = plan.work_unit.model_dump(
         mode="json"
@@ -318,23 +334,37 @@ async def execute_graph_mutation_plan(
         )
 
     entity_payloads, relationship_payloads = plan.to_graph_payloads()
-    if entity_payloads or relationship_payloads:
-        await knowledge_store.write_batch(entity_payloads, relationship_payloads)
-
-    dirty_count = 0
-    if redis_client and plan.scope.user_name and plan.dirty_entity_ids:
-        dirty_key = RedisKeys.dirty_entities(
-            plan.scope.user_name, plan.scope.project_id
+    message_entity_payloads = plan.to_message_entity_payloads()
+    if (
+        entity_payloads
+        or relationship_payloads
+        or message_entity_payloads
+        or plan.eligible_messages
+    ):
+        await knowledge_store.write_batch(
+            entity_payloads,
+            relationship_payloads,
+            message_entity_refs=message_entity_payloads,
+            eligible_messages=plan.eligible_messages,
+            scope=plan.scope,
         )
-        await redis_client.sadd(
-            dirty_key, *[str(entity_id) for entity_id in plan.dirty_entity_ids]
+
+    dirty_entities_marked = 0
+    if redis_client is not None and plan.dirty_entity_ids:
+        dirty_key = RedisKeys.dirty_entities(
+            plan.scope.user_name,
+            plan.scope.project_id,
+        )
+        dirty_entities_marked = await redis_client.sadd(
+            dirty_key,
+            *[str(entity_id) for entity_id in sorted(plan.dirty_entity_ids)],
         )
         await redis_client.delete(
             RedisKeys.project_profile_complete(
-                plan.scope.user_name, plan.scope.project_id
+                plan.scope.user_name,
+                plan.scope.project_id,
             )
         )
-        dirty_count = len(plan.dirty_entity_ids)
         await emit(
             plan.scope.project_id,
             "job",
@@ -344,7 +374,7 @@ async def execute_graph_mutation_plan(
                 "project_id": plan.scope.project_id,
                 "dirty_key": dirty_key,
                 "entity_ids": sorted(plan.dirty_entity_ids),
-                "marked_count": dirty_count,
+                "marked_count": dirty_entities_marked,
                 "reason": "graph_write",
             },
         )
@@ -354,7 +384,7 @@ async def execute_graph_mutation_plan(
         relationships_written=len(relationship_payloads),
         user_relationships_written=len(plan.user_relationship_writes),
         aliases_updated=len(alias_update_map),
-        dirty_entities_marked=dirty_count,
+        dirty_entities_marked=dirty_entities_marked,
         zombies_filtered=len(plan.zombie_entity_ids),
         relationships_skipped=len(plan.skipped_relationships),
     )

@@ -6,23 +6,33 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Set
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from common.schema.primitives import (
+    Connection,
     ConnectionRecord,
-    EntityRecord,
-    Fact,
-    FactRecord,
-    ProfileUpdate,
+    Entity,
 )
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now, get_now_unix
 
 
-class NERResult(BaseModel):
-    """Collection model for NER batch extraction."""
+class NERMention(Entity):
+    """One model-returned entity mention with a local message reference."""
 
-    mentions: List[EntityRecord] = Field(default_factory=list)
+    msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
+
+
+class NERResult(BaseModel):
+    """Collection model for model-returned NER mentions."""
+
+    mentions: List[NERMention] = Field(default_factory=list)
+
+
+class ConnectionMention(Connection):
+    """One model-returned relationship with a local message reference."""
+
+    msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
 
 
 class UserConnectionRecord(BaseModel):
@@ -36,17 +46,183 @@ class UserConnectionRecord(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class UserConnectionMention(BaseModel):
+    """One model-returned identity relationship with a local message reference."""
+
+    entity_name: str
+    relationship: str
+    confidence: float = Field(1.0, ge=0.0, le=1.0)
+    context: Optional[str] = None
+    msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
+
+
 class ConnectionsResult(BaseModel):
     """Collection model for extracted connections."""
 
-    connections: List[ConnectionRecord] = Field(default_factory=list)
-    user_connections: List[UserConnectionRecord] = Field(default_factory=list)
+    connections: List[ConnectionMention] = Field(default_factory=list)
+    user_connections: List[UserConnectionMention] = Field(default_factory=list)
 
 
-class EntityProfilesResult(BaseModel):
-    """Collection model for profile extraction results."""
+class EpisodeMessageInfluence(BaseModel):
+    """LLM-selected influence for one message in an eligible episode window."""
 
-    profiles: List[ProfileUpdate] = Field(default_factory=list)
+    message_id: int = Field(..., gt=0)
+    influence_weight: float = Field(..., ge=0.0)
+    influence_reason: Optional[str] = None
+
+
+class EpisodeFocusEntitySelection(BaseModel):
+    """A focus marker selected from the candidate window's entity set."""
+
+    entity_id: int = Field(..., gt=0)
+    prominence_weight: float = Field(..., ge=0.0)
+    role: Optional[str] = None
+
+
+class EpisodeCentralRelationshipSelection(BaseModel):
+    """A central marker selected from the candidate window's relationships."""
+
+    relationship_id: str = Field(..., min_length=1)
+    prominence_weight: float = Field(..., ge=0.0)
+
+
+def _validate_episode_decision_shape(decision: Any) -> None:
+    """Apply the shared action rules to internal and model-facing decisions."""
+
+    if decision.action == "skip":
+        if not decision.skip_reason:
+            raise ValueError("skip decisions require skip_reason")
+        if (
+            decision.target_episode_id
+            or decision.summary
+            or decision.new_developments
+            or decision.updates
+            or decision.unresolved
+            or decision.importance
+            or decision.message_influences
+            or decision.focus_entities
+            or decision.central_relationships
+        ):
+            raise ValueError("skip decisions must not include episode content")
+        return
+
+    if not decision.summary:
+        raise ValueError("create and consolidate decisions require summary")
+    if not decision.message_influences:
+        raise ValueError("create and consolidate decisions require message influences")
+    if decision.action == "consolidate" and not decision.target_episode_id:
+        raise ValueError("consolidate decisions require target_episode_id")
+    if decision.action == "create" and decision.target_episode_id:
+        raise ValueError("create decisions must not include target_episode_id")
+    if decision.skip_reason:
+        raise ValueError("non-skip decisions must not include skip_reason")
+
+
+class EpisodeDecision(BaseModel):
+    """Resolved internal decision for one bounded episodic-memory window."""
+
+    action: Literal["create", "consolidate", "skip"]
+    target_episode_id: Optional[str] = Field(None, min_length=1)
+    summary: Optional[str] = Field(None, min_length=1)
+    new_developments: List[str] = Field(default_factory=list)
+    updates: List[str] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)
+    importance: float = Field(0.0, ge=0.0, le=1.0)
+    message_influences: List[EpisodeMessageInfluence] = Field(default_factory=list)
+    focus_entities: List[EpisodeFocusEntitySelection] = Field(default_factory=list)
+    central_relationships: List[EpisodeCentralRelationshipSelection] = Field(
+        default_factory=list
+    )
+    skip_reason: Optional[str] = Field(None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_action_shape(self) -> "EpisodeDecision":
+        _validate_episode_decision_shape(self)
+        return self
+
+
+class EpisodeConsolidation(BaseModel):
+    """Resolved internal regeneration for one selected episode."""
+
+    summary: str = Field(..., min_length=1)
+    new_developments: List[str] = Field(default_factory=list)
+    updates: List[str] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)
+    importance: float = Field(0.0, ge=0.0, le=1.0)
+    message_influences: List[EpisodeMessageInfluence] = Field(
+        ..., min_length=1
+    )
+    focus_entities: List[EpisodeFocusEntitySelection] = Field(default_factory=list)
+    central_relationships: List[EpisodeCentralRelationshipSelection] = Field(
+        default_factory=list
+    )
+
+
+class LLMEpisodeMessageInfluence(BaseModel):
+    """One model-selected influence with a local message reference."""
+
+    message_id: str = Field(..., pattern=r"^m[1-9]\d*$")
+    influence_weight: float = Field(..., ge=0.0)
+    influence_reason: Optional[str] = None
+
+
+class LLMEpisodeFocusEntitySelection(BaseModel):
+    """One model-selected focus entity with a local entity reference."""
+
+    entity_id: str = Field(..., pattern=r"^e[1-9]\d*$")
+    prominence_weight: float = Field(..., ge=0.0)
+    role: Optional[str] = None
+
+
+class LLMEpisodeCentralRelationshipSelection(BaseModel):
+    """One model-selected relationship with a local relationship reference."""
+
+    relationship_id: str = Field(..., pattern=r"^r[1-9]\d*$")
+    prominence_weight: float = Field(..., ge=0.0)
+
+
+class LLMEpisodeDecision(BaseModel):
+    """Model-facing episode decision that contains only local references."""
+
+    action: Literal["create", "consolidate", "skip"]
+    target_episode_id: Optional[str] = Field(None, pattern=r"^ep[1-9]\d*$")
+    summary: Optional[str] = Field(None, min_length=1)
+    new_developments: List[str] = Field(default_factory=list)
+    updates: List[str] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)
+    importance: float = Field(0.0, ge=0.0, le=1.0)
+    message_influences: List[LLMEpisodeMessageInfluence] = Field(default_factory=list)
+    focus_entities: List[LLMEpisodeFocusEntitySelection] = Field(
+        default_factory=list
+    )
+    central_relationships: List[LLMEpisodeCentralRelationshipSelection] = Field(
+        default_factory=list
+    )
+    skip_reason: Optional[str] = Field(None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_action_shape(self) -> "LLMEpisodeDecision":
+        _validate_episode_decision_shape(self)
+        return self
+
+
+class LLMEpisodeConsolidation(BaseModel):
+    """Model-facing episode regeneration output with local references."""
+
+    summary: str = Field(..., min_length=1)
+    new_developments: List[str] = Field(default_factory=list)
+    updates: List[str] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)
+    importance: float = Field(0.0, ge=0.0, le=1.0)
+    message_influences: List[LLMEpisodeMessageInfluence] = Field(
+        ..., min_length=1
+    )
+    focus_entities: List[LLMEpisodeFocusEntitySelection] = Field(
+        default_factory=list
+    )
+    central_relationships: List[LLMEpisodeCentralRelationshipSelection] = Field(
+        default_factory=list
+    )
 
 
 class MergeJudgment(BaseModel):
@@ -59,36 +235,6 @@ class MergeJudgment(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
     new_canonical_name: Optional[str] = Field(
         None, description="Suggested better name if merging"
-    )
-
-
-class ContradictionJudgment(BaseModel):
-    """Result for a single contradiction check."""
-
-    index: int = Field(..., description="The 1-based index from the input list")
-    is_contradiction: bool = Field(..., description="Whether FACT_B contradicts FACT_A")
-
-
-class BulkContradictionResult(BaseModel):
-    """Collection of contradiction judgments."""
-
-    judgments: List[ContradictionJudgment] = Field(default_factory=list)
-
-
-class TopicDetail(BaseModel):
-    """Model for a single topic's configuration."""
-
-    active: bool = Field(default=True)
-    labels: List[str] = Field(default_factory=list)
-    aliases: List[str] = Field(default_factory=list)
-    hierarchy: Dict[str, List[str]] = Field(default_factory=dict)
-
-
-class TopicConfigResult(BaseModel):
-    """Model for the full topic configuration."""
-
-    topics: Dict[str, TopicDetail] = Field(
-        ..., description="Map of TopicName to its configuration"
     )
 
 
@@ -139,11 +285,9 @@ EngineWorkKind = Literal[
     "message_batch",
     "graph_write",
     "dlq_replay",
-    "profile_refinement",
     "merge_detection",
     "topic_evolution",
     "cleanup",
-    "archival",
     "embedding",
     "rerank",
     "nli",
@@ -259,7 +403,15 @@ class EngineWorkUnit(BaseModel):
     @classmethod
     def for_model_operation(
         cls,
-        kind: Literal["embedding", "rerank", "nli", "spacy", "gliner", "document_index", "model_load"],
+        kind: Literal[
+            "embedding",
+            "rerank",
+            "nli",
+            "spacy",
+            "gliner",
+            "document_index",
+            "model_load",
+        ],
         scope: EngineScope,
         *,
         parent_work_unit_id: Optional[str] = None,
@@ -370,7 +522,8 @@ class MessageUserConnections(BaseModel):
     user_connections: List[UserConnectionRecord] = Field(default_factory=list)
 
 
-class EntityWrite(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class EntityWrite:
     """Typed entity payload intended for graph persistence."""
 
     id: int
@@ -380,13 +533,14 @@ class EntityWrite(BaseModel):
     confidence: float = 1.0
     topic: str = "General"
     embedding: Optional[List[float]] = None
-    aliases: List[str] = Field(default_factory=list)
+    aliases: List[str] = field(default_factory=list)
     user_name: str
     session_id: str
     project_id: str
 
 
-class RelationshipWrite(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class RelationshipWrite:
     """Typed relationship payload intended for graph persistence."""
 
     entity_a: str
@@ -402,7 +556,8 @@ class RelationshipWrite(BaseModel):
     context: Optional[str] = None
 
 
-class UserRelationshipWrite(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class UserRelationshipWrite:
     """Typed user-root relationship payload intended for graph persistence."""
 
     user_entity_id: int
@@ -432,42 +587,65 @@ class UserRelationshipWrite(BaseModel):
         }
 
 
-class AliasUpdate(BaseModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MessageEntityRef:
+    """A resolved entity mention grounded to one canonical message."""
+
+    message_id: int
+    entity_id: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EpisodeEligibility:
+    """Episode-processing eligibility attached to a canonical message."""
+
+    message_id: int
+    episode_type: Optional[str] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class AliasUpdate:
     """Aliases to persist for a canonical entity."""
 
     entity_id: int
-    aliases: List[str] = Field(default_factory=list)
+    aliases: List[str] = field(default_factory=list)
 
 
-class SkippedRelationship(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class SkippedRelationship:
     """Relationship observation skipped before graph persistence."""
 
     entity_a: Optional[str] = None
     entity_b: Optional[str] = None
     message_id: int
     reason: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class GraphMutationPlan(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class GraphMutationPlan:
     """Typed graph-write intent derived from a processed batch."""
 
     work_unit: EngineWorkUnit
     scope: EngineScope
-    entity_ids: List[int] = Field(default_factory=list)
-    safe_entity_ids: Set[int] = Field(default_factory=set)
-    new_entity_ids: Set[int] = Field(default_factory=set)
-    alias_updates: List[AliasUpdate] = Field(default_factory=list)
-    entity_writes: List[EntityWrite] = Field(default_factory=list)
-    relationship_writes: List[RelationshipWrite] = Field(default_factory=list)
-    user_relationship_writes: List[UserRelationshipWrite] = Field(default_factory=list)
-    skipped_relationships: List[SkippedRelationship] = Field(default_factory=list)
-    dirty_entity_ids: Set[int] = Field(default_factory=set)
-    zombie_entity_ids: Set[int] = Field(default_factory=set)
+    entity_ids: List[int] = field(default_factory=list)
+    safe_entity_ids: Set[int] = field(default_factory=set)
+    new_entity_ids: Set[int] = field(default_factory=set)
+    alias_updates: List[AliasUpdate] = field(default_factory=list)
+    entity_writes: List[EntityWrite] = field(default_factory=list)
+    message_entity_refs: List[MessageEntityRef] = field(default_factory=list)
+    eligible_messages: List[EpisodeEligibility] = field(default_factory=list)
+    relationship_writes: List[RelationshipWrite] = field(default_factory=list)
+    user_relationship_writes: List[UserRelationshipWrite] = field(default_factory=list)
+    skipped_relationships: List[SkippedRelationship] = field(default_factory=list)
+    zombie_entity_ids: Set[int] = field(default_factory=set)
+    dirty_entity_ids: Set[int] = field(default_factory=set)
 
     def has_writes(self) -> bool:
         return bool(
             self.entity_writes
+            or self.message_entity_refs
+            or self.eligible_messages
             or self.relationship_writes
             or self.user_relationship_writes
             or self.alias_updates
@@ -475,19 +653,20 @@ class GraphMutationPlan(BaseModel):
 
     def to_graph_payloads(self) -> tuple[List[dict], List[dict]]:
         return (
-            [entity.model_dump(mode="json") for entity in self.entity_writes],
-            [
-                relationship.model_dump(mode="json")
-                for relationship in self.relationship_writes
-            ]
+            [asdict(entity) for entity in self.entity_writes],
+            [asdict(relationship) for relationship in self.relationship_writes]
             + [
                 relationship.to_relationship_payload()
                 for relationship in self.user_relationship_writes
             ],
         )
 
+    def to_message_entity_payloads(self) -> List[dict]:
+        return [asdict(reference) for reference in self.message_entity_refs]
 
-class GraphWriteSummary(BaseModel):
+
+@dataclass(slots=True)
+class GraphWriteSummary:
     """Counts from executing a graph mutation plan."""
 
     entities_written: int = 0
@@ -497,39 +676,6 @@ class GraphWriteSummary(BaseModel):
     dirty_entities_marked: int = 0
     zombies_filtered: int = 0
     relationships_skipped: int = 0
-
-
-class SkippedFactChange(BaseModel):
-    """Fact change skipped or left unresolved during profile refinement."""
-
-    content: Optional[str] = None
-    reason: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class FactMergeResult(BaseModel):
-    """Fact merge decisions derived from LLM-extracted profile facts."""
-
-    to_invalidate: List[str] = Field(default_factory=list)
-    new_contents: List[Fact] = Field(default_factory=list)
-    skipped: List[SkippedFactChange] = Field(default_factory=list)
-    missing_targets: List[SkippedFactChange] = Field(default_factory=list)
-
-
-class FactResolutionSummary(BaseModel):
-    """Result of applying fact merge decisions to graph persistence."""
-
-    active_facts: List[FactRecord] = Field(default_factory=list)
-    created_facts: List[FactRecord] = Field(default_factory=list)
-    invalidated_fact_ids: List[str] = Field(default_factory=list)
-    failed_invalidations: List[str] = Field(default_factory=list)
-    contradicted_fact_ids: List[str] = Field(default_factory=list)
-    invalid_source_msg_ids: List[int] = Field(default_factory=list)
-    contradiction_candidate_diagnostics: List[Dict[str, Any]] = Field(
-        default_factory=list
-    )
-    write_failed: bool = False
-    error: Optional[str] = None
 
 
 @dataclass
@@ -589,6 +735,7 @@ class BatchResult:
     trace: ExtractionTrace = field(default_factory=ExtractionTrace)
     issues: List[ValidationIssue] = field(default_factory=list)
     entity_ids: List[int] = field(default_factory=list)
+    entity_message_map: Dict[int, List[int]] = field(default_factory=dict)
     new_entity_ids: Set[int] = field(default_factory=set)
     alias_updated_ids: Set[int] = field(default_factory=set)
     alias_updates: Dict[int, List[str]] = field(default_factory=dict)
@@ -631,9 +778,24 @@ class BatchResult:
         self.trace.fallbacks.append({"stage": stage, "fallback": fallback})
 
     def has_graph_writes(self) -> bool:
+        legacy_trace_message_ids = (
+            self.trace.get("message_ids", [])
+            if isinstance(self.trace, dict)
+            else []
+        )
+        trace_message_ids = (
+            self.trace.message_ids
+            if hasattr(self.trace, "message_ids")
+            else legacy_trace_message_ids
+        )
+        return self.has_graph_mutations() or bool(trace_message_ids)
+
+    def has_graph_mutations(self) -> bool:
+        """Return whether entity, alias, or relationship state needs writing."""
         return bool(
             self.relationship_observations
             or self.user_relationship_observations
+            or self.entity_message_map
             or self.new_entity_ids
             or self.alias_updated_ids
             or self.alias_updates
@@ -650,6 +812,10 @@ class BatchResult:
             "trace": self.trace.model_dump(mode="json"),
             "issues": [issue.model_dump(mode="json") for issue in self.issues],
             "entity_ids": self.entity_ids,
+            "entity_message_map": {
+                str(entity_id): message_ids
+                for entity_id, message_ids in self.entity_message_map.items()
+            },
             "new_entity_ids": list(self.new_entity_ids),
             "alias_updated_ids": list(self.alias_updated_ids),
             "alias_updates": {str(k): v for k, v in self.alias_updates.items()},
@@ -688,6 +854,13 @@ class BatchResult:
                 for item in data.get("issues", [])
             ],
             entity_ids=data.get("entity_ids", []),
+            entity_message_map={
+                int(entity_id): [int(message_id) for message_id in message_ids]
+                for entity_id, message_ids in data.get(
+                    "entity_message_map", {}
+                ).items()
+                if str(entity_id).isdigit()
+            },
             new_entity_ids=set(data.get("new_entity_ids", [])),
             alias_updated_ids=set(data.get("alias_updated_ids", [])),
             alias_updates={

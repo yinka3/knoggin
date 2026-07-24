@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from typing import AsyncGenerator, Dict, List, Optional, Union
@@ -18,7 +19,6 @@ from common.schema.agent_stream import (
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now
-from infrastructure.llm_client import LLMService
 from core.agent.formatters import (
     format_document_focus_context,
     format_documents_context,
@@ -31,6 +31,7 @@ from core.agent.internals import (
     build_evidence_context,
     build_user_message,
     execute_tool,
+    localize_agent_tool_result,
     summarize_result,
     update_accumulators,
 )
@@ -52,8 +53,30 @@ from core.agent.types import (
     FinalResponse,
     ToolCall,
 )
+from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
+
+
+def _is_local_reference_resolution_error(message: str) -> bool:
+    """Recognize resolver failures without exposing the supplied ID in metrics."""
+
+    return "Unknown local ID" in message or "UUID handle" in message
+
+
+def _local_reference_type(tool_name: str) -> str:
+    if tool_name in {"read_episode", "propose_entity_merge"}:
+        return "episode"
+    if tool_name in {"get_document_info", "read_document"}:
+        return "document"
+    if tool_name in {
+        "list_documents",
+        "get_folder_upload_summary",
+        "list_folder_tree",
+        "search_documents",
+    }:
+        return "folder"
+    return "tool_argument"
 
 
 class AgentExecutor:
@@ -72,6 +95,34 @@ class AgentExecutor:
         self.tools = tools
 
     async def execute(
+        self,
+        user_timezone: Optional[str] = None,
+        model: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
+        simulated_date: Optional[str] = None,
+        agent_temperature: float = 0.7,
+        agent_brain: Optional[str] = None,
+        agent_directives: Optional[str] = None,
+        client_tools: Optional[List[Dict]] = None,
+    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
+        """Run one agent execution and discard its model-only UUID handles."""
+
+        try:
+            async for event in self._execute_run(
+                user_timezone=user_timezone,
+                model=model,
+                enabled_tools=enabled_tools,
+                simulated_date=simulated_date,
+                agent_temperature=agent_temperature,
+                agent_brain=agent_brain,
+                agent_directives=agent_directives,
+                client_tools=client_tools,
+            ):
+                yield event
+        finally:
+            self.ctx.state.clear_short_uuid_references()
+
+    async def _execute_run(
         self,
         user_timezone: Optional[str] = None,
         model: Optional[str] = None,
@@ -487,6 +538,17 @@ class AgentExecutor:
             return
 
         for call in tool_calls:
+            if self.ctx.state.call_count >= self.ctx.config.max_calls:
+                err_msg = (
+                    f"Global call limit reached ({self.ctx.config.max_calls})"
+                )
+                results_out.append({"tool": "all", "error": err_msg})
+                yield {
+                    "event": "tool_error",
+                    "data": {"tool": "all", "error": err_msg},
+                }
+                return
+
             yield {
                 "event": "tool_start",
                 "data": {
@@ -547,7 +609,29 @@ class AgentExecutor:
                     }
                     continue
 
-                result = await execute_tool(self.tools, call.name, call.args)
+                missing = object()
+                previous_short_uuid_references = getattr(
+                    self.tools, "short_uuid_references", missing
+                )
+                if self.ctx.use_local_references:
+                    self.tools.short_uuid_references = (
+                        self.ctx.state.short_uuid_references
+                    )
+                try:
+                    async with asyncio.timeout(self.ctx.config.tool_timeout):
+                        result = await execute_tool(
+                            self.tools,
+                            call.name,
+                            call.args,
+                        )
+                finally:
+                    if self.ctx.use_local_references:
+                        if previous_short_uuid_references is missing:
+                            delattr(self.tools, "short_uuid_references")
+                        else:
+                            self.tools.short_uuid_references = (
+                                previous_short_uuid_references
+                            )
 
                 await apply_tool_result_hooks(
                     self.ctx,
@@ -557,11 +641,16 @@ class AgentExecutor:
                 )
 
                 summary, _ = summarize_result(call.name, result)
-                update_accumulators(self.ctx, call.name, result)
+                model_result = (
+                    localize_agent_tool_result(self.ctx, call.name, result)
+                    if self.ctx.use_local_references
+                    else result
+                )
+                update_accumulators(self.ctx, call.name, model_result)
 
                 self.ctx.state.consecutive_errors = 0
                 self.ctx.state.last_error = None
-                results_out.append({"tool": call.name, "result": result})
+                results_out.append({"tool": call.name, "result": model_result})
 
                 yield {
                     "event": "tool_end",
@@ -572,7 +661,37 @@ class AgentExecutor:
                     },
                 }
 
+            except TimeoutError:
+                message = (
+                    "Tool execution timed out after "
+                    f"{self.ctx.config.tool_timeout:g} seconds"
+                )
+                logger.warning(f"Tool {call.name}: {message}")
+                handled_as_maintenance = await apply_tool_error_hooks(
+                    self.ctx,
+                    self.tools,
+                    call.name,
+                )
+                if not handled_as_maintenance:
+                    self.ctx.state.last_error = message
+                    self.ctx.state.consecutive_errors += 1
+                results_out.append({"tool": call.name, "error": message})
+                yield {
+                    "event": "tool_error",
+                    "data": {"tool": call.name, "error": message},
+                }
             except ToolExecutionError as e:
+                if _is_local_reference_resolution_error(e.message):
+                    await emit(
+                        self.ctx.session_id,
+                        "agent",
+                        "local_reference_resolution_failed",
+                        {
+                            "pipeline": "agent_tool_loop",
+                            "reference_type": _local_reference_type(call.name),
+                            "reason": "unknown_or_wrong_type",
+                        },
+                    )
                 handled_as_maintenance = await apply_tool_error_hooks(
                     self.ctx,
                     self.tools,
@@ -723,7 +842,7 @@ class AgentExecutor:
             self.ctx.evidence.messages = self.ctx.evidence.messages[-5:]
             self.ctx.evidence.profiles = self.ctx.evidence.profiles[-5:]
             self.ctx.evidence.graph = self.ctx.evidence.graph[-15:]
-            self.ctx.evidence.facts = []
+            self.ctx.evidence.episodes = []
             self.ctx.evidence.paths = []
             self.ctx.evidence.hierarchy = []
 
@@ -740,9 +859,9 @@ class AgentExecutor:
             "I have gathered the following evidence regarding: "
             f"'{self.ctx.user_query}'\n\n"
             f"{evidence_text}\n\n"
-            "Summarize the key facts, connections, and relevant information into "
-            "a concise summary. Keep important IDs (message IDs, entity IDs) if "
-            "they are critical for further operations."
+            "Summarize the key details, connections, and relevant information into "
+            "a concise summary. Preserve the relevant evidence and any local "
+            "references already present; never invent or request system IDs."
         )
 
         try:

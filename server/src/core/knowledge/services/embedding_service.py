@@ -1,10 +1,13 @@
 import asyncio
 import gc
+import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 import numpy as np
+import onnxruntime as ort
 import torch
 from loguru import logger
 from sentence_transformers import CrossEncoder, SentenceTransformer
@@ -28,6 +31,13 @@ class EmbeddingService:
 
     BATCH_SIZE = 64
     supports_model_work_units = True
+    _ONNX_PROVIDER_ALIASES = {
+        "cpu": "CPUExecutionProvider",
+        "coreml": "CoreMLExecutionProvider",
+        "cuda": "CUDAExecutionProvider",
+        "directml": "DmlExecutionProvider",
+        "openvino": "OpenVINOExecutionProvider",
+    }
 
     def __init__(
         self,
@@ -39,10 +49,20 @@ class EmbeddingService:
         device: str = None,
         batch_size: int = 32,
         model_work: ModelWorkCoordinator | None = None,
+        embedding_backend: str | None = None,
     ):
         self.device = device or "cpu"
         self.batch_size = batch_size
         self._lock = threading.Lock()
+
+        self._backend = (
+            embedding_backend
+            or os.getenv("KNOGGIN_EMBEDDING_BACKEND", "onnx")
+        ).strip().lower()
+        if self._backend not in {"torch", "onnx"}:
+            raise ValueError(
+                "KNOGGIN_EMBEDDING_BACKEND must be either 'torch' or 'onnx'"
+            )
 
         self._embedder = None
         self._reranker = None
@@ -52,7 +72,20 @@ class EmbeddingService:
         if str(self.device) == "cpu":
             self._config_kwargs["use_memory_efficient_attention"] = False
             self._config_kwargs["unpad_inputs"] = False
-        self._model_Kwargs = {"torch_dtype": torch.float16}
+        self._torch_model_kwargs = {"torch_dtype": torch.float32}
+        self._onnx_provider = (
+            self._resolve_onnx_provider(
+                os.getenv("KNOGGIN_ONNX_PROVIDER", "auto")
+            )
+            if self._backend == "onnx"
+            else None
+        )
+        self._embedding_model_kwargs = (
+            {"provider": self._onnx_provider}
+            if self._backend == "onnx"
+            else self._torch_model_kwargs
+        )
+        self._cross_encoder_model_kwargs = self._embedding_model_kwargs
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
         self._nli_model = nli_model
@@ -60,8 +93,57 @@ class EmbeddingService:
 
         logger.info(
             "EmbeddingService initialized | "
-            f"device={self.device} | batch_size={batch_size}"
+            f"device={self.device} | batch_size={batch_size} | "
+            f"backend={self._backend} | provider={self._onnx_provider or 'n/a'}"
         )
+
+    @classmethod
+    def _resolve_onnx_provider(cls, requested_provider: str) -> str:
+        """Choose an installed execution provider, honoring explicit choices."""
+        requested = requested_provider.strip()
+        if not requested:
+            raise ValueError("KNOGGIN_ONNX_PROVIDER must not be empty")
+        available = set(ort.get_available_providers())
+        if requested.lower() == "auto":
+            if sys.platform == "darwin":
+                preferred = ("CoreMLExecutionProvider", "CPUExecutionProvider")
+            elif sys.platform == "win32":
+                preferred = (
+                    "CUDAExecutionProvider",
+                    "DmlExecutionProvider",
+                    "OpenVINOExecutionProvider",
+                    "CPUExecutionProvider",
+                )
+            else:
+                preferred = (
+                    "CUDAExecutionProvider",
+                    "OpenVINOExecutionProvider",
+                    "CPUExecutionProvider",
+                )
+            provider = next(
+                (candidate for candidate in preferred if candidate in available),
+                None,
+            )
+            if provider is None:
+                raise RuntimeError(
+                    "No supported ONNX Runtime execution provider is installed; "
+                    f"available providers: {sorted(available)}"
+                )
+            logger.info(
+                "Selected ONNX Runtime provider "
+                f"{provider} automatically from {sorted(available)}"
+            )
+            return provider
+
+        provider = cls._ONNX_PROVIDER_ALIASES.get(
+            requested.lower(), requested
+        )
+        if provider not in available:
+            raise ValueError(
+                f"KNOGGIN_ONNX_PROVIDER={provider!r} is unavailable; "
+                f"available providers: {sorted(available)}"
+            )
+        return provider
 
     def set_model_work_coordinator(
         self, model_work: ModelWorkCoordinator
@@ -97,27 +179,12 @@ class EmbeddingService:
         return await loop.run_in_executor(None, operation)
 
     async def load_models(self):
-        """Async initialization for heavy ML models."""
-        if self._embedder and self._reranker:
+        """Load the always-needed sentence embedding model."""
+        if self._embedder:
             return
 
-        def _load_models():
-            embedder = SentenceTransformer(
-                self._embedding_model,
-                trust_remote_code=True,
-                device=self.device,
-                model_kwargs=self._model_Kwargs,
-                config_kwargs=self._config_kwargs,
-            )
-            reranker = CrossEncoder(
-                self._reranker_model,
-                device=self.device,
-                model_kwargs=self._model_Kwargs,
-            )
-            return embedder, reranker
-
-        self._embedder, self._reranker = await self._run_blocking(
-            _load_models,
+        await self._run_blocking(
+            self._load_embedder_sync,
             name="embedding-model-load",
             priority=ModelWorkPriority.BACKGROUND,
             work_kind="model_load",
@@ -125,9 +192,76 @@ class EmbeddingService:
 
         if self._embedder:
             self._embedding_dim = self._embedder.get_sentence_embedding_dimension()
-            logger.info(f"Loaded models on {self.device} | dims={self._embedding_dim}")
+            logger.info(
+                f"Loaded embedding model on {self.device} | "
+                f"dims={self._embedding_dim}"
+            )
         else:
             logger.error("Failed to load embedder model")
+
+    def _load_embedder_sync(self) -> None:
+        with self._lock:
+            if self._embedder is None:
+                self._embedder = SentenceTransformer(
+                    self._embedding_model,
+                    trust_remote_code=True,
+                    device=self.device,
+                    model_kwargs=self._embedding_model_kwargs,
+                    config_kwargs=self._config_kwargs,
+                    backend=self._backend,
+                )
+
+    async def load_reranker(
+        self,
+        *,
+        priority: ModelWorkPriority = ModelWorkPriority.FOREGROUND,
+    ) -> None:
+        """Load the optional cross-encoder only when reranking is needed."""
+        if self._reranker is not None:
+            return
+        await self._run_blocking(
+            self._load_reranker_sync,
+            name="reranker-model-load",
+            priority=priority,
+            work_kind="model_load",
+        )
+
+    def _load_reranker_sync(self) -> None:
+        with self._lock:
+            if self._reranker is None:
+                self._reranker = CrossEncoder(
+                    self._reranker_model,
+                    device=self.device,
+                    model_kwargs=self._cross_encoder_model_kwargs,
+                    backend=self._backend,
+                )
+                logger.info(f"Loaded reranker model on {self.device}")
+
+    async def load_nli_model(
+        self,
+        *,
+        priority: ModelWorkPriority = ModelWorkPriority.FOREGROUND,
+    ) -> None:
+        """Load NLI only for workflows that need evidence classification."""
+        if self._nli is not None:
+            return
+        await self._run_blocking(
+            self._load_nli_model_sync,
+            name="nli-model-load",
+            priority=priority,
+            work_kind="nli",
+        )
+
+    def _load_nli_model_sync(self) -> None:
+        with self._lock:
+            if self._nli is None:
+                self._nli = CrossEncoder(
+                    self._nli_model,
+                    device=self.device,
+                    model_kwargs=self._cross_encoder_model_kwargs,
+                    backend=self._backend,
+                )
+                logger.info(f"Loaded NLI model on {self.device}")
 
     @property
     def embedding_dim(self) -> int:
@@ -140,6 +274,16 @@ class EmbeddingService:
     def nli_model(self) -> str:
         """Configured NLI model name. Loaded only when NLI support is wired in."""
         return self._nli_model
+
+    @property
+    def embedding_backend(self) -> str:
+        """Backend used by the sentence embedding model."""
+        return self._backend
+
+    @property
+    def onnx_provider(self) -> str | None:
+        """The resolved ONNX Runtime provider, or None for the Torch backend."""
+        return self._onnx_provider
 
     async def encode(
         self,
@@ -197,6 +341,7 @@ class EmbeddingService:
         """Score query-candidate pairs via cross-encoder (async)."""
         if not candidates:
             return []
+        await self.load_reranker()
         return await self._run_blocking(
             lambda: self._rerank_sync(query, candidates, batch_size),
             name="embedding-rerank",
@@ -208,7 +353,7 @@ class EmbeddingService:
         self, query: str, candidates: List[str], batch_size: int = None
     ) -> List[float]:
         if not self._reranker:
-            raise RuntimeError("Reranker not loaded. Call load_models() first.")
+            raise RuntimeError("Reranker failed to load")
         batch_size = batch_size or self.batch_size
         pairs = [(query, c) for c in candidates]
 
@@ -234,6 +379,7 @@ class EmbeddingService:
         """Classify text pairs as entailment, contradiction, or neutral."""
         if not pairs:
             return []
+        await self.load_nli_model()
         return await self._run_blocking(
             lambda: self._classify_text_pairs_sync(pairs, batch_size),
             name="embedding-nli",
@@ -247,14 +393,7 @@ class EmbeddingService:
         batch_size: int = None,
     ) -> List[TextPairClassification]:
         if self._nli is None:
-            with self._lock:
-                if self._nli is None:
-                    self._nli = CrossEncoder(
-                        self._nli_model,
-                        device=self.device,
-                        model_kwargs=self._model_Kwargs,
-                    )
-                    logger.info(f"Loaded NLI model on {self.device}")
+            raise RuntimeError("NLI model failed to load")
 
         batch_size = batch_size or self.batch_size
         judgments = []

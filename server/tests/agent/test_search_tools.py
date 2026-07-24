@@ -1,7 +1,7 @@
 import pytest
 
-from infrastructure.redis_client import RedisKeys
 from core.agent.tools.search import SearchTools
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis
 
 

@@ -4,12 +4,12 @@ from collections.abc import Iterable
 from typing import Any
 
 from common.utils.time_utils import get_now_unix
-from infrastructure.redis_client import RedisKeys
 from core.agent.tools.registry import (
     get_active_tool_names,
     get_tool_schemas,
 )
 from core.agent.types import MaintenanceCandidate
+from infrastructure.redis_client import RedisKeys
 
 TOPIC_EVALUATION_CANDIDATE = "topic_evaluation"
 GRAPH_MERGE_SCAN_CANDIDATE = "graph_merge_scan"

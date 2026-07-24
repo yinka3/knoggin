@@ -5,6 +5,7 @@ import httpx
 
 from common.conf.topics_config import TopicConfig
 from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
+from common.schema.settings import EpisodeSettings
 from common.schema.tool_schema import (
     CAPABILITY_CLASSES,
     DESTRUCTIVE_WRITE_CAPABILITY,
@@ -17,15 +18,17 @@ from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
 from core.agent.tools.topic_tools import TopicTools
-from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.documents import DocumentService
+from core.knowledge.entity.resolver import EntityResolver
 
 TOOL_DISPATCH = {
     "search_messages": ("search_messages", ["query", "limit"]),
     "search_entity": ("search_entity", ["query", "limit"]),
     "get_connections": ("get_connections", ["entity_name"]),
     "get_recent_activity": ("get_recent_activity", ["entity_name", "hours"]),
-    "fact_check": ("fact_check", ["entity_name", "query"]),
+    "episode_check": ("episode_check", ["query", "entity_name"]),
+    "read_episode": ("read_episode", ["episode_id"]),
+    "read_recent_episodes": ("read_recent_episodes", ["limit"]),
     "find_path": ("find_path", ["entity_a", "entity_b"]),
     "get_hierarchy": ("get_hierarchy", ["entity_name", "direction"]),
     "read_brain": ("read_brain", []),
@@ -111,7 +114,8 @@ TOOL_DISPATCH = {
         [
             "primary_id",
             "duplicate_id",
-            "evidence_fact_ids",
+            "evidence_message_ids",
+            "evidence_episode_ids",
             "reasoning",
             "confidence",
         ],
@@ -141,7 +145,9 @@ TOOL_LAYERS = {
             "search_entity",
             "get_connections",
             "get_recent_activity",
-            "fact_check",
+            "episode_check",
+            "read_episode",
+            "read_recent_episodes",
             "find_path",
             "get_hierarchy",
             "list_documents",
@@ -341,7 +347,9 @@ TOOL_MODULES = {
             ("search_messages", 6),
             ("get_connections", 8),
             ("search_entity", 8),
-            ("fact_check", 6),
+            ("episode_check", 6),
+            ("read_episode", 4),
+            ("read_recent_episodes", 4),
             ("get_recent_activity", 8),
             ("find_path", 8),
             ("get_hierarchy", 8),
@@ -786,6 +794,7 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         redis=None,
         agent_id: Optional[str] = None,
         topic_refresh_callback=None,
+        episode_settings: Optional[EpisodeSettings] = None,
     ):
         if knowledge_store is None or postgres is None or redis is None:
             raise ValueError(
@@ -806,6 +815,8 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         self.document_focus = document_focus
         self.active_topics = topic_config.active_topics if topic_config else None
         self.search_cfg = search_config or {}
+        episode_settings = episode_settings or EpisodeSettings()
+        self.episode_retrieval_limit = episode_settings.retrieval_episode_limit
         self.agent_id = agent_id or "AGENT_IDENTITY"
         self.topic_refresh_callback = topic_refresh_callback
         self.tool_authorization: Optional[ToolPermissions] = None

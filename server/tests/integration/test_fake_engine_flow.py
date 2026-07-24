@@ -5,16 +5,16 @@ import pytest
 
 from common.schema.primitives import Message
 from common.utils.events import EventEmitter
-from infrastructure.redis_client import RedisKeys
 from core.project.project_manager import ProjectManager
 from core.session.context import Session
 from core.session.session_manager import SessionManager
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import (
     FakeConfigValue,
     FakeConsumer,
-    FakeSession,
     FakeResources,
+    FakeSession,
 )
 
 
@@ -123,9 +123,26 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
 
 @pytest.mark.integration
 @pytest.mark.no_network
-async def test_hard_project_delete_and_explicit_session_cleanup_are_separate():
+async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
     resources = FakeResources()
     project_manager = ProjectManager(resources, user_name="ada")
+
+    class FakeAggregateDeletionWriter:
+        async def delete_project(self, *, user_name, project_id):
+            resources.postgres.projects.pop(project_id, None)
+            resources.postgres.sessions = {
+                session_id: row
+                for session_id, row in resources.postgres.sessions.items()
+                if row.get("project_id") != project_id
+            }
+            resources.postgres.messages = [
+                row
+                for row in resources.postgres.messages
+                if row.get("project_id") != project_id
+            ]
+            return {"projects": 1}
+
+    project_manager._project_deletion_writer = FakeAggregateDeletionWriter()
     project = await project_manager.create_project("Scratch")
     session_id = "session-1"
     active_sessions = {session_id: FakeSession(session_id, project["id"])}
@@ -158,17 +175,17 @@ async def test_hard_project_delete_and_explicit_session_cleanup_are_separate():
     deleted_project = await project_manager.delete_project(project["id"])
     assert await project_manager.get_session_ids(project["id"]) == []
 
-    deleted_count = await manager.delete_session_data(session_id)
-
-    assert deleted_project["status"] == "deleted"
-    assert await project_manager.get_project(project["id"]) is None
-    assert deleted_count >= 2
     assert await resources.redis.hget(RedisKeys.sessions("ada"), session_id) is None
     assert (
-        await resources.redis.lrange(RedisKeys.buffer("ada", session_id), 0, -1)
-        == []
+        await resources.redis.lrange(RedisKeys.buffer("ada", session_id), 0, -1) == []
     )
     assert (
         await resources.redis.hget(RedisKeys.conversation("ada", session_id), "1")
         is None
     )
+
+    deleted_count = await manager.delete_session_data(session_id)
+
+    assert deleted_project["status"] == "deleted"
+    assert await project_manager.get_project(project["id"]) is None
+    assert deleted_count == 0

@@ -14,7 +14,7 @@ from common.schema.contracts import (
     NERResult,
     ValidationIssue,
 )
-from common.schema.settings import TextProcessorSettings
+from common.schema.settings import LocalReferenceSettings, TextProcessorSettings
 from common.utils.core_utils import (
     PRONOUNS,
     format_vp01_input,
@@ -23,6 +23,7 @@ from common.utils.core_utils import (
     validate_entity,
 )
 from common.utils.events import emit
+from common.utils.local_references import build_local_id_maps, resolve_local_id
 from core.ingestion.prompts import ner_prompt
 from core.knowledge.entity.profile import EntityProfile
 from infrastructure.llm_client import LLMService
@@ -53,6 +54,7 @@ class TextProcessor:
         spacy: spacy.Language,
         settings: TextProcessorSettings,
         model_work: Optional[ModelWorkCoordinator] = None,
+        local_reference_settings: Optional[LocalReferenceSettings] = None,
     ):
         self.llm_client = llm
         self.topic_config = topic_config
@@ -68,6 +70,11 @@ class TextProcessor:
         self._phrase_matcher_cache: Optional[
             Tuple[PhraseMatcher, Dict[str, int]]
         ] = None
+        self.local_references_enabled = (
+            local_reference_settings.enabled
+            if local_reference_settings is not None
+            else True
+        )
         self.update_settings(settings)
 
     def update_settings(self, config: TextProcessorSettings):
@@ -75,6 +82,12 @@ class TextProcessor:
         self.gliner_threshold = config.gliner_threshold
         self.vp01_min_confidence = config.vp01_min_confidence
         self.llm_ner = config.llm_ner
+
+    def update_local_reference_settings(
+        self,
+        config: LocalReferenceSettings,
+    ) -> None:
+        self.local_references_enabled = config.enabled
 
     def _build_label_to_topics(self) -> Dict[str, List[str]]:
         """Invert topic_config: label -> [topics that include it]"""
@@ -383,6 +396,11 @@ class TextProcessor:
             )
             return output
 
+        message_local_ids, message_ids_by_local = build_local_id_maps(
+            (message["id"] for message in messages),
+            "m",
+            use_local_references=self.local_references_enabled,
+        )
         user_content = format_vp01_input(
             messages,
             known_ents,
@@ -390,9 +408,15 @@ class TextProcessor:
             ambiguous,
             covered_texts,
             self.topic_config.label_block,
+            message_local_ids,
         )
 
         system_prompt = ner_prompt(user_name)
+        if not self.local_references_enabled:
+            system_prompt += (
+                "\n\nLegacy ID mode is active. Return only the exact message IDs "
+                "shown in this call's input; ignore local-reference examples."
+            )
 
         await emit(
             session_id,
@@ -423,12 +447,43 @@ class TextProcessor:
             if trace is not None:
                 trace.llm_mentions_seen = len(ner_result.mentions)
             for entity in ner_result.mentions:
-                if entity.msg_id not in valid_msg_ids:
+                try:
+                    actual_msg_id = int(
+                        resolve_local_id(entity.msg_id, message_ids_by_local)
+                    )
+                except ValueError:
+                    if trace is not None:
+                        trace.llm_mentions_rejected += 1
+                    await emit(
+                        session_id,
+                        "pipeline",
+                        "local_reference_resolution_failed",
+                        {
+                            "pipeline": "ner",
+                            "reference_type": "message",
+                            "reason": "unknown_id",
+                        },
+                    )
+                    record_issue(
+                        code="invalid_msg_id",
+                        message=(
+                            "VP-01 returned an invalid local msg_id "
+                            f"{entity.msg_id}"
+                        ),
+                        item_ref=entity.name,
+                        metadata={"msg_id": entity.msg_id},
+                    )
+                    continue
+
+                if actual_msg_id not in valid_msg_ids:
                     if trace is not None:
                         trace.llm_mentions_rejected += 1
                     record_issue(
                         code="invalid_msg_id",
-                        message=f"VP-01 returned invalid msg_id {entity.msg_id}",
+                        message=(
+                            "VP-01 local msg_id resolved outside the current "
+                            "message set"
+                        ),
                         item_ref=entity.name,
                         metadata={"msg_id": entity.msg_id},
                     )
@@ -456,7 +511,7 @@ class TextProcessor:
                 if validate_entity(
                     entity.name, entity.topic, self.topic_config, label=entity.type
                 ):
-                    if is_covered(entity.name, covered_texts.get(entity.msg_id, set())):
+                    if is_covered(entity.name, covered_texts.get(actual_msg_id, set())):
                         if trace is not None:
                             trace.llm_mentions_rejected += 1
                         record_issue(
@@ -466,11 +521,11 @@ class TextProcessor:
                             ),
                             severity="info",
                             item_ref=entity.name,
-                            metadata={"msg_id": entity.msg_id},
+                            metadata={"msg_id": actual_msg_id},
                         )
                         continue
                     output.append(
-                        (entity.msg_id, entity.name, entity.type, entity.topic)
+                        (actual_msg_id, entity.name, entity.type, entity.topic)
                     )
                     vp01_count += 1
                     if trace is not None:
@@ -483,7 +538,7 @@ class TextProcessor:
                         message=f"VP-01 entity '{entity.name}' failed validation",
                         item_ref=entity.name,
                         metadata={
-                            "msg_id": entity.msg_id,
+                            "msg_id": actual_msg_id,
                             "type": entity.type,
                             "topic": entity.topic,
                         },

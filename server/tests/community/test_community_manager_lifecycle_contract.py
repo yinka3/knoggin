@@ -6,7 +6,11 @@ import pytest
 from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent_contracts import AgentConfig
 from common.schema.settings import CommunitySettings, DeveloperSettings, RootConfig
-from core.community.community_manager import CommunityManager
+from core.community.community_manager import (
+    ACTIVE_DISCUSSION_TTL_SECONDS,
+    COMMUNITY_ENABLED_TOOLS,
+    CommunityManager,
+)
 from tests.fixtures.fakes import FakePostgresClient, FakeRedis
 
 
@@ -16,25 +20,33 @@ class RecordingCommunityGraph:
         self.closed = []
         self.messages = []
 
-    async def create_discussion(self, discussion_id, topic, agent_ids):
+    async def create_discussion(
+        self, discussion_id, topic, agent_ids, *, user_name, project_id
+    ):
         self.created.append(
             {
                 "discussion_id": discussion_id,
                 "topic": topic,
                 "agent_ids": list(agent_ids),
+                "user_name": user_name,
+                "project_id": project_id,
             }
         )
 
-    async def close_discussion(self, discussion_id):
-        self.closed.append(discussion_id)
+    async def close_discussion(self, discussion_id, *, user_name, project_id):
+        self.closed.append((discussion_id, user_name, project_id))
 
-    async def add_message(self, discussion_id, agent_id, message, role):
+    async def add_message(
+        self, discussion_id, agent_id, message, role, *, user_name, project_id
+    ):
         self.messages.append(
             {
                 "discussion_id": discussion_id,
                 "agent_id": agent_id,
                 "message": message,
                 "role": role,
+                "user_name": user_name,
+                "project_id": project_id,
             }
         )
 
@@ -75,12 +87,12 @@ def patch_events(monkeypatch):
     return events
 
 
-def make_resources(*, redis=None):
+def make_resources(*, redis=None, llm_service=None):
     return SimpleNamespace(
         redis=redis or FakeRedis(),
         postgres=FakePostgresClient(),
         knowledge_store=RecordingKnowledgeStore(),
-        llm_service=object(),
+        llm_service=llm_service or object(),
     )
 
 
@@ -108,6 +120,16 @@ async def save_agent(postgres, agent_id, *, name=None, persona=None, **overrides
     return agent
 
 
+class RecordingSeedingLLM:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    async def generate_text(self, system, user, **kwargs):
+        self.calls.append({"system": system, "user": user, **kwargs})
+        return self.response
+
+
 @pytest.mark.no_network
 async def test_trigger_discussion_skips_when_active_discussion_exists(monkeypatch):
     patch_manager_config(monkeypatch)
@@ -125,6 +147,83 @@ async def test_trigger_discussion_skips_when_active_discussion_exists(monkeypatc
 
     assert resources.knowledge_store.community.created == []
     assert manager._discussion_task is None
+
+
+@pytest.mark.no_network
+async def test_seed_discussion_uses_local_agent_references(monkeypatch):
+    config = root_config()
+    config.developer_settings.community.seeding_agent_id = "agent-omega"
+    monkeypatch.setattr(
+        "core.community.community_manager.ConfigManager.get",
+        staticmethod(lambda: SimpleNamespace(config=config)),
+    )
+    events = patch_events(monkeypatch)
+    llm = RecordingSeedingLLM(
+        '{"topic":"Episode quality","agent_ids":["a1","a2","a99"]}'
+    )
+    resources = make_resources(llm_service=llm)
+    await save_agent(
+        resources.postgres,
+        "agent-alpha",
+        name="Analyst",
+        persona="Careful evidence analyst",
+    )
+    await save_agent(
+        resources.postgres,
+        "agent-omega",
+        name="Explorer",
+        persona="Curious systems explorer",
+    )
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    seeded = await manager._seed_discussion()
+
+    assert seeded is not None
+    assert seeded["agent_ids"] == ["agent-alpha", "agent-omega"]
+    prompt = llm.calls[0]["user"]
+    assert "- a1: Analyst:" in prompt
+    assert "- a2: Explorer:" in prompt
+    assert "agent-alpha" not in prompt
+    assert "agent-omega" not in prompt
+    assert '"agent_ids": ["a1", "a2"]' in prompt
+    assert events[-1][2] == "discussion_seeded"
+    assert events[-1][3]["agent_ids"] == ["agent-alpha", "agent-omega"]
+
+
+@pytest.mark.no_network
+async def test_seed_discussion_falls_back_to_the_seeding_agent_for_invalid_refs(
+    monkeypatch,
+):
+    config = root_config()
+    config.developer_settings.community.seeding_agent_id = "agent-omega"
+    monkeypatch.setattr(
+        "core.community.community_manager.ConfigManager.get",
+        staticmethod(lambda: SimpleNamespace(config=config)),
+    )
+    patch_events(monkeypatch)
+    resources = make_resources(
+        llm_service=RecordingSeedingLLM(
+            '{"topic":"Episode quality","agent_ids":["a99"]}'
+        )
+    )
+    await save_agent(
+        resources.postgres,
+        "agent-alpha",
+        name="Analyst",
+        persona="Careful evidence analyst",
+    )
+    await save_agent(
+        resources.postgres,
+        "agent-omega",
+        name="Explorer",
+        persona="Curious systems explorer",
+    )
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    seeded = await manager._seed_discussion()
+
+    assert seeded is not None
+    assert seeded["agent_ids"] == ["agent-omega"]
 
 
 @pytest.mark.no_network
@@ -161,7 +260,9 @@ async def test_trigger_discussion_creates_discussion_and_cleans_up_after_error(
     discussion_id = created[0]["discussion_id"]
     assert created[0]["topic"] == "Profile stability"
     assert created[0]["agent_ids"] == ["agent-1"]
-    assert resources.knowledge_store.community.closed == [discussion_id]
+    assert resources.knowledge_store.community.closed == [
+        (discussion_id, "ada", "project-1")
+    ]
     assert await redis.get(manager._active_discussion_key()) is None
     assert manager._active_discussion_id is None
     assert [event[2] for event in events] == [
@@ -188,6 +289,29 @@ async def test_trigger_discussion_claims_before_running_the_seed(monkeypatch):
 
     await manager.trigger_discussion()
 
+    assert await redis.get(manager._active_discussion_key()) is None
+    assert manager._active_discussion_id is None
+
+
+@pytest.mark.no_network
+async def test_trigger_discussion_releases_claim_when_seeding_times_out(monkeypatch):
+    patch_manager_config(monkeypatch)
+    patch_events(monkeypatch)
+    redis = FakeRedis()
+    resources = make_resources(redis=redis)
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    async def timed_out_wait_for(coroutine, *, timeout):
+        coroutine.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "core.community.community_manager.asyncio.wait_for", timed_out_wait_for
+    )
+
+    await manager.trigger_discussion()
+
+    assert resources.knowledge_store.community.created == []
     assert await redis.get(manager._active_discussion_key()) is None
     assert manager._active_discussion_id is None
 
@@ -275,15 +399,31 @@ async def test_run_loop_rotates_participants_persists_messages_and_stops_on_end(
             "agent_id": "agent-1",
             "message": "First contribution",
             "role": "assistant",
+            "user_name": "ada",
+            "project_id": "project-1",
         },
         {
             "discussion_id": "disc-1",
             "agent_id": "agent-2",
             "message": "Second contribution [[END_DISCUSSION]]",
             "role": "assistant",
+            "user_name": "ada",
+            "project_id": "project-1",
         },
     ]
     assert [event[2] for event in events] == ["message_added", "message_added"]
+    assert [args for _, args in resources.redis.evals] == [
+        (
+            manager._active_discussion_key(),
+            "disc-1",
+            ACTIVE_DISCUSSION_TTL_SECONDS,
+        ),
+        (
+            manager._active_discussion_key(),
+            "disc-1",
+            ACTIVE_DISCUSSION_TTL_SECONDS,
+        ),
+    ]
 
 
 @pytest.mark.no_network
@@ -428,3 +568,42 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
             },
         )
     ]
+
+
+@pytest.mark.no_network
+def test_community_tool_resolution_preserves_empty_allowlists_and_brain_restore():
+    manager = CommunityManager(
+        make_project_state(),
+        "ada",
+        make_resources(),
+    )
+
+    default_agent = AgentConfig(
+        id="agent-default",
+        name="Default",
+        persona="Default persona",
+        enabled_tools=None,
+    )
+    empty_agent = AgentConfig(
+        id="agent-empty",
+        name="Empty",
+        persona="Empty persona",
+        enabled_tools=[],
+    )
+    restore_agent = AgentConfig(
+        id="agent-restore",
+        name="Restore",
+        persona="Restore persona",
+        enabled_tools=["restore_brain_section"],
+    )
+
+    enabled, client_tools = manager._resolve_agent_tools(default_agent)
+    assert enabled == COMMUNITY_ENABLED_TOOLS
+    assert "restore_brain_section" in enabled
+    assert client_tools == AAC_SPECIFIC_SCHEMAS
+
+    assert manager._resolve_agent_tools(empty_agent) == ([], [])
+    assert manager._resolve_agent_tools(restore_agent) == (
+        ["restore_brain_section"],
+        [],
+    )

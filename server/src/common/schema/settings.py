@@ -116,25 +116,23 @@ class CleanerSettings(BaseModel):
     stale_junk_days: int = Field(30, ge=1)
 
 
-class ProfileSettings(BaseModel):
-    msg_window: int = Field(30, ge=5)
-    volume_threshold: int = Field(15, ge=1)
-    profile_batch_size: int = Field(8, ge=1)
-    max_facts_context: int = Field(50, ge=1)
-    contradiction_sim_low: float = Field(0.70, ge=0.0, le=1.0)
-    contradiction_batch_size: int = Field(4, ge=1)
+class EpisodeSettings(BaseModel):
+    """Configuration for bounded episodic-memory generation windows."""
+
+    enabled: bool = Field(True)
+    batch_multiple: int = Field(3, ge=1)
+    max_message_count: int = Field(72, ge=1)
+    max_age_hours: Optional[float] = Field(None, gt=0)
+    max_sessions_per_run: int = Field(4, ge=1, le=100)
+    prior_episode_candidate_count: int = Field(3, ge=1, le=3)
+    retrieval_episode_limit: int = Field(5, ge=1)
 
 
 class DLQSettings(BaseModel):
     interval_seconds: int = Field(60, ge=10)
     batch_size: int = Field(50, ge=1)
     max_attempts: int = Field(2, ge=1)
-
-
-class ArchivalSettings(BaseModel):
-    enabled: bool = Field(True)
-    retention_days: int = Field(14, ge=1)
-    fallback_interval_hours: float = Field(24.0, ge=0.5)
+    completed_state_retention_hours: float = Field(24.0, ge=0.25)
 
 
 class MergeRollbackSettings(BaseModel):
@@ -143,13 +141,25 @@ class MergeRollbackSettings(BaseModel):
     fallback_interval_hours: float = Field(1.0, ge=0.25)
 
 
+class AuditRetentionSettings(BaseModel):
+    """Retention windows for completed, non-canonical operational records."""
+
+    enabled: bool = Field(True)
+    interval_hours: float = Field(24.0, ge=0.25)
+    candidate_suggestion_days: int = Field(30, ge=1)
+    tool_audit_days: int = Field(180, ge=1)
+    merge_history_days: int = Field(180, ge=1)
+
+
 class JobSettings(BaseModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
-    profile: ProfileSettings = Field(default_factory=ProfileSettings)
+    episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     dlq: DLQSettings = Field(default_factory=DLQSettings)
-    archival: ArchivalSettings = Field(default_factory=ArchivalSettings)
     merge_rollback: MergeRollbackSettings = Field(
         default_factory=MergeRollbackSettings
+    )
+    audit_retention: AuditRetentionSettings = Field(
+        default_factory=AuditRetentionSettings
     )
     document_indexing: DocumentIndexingSettings = Field(
         default_factory=DocumentIndexingSettings
@@ -164,6 +174,7 @@ class TopicEvaluationSettings(BaseModel):
 class AgentLimitSettings(BaseModel):
     agent_history_turns: int = Field(7, ge=1)
     max_tool_calls: int = Field(12, ge=1)
+    tool_timeout: float = Field(30.0, gt=0)
     max_attempts: int = Field(15, ge=1)
     max_consecutive_errors: int = Field(3, ge=1)
     max_accumulated_messages: int = Field(30, ge=1)
@@ -177,7 +188,9 @@ class AgentLimitSettings(BaseModel):
             "get_recent_activity": 8,
             "find_path": 8,
             "get_hierarchy": 8,
-            "fact_check": 6,
+            "episode_check": 6,
+            "read_episode": 4,
+            "read_recent_episodes": 4,
             "read_brain": 4,
             "list_brain_snapshots": 4,
             "read_brain_snapshot": 4,
@@ -205,7 +218,7 @@ class TextProcessorSettings(BaseModel):
 
 class SearchSettings(BaseModel):
     fts_limit: int = Field(50, ge=1)
-    rerank_candidates: int = Field(45, ge=1)
+    rerank_candidates: int = Field(25, ge=1)
     default_message_limit: int = Field(8, ge=1)
     default_entity_limit: int = Field(5, ge=1)
     default_activity_hours: int = Field(24, ge=1)
@@ -242,6 +255,7 @@ class CommunitySettings(BaseModel):
     enabled: bool = Field(False)
     interval_minutes: int = Field(30, ge=1)
     max_turns: int = Field(10, ge=1)
+    seeding_timeout_seconds: int = Field(300, ge=1)
     seeding_agent_id: Optional[str] = None
     agent_pool_ids: List[str] = Field(default_factory=list)
     project_ids: List[str] = Field(default_factory=list)
@@ -252,6 +266,12 @@ class CoordinationLogSettings(BaseModel):
     path: str = Field("logs/coordination.log", min_length=1)
     retention_days: int = Field(14, ge=1)
     rotation_mb: int = Field(10, ge=1)
+
+
+class LocalReferenceSettings(BaseModel):
+    """Temporary rollout control for model-facing local identifier maps."""
+
+    enabled: bool = Field(True)
 
 
 class DeveloperSettings(BaseModel):
@@ -270,12 +290,14 @@ class DeveloperSettings(BaseModel):
     coordination_log: CoordinationLogSettings = Field(
         default_factory=CoordinationLogSettings
     )
+    local_references: LocalReferenceSettings = Field(
+        default_factory=LocalReferenceSettings
+    )
 
 
 class RootConfig(BaseModel):
     user_name: str = Field("")
     user_aliases: List[str] = Field(default_factory=list)
-    user_facts: List[str] = Field(default_factory=list)
     configured_at: Optional[str] = None
     curated_models: List[dict] = Field(
         default_factory=lambda: [

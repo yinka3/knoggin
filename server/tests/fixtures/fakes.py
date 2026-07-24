@@ -5,7 +5,6 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from common.schema.settings import RedisConnectionSettings
@@ -292,6 +291,12 @@ class FakeRedis:
 
     async def eval(self, script, numkeys, *args):
         self.evals.append((script, args))
+        if numkeys == 1 and len(args) >= 3:
+            key, expected_value, ttl = args[0], str(args[1]), args[2]
+            self._purge_expired(key)
+            if self.strings.get(key) == expected_value:
+                return await self.expire(key, ttl)
+            return 0
         if numkeys == 1 and len(args) >= 2:
             key, expected_value = args[0], str(args[1])
             self._purge_expired(key)
@@ -445,7 +450,7 @@ class FakeKnowledgeStore:
             "identity_project_ids": list(identity_project_ids),
         }
         self.search_rebuild_calls.append(call)
-        return {"messages": 0, "entities": 0, "facts": 0, "identity": 1}
+        return {"messages": 0, "entities": 0, "episodes": 0, "identity": 1}
 
     async def ensure_identity_entity(self, user_name, aliases=None):
         self.identity_calls.append((user_name, list(aliases or [])))
@@ -536,6 +541,18 @@ class FakePostgresClient:
         self.calls.append(("execute", query, params))
         self._execute_against_stores(query, params or {})
         return self.write_count
+
+    @staticmethod
+    def build_cypher(
+        cypher_query,
+        return_types="result agtype",
+        graph_name="knoggin_graph",
+    ):
+        return f"cypher<{graph_name}|{return_types}>:{cypher_query}"
+
+    @asynccontextmanager
+    async def transaction(self):
+        yield _FakePostgresCursor(self)
 
     @staticmethod
     def _now():
@@ -831,6 +848,13 @@ class FakePostgresClient:
             return
 
         if "update public.agents" in normalized:
+            if "set is_default = (agent_id = %(agent_id)s)" in normalized:
+                for candidate_id, candidate in self.agents.items():
+                    if candidate.get("user_name") == params.get("user_name"):
+                        candidate["is_default"] = candidate_id == params.get(
+                            "agent_id"
+                        )
+                return
             if "set is_default = false" in normalized:
                 for row in self.agents.values():
                     if row.get("user_name") == params.get("user_name"):
@@ -854,6 +878,16 @@ class FakePostgresClient:
 
         if "delete from public.agents" in normalized:
             self.agents.pop(params.get("agent_id"), None)
+
+
+class _FakePostgresCursor:
+    def __init__(self, client):
+        self.client = client
+
+    async def execute(self, query, params=None):
+        self.client.calls.append(("execute", query, params))
+        self.client._execute_against_stores(query, params or {})
+        return self.client.write_count
 
 
 @dataclass

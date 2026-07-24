@@ -1,5 +1,4 @@
 import json
-from datetime import datetime, timezone
 
 import pytest
 
@@ -22,7 +21,6 @@ class RecordingEmbeddingService:
 
 
 def make_client():
-    valid_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
     return RecordingPostgresClient(
         fetch_one_results=[
             {
@@ -54,21 +52,11 @@ def make_client():
             ],
             [
                 {
-                    "fact_id": "fact-1",
-                    "entity_id": 2,
-                    "user_name": "ada",
-                    "project_id": "project-1",
-                    "content": "Widget uses direct evidence.",
-                    "valid_at": valid_at,
-                    "invalid_at": None,
-                }
-            ],
-            [
-                {
-                    "fact_id": "identity-fact",
-                    "content": "Ada prefers concise answers.",
-                    "valid_at": valid_at,
-                    "invalid_at": None,
+                    "episode_id": "episode-1",
+                    "summary": "Widget storage will use direct evidence.",
+                    "new_developments": ["Episode vectors are enabled."],
+                    "updates": [],
+                    "unresolved": [],
                 }
             ],
         ]
@@ -91,15 +79,18 @@ async def test_search_index_rebuilder_replaces_all_derived_indexes():
     assert summary == {
         "messages": 1,
         "entities": 1,
-        "facts": 1,
         "identity": 1,
+        "episodes": 1,
     }
     assert embedding.calls == [
         [
-            "Widget (concept). Widget uses direct evidence.",
-            "ada (person). Ada prefers concise answers.",
+            "Widget (concept)",
+            "ada (person)",
         ],
-        ["Widget uses direct evidence."],
+        [
+            "Summary:\nWidget storage will use direct evidence.\n\n"
+            "New developments:\n- Episode vectors are enabled."
+        ],
     ]
     assert any(
         call[0] == "execute"
@@ -126,9 +117,13 @@ async def test_search_index_rebuilder_replaces_all_derived_indexes():
     ]
     assert len(entity_inserts) == 2
     assert len(json.loads(entity_inserts[0][2][4])) == 1024
-    identity_fact_read = client.calls[4]
-    assert identity_fact_read[0] == "fetch_all"
-    assert identity_fact_read[2] == (1, "ada", ["project-1", "archive-1"])
+    episode_update = next(
+        call
+        for call in client.calls
+        if call[0] == "execute" and "UPDATE episodes" in call[1]
+    )
+    assert episode_update[2][1:] == ("episode-1", "project-1")
+    assert len(json.loads(episode_update[2][0])) == 1024
 
 
 @pytest.mark.storage
@@ -212,9 +207,7 @@ async def test_search_index_rebuilder_rejects_malformed_embedding_results(
 async def test_search_index_rebuilder_database_failure_exits_transaction():
     client = make_client()
     client.cursor_execute_exceptions = [
-        None,
-        None,
-        None,
+        *([None] * 13),
         RuntimeError("message insert failed"),
     ]
     rebuilder = SearchIndexer(client, RecordingEmbeddingService())
@@ -226,5 +219,5 @@ async def test_search_index_rebuilder_database_failure_exits_transaction():
             ["project-1"],
         )
 
-    assert client.transaction_enters == 1
-    assert client.transaction_exits == 1
+    assert client.transaction_enters == 3
+    assert client.transaction_exits == 3

@@ -103,16 +103,6 @@ class DLQReplayJob(BaseJob):
     def _is_transient(self, error: str) -> bool:
         return any(t.lower() in error.lower() for t in self.TRANSIENT_ERRORS)
 
-    async def remark_dirty_entities(
-        self, user_name: str, project_id: str, entity_ids: list[int | str]
-    ) -> int:
-        if not entity_ids:
-            return 0
-        return await self.redis.sadd(
-            RedisKeys.dirty_entities(user_name, project_id),
-            *[str(entity_id) for entity_id in entity_ids],
-        )
-
     async def remark_merge_candidates(
         self, user_name: str, project_id: str, entity_ids: list[int | str]
     ) -> int:
@@ -120,6 +110,16 @@ class DLQReplayJob(BaseJob):
             return 0
         return await self.redis.sadd(
             RedisKeys.merge_queue(user_name, project_id),
+            *[str(entity_id) for entity_id in entity_ids],
+        )
+
+    async def remark_dirty_entities(
+        self, user_name: str, project_id: str, entity_ids: list[int | str]
+    ) -> int:
+        if not entity_ids:
+            return 0
+        return await self.redis.sadd(
+            RedisKeys.dirty_entities(user_name, project_id),
             *[str(entity_id) for entity_id in entity_ids],
         )
 
@@ -233,6 +233,30 @@ class DLQReplayJob(BaseJob):
             dlq_id,
             DLQ_STATUS_COMPLETED,
         )
+        await self.redis.zadd(
+            RedisKeys.dlq_completed(ctx.user_name, ctx.project_id),
+            {dlq_id: get_now_unix()},
+        )
+
+    async def _prune_completed_state(self, ctx: JobContext) -> int:
+        """Remove expired completed-state dedup markers, never queued work."""
+        cutoff = get_now_unix() - self.completed_state_retention_seconds
+        completed_key = RedisKeys.dlq_completed(ctx.user_name, ctx.project_id)
+        expired_ids = await self.redis.zrange(
+            completed_key,
+            "-inf",
+            cutoff,
+            byscore=True,
+        )
+        if not expired_ids:
+            return 0
+
+        await self.redis.hdel(
+            RedisKeys.dlq_state(ctx.user_name, ctx.project_id),
+            *expired_ids,
+        )
+        await self.redis.zrem(completed_key, *expired_ids)
+        return len(expired_ids)
 
     async def _requeue_claimed(
         self, ctx: JobContext, raw_item: str, entry: dict, dlq_id: str
@@ -630,10 +654,18 @@ class DLQReplayJob(BaseJob):
         dlq_key = RedisKeys.dlq(ctx.user_name, ctx.project_id)
         park_key = RedisKeys.dlq_parked(ctx.user_name, ctx.project_id)
         await self._requeue_abandoned_claims(ctx)
+        pruned_completed = await self._prune_completed_state(ctx)
 
         queue_len = await self.redis.llen(dlq_key)
         if queue_len == 0:
-            return JobResult(success=True, summary="DLQ empty")
+            return JobResult(
+                success=True,
+                summary=(
+                    "DLQ empty"
+                    if not pruned_completed
+                    else f"DLQ empty; pruned {pruned_completed} completed markers"
+                ),
+            )
 
         await emit(
             ctx.project_id,
@@ -797,9 +829,14 @@ class DLQReplayJob(BaseJob):
         self.interval = settings.interval_seconds
         self.batch_size = settings.batch_size
         self.max_attempts = settings.max_attempts
+        self.completed_state_retention_seconds = (
+            settings.completed_state_retention_hours * 3600
+        )
         logger.info(
             "DLQReplayJob updated: "
             f"interval={self.interval}, "
             f"batch_size={self.batch_size}, "
-            f"max_attempts={self.max_attempts}"
+            f"max_attempts={self.max_attempts}, "
+            "completed_state_retention_hours="
+            f"{settings.completed_state_retention_hours}"
         )

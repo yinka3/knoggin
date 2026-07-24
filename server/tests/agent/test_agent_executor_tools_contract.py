@@ -1,9 +1,9 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from common.exceptions import ToolExecutionError
-from infrastructure.redis_client import RedisKeys
 from core.agent.executor import AgentExecutor
 from core.agent.types import (
     AgentContext,
@@ -13,6 +13,7 @@ from core.agent.types import (
     RetrievedEvidence,
     ToolCall,
 )
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -120,7 +121,6 @@ async def test_execute_tools_success_records_state_and_accumulates_evidence(
         {
             "id": "msg_1",
             "user_name": "ada",
-            "session_id": "session-1",
             "message": "profile evidence",
             "score": 0.9,
         }
@@ -133,7 +133,6 @@ async def test_execute_tools_success_records_state_and_accumulates_evidence(
                     {
                         "id": "msg_1",
                         "user_name": "ada",
-                        "session_id": "session-1",
                         "message": "profile evidence",
                         "score": 0.9,
                     }
@@ -201,16 +200,82 @@ async def test_execute_tools_global_limit_blocks_all_calls(monkeypatch):
 
 
 @pytest.mark.no_network
+async def test_execute_tools_stops_a_batch_when_the_global_limit_is_reached(
+    monkeypatch,
+):
+    state = AgentState(call_count=1)
+    executor = make_executor(config=AgentRunConfig(max_calls=2), state=state)
+    executed_tools = []
+
+    async def fake_execute_tool(_tools, name, _args):
+        executed_tools.append(name)
+        return {"data": []}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute_tool)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall(name="search_messages", args={"query": "first"}),
+                ToolCall(name="search_entity", args={"query": "second"}),
+            ],
+            results,
+        )
+    ]
+
+    assert executed_tools == ["search_messages"]
+    assert executor.ctx.state.call_count == 2
+    assert events[-1] == {
+        "event": "tool_error",
+        "data": {"tool": "all", "error": "Global call limit reached (2)"},
+    }
+    assert results[-1] == {
+        "tool": "all",
+        "error": "Global call limit reached (2)",
+    }
+
+
+@pytest.mark.no_network
+async def test_execute_tools_times_out_and_records_a_recoverable_error(monkeypatch):
+    executor = make_executor(config=AgentRunConfig(max_calls=2, tool_timeout=0.01))
+
+    async def stalled_execute_tool(*_args):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(
+        "core.agent.executor.execute_tool",
+        stalled_execute_tool,
+    )
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall(name="search_messages", args={"query": "profile"})],
+            results,
+        )
+    ]
+
+    message = "Tool execution timed out after 0.01 seconds"
+    assert events[-1] == {
+        "event": "tool_error",
+        "data": {"tool": "search_messages", "error": message},
+    }
+    assert results == [{"tool": "search_messages", "error": message}]
+    assert executor.ctx.state.consecutive_errors == 1
+
+
+@pytest.mark.no_network
 async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
     monkeypatch,
 ):
     config = AgentRunConfig(
         max_calls=10,
-        tool_limits=(("search_messages", 1), ("fact_check", 3)),
+        tool_limits=(("search_messages", 1), ("episode_check", 3)),
     )
     state = AgentState()
     state.record_call("search_messages", {"query": "already used"})
-    state.record_call("fact_check", {"entity_name": "Ada", "query": "profile"})
+    state.record_call("episode_check", {"entity_name": "Ada", "query": "profile"})
     executor = make_executor(config=config, state=state)
 
     async def fail_execute_tool(*_args):
@@ -224,7 +289,7 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
             [
                 ToolCall(name="search_messages", args={"query": "new"}),
                 ToolCall(
-                    name="fact_check",
+                    name="episode_check",
                     args={"entity_name": "Ada", "query": "profile"},
                 ),
                 ToolCall(
@@ -256,7 +321,7 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
         {
             "event": "tool_start",
             "data": {
-                "tool": "fact_check",
+                "tool": "episode_check",
                 "args": {"entity_name": "Ada", "query": "profile"},
                 "thinking": None,
                 "call_id": None,
@@ -264,7 +329,7 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
         },
         {
             "event": "tool_error",
-            "data": {"tool": "fact_check", "error": "Duplicate call skipped"},
+            "data": {"tool": "episode_check", "error": "Duplicate call skipped"},
         },
         {
             "event": "tool_start",
@@ -289,8 +354,8 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
             "error": "Tool 'search_messages' has reached its call limit",
         },
         {
-            "tool": "fact_check",
-            "error": "Duplicate call to 'fact_check' with same arguments",
+            "tool": "episode_check",
+            "error": "Duplicate call to 'episode_check' with same arguments",
         },
         {
             "tool": "get_connections",
@@ -304,7 +369,7 @@ async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
     assert executor.ctx.state.call_count == 3
     assert executor.ctx.state.tools_used == [
         "search_messages",
-        "fact_check",
+        "episode_check",
         "get_connections",
     ]
 
@@ -374,7 +439,10 @@ async def test_execute_tools_tool_errors_increment_and_success_resets(monkeypatc
             [
                 ToolCall(name="search_messages", args={"query": "one"}),
                 ToolCall(name="search_messages", args={"query": "two"}),
-                ToolCall(name="fact_check", args={"entity_name": "Ada", "query": "q"}),
+                ToolCall(
+                    name="episode_check",
+                    args={"entity_name": "Ada", "query": "q"},
+                ),
             ],
             results,
         )
@@ -391,7 +459,7 @@ async def test_execute_tools_tool_errors_increment_and_success_resets(monkeypatc
     assert "backend unavailable" in events[1]["data"]["error"]
     assert events[3]["data"]["result"] == "Found 1 results"
     assert events[5]["data"] == {
-        "tool": "fact_check",
+        "tool": "episode_check",
         "error": "Internal tool failure",
     }
     assert executor.ctx.state.consecutive_errors == 1

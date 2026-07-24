@@ -24,6 +24,11 @@ if TYPE_CHECKING:
     from core.session.context import Session
 
 
+PUBLIC_AGENT_ERROR_MESSAGE = (
+    "The agent couldn't complete this request. Please try again."
+)
+
+
 class Orchestrator:
     """
     Orchestrator manages the high-level flow of an agent run.
@@ -63,6 +68,7 @@ class Orchestrator:
             limits = config.developer_settings.limits
             run_config = AgentRunConfig(
                 max_calls=limits.max_tool_calls,
+                tool_timeout=limits.tool_timeout,
                 max_attempts=limits.max_attempts,
                 max_history_turns=limits.agent_history_turns,
                 max_accumulated_messages=limits.max_accumulated_messages,
@@ -97,8 +103,10 @@ class Orchestrator:
             tools = services["tools"]
             topic_config = services["topic_config"]
 
-            effective_enabled_tools = enabled_tools or (
-                agent_cfg.enabled_tools if agent_cfg else None
+            effective_enabled_tools = (
+                enabled_tools
+                if enabled_tools is not None
+                else (agent_cfg.enabled_tools if agent_cfg else None)
             )
             maintenance_candidates = await build_maintenance_candidates(
                 redis=context.redis_client,
@@ -141,6 +149,11 @@ class Orchestrator:
                 agent_persona=identity["persona"],
                 history=conversation_history or [],
                 maintenance_candidates=maintenance_candidates,
+                use_local_references=getattr(
+                    getattr(config.developer_settings, "local_references", None),
+                    "enabled",
+                    True,
+                ),
             )
 
             # Execution via AgentExecutor
@@ -162,11 +175,17 @@ class Orchestrator:
                 yield event
 
         except Exception as e:
-            logger.error(f"Orchestrator error: {e}")
-            yield {"event": "error", "data": {"message": str(e)}}
+            logger.exception(f"Orchestrator error: {e}")
+            yield {
+                "event": "error",
+                "data": {"message": PUBLIC_AGENT_ERROR_MESSAGE},
+            }
         finally:
             if tools:
-                await tools.close()
+                try:
+                    await tools.close()
+                except Exception:
+                    logger.exception("Failed to close agent tools")
 
     async def _resolve_agent_identity(
         self,
@@ -217,6 +236,7 @@ class Orchestrator:
             postgres=context.resources.postgres,
             redis=context.redis_client,
             agent_id=agent_id,
+            episode_settings=config.developer_settings.jobs.episode,
             topic_refresh_callback=(
                 context.project.refresh_topic_mappings
                 if context.project

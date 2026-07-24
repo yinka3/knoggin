@@ -4,6 +4,7 @@ import pytest
 
 from common.schema.contracts import BatchResult
 from common.schema.settings import DLQSettings
+from common.utils.time_utils import frozen_time
 from core.ingestion.dlq_state import ensure_dlq_id, serialize_dlq_entry
 from core.ingestion.jobs.dlq_job import DLQReplayJob
 from infrastructure.job.base import JobContext
@@ -201,6 +202,30 @@ async def test_dlq_success_claims_acknowledges_and_marks_completed():
         "completed"
     )
     assert await redis.hget(RedisKeys.dlq_claims("ada", "project-1"), dlq_id) is None
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_dlq_prunes_only_expired_completed_dedup_markers():
+    redis = FakeRedis()
+    job = make_job(redis=redis)
+    ctx = JobContext(user_name="ada", project_id="project-1")
+    dlq_id = "completed-item"
+
+    with frozen_time("2026-01-01T10:00:00+00:00") as clock:
+        await job._ack_completed(ctx, "raw-item", dlq_id)
+        assert await redis.hget(RedisKeys.dlq_state("ada", "project-1"), dlq_id) == (
+            "completed"
+        )
+
+        clock.advance(hours=25)
+        result = await job.execute(ctx)
+
+    assert result.summary == "DLQ empty; pruned 1 completed markers"
+    assert await redis.hget(RedisKeys.dlq_state("ada", "project-1"), dlq_id) is None
+    assert await redis.zrange(
+        RedisKeys.dlq_completed("ada", "project-1"), 0, -1
+    ) == []
 
 
 @pytest.mark.ingestion

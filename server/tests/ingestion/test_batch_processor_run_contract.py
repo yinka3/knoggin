@@ -338,7 +338,8 @@ async def test_batch_processor_run_no_mentions_skips_resolution():
     assert result.entity_ids == []
     assert result.relationship_observations == []
     assert result.user_relationship_observations == []
-    assert result.has_graph_writes() is False
+    # A batch with no mentions is still durably eligible for episodic processing.
+    assert result.has_graph_writes() is True
     assert result.trace.batch_size == 2
     assert result.trace.message_ids == [1, 2]
     assert result.work_unit.status == "succeeded"

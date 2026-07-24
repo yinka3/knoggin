@@ -27,6 +27,17 @@ class DependencyError(KnogginError):
         super().__init__(message, code="dependency_error", details=details)
 
 
+class StorageUnavailableError(KnogginError):
+    """Raised when a durable storage read cannot distinguish absence from failure."""
+
+    def __init__(self, operation: str, details: Optional[Dict] = None):
+        super().__init__(
+            f"Storage query unavailable: {operation}",
+            code="storage_unavailable",
+            details={"operation": operation, **(details or {})},
+        )
+
+
 class LLMError(KnogginError):
     """Base class for LLM request and response failures."""
 

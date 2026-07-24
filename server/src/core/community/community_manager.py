@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from common.schema.agent_contracts import AgentConfig
 from common.scoping import IDENTITY_SCOPE
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
+from common.utils.local_references import build_local_id_maps, resolve_local_id
 from common.utils.time_utils import get_now
 from core.agent.executor import AgentExecutor
 from core.agent.services.agent_manager import AgentManager
@@ -26,7 +28,7 @@ from core.agent.types import (
 from core.project.state import ProjectState
 from infrastructure.redis_client import RedisKeys
 
-COMMUNITY_ENABLED_TOOLS = AAC_READ_TOOL_NAMES
+COMMUNITY_ENABLED_TOOLS = [*AAC_READ_TOOL_NAMES, "restore_brain_section"]
 ACTIVE_DISCUSSION_TTL_SECONDS = 2 * 60 * 60
 
 COMMUNITY_RUN_CONFIG = AgentRunConfig(
@@ -37,7 +39,8 @@ COMMUNITY_RUN_CONFIG = AgentRunConfig(
     max_consecutive_errors=2,
     tool_limits=(
         ("search_entity", 4),
-        ("fact_check", 6),
+        ("episode_check", 6),
+        ("read_episode", 4),
         ("get_connections", 3),
         ("search_messages", 3),
         ("search_documents", 4),
@@ -45,6 +48,7 @@ COMMUNITY_RUN_CONFIG = AgentRunConfig(
         ("list_documents", 2),
         ("read_brain", 4),
         ("edit_brain", 2),
+        ("restore_brain_section", 2),
         ("save_insight", 4),
         ("spawn_specialist", 2),
     ),
@@ -66,6 +70,13 @@ class CommunityManager:
     _RELEASE_ACTIVE_DISCUSSION_SCRIPT = """
     if redis.call('get', KEYS[1]) == ARGV[1] then
         return redis.call('del', KEYS[1])
+    end
+    return 0
+    """
+
+    _RENEW_ACTIVE_DISCUSSION_SCRIPT = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('expire', KEYS[1], ARGV[2])
     end
     return 0
     """
@@ -142,6 +153,16 @@ class CommunityManager:
             discussion_id,
         )
 
+    async def _renew_active_discussion(self, discussion_id: str) -> bool:
+        renewed = await self.resources.redis.eval(
+            self._RENEW_ACTIVE_DISCUSSION_SCRIPT,
+            1,
+            self._active_discussion_key(),
+            discussion_id,
+            ACTIVE_DISCUSSION_TTL_SECONDS,
+        )
+        return bool(renewed)
+
     async def trigger_discussion(self) -> None:
         """Main entry point called by scheduler."""
         if await self._is_discussion_active():
@@ -161,7 +182,13 @@ class CommunityManager:
         self._active_discussion_id = discussion_id
 
         try:
-            seed_data = await self._seed_discussion()
+            community_settings = (
+                ConfigManager.get().config.developer_settings.community
+            )
+            seed_data = await asyncio.wait_for(
+                self._seed_discussion(),
+                timeout=community_settings.seeding_timeout_seconds,
+            )
             if not seed_data:
                 await self._release_active_discussion(discussion_id)
                 self._active_discussion_id = None
@@ -183,8 +210,19 @@ class CommunityManager:
 
             topic = seed_data["topic"]
             await self.resources.knowledge_store.community.create_discussion(
-                discussion_id, topic, valid_agent_ids
+                discussion_id,
+                topic,
+                valid_agent_ids,
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
             )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "AAC: Seeding exceeded the configured timeout; skipping discussion."
+            )
+            await self._release_active_discussion(discussion_id)
+            self._active_discussion_id = None
+            return
         except BaseException:
             await self._release_active_discussion(discussion_id)
             self._active_discussion_id = None
@@ -216,7 +254,9 @@ class CommunityManager:
                 self._active_discussion_id = None
                 try:
                     await self.resources.knowledge_store.community.close_discussion(
-                        discussion_id
+                        discussion_id,
+                        user_name=self.user_name,
+                        project_id=self.project_state.project_id,
                     )
                 except Exception as e:
                     logger.error(
@@ -253,10 +293,7 @@ class CommunityManager:
         history = []
 
         for turn in range(max_turns):
-            active_id = await self.resources.redis.get(
-                self._active_discussion_key()
-            )
-            if not active_id or active_id != discussion_id:
+            if not await self._renew_active_discussion(discussion_id):
                 logger.info(
                     f"AAC [{discussion_id}]: Discussion manually closed or "
                     "superseded. Aborting loop."
@@ -299,7 +336,12 @@ class CommunityManager:
             )
 
             await self.resources.knowledge_store.community.add_message(
-                discussion_id, agent_id, message, "assistant"
+                discussion_id,
+                agent_id,
+                message,
+                "assistant",
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
             )
 
             await emit_community(
@@ -370,6 +412,9 @@ class CommunityManager:
             history=history,
             is_community=True,
             current_participants=participants,
+            use_local_references=(
+                ConfigManager.get().config.developer_settings.local_references.enabled
+            ),
         )
 
         executor = AgentExecutor(
@@ -420,7 +465,7 @@ class CommunityManager:
         return full_response.strip() if full_response else None
 
     def _resolve_agent_tools(self, agent: AgentConfig) -> tuple[List[str], List[Dict]]:
-        if not agent.enabled_tools:
+        if agent.enabled_tools is None:
             return COMMUNITY_ENABLED_TOOLS, AAC_SPECIFIC_SCHEMAS
 
         allowed = set(agent.enabled_tools)
@@ -472,27 +517,35 @@ class CommunityManager:
     meaningful discussion.
 
     You must decide:
-    1. TOPIC: What specific subject should agents discuss? Be concrete, not vague.
+    1. TOPIC: What specific subject should agents discuss? Be concrete, not \
+       vague.
     2. OBJECTIVE: What should they achieve? (e.g., resolve a contradiction,
        explore a connection, brainstorm applications, debate a decision)
     3. DISCUSSION_TYPE: "brainstorm" | "debate" | "investigation" | "synthesis"
     4. REASONING: Why this topic now? What makes it valuable?
-    5. AGENT_IDS: Which agents should participate? Pick 2-4 agents whose
-       personas are relevant. You may include yourself.
+    5. AGENT_IDS: Which listed agent IDs should participate? Pick
+       2-4 agents whose personas are relevant. You may include yourself.
 
     Guidelines:
     - Prioritize topics with recent activity or unresolved questions
     - Avoid repeating recent discussion topics
     - Match agents to topics based on their personas
     - Prefer depth over breadth — focused discussions are better
-    - You now have access to project documents via search_documents. Consider initiating discussions around analyzing uploaded files!
+    - You now have access to project documents via search_documents. Consider \
+      initiating discussions around analyzing uploaded files!
     </seeding_role>
     """
 
-        system_prompt = base_prompt + seeding_instructions
-
         graph_context = await self._build_seeding_context()
-        agent_ids, agent_descriptions = await self._build_agent_pool_context()
+        agent_ids_by_local, agent_descriptions = await self._build_agent_pool_context(
+            required_agent=seeding_agent,
+        )
+        system_prompt = base_prompt + seeding_instructions
+        if not ConfigManager.get().config.developer_settings.local_references.enabled:
+            system_prompt += (
+                "\nLegacy ID mode is active. Return only exact agent IDs listed "
+                "in this call."
+            )
 
         user_prompt = f"""
     {graph_context}
@@ -509,7 +562,7 @@ class CommunityManager:
         "objective": "what the discussion should achieve",
         "discussion_type": "brainstorm|debate|investigation|synthesis",
         "reasoning": "why this topic is valuable right now",
-        "agent_ids": ["id1", "id2"]
+        "agent_ids": {json.dumps(list(agent_ids_by_local))}
     }}
     """
 
@@ -551,11 +604,28 @@ class CommunityManager:
                 raise ValueError(f"Missing required keys. Got: {list(data.keys())}")
 
             valid_agent_ids = []
-            for aid in data["agent_ids"]:
-                if aid in agent_ids or aid == seeding_agent.id:
-                    valid_agent_ids.append(aid)
-                else:
-                    logger.warning(f"AAC: Seeded agent_id '{aid}' not found, skipping")
+            for local_agent_id in data["agent_ids"]:
+                try:
+                    agent_id = str(
+                        resolve_local_id(local_agent_id, agent_ids_by_local)
+                    )
+                except ValueError:
+                    logger.warning(
+                        "AAC: Seeded an unknown local agent reference "
+                        f"'{local_agent_id}', skipping"
+                    )
+                    await emit_community(
+                        self.user_name,
+                        "community",
+                        "local_reference_resolution_failed",
+                        {
+                            "pipeline": "community_seeding",
+                            "reference_type": "agent",
+                            "reason": "unknown_id",
+                        },
+                    )
+                    continue
+                valid_agent_ids.append(agent_id)
 
             if not valid_agent_ids:
                 logger.warning("AAC: No valid agents selected, using seeding agent")
@@ -593,7 +663,7 @@ class CommunityManager:
         }
 
     async def _build_seeding_context(self) -> str:
-        """Gather rich context for seeding agent decision-making."""
+        """Gather graph and discussion context for seeding decisions."""
         lines = []
 
         try:
@@ -603,27 +673,16 @@ class CommunityManager:
             stats = await self.resources.knowledge_store.get_graph_stats(
                 visible_project_ids=visible_project_ids
             )
-            notable = await self.resources.knowledge_store.get_notable_entities(
-                visible_project_ids=visible_project_ids,
-                limit=8,
+            community_store = self.resources.knowledge_store.community
+            past_discussions = await community_store.get_recent_discussions(
+                5,
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
             )
-            recent_entities = (
-                await self.resources.knowledge_store.get_recently_active_entities(
-                    visible_project_ids=visible_project_ids,
-                    days=7,
-                    limit=5,
-                )
-            )
-            recent_facts = await self.resources.knowledge_store.get_recent_facts(
-                visible_project_ids=visible_project_ids,
-                days=7,
-                limit=10,
-            )
-            past_discussions = (
-                await self.resources.knowledge_store.community.get_recent_discussions(5)
-            )
-            insights = (
-                await self.resources.knowledge_store.community.get_discussion_insights(5)
+            insights = await community_store.get_discussion_insights(
+                5,
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
             )
         except Exception as e:
             logger.warning(f"Failed to gather seeding context: {e}")
@@ -632,45 +691,11 @@ class CommunityManager:
         if isinstance(stats, dict):
             lines.append("=== GRAPH OVERVIEW ===")
             lines.append(f"Entities: {stats.get('entities', 0)}")
-            lines.append(f"Facts: {stats.get('facts', 0)}")
+            lines.append(f"Episodes: {stats.get('episodes', 0)}")
             lines.append(f"Relationships: {stats.get('relationships', 0)}")
             lines.append("")
         elif isinstance(stats, Exception):
             logger.warning(f"Failed to get graph stats: {stats}")
-
-        if not isinstance(notable, Exception) and notable:
-            lines.append("=== NOTABLE ENTITIES ===")
-            for ent in notable:
-                lines.append(
-                    f"- {ent['name']} ({ent['type']}, {ent['topic']}): "
-                    f"{ent['connection_count']} connections, {ent['fact_count']} facts"
-                )
-            lines.append("")
-        elif isinstance(notable, Exception):
-            logger.warning(f"Failed to get notable entities: {notable}")
-
-        if not isinstance(recent_entities, Exception) and recent_entities:
-            lines.append("=== RECENTLY ACTIVE (last 7 days) ===")
-            for ent in recent_entities:
-                lines.append(
-                    f"- {ent['name']} ({ent['type']}): {ent['recent_facts']} new facts"
-                )
-            lines.append("")
-        elif isinstance(recent_entities, Exception):
-            logger.warning(f"Failed to get recent entities: {recent_entities}")
-
-        if not isinstance(recent_facts, Exception) and recent_facts:
-            lines.append("=== RECENT FACTS ===")
-            for fact in recent_facts:
-                content = (
-                    fact["content"][:100] + "..."
-                    if len(fact["content"]) > 100
-                    else fact["content"]
-                )
-                lines.append(f"- [{fact['entity_name']}] {content}")
-            lines.append("")
-        elif isinstance(recent_facts, Exception):
-            logger.warning(f"Failed to get recent facts: {recent_facts}")
 
         if not isinstance(past_discussions, Exception) and past_discussions:
             lines.append("=== PREVIOUS DISCUSSIONS ===")
@@ -698,8 +723,13 @@ class CommunityManager:
             else "Knowledge graph is available for exploration."
         )
 
-    async def _build_agent_pool_context(self) -> tuple[List[str], str]:
-        """Build descriptive agent pool. Returns (agent_ids, formatted_description)."""
+    async def _build_agent_pool_context(
+        self,
+        *,
+        required_agent: AgentConfig | None = None,
+    ) -> tuple[dict[str, str], str]:
+        """Build the model-facing agent pool with one local-reference map."""
+
         manager = AgentManager(self.resources, self.user_name, {})
         agents = await manager.list_agents()
         pool_ids = set(
@@ -713,12 +743,23 @@ class CommunityManager:
             default_agent = await manager.get_agent(default_id)
             agents = [default_agent] if default_agent else []
 
-        agent_ids = [agent.id for agent in agents]
+        if required_agent and all(agent.id != required_agent.id for agent in agents):
+            agents.append(required_agent)
+        agents = sorted(agents, key=lambda agent: agent.id)
+        use_local_references = (
+            ConfigManager.get().config.developer_settings.local_references.enabled
+        )
+        agent_local_ids, agent_ids_by_local = build_local_id_maps(
+            (agent.id for agent in agents),
+            "a",
+            use_local_references=use_local_references,
+        )
         descriptions = []
         for agent in agents:
             spawned_tag = " [spawned]" if agent.is_spawned else ""
             persona_preview = " ".join(agent.persona_markdown.split())[:160]
             descriptions.append(
-                f"- {agent.name}{spawned_tag} (id: {agent.id}): {persona_preview}"
+                f"- {agent_local_ids[agent.id]}: "
+                f"{agent.name}{spawned_tag}: {persona_preview}"
             )
-        return agent_ids, "\n".join(descriptions)
+        return agent_ids_by_local, "\n".join(descriptions)

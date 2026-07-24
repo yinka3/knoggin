@@ -7,6 +7,8 @@ from common.utils.time_utils import frozen_time
 from core.community.community_store import CommunityStore
 
 FROZEN_AT = "2026-02-03T04:05:06+00:00"
+USER_NAME = "ada"
+PROJECT_ID = "project-1"
 
 
 class RecordingCursor:
@@ -87,10 +89,21 @@ async def test_community_store_write_methods_record_expected_payloads():
     store = CommunityStore(client)
 
     with frozen_time(FROZEN_AT):
-        await store.create_discussion("disc-1", "Profile drift review", ["a1", "a2"])
-        await store.add_message("disc-1", "a1", "Community note", "assistant")
-        await store.close_discussion("disc-1")
-        await store.register_agent_spawn("a1", "spawned-1", "Evidence specialist")
+        await store.create_discussion(
+            "disc-1", "Profile drift review", ["a1", "a2"],
+            user_name=USER_NAME, project_id=PROJECT_ID,
+        )
+        await store.add_message(
+            "disc-1", "a1", "Community note", "assistant",
+            user_name=USER_NAME, project_id=PROJECT_ID,
+        )
+        await store.close_discussion(
+            "disc-1", user_name=USER_NAME, project_id=PROJECT_ID
+        )
+        await store.register_agent_spawn(
+            "a1", "spawned-1", "Evidence specialist",
+            user_name=USER_NAME, project_id=PROJECT_ID,
+        )
 
     assert len(client.write_calls) == 4
     assert "CREATE (d:AAC_Discussion" in client.write_calls[0][0]
@@ -99,6 +112,8 @@ async def test_community_store_write_methods_record_expected_payloads():
         "id": "disc-1",
         "topic": "Profile drift review",
         "agent_ids": ["a1", "a2"],
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
         "ts": FROZEN_AT,
     }
 
@@ -108,12 +123,16 @@ async def test_community_store_write_methods_record_expected_payloads():
         "agent_id": "a1",
         "content": "Community note",
         "role": "assistant",
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
         "ts": FROZEN_AT,
     }
 
     assert "SET d.status = 'closed'" in client.write_calls[2][0]
     assert only_payload(client.write_calls[2]) == {
         "id": "disc-1",
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
         "ts": FROZEN_AT,
     }
 
@@ -122,6 +141,8 @@ async def test_community_store_write_methods_record_expected_payloads():
         "parent_id": "a1",
         "child_id": "spawned-1",
         "detail": "Evidence specialist",
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
         "ts": FROZEN_AT,
     }
 
@@ -145,7 +166,9 @@ async def test_community_store_get_discussions_normalizes_rows():
     )
     store = CommunityStore(client)
 
-    discussions = await store.get_discussions()
+    discussions = await store.get_discussions(
+        user_name=USER_NAME, project_id=PROJECT_ID
+    )
 
     assert discussions == [
         {
@@ -157,7 +180,10 @@ async def test_community_store_get_discussions_normalizes_rows():
         }
     ]
     assert "ORDER BY d.created_at DESC" in client.read_calls[0][0]
-    assert client.read_calls[0][1] == ("{}",)
+    assert json.loads(client.read_calls[0][1][0]) == {
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
+    }
 
 
 @pytest.mark.storage
@@ -183,7 +209,9 @@ async def test_community_store_get_discussion_history_normalizes_rows():
     )
     store = CommunityStore(client)
 
-    history = await store.get_discussion_history("disc-1")
+    history = await store.get_discussion_history(
+        "disc-1", user_name=USER_NAME, project_id=PROJECT_ID
+    )
 
     assert history == [
         {
@@ -199,7 +227,11 @@ async def test_community_store_get_discussion_history_normalizes_rows():
             "timestamp": "2026-02-03T04:06:06+00:00",
         },
     ]
-    assert json.loads(client.read_calls[0][1][0]) == {"discussion_id": "disc-1"}
+    assert json.loads(client.read_calls[0][1][0]) == {
+        "discussion_id": "disc-1",
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
+    }
     assert "ORDER BY m.timestamp ASC" in client.read_calls[0][0]
 
 
@@ -220,7 +252,9 @@ async def test_community_store_get_agent_hierarchy_normalizes_rows():
     )
     store = CommunityStore(client)
 
-    hierarchy = await store.get_agent_hierarchy()
+    hierarchy = await store.get_agent_hierarchy(
+        user_name=USER_NAME, project_id=PROJECT_ID
+    )
 
     assert hierarchy == [
         {
@@ -230,7 +264,10 @@ async def test_community_store_get_agent_hierarchy_normalizes_rows():
             "timestamp": "2026-02-03T04:05:06+00:00",
         }
     ]
-    assert client.read_calls[0][1] == ("{}",)
+    assert json.loads(client.read_calls[0][1][0]) == {
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
+    }
 
 
 @pytest.mark.storage
@@ -252,7 +289,9 @@ async def test_community_store_get_recent_discussions_passes_limit():
     )
     store = CommunityStore(client)
 
-    discussions = await store.get_recent_discussions(limit=7)
+    discussions = await store.get_recent_discussions(
+        limit=7, user_name=USER_NAME, project_id=PROJECT_ID
+    )
 
     assert discussions == [
         {
@@ -264,7 +303,11 @@ async def test_community_store_get_recent_discussions_passes_limit():
             "message_count": "3",
         }
     ]
-    assert json.loads(client.read_calls[0][1][0]) == {"limit": 7}
+    assert json.loads(client.read_calls[0][1][0]) == {
+        "limit": 7,
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
+    }
     assert "message_count" in client.read_calls[0][0]
 
 
@@ -284,7 +327,9 @@ async def test_community_store_get_discussion_insights_passes_limit():
     )
     store = CommunityStore(client)
 
-    insights = await store.get_discussion_insights(limit=4)
+    insights = await store.get_discussion_insights(
+        limit=4, user_name=USER_NAME, project_id=PROJECT_ID
+    )
 
     assert insights == [
         {
@@ -293,7 +338,11 @@ async def test_community_store_get_discussion_insights_passes_limit():
             "discussion_topic": "Testing plan",
         }
     ]
-    assert json.loads(client.read_calls[0][1][0]) == {"limit": 4}
+    assert json.loads(client.read_calls[0][1][0]) == {
+        "limit": 4,
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
+    }
     assert "WHERE m.role = 'insight'" in client.read_calls[0][0]
 
 
@@ -313,7 +362,9 @@ async def test_community_store_read_failures_return_empty_list(method_name, args
     client = RecordingPostgresClient(read_exception=RuntimeError("read failed"))
     store = CommunityStore(client)
 
-    assert await getattr(store, method_name)(*args) == []
+    assert await getattr(store, method_name)(
+        *args, user_name=USER_NAME, project_id=PROJECT_ID
+    ) == []
 
 
 @pytest.mark.storage
@@ -323,7 +374,10 @@ async def test_community_store_write_failures_reraise():
     store = CommunityStore(client)
 
     with pytest.raises(RuntimeError, match="write failed"):
-        await store.create_discussion("disc-1", "Topic", ["a1"])
+        await store.create_discussion(
+            "disc-1", "Topic", ["a1"],
+            user_name=USER_NAME, project_id=PROJECT_ID,
+        )
 
 
 @pytest.mark.storage
@@ -333,11 +387,17 @@ async def test_community_store_delete_old_discussions_uses_pool_and_returns_coun
     store = CommunityStore(client)
 
     with frozen_time("2026-02-10T04:05:06+00:00"):
-        deleted = await store.delete_old_discussions(retention_days=7)
+        deleted = await store.delete_old_discussions(
+            retention_days=7, user_name=USER_NAME, project_id=PROJECT_ID
+        )
 
     assert deleted == 2
     assert client.transaction_enters == 1
     assert client.cursor_enters == 1
     query, params = client.cursor_execute_calls[0]
     assert "DETACH DELETE d, m" in query
-    assert json.loads(params[0]) == {"cutoff": "2026-02-03T04:05:06+00:00"}
+    assert json.loads(params[0]) == {
+        "cutoff": "2026-02-03T04:05:06+00:00",
+        "user_name": USER_NAME,
+        "project_id": PROJECT_ID,
+    }

@@ -33,6 +33,96 @@ class DocumentReader:
         )
         return rows[0] if rows else None
 
+    async def fetch_workspace_source(
+        self,
+        *,
+        source_id: str,
+        session_id: Optional[str],
+    ) -> Optional[Dict]:
+        """Return one workspace source visible to this project/session."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT
+                source_id,
+                project_id,
+                session_id,
+                visibility_scope,
+                display_name,
+                last_synced_at,
+                last_manifest_candidate_count,
+                last_manifest_included_count,
+                last_manifest_excluded_count,
+                last_manifest_excluded_reason_counts,
+                created_at,
+                updated_at
+            FROM public.document_workspace_sources
+            WHERE source_id = %s
+              AND project_id = %s
+              AND (
+                  visibility_scope = 'project'
+                  OR (
+                      visibility_scope = 'session'
+                      AND session_id = %s
+                  )
+              )
+            """,
+            (source_id, self._project_id, session_id),
+        )
+        return rows[0] if rows else None
+
+    async def fetch_workspace_indexing_status(
+        self,
+        *,
+        source_id: str,
+        session_id: Optional[str],
+    ) -> Optional[Dict]:
+        """Return source metadata and cheap aggregate document status counts."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT
+                ws.source_id,
+                ws.project_id,
+                ws.session_id,
+                ws.visibility_scope,
+                ws.display_name,
+                ws.last_synced_at,
+                ws.last_manifest_candidate_count,
+                ws.last_manifest_included_count,
+                ws.last_manifest_excluded_count,
+                ws.last_manifest_excluded_reason_counts,
+                ws.created_at,
+                ws.updated_at,
+                COUNT(pd.document_id)::INTEGER AS document_count,
+                COUNT(pd.document_id) FILTER (
+                    WHERE pd.status = 'queued'
+                )::INTEGER AS queued_count,
+                COUNT(pd.document_id) FILTER (
+                    WHERE pd.status = 'indexing'
+                )::INTEGER AS indexing_count,
+                COUNT(pd.document_id) FILTER (
+                    WHERE pd.status = 'indexed'
+                )::INTEGER AS indexed_count,
+                COUNT(pd.document_id) FILTER (
+                    WHERE pd.status = 'failed'
+                )::INTEGER AS failed_count
+            FROM public.document_workspace_sources AS ws
+            LEFT JOIN public.project_documents AS pd
+                ON pd.source_id = ws.source_id
+            WHERE ws.source_id = %s
+              AND ws.project_id = %s
+              AND (
+                  ws.visibility_scope = 'project'
+                  OR (
+                      ws.visibility_scope = 'session'
+                      AND ws.session_id = %s
+                  )
+              )
+            GROUP BY ws.source_id
+            """,
+            (source_id, self._project_id, session_id),
+        )
+        return rows[0] if rows else None
+
     async def fetch_documents_by_reference(
         self,
         *,
@@ -98,18 +188,65 @@ class DocumentReader:
             (selector_value, self._project_id, session_id),
         )
 
-    async def fetch_document_content(self, document_id: str) -> Optional[bytes]:
-        """Return the raw bytes for a document, or None if absent."""
+    async def fetch_document_content(
+        self,
+        *,
+        document_id: str,
+        session_id: Optional[str],
+    ) -> Optional[bytes]:
+        """Return raw bytes only when the document is visible in this scope."""
         rows = await self._client.fetch_all(
             """
-            SELECT content FROM public.document_content
-            WHERE document_id = %s
+            SELECT dc.content
+            FROM public.document_content AS dc
+            JOIN public.project_documents AS pd
+                ON pd.document_id = dc.document_id
+            WHERE dc.document_id = %s
+              AND pd.project_id = %s
+              AND (
+                  pd.visibility_scope = 'project'
+                  OR (
+                      pd.visibility_scope = 'session'
+                      AND pd.session_id = %s
+                  )
+              )
             """,
-            (document_id,),
+            (document_id, self._project_id, session_id),
         )
         if not rows:
             return None
         return bytes(rows[0]["content"])
+
+    async def fetch_extracted_text(
+        self,
+        *,
+        document_id: str,
+        content_hash: str,
+        session_id: Optional[str],
+    ) -> Optional[str]:
+        """Return visible derived text only when it matches the source hash."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT dc.extracted_text
+            FROM public.document_content AS dc
+            JOIN public.project_documents AS pd
+                ON pd.document_id = dc.document_id
+            WHERE dc.document_id = %s
+              AND pd.content_hash = %s
+              AND dc.extracted_content_hash = pd.content_hash
+              AND dc.extracted_text IS NOT NULL
+              AND pd.project_id = %s
+              AND (
+                  pd.visibility_scope = 'project'
+                  OR (
+                      pd.visibility_scope = 'session'
+                      AND pd.session_id = %s
+                  )
+              )
+            """,
+            (document_id, content_hash, self._project_id, session_id),
+        )
+        return rows[0]["extracted_text"] if rows else None
 
     async def list_documents_for_index_recovery(self, limit: int = 16) -> List[Dict]:
         """Return queued project documents for durable indexing recovery."""
@@ -136,6 +273,7 @@ class DocumentReader:
             FROM public.project_documents
             WHERE project_id = %s
               AND status = 'queued'
+              AND source_id IS NULL
             ORDER BY created_at ASC, document_id ASC
             LIMIT %s
             """,
@@ -148,6 +286,56 @@ class DocumentReader:
             SELECT COUNT(*)::INTEGER AS count
             FROM public.project_documents
             WHERE project_id = %s
+              AND status = 'queued'
+              AND source_id IS NULL
+            """,
+            (self._project_id,),
+        )
+        return int(rows[0]["count"]) if rows else 0
+
+    async def list_workspace_sources_for_index_recovery(
+        self,
+        limit: int = 16,
+    ) -> List[Dict]:
+        """Return workspace sources with queued files after a restart."""
+        return await self._client.fetch_all(
+            """
+            SELECT
+                source_id,
+                MIN(session_id) AS session_id
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND source_id IS NOT NULL
+              AND status = 'queued'
+            GROUP BY source_id
+            ORDER BY MIN(updated_at) ASC, source_id ASC
+            LIMIT %s
+            """,
+            (self._project_id, limit),
+        )
+
+    async def count_queued_workspace_documents(self, source_id: str) -> int:
+        """Return the number of queued files for one workspace source."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT COUNT(*)::INTEGER AS count
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND source_id = %s
+              AND status = 'queued'
+            """,
+            (self._project_id, source_id),
+        )
+        return int(rows[0]["count"]) if rows else 0
+
+    async def count_workspace_documents_for_index_recovery(self) -> int:
+        """Return all queued workspace files in this project."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT COUNT(*)::INTEGER AS count
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND source_id IS NOT NULL
               AND status = 'queued'
             """,
             (self._project_id,),
@@ -354,31 +542,48 @@ class DocumentReader:
         self,
         *,
         session_id: Optional[str],
+        query_text: str,
         query_embedding: List[float],
         n_results: int,
+        candidate_limit: int,
         document_filter: Optional[str] = None,
         folder_root_id: Optional[str] = None,
         relative_path: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> List[Dict]:
         """
-        Return the top-N chunk rows ranked by cosine similarity to
-        query_embedding.
+        Return the top-N chunks from semantic and lexical candidates, fused
+        with reciprocal-rank fusion. This keeps conceptual queries useful
+        while allowing exact code identifiers and paths to surface.
         """
         embedding_json = json.dumps(query_embedding)
         sql = """
-            SELECT
-                dc.document_id,
-                pd.folder_root_id,
-                pd.original_name,
-                pd.relative_path,
-                dc.chunk_index,
-                dc.content,
-                1 - (dc.embedding <=> %s::vector) AS score
-            FROM public.document_chunks AS dc
-            JOIN public.project_documents AS pd
-                ON pd.document_id = dc.document_id
-            WHERE pd.project_id = %s
+            WITH search_query AS (
+                SELECT websearch_to_tsquery('simple', %s) AS terms
+            ),
+            query_vector AS (
+                SELECT %s::vector AS embedding
+            ),
+            visible_chunks AS NOT MATERIALIZED (
+                SELECT
+                    dc.chunk_id,
+                    dc.document_id,
+                    pd.folder_root_id,
+                    pd.original_name,
+                    pd.relative_path,
+                    dc.chunk_index,
+                    dc.content,
+                    dc.language,
+                    dc.chunk_kind,
+                    dc.symbol_name,
+                    dc.start_line,
+                    dc.end_line,
+                    dc.embedding,
+                    dc.search_vector
+                FROM public.document_chunks AS dc
+                JOIN public.project_documents AS pd
+                    ON pd.document_id = dc.document_id
+                WHERE pd.project_id = %s
               AND pd.status = 'indexed'
               AND (
                   pd.visibility_scope = 'project'
@@ -388,7 +593,7 @@ class DocumentReader:
                   )
               )
         """
-        params: list = [embedding_json, self._project_id, session_id]
+        params: list = [query_text, embedding_json, self._project_id, session_id]
         if document_filter is not None:
             sql += " AND pd.document_id = %s"
             params.append(document_filter)
@@ -406,11 +611,69 @@ class DocumentReader:
             )
             params.extend([path_prefix, f"{escaped}/%"])
         sql += """
+            ),
+            semantic_candidates AS (
+                SELECT
+                    ranked.chunk_id,
+                    row_number() OVER (
+                        ORDER BY ranked.distance, ranked.chunk_id
+                    ) AS semantic_rank
+                FROM (
+                    SELECT
+                        vc.chunk_id,
+                        vc.embedding <=> qv.embedding AS distance
+                    FROM visible_chunks AS vc
+                    CROSS JOIN query_vector AS qv
+                    ORDER BY vc.embedding <=> qv.embedding, vc.chunk_id
+                    LIMIT %s
+                ) AS ranked
+            ),
+            lexical_candidates AS (
+                SELECT
+                    ranked.chunk_id,
+                    row_number() OVER (
+                        ORDER BY ranked.lexical_score DESC, ranked.chunk_id
+                    ) AS lexical_rank
+                FROM (
+                    SELECT
+                        vc.chunk_id,
+                        ts_rank_cd(vc.search_vector, sq.terms) AS lexical_score
+                    FROM visible_chunks AS vc
+                    CROSS JOIN search_query AS sq
+                    WHERE vc.search_vector @@ sq.terms
+                    ORDER BY lexical_score DESC, vc.chunk_id
+                    LIMIT %s
+                ) AS ranked
+            ),
+            candidate_ids AS (
+                SELECT chunk_id FROM semantic_candidates
+                UNION
+                SELECT chunk_id FROM lexical_candidates
+            )
+            SELECT
+                vc.document_id,
+                vc.folder_root_id,
+                vc.original_name,
+                vc.relative_path,
+                vc.chunk_index,
+                vc.content,
+                vc.language,
+                vc.chunk_kind,
+                vc.symbol_name,
+                vc.start_line,
+                vc.end_line,
+                1 - (vc.embedding <=> qv.embedding) AS score
+            FROM candidate_ids AS ci
+            JOIN visible_chunks AS vc ON vc.chunk_id = ci.chunk_id
+            CROSS JOIN query_vector AS qv
+            LEFT JOIN semantic_candidates AS sc ON sc.chunk_id = ci.chunk_id
+            LEFT JOIN lexical_candidates AS lc ON lc.chunk_id = ci.chunk_id
             ORDER BY
-                dc.embedding <=> %s::vector,
-                dc.document_id,
-                dc.chunk_index
+                COALESCE(1.0 / (60 + sc.semantic_rank), 0)
+                + COALESCE(1.0 / (60 + lc.lexical_rank), 0) DESC,
+                vc.document_id,
+                vc.chunk_index
             LIMIT %s
         """
-        params.extend([embedding_json, n_results])
+        params.extend([candidate_limit, candidate_limit, n_results])
         return await self._client.fetch_all(sql, tuple(params))

@@ -1,8 +1,6 @@
-import os
-import json
-import yaml
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from common.conf.manager import ConfigManager, deep_merge
 from common.schema.settings import RootConfig

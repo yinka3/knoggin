@@ -2,8 +2,8 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from infrastructure.redis_client import RedisKeys
 from core.knowledge.entity.merge_service import EntityMergeService
+from infrastructure.redis_client import RedisKeys
 
 
 class MaintenanceTools:
@@ -52,9 +52,9 @@ class MaintenanceTools:
 
     @staticmethod
     def _merge_candidate_rank_key(candidate: Dict) -> tuple:
-        fact_support = str(candidate.get("fact_support") or "").casefold()
+        evidence_support = str(candidate.get("evidence_support") or "").casefold()
         return (
-            1 if fact_support == "entailment" else 0,
+            1 if evidence_support == "entailment" else 0,
             candidate.get("fuzz_score") or 0,
             candidate.get("cosine_score") or 0,
             candidate.get("shared_neighbor_count") or 0,
@@ -62,21 +62,18 @@ class MaintenanceTools:
 
     @staticmethod
     def _format_merge_candidate(candidate: Dict) -> Dict:
-        facts = []
-        for side, key in (("primary", "facts_a"), ("secondary", "facts_b")):
-            for fact in candidate.get(key, []) or []:
-                fact_id = getattr(fact, "id", None)
-                content = getattr(fact, "content", None)
-                if isinstance(fact, dict):
-                    fact_id = fact.get("id") or fact.get("fact_id")
-                    content = fact.get("content")
-                facts.append(
-                    {
-                        "side": side,
-                        "fact_id": fact_id,
-                        "content": content,
-                    }
-                )
+        evidence = []
+        for side, key in (("primary", "evidence_a"), ("secondary", "evidence_b")):
+            for item in candidate.get(key, []) or []:
+                reference = {
+                    "side": side,
+                    "kind": item.get("kind"),
+                    "text": item.get("text"),
+                }
+                for identifier in ("message_id", "episode_id", "session_id"):
+                    if item.get(identifier) is not None:
+                        reference[identifier] = item[identifier]
+                evidence.append(reference)
 
         formatted = {
             "primary_id": candidate.get("primary_id"),
@@ -90,15 +87,15 @@ class MaintenanceTools:
             "fuzz_score": candidate.get("fuzz_score", 0),
             "shared_neighbor_count": candidate.get("shared_neighbor_count", 0),
             "reasons": list(candidate.get("reasons", [])),
-            "evidence_facts": facts,
+            "evidence": evidence,
         }
         if "cosine_score" in candidate:
             formatted["cosine_score"] = candidate.get("cosine_score")
-        if "fact_support" in candidate:
-            formatted["fact_support"] = candidate.get("fact_support")
-        if "fact_support_pairs" in candidate:
-            formatted["fact_support_pairs"] = list(
-                candidate.get("fact_support_pairs") or []
+        if "evidence_support" in candidate:
+            formatted["evidence_support"] = candidate.get("evidence_support")
+        if "evidence_support_pairs" in candidate:
+            formatted["evidence_support_pairs"] = list(
+                candidate.get("evidence_support_pairs") or []
             )
         return formatted
 
@@ -106,8 +103,9 @@ class MaintenanceTools:
         self,
         primary_id: int,
         duplicate_id: int,
-        evidence_fact_ids: List[str],
         reasoning: str,
+        evidence_message_ids: Optional[List[int]] = None,
+        evidence_episode_ids: Optional[List[str]] = None,
         confidence: Optional[float] = None,
     ) -> Dict:
         """Submit a grounded merge proposal without granting destructive access."""
@@ -122,7 +120,8 @@ class MaintenanceTools:
                 project_id=self.project_id,
                 primary_id=primary_id,
                 duplicate_id=duplicate_id,
-                evidence_fact_ids=evidence_fact_ids,
+                evidence_message_ids=evidence_message_ids or [],
+                evidence_episode_ids=evidence_episode_ids or [],
                 reasoning=reasoning,
                 model_confidence=confidence,
             )

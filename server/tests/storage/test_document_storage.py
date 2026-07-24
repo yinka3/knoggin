@@ -66,9 +66,9 @@ async def test_document_chunks_are_deleted_with_parent_document(
     await real_postgres_client.execute(
         """
         INSERT INTO document_chunks (
-            chunk_id, document_id, chunk_index, content, embedding
+            chunk_id, document_id, chunk_index, content, relative_path, embedding
         )
-        VALUES (%s, %s, 0, 'alpha', %s::vector)
+        VALUES (%s, %s, 0, 'alpha', 'notes.md', %s::vector)
         """,
         (chunk_id, document_id, embedding),
     )
@@ -129,9 +129,9 @@ async def test_folder_upload_delete_cascades_documents_and_chunks(
     await real_postgres_client.execute(
         """
         INSERT INTO document_chunks (
-            chunk_id, document_id, chunk_index, content, embedding
+            chunk_id, document_id, chunk_index, content, relative_path, embedding
         )
-        VALUES (%s, %s, 0, 'alpha', %s::vector)
+        VALUES (%s, %s, 0, 'alpha', 'notes.md', %s::vector)
         """,
         (chunk_id, document_id, embedding),
     )

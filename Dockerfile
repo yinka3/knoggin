@@ -26,7 +26,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Pre-download ML models so first boot is instant
 RUN python -c "\
 from sentence_transformers import SentenceTransformer, CrossEncoder; \
-SentenceTransformer('dunzhang/stella_en_1.5B_v5'); \
+SentenceTransformer('dunzhang/stella_en_1.5B_v5', backend='onnx', trust_remote_code=True); \
 CrossEncoder('BAAI/bge-reranker-large')"
 
 RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_large-v2.1')"

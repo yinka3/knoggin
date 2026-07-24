@@ -67,7 +67,7 @@ class OnboardingService:
         name: str,
         description: Optional[str] = None,
         kickoff_note: Optional[str] = None,
-        facts: Optional[list[str]] = None,
+        context_notes: Optional[list[str]] = None,
         preferences: Optional[list[str]] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -97,7 +97,7 @@ class OnboardingService:
             project_name=project_name,
             description=project_description,
             kickoff_note=kickoff_note,
-            facts=facts,
+            context_notes=context_notes,
             preferences=preferences,
             seed_user_profile=seed_user_profile,
         )
@@ -125,18 +125,18 @@ class OnboardingService:
         project_name: str,
         description: Optional[str],
         kickoff_note: Optional[str],
-        facts: Optional[list[str]],
+        context_notes: Optional[list[str]],
         preferences: Optional[list[str]],
         seed_user_profile: bool,
     ) -> str:
         sections = []
 
         if seed_user_profile:
-            cleaned_facts = _clean_list(facts or [])
-            if cleaned_facts:
+            cleaned_context_notes = _clean_list(context_notes or [])
+            if cleaned_context_notes:
                 sections.append(
-                    "Project-scoped user facts:\n"
-                    + "\n".join(f"- {fact}" for fact in cleaned_facts)
+                    "Project-scoped context notes:\n"
+                    + "\n".join(f"- {note}" for note in cleaned_context_notes)
                 )
 
             cleaned_preferences = _clean_list(preferences or [])

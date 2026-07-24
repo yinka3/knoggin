@@ -9,7 +9,6 @@ from loguru import logger
 from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
-from common.utils.time_utils import parse_iso_time_or_now
 
 PRONOUNS = {
     "my",
@@ -231,17 +230,6 @@ async def fetch_conversation_turns(
     return results
 
 
-def format_recorded_date(recorded: str) -> str:
-    """Format ISO timestamp to YYYY-MM-DD, with fallback."""
-    if not recorded:
-        return "unknown"
-    try:
-        dt = parse_iso_time_or_now(recorded)
-        return dt.strftime("%Y-%m-%d")
-    except Exception:
-        return str(recorded)[:10]
-
-
 def format_vp01_input(
     messages: List[Dict],
     known_ents: List[Tuple[str, int]],
@@ -249,13 +237,14 @@ def format_vp01_input(
     ambiguous: List[Tuple[int, str, str, List[str]]],
     covered_texts: Dict[int, set],
     label_block: str,
+    message_local_ids: Dict[int, str],
 ) -> str:
     lines = []
     lines.append("## Label Schema\n")
     lines.append(label_block)
 
     lines.append("\n## Messages\n")
-    valid_msg_ids = [msg["id"] for msg in messages]
+    valid_msg_ids = [message_local_ids[msg["id"]] for msg in messages]
     lines.append(f"Valid msg_id values: {valid_msg_ids}")
     for msg in messages:
         label = msg.get("role_label")
@@ -263,12 +252,12 @@ def format_vp01_input(
             label = "USER" if msg.get("role") == "user" else "AGENT"
 
         content = msg.get("message") or msg.get("content") or ""
-        lines.append(f'[MSG {msg["id"]}] [{label}]: "{content}"')
+        lines.append(f'[MSG {message_local_ids[msg["id"]]}] [{label}]: "{content}"')
 
     lines.append("\n## Known Entities (from graph - do not override)\n")
     if known_ents:
-        for span_text, eid in known_ents:
-            lines.append(f'- "{span_text}" -> entity_id={eid}')
+        for span_text, _ in known_ents:
+            lines.append(f'- "{span_text}" — already known; do not return it')
     else:
         lines.append("(none)")
 
@@ -282,7 +271,7 @@ def format_vp01_input(
 
     if gliner_resolved:
         for msg_id, span, label in gliner_resolved:
-            lines.append(f'- MSG {msg_id}: "{span}" -> {label}')
+            lines.append(f'- MSG {message_local_ids[msg_id]}: "{span}" -> {label}')
     else:
         lines.append("(none)")
 
@@ -290,7 +279,8 @@ def format_vp01_input(
         lines.append("\n## Ambiguous (Task 1: assign topic)")
         for msg_id, span_text, label, topics in ambiguous:
             lines.append(
-                f'- MSG {msg_id}: "{span_text}" ({label}) -> choose from: {topics}'
+                f'- MSG {message_local_ids[msg_id]}: "{span_text}" ({label}) '
+                f"-> choose from: {topics}"
             )
 
     lines.append("\n## Discovery (Task 2: find missed entities)")
@@ -308,6 +298,7 @@ def format_vp02_input(
     candidates: List[Dict],
     messages: List[Dict],
     session_context: str,
+    message_local_ids: Dict[int, str],
     user_name: Optional[str] = None,
 ) -> str:
     lines = []
@@ -321,7 +312,9 @@ def format_vp02_input(
         for c in candidates:
             msg_ids = c.get("source_msgs", [])
             if msg_ids:
-                source = f" (from MSG {', '.join(str(m) for m in msg_ids)})"
+                source = " (from MSG {})".format(
+                    ", ".join(message_local_ids[message_id] for message_id in msg_ids)
+                )
             else:
                 source = ""
             lines.append(f"{c['canonical_name']} [{c['type']}]{source}")
@@ -331,7 +324,7 @@ def format_vp02_input(
         lines.append("(none)")
 
     lines.append("\n## Messages")
-    valid_msg_ids = [msg["id"] for msg in messages]
+    valid_msg_ids = [message_local_ids[msg["id"]] for msg in messages]
     lines.append(f"Valid msg_id values: {valid_msg_ids}")
     if messages:
         for msg in messages:
@@ -340,7 +333,9 @@ def format_vp02_input(
                 label = "USER" if msg.get("role") == "user" else "AGENT"
 
             content = msg.get("message") or msg.get("content") or msg.get("text") or ""
-            lines.append(f'[MSG {msg["id"]}] [{label}]: "{content}"')
+            lines.append(
+                f'[MSG {message_local_ids[msg["id"]]}] [{label}]: "{content}"'
+            )
     else:
         lines.append("(none)")
 
@@ -364,76 +359,6 @@ def format_vp02_input(
         lines.append("(none)")
 
     return "\n".join(lines)
-
-
-def _format_entity_block(ent: Dict[str, Any], label: Optional[str] = None) -> List[str]:
-    name = ent.get("canonical_name", ent.get("entity_name", "Unknown"))
-    etype = ent.get("type", ent.get("entity_type", "Unknown"))
-
-    header = f"### {label}: {name} [{etype}]" if label else f"### {name} [{etype}]"
-    output = [header]
-
-    aliases = ent.get("aliases", ent.get("known_aliases", []))
-    if aliases:
-        output.append(f"Aliases: {', '.join(aliases)}")
-    else:
-        output.append("Aliases: (none)")
-
-    facts = ent.get("facts", ent.get("existing_facts", []))
-    if facts:
-        output.append("Facts:")
-        for f in facts:
-            content = f.get("content", "")
-            recorded = f.get("recorded_at", "")
-            source = f.get("source_message")
-
-            if recorded:
-                recorded_str = format_recorded_date(recorded)
-            else:
-                recorded_str = "unknown"
-
-            source_info = f', source: "{source}"' if source else ""
-            output.append(f"  - {content} (recorded: {recorded_str}{source_info})")
-
-    return output
-
-
-def format_vp04_input(entities: List[Dict], conversation_text: str) -> str:
-    """Format prompt for extraction verification phase."""
-    lines = []
-    lines.append("## Entities")
-    entity_names = [
-        ent.get("canonical_name", ent.get("entity_name", "Unknown"))
-        for ent in entities
-    ]
-    lines.append(f"Valid canonical_name values: {entity_names}")
-
-    for ent in entities:
-        lines.extend(_format_entity_block(ent))
-        lines.append("")
-
-    lines.append("## Prior Conversation For Context")
-    lines.append(conversation_text)
-    lines.append("")
-    lines.append("## Output Constraints")
-    lines.append("Use only Valid canonical_name values.")
-    lines.append(
-        "Use source_msg_id only when the fact is grounded in a [MSG_<id>] or "
-        "[MSG <id>] line above."
-    )
-    lines.append("Use exact existing fact text for supersedes or invalidates.")
-
-    return "\n".join(lines)
-
-
-def format_vp05_input(entity_a: Dict, entity_b: Dict) -> str:
-    """Format prompt for merge profile validation phase."""
-
-    output = []
-    output.extend(_format_entity_block(entity_a, "Entity A"))
-    output.append("")
-    output.extend(_format_entity_block(entity_b, "Entity B"))
-    return "\n".join(output)
 
 
 def safe_update(target_method: Callable, settings_model: Any) -> Optional[Any]:

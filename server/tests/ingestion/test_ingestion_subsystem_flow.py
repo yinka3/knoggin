@@ -4,11 +4,12 @@ import pytest
 
 from common.exceptions import LLMProviderError
 from common.schema.contracts import (
+    ConnectionMention,
     ConnectionsResult,
+    NERMention,
     NERResult,
-    UserConnectionRecord,
+    UserConnectionMention,
 )
-from common.schema.primitives import ConnectionRecord, EntityRecord
 from common.schema.settings import IngestionSettings, TextProcessorSettings
 from core.ingestion.services.batch_consumer import IngestionWorker
 from core.ingestion.services.pipeline_service import IngestionPipeline
@@ -177,8 +178,8 @@ async def empty_context(window, up_to_msg_id=None):
     return []
 
 
-def make_entity(name, *, msg_id=1, typ="project", topic="General", confidence=0.95):
-    return EntityRecord(
+def make_entity(name, *, msg_id="m1", typ="project", topic="General", confidence=0.95):
+    return NERMention(
         msg_id=msg_id,
         name=name,
         type=typ,
@@ -190,8 +191,8 @@ def make_entity(name, *, msg_id=1, typ="project", topic="General", confidence=0.
 def make_connections(*, relationship_entity_b="Bob"):
     return ConnectionsResult(
         connections=[
-            ConnectionRecord(
-                msg_id=1,
+            ConnectionMention(
+                msg_id="m1",
                 entity_a="Alice",
                 entity_b=relationship_entity_b,
                 relationship="works_with",
@@ -200,8 +201,8 @@ def make_connections(*, relationship_entity_b="Bob"):
             )
         ],
         user_connections=[
-            UserConnectionRecord(
-                msg_id=1,
+            UserConnectionMention(
+                msg_id="m1",
                 entity_name="Knoggin",
                 relationship="works_on",
                 confidence=0.88,
@@ -320,7 +321,7 @@ async def make_harness(
 @pytest.mark.no_network
 async def test_ingestion_subsystem_happy_path_drains_buffer_to_graph_write():
     ner_result = NERResult(
-        mentions=[make_entity("Linear", msg_id=1, typ="tool", topic="General")]
+        mentions=[make_entity("Linear", msg_id="m1", typ="tool", topic="General")]
     )
     consumer, redis, processor, knowledge_store, write_to_graph, entities = (
         await make_harness(
