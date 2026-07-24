@@ -218,7 +218,7 @@ class TextProcessorSettings(BaseModel):
 
 class SearchSettings(BaseModel):
     fts_limit: int = Field(50, ge=1)
-    rerank_candidates: int = Field(45, ge=1)
+    rerank_candidates: int = Field(25, ge=1)
     default_message_limit: int = Field(8, ge=1)
     default_entity_limit: int = Field(5, ge=1)
     default_activity_hours: int = Field(24, ge=1)

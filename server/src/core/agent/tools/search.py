@@ -534,7 +534,7 @@ class SearchTools:
         an optional cross-encoder reranking step if candidates exceed 1.
         """
         fts_limit = self.search_cfg.get("fts_limit", 50)
-        rerank_candidates = self.search_cfg.get("rerank_candidates", 45)
+        rerank_candidates = self.search_cfg.get("rerank_candidates", 25)
 
         results = {}
 
