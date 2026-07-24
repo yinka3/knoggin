@@ -4,6 +4,8 @@ import pytest
 
 from core.knowledge.db.writers.document_writer import DocumentWriter
 
+_MISMATCH_ERROR = "chunks and embeddings must have the same length"
+
 
 class RecordingCursor:
     def __init__(self) -> None:
@@ -49,3 +51,38 @@ async def test_insert_document_uses_public_transaction_contract():
     assert len(client.cursor.calls) == 2
     assert "INSERT INTO public.project_documents" in client.cursor.calls[0][0]
     assert "INSERT INTO public.document_content" in client.cursor.calls[1][0]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize("operation", ["workspace", "single_document"])
+async def test_document_writer_rejects_mismatched_chunk_embedding_lists(operation):
+    client = TransactionOnlyClient()
+    writer = DocumentWriter(client, "project-1")
+
+    with pytest.raises(ValueError, match=_MISMATCH_ERROR):
+        if operation == "workspace":
+            await writer.persist_workspace_indexed_documents(
+                documents=[
+                    {
+                        "document_id": "document-1",
+                        "relative_path": "notes.md",
+                        "content_hash": "hash",
+                        "extracted_text": "notes",
+                        "chunks": ["chunk"],
+                        "embeddings": [],
+                    }
+                ],
+                indexed_at="2026-07-23T00:00:00+00:00",
+            )
+        else:
+            await writer.persist_indexed_chunks(
+                document_id="document-1",
+                session_id=None,
+                chunks=["chunk"],
+                embeddings=[],
+                extracted_text="notes",
+                indexed_at="2026-07-23T00:00:00+00:00",
+            )
+
+    assert client.transaction_count == 0

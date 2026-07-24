@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -308,7 +309,7 @@ def _attach_graph_work_summary(
 ) -> None:
     if not batch.work_unit:
         return
-    batch.work_unit.metadata["graph_write"] = summary.model_dump(mode="json")
+    batch.work_unit.metadata["graph_write"] = asdict(summary)
     batch.work_unit.metadata["graph_write_work_unit_id"] = plan.work_unit.id
     batch.work_unit.metadata["graph_write_work_unit"] = plan.work_unit.model_dump(
         mode="json"

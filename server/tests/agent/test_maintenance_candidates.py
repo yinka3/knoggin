@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 
 from common.utils.time_utils import frozen_time
-from infrastructure.redis_client import RedisKeys
 from core.agent.maintenance import (
     GRAPH_MERGE_SCAN_CANDIDATE,
     TOPIC_EVALUATION_CANDIDATE,
@@ -11,6 +10,7 @@ from core.agent.maintenance import (
     build_maintenance_candidates,
     candidate_id,
 )
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis
 
 

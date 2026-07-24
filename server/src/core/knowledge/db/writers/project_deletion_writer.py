@@ -20,6 +20,7 @@ class ProjectDeletionWriter:
         "document_chunks",
         "project_documents",
         "document_folder_uploads",
+        "document_workspace_sources",
         "project_document_scan_settings",
         "relationship_evidence_refs",
         "message_entity_refs",

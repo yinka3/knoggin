@@ -1,7 +1,11 @@
 import pytest
 from pydantic import ValidationError
 
-from common.schema.contracts import ConnectionMention, ConnectionsResult, MessageConnections
+from common.schema.contracts import (
+    ConnectionMention,
+    ConnectionsResult,
+    MessageConnections,
+)
 from common.schema.primitives import ConnectionRecord
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.profile import EntityProfile

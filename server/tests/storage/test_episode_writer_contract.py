@@ -88,6 +88,7 @@ async def test_episode_writer_attaches_complete_derived_context_idempotently():
     ]
     assert entity_calls[0][2] == (
         "episode-1",
+        "project-1",
         2,
         1.5,
         "subject",
@@ -98,6 +99,7 @@ async def test_episode_writer_attaches_complete_derived_context_idempotently():
     )
     assert entity_calls[1][2] == (
         "episode-1",
+        "project-1",
         3,
         0.9,
         None,
@@ -114,6 +116,10 @@ async def test_episode_writer_attaches_complete_derived_context_idempotently():
         datetime.fromtimestamp(1700000000000 / 1000, tz=timezone.utc),
         datetime.fromtimestamp(1700000001000 / 1000, tz=timezone.utc),
     )
+    message_call = next(
+        call for call in client.calls if "INSERT INTO episode_messages" in call[1]
+    )
+    assert message_call[2][:4] == ("episode-1", "project-1", "session-1", 11)
 
 
 @pytest.mark.storage

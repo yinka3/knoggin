@@ -403,7 +403,15 @@ class EngineWorkUnit(BaseModel):
     @classmethod
     def for_model_operation(
         cls,
-        kind: Literal["embedding", "rerank", "nli", "spacy", "gliner", "document_index", "model_load"],
+        kind: Literal[
+            "embedding",
+            "rerank",
+            "nli",
+            "spacy",
+            "gliner",
+            "document_index",
+            "model_load",
+        ],
         scope: EngineScope,
         *,
         parent_work_unit_id: Optional[str] = None,
@@ -514,7 +522,8 @@ class MessageUserConnections(BaseModel):
     user_connections: List[UserConnectionRecord] = Field(default_factory=list)
 
 
-class EntityWrite(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class EntityWrite:
     """Typed entity payload intended for graph persistence."""
 
     id: int
@@ -524,13 +533,14 @@ class EntityWrite(BaseModel):
     confidence: float = 1.0
     topic: str = "General"
     embedding: Optional[List[float]] = None
-    aliases: List[str] = Field(default_factory=list)
+    aliases: List[str] = field(default_factory=list)
     user_name: str
     session_id: str
     project_id: str
 
 
-class RelationshipWrite(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class RelationshipWrite:
     """Typed relationship payload intended for graph persistence."""
 
     entity_a: str
@@ -546,7 +556,8 @@ class RelationshipWrite(BaseModel):
     context: Optional[str] = None
 
 
-class UserRelationshipWrite(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class UserRelationshipWrite:
     """Typed user-root relationship payload intended for graph persistence."""
 
     user_entity_id: int
@@ -576,54 +587,59 @@ class UserRelationshipWrite(BaseModel):
         }
 
 
-class MessageEntityRef(BaseModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MessageEntityRef:
     """A resolved entity mention grounded to one canonical message."""
 
-    message_id: int = Field(..., gt=0)
-    entity_id: int = Field(..., gt=0)
+    message_id: int
+    entity_id: int
 
 
-class EpisodeEligibility(BaseModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EpisodeEligibility:
     """Episode-processing eligibility attached to a canonical message."""
 
-    message_id: int = Field(..., gt=0)
+    message_id: int
     episode_type: Optional[str] = None
 
 
-class AliasUpdate(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class AliasUpdate:
     """Aliases to persist for a canonical entity."""
 
     entity_id: int
-    aliases: List[str] = Field(default_factory=list)
+    aliases: List[str] = field(default_factory=list)
 
 
-class SkippedRelationship(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class SkippedRelationship:
     """Relationship observation skipped before graph persistence."""
 
     entity_a: Optional[str] = None
     entity_b: Optional[str] = None
     message_id: int
     reason: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class GraphMutationPlan(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class GraphMutationPlan:
     """Typed graph-write intent derived from a processed batch."""
 
     work_unit: EngineWorkUnit
     scope: EngineScope
-    entity_ids: List[int] = Field(default_factory=list)
-    safe_entity_ids: Set[int] = Field(default_factory=set)
-    new_entity_ids: Set[int] = Field(default_factory=set)
-    alias_updates: List[AliasUpdate] = Field(default_factory=list)
-    entity_writes: List[EntityWrite] = Field(default_factory=list)
-    message_entity_refs: List[MessageEntityRef] = Field(default_factory=list)
-    eligible_messages: List[EpisodeEligibility] = Field(default_factory=list)
-    relationship_writes: List[RelationshipWrite] = Field(default_factory=list)
-    user_relationship_writes: List[UserRelationshipWrite] = Field(default_factory=list)
-    skipped_relationships: List[SkippedRelationship] = Field(default_factory=list)
-    zombie_entity_ids: Set[int] = Field(default_factory=set)
-    dirty_entity_ids: Set[int] = Field(default_factory=set)
+    entity_ids: List[int] = field(default_factory=list)
+    safe_entity_ids: Set[int] = field(default_factory=set)
+    new_entity_ids: Set[int] = field(default_factory=set)
+    alias_updates: List[AliasUpdate] = field(default_factory=list)
+    entity_writes: List[EntityWrite] = field(default_factory=list)
+    message_entity_refs: List[MessageEntityRef] = field(default_factory=list)
+    eligible_messages: List[EpisodeEligibility] = field(default_factory=list)
+    relationship_writes: List[RelationshipWrite] = field(default_factory=list)
+    user_relationship_writes: List[UserRelationshipWrite] = field(default_factory=list)
+    skipped_relationships: List[SkippedRelationship] = field(default_factory=list)
+    zombie_entity_ids: Set[int] = field(default_factory=set)
+    dirty_entity_ids: Set[int] = field(default_factory=set)
 
     def has_writes(self) -> bool:
         return bool(
@@ -637,11 +653,8 @@ class GraphMutationPlan(BaseModel):
 
     def to_graph_payloads(self) -> tuple[List[dict], List[dict]]:
         return (
-            [entity.model_dump(mode="json") for entity in self.entity_writes],
-            [
-                relationship.model_dump(mode="json")
-                for relationship in self.relationship_writes
-            ]
+            [asdict(entity) for entity in self.entity_writes],
+            [asdict(relationship) for relationship in self.relationship_writes]
             + [
                 relationship.to_relationship_payload()
                 for relationship in self.user_relationship_writes
@@ -649,13 +662,11 @@ class GraphMutationPlan(BaseModel):
         )
 
     def to_message_entity_payloads(self) -> List[dict]:
-        return [
-            reference.model_dump(mode="json")
-            for reference in self.message_entity_refs
-        ]
+        return [asdict(reference) for reference in self.message_entity_refs]
 
 
-class GraphWriteSummary(BaseModel):
+@dataclass(slots=True)
+class GraphWriteSummary:
     """Counts from executing a graph mutation plan."""
 
     entities_written: int = 0

@@ -5,16 +5,16 @@ import pytest
 
 from common.schema.primitives import Message
 from common.utils.events import EventEmitter
-from infrastructure.redis_client import RedisKeys
 from core.project.project_manager import ProjectManager
 from core.session.context import Session
 from core.session.session_manager import SessionManager
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import (
     FakeConfigValue,
     FakeConsumer,
-    FakeSession,
     FakeResources,
+    FakeSession,
 )
 
 

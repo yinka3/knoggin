@@ -132,6 +132,7 @@ class DLQSettings(BaseModel):
     interval_seconds: int = Field(60, ge=10)
     batch_size: int = Field(50, ge=1)
     max_attempts: int = Field(2, ge=1)
+    completed_state_retention_hours: float = Field(24.0, ge=0.25)
 
 
 class MergeRollbackSettings(BaseModel):
@@ -140,12 +141,25 @@ class MergeRollbackSettings(BaseModel):
     fallback_interval_hours: float = Field(1.0, ge=0.25)
 
 
+class AuditRetentionSettings(BaseModel):
+    """Retention windows for completed, non-canonical operational records."""
+
+    enabled: bool = Field(True)
+    interval_hours: float = Field(24.0, ge=0.25)
+    candidate_suggestion_days: int = Field(30, ge=1)
+    tool_audit_days: int = Field(180, ge=1)
+    merge_history_days: int = Field(180, ge=1)
+
+
 class JobSettings(BaseModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     dlq: DLQSettings = Field(default_factory=DLQSettings)
     merge_rollback: MergeRollbackSettings = Field(
         default_factory=MergeRollbackSettings
+    )
+    audit_retention: AuditRetentionSettings = Field(
+        default_factory=AuditRetentionSettings
     )
     document_indexing: DocumentIndexingSettings = Field(
         default_factory=DocumentIndexingSettings
@@ -160,6 +174,7 @@ class TopicEvaluationSettings(BaseModel):
 class AgentLimitSettings(BaseModel):
     agent_history_turns: int = Field(7, ge=1)
     max_tool_calls: int = Field(12, ge=1)
+    tool_timeout: float = Field(30.0, gt=0)
     max_attempts: int = Field(15, ge=1)
     max_consecutive_errors: int = Field(3, ge=1)
     max_accumulated_messages: int = Field(30, ge=1)
@@ -240,6 +255,7 @@ class CommunitySettings(BaseModel):
     enabled: bool = Field(False)
     interval_minutes: int = Field(30, ge=1)
     max_turns: int = Field(10, ge=1)
+    seeding_timeout_seconds: int = Field(300, ge=1)
     seeding_agent_id: Optional[str] = None
     agent_pool_ids: List[str] = Field(default_factory=list)
     project_ids: List[str] = Field(default_factory=list)

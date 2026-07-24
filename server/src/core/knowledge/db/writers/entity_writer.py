@@ -516,17 +516,49 @@ class EntityWriter:
                     )
                     record = await cur.fetchone()
                     if not record:
-                        continue
+                        raise ValueError(
+                            "Relationship endpoints must exist in the "
+                            f"project scope: {r['project_id']}/"
+                            f"{a_id}/{b_id}"
+                        )
+
+                    if evidence_ref["user_name"] != r["user_name"]:
+                        raise ValueError(
+                            "Relationship evidence must belong to the "
+                            "relationship user"
+                        )
+                    await cur.execute(
+                        """
+                        SELECT message_id
+                        FROM messages
+                        WHERE message_id = %s
+                          AND user_name = %s
+                          AND session_id = %s
+                          AND project_id = %s
+                        """,
+                        (
+                            evidence_ref["message_id"],
+                            evidence_ref["user_name"],
+                            evidence_ref["session_id"],
+                            r["project_id"],
+                        ),
+                    )
+                    if await cur.fetchone() is None:
+                        raise ValueError(
+                            "Relationship evidence message must exist in the "
+                            "relationship project scope"
+                        )
 
                     await cur.execute(
                         """
                         INSERT INTO relationship_evidence_refs (
                             relationship_id,
+                            project_id,
                             user_name,
                             session_id,
                             message_id
                         )
-                        VALUES (%s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s)
                         ON CONFLICT (
                             relationship_id,
                             user_name,
@@ -536,6 +568,7 @@ class EntityWriter:
                         """,
                         (
                             relationship_id,
+                            r["project_id"],
                             evidence_ref["user_name"],
                             evidence_ref["session_id"],
                             evidence_ref["message_id"],

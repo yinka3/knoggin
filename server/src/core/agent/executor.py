@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from typing import AsyncGenerator, Dict, List, Optional, Union
@@ -18,7 +19,6 @@ from common.schema.agent_stream import (
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now
-from infrastructure.llm_client import LLMService
 from core.agent.formatters import (
     format_document_focus_context,
     format_documents_context,
@@ -53,6 +53,7 @@ from core.agent.types import (
     FinalResponse,
     ToolCall,
 )
+from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
 
@@ -537,6 +538,17 @@ class AgentExecutor:
             return
 
         for call in tool_calls:
+            if self.ctx.state.call_count >= self.ctx.config.max_calls:
+                err_msg = (
+                    f"Global call limit reached ({self.ctx.config.max_calls})"
+                )
+                results_out.append({"tool": "all", "error": err_msg})
+                yield {
+                    "event": "tool_error",
+                    "data": {"tool": "all", "error": err_msg},
+                }
+                return
+
             yield {
                 "event": "tool_start",
                 "data": {
@@ -606,7 +618,12 @@ class AgentExecutor:
                         self.ctx.state.short_uuid_references
                     )
                 try:
-                    result = await execute_tool(self.tools, call.name, call.args)
+                    async with asyncio.timeout(self.ctx.config.tool_timeout):
+                        result = await execute_tool(
+                            self.tools,
+                            call.name,
+                            call.args,
+                        )
                 finally:
                     if self.ctx.use_local_references:
                         if previous_short_uuid_references is missing:
@@ -644,6 +661,25 @@ class AgentExecutor:
                     },
                 }
 
+            except TimeoutError:
+                message = (
+                    "Tool execution timed out after "
+                    f"{self.ctx.config.tool_timeout:g} seconds"
+                )
+                logger.warning(f"Tool {call.name}: {message}")
+                handled_as_maintenance = await apply_tool_error_hooks(
+                    self.ctx,
+                    self.tools,
+                    call.name,
+                )
+                if not handled_as_maintenance:
+                    self.ctx.state.last_error = message
+                    self.ctx.state.consecutive_errors += 1
+                results_out.append({"tool": call.name, "error": message})
+                yield {
+                    "event": "tool_error",
+                    "data": {"tool": call.name, "error": message},
+                }
             except ToolExecutionError as e:
                 if _is_local_reference_resolution_error(e.message):
                     await emit(

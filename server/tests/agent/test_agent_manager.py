@@ -69,7 +69,7 @@ async def test_agent_manager_default_agent_cannot_be_deleted(manager):
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_agent_manager_set_default_unsets_previous_default(manager):
-    agent_manager, _ = manager
+    agent_manager, resources = manager
     old_default_id = await agent_manager.get_default_agent_id()
     created = await agent_manager.create_agent("Alt", "Alternative")
 
@@ -80,3 +80,9 @@ async def test_agent_manager_set_default_unsets_previous_default(manager):
     assert old_default.is_default is False
     assert new_default.is_default is True
     assert await agent_manager.get_default_agent_id() == created.id
+    default_updates = [
+        call
+        for call in resources.postgres.calls
+        if call[0] == "execute" and "UPDATE public.agents" in call[1]
+    ]
+    assert len(default_updates) == 2

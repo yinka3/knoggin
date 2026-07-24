@@ -1,9 +1,9 @@
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from infrastructure.job.base import BaseJob, JobContext, JobResult
 from core.community.community_manager import CommunityManager
 from core.project.state import ProjectState
+from infrastructure.job.base import BaseJob, JobContext, JobResult
 
 
 class AACJob(BaseJob):
@@ -33,15 +33,27 @@ class AACJob(BaseJob):
 
     async def execute(self, ctx: JobContext) -> JobResult:
         logger.info(
-            f"AAC: Starting scheduled discussion for {ctx.user_name} on project {self.project_state.project_id}"
+            "AAC: Starting scheduled discussion for "
+            f"{ctx.user_name} on project {self.project_state.project_id}"
         )
 
-        manager = CommunityManager(self.project_state, ctx.user_name, self.resources)
+        manager = CommunityManager(
+            self.project_state,
+            ctx.user_name,
+            self.resources,
+        )
         try:
             await manager.trigger_discussion()
 
-            if self.resources.knowledge_store and self.resources.knowledge_store.community:
-                await self.resources.knowledge_store.community.delete_old_discussions(30)
+            if (
+                self.resources.knowledge_store
+                and self.resources.knowledge_store.community
+            ):
+                await self.resources.knowledge_store.community.delete_old_discussions(
+                    30,
+                    user_name=ctx.user_name,
+                    project_id=self.project_state.project_id,
+                )
 
             return JobResult(success=True, summary="Discussion triggered")
         except Exception as e:

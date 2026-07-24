@@ -1,6 +1,7 @@
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -22,6 +23,7 @@ from infrastructure.llm_client import LLMService
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient
+from infrastructure.resource_profile import ResourceProfile
 from log.llm_trace import get_trace_logger
 
 
@@ -52,12 +54,13 @@ class ResourceManager:
         self.executor: Optional[ThreadPoolExecutor] = None
         self.background_work: Optional[BackgroundWorkCoordinator] = None
         self.model_work: Optional[ModelWorkCoordinator] = None
+        self.resource_profile: Optional[ResourceProfile] = None
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
 
     @classmethod
-    async def initialize(cls, num_workers: int = 4) -> "ResourceManager":
+    async def initialize(cls, num_workers: int | None = None) -> "ResourceManager":
         """Initialize all resources concurrently."""
         load_dotenv()
         async with cls._get_lock():
@@ -67,6 +70,13 @@ class ResourceManager:
             instance = cls()
 
             try:
+                resource_profile = ResourceProfile.from_environment()
+                if num_workers is not None:
+                    resource_profile = replace(
+                        resource_profile,
+                        worker_count=num_workers,
+                    )
+                instance.resource_profile = resource_profile
                 use_gpu = os.getenv("KNOGGIN_GPU", "false").lower() == "true"
                 if use_gpu and torch.cuda.is_available():
                     device = torch.device("cuda")
@@ -81,11 +91,11 @@ class ResourceManager:
                 else:
                     device = torch.device("cpu")
 
-                instance.executor = ThreadPoolExecutor(max_workers=num_workers)
+                instance.executor = ThreadPoolExecutor(
+                    max_workers=resource_profile.worker_count
+                )
                 instance.background_work = BackgroundWorkCoordinator(
-                    max_concurrency=int(
-                        os.getenv("KNOGGIN_BACKGROUND_JOB_WORKERS", "1")
-                    ),
+                    max_concurrency=resource_profile.background_job_workers,
                     max_queued_per_project=int(
                         os.getenv("KNOGGIN_BACKGROUND_QUEUE_PER_PROJECT", "8")
                     ),
@@ -96,12 +106,8 @@ class ResourceManager:
                 await instance.background_work.start()
                 instance.model_work = ModelWorkCoordinator(
                     instance.executor,
-                    foreground_concurrency=int(
-                        os.getenv("KNOGGIN_FOREGROUND_MODEL_WORKERS", "1")
-                    ),
-                    background_concurrency=int(
-                        os.getenv("KNOGGIN_BACKGROUND_MODEL_WORKERS", "1")
-                    ),
+                    foreground_concurrency=resource_profile.foreground_model_workers,
+                    background_concurrency=resource_profile.background_model_workers,
                     foreground_timeout_seconds=float(
                         os.getenv("KNOGGIN_FOREGROUND_MODEL_TIMEOUT_SECONDS", "30")
                     ),
@@ -160,14 +166,15 @@ class ResourceManager:
                     reranker_model=reranker_model,
                     nli_model=nli_model,
                     device=device,
+                    batch_size=resource_profile.embedding_batch_size,
                 )
                 if hasattr(instance.embedding, "set_model_work_coordinator"):
                     instance.embedding.set_model_work_coordinator(instance.model_work)
+                instance.postgres = PostgresClient(dsn=dsn)
                 instance.knowledge_store = KnowledgeStore(
-                    dsn=dsn,
+                    postgres_client=instance.postgres,
                     embedding_service=instance.embedding,
                 )
-                instance.postgres = instance.knowledge_store.postgres
 
                 async def load_spacy():
                     exclude = ["ner", "lemmatizer", "attribute_ruler"]
@@ -204,7 +211,7 @@ class ResourceManager:
                         details={"original_error": str(e)},
                     )
 
-                await instance.knowledge_store.connect()
+                await instance.postgres.connect()
                 cls._instance = instance
                 logger.info("ResourceManager initialization complete")
                 return instance
@@ -243,9 +250,8 @@ class ResourceManager:
             self.redis_manager = None
         self.redis = None
 
-        if self.knowledge_store:
-            await self.knowledge_store.close()
-            self.knowledge_store = None
+        if self.postgres:
+            await self.postgres.close()
         self.postgres = None
         if self.embedding:
             self.embedding.cleanup()

@@ -5,6 +5,7 @@ import httpx
 
 from common.conf.topics_config import TopicConfig
 from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
+from common.schema.settings import EpisodeSettings
 from common.schema.tool_schema import (
     CAPABILITY_CLASSES,
     DESTRUCTIVE_WRITE_CAPABILITY,
@@ -12,14 +13,13 @@ from common.schema.tool_schema import (
     TOOL_SCHEMAS,
     get_schema_capability,
 )
-from common.schema.settings import EpisodeSettings
 from core.agent.tools.graph import GraphTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
 from core.agent.tools.topic_tools import TopicTools
-from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.documents import DocumentService
+from core.knowledge.entity.resolver import EntityResolver
 
 TOOL_DISPATCH = {
     "search_messages": ("search_messages", ["query", "limit"]),

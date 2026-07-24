@@ -1,7 +1,7 @@
 import fnmatch
 import hashlib
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from pathspec import GitIgnoreSpec
 
@@ -19,9 +19,12 @@ from core.knowledge.documents.constants import (
     DEFAULT_IGNORED_DIRECTORIES,
     DEFAULT_IGNORED_PATTERNS,
     EXECUTABLE_EXTENSIONS,
+    GENERATED_CONTENT_MARKERS,
+    GENERATED_FILE_PATTERNS,
     IMAGE_EXTENSIONS,
     SENSITIVE_FILE_PATTERNS,
     VIDEO_EXTENSIONS,
+    document_extension,
 )
 from core.knowledge.documents.storage import looks_binary
 
@@ -48,6 +51,25 @@ def normalize_relative_path(
     if normalized in {"", "."}:
         raise ValueError("relative_path must identify a document")
     return normalized
+
+
+def has_generated_content_marker(content: bytes) -> bool:
+    """Detect standard generated-file banners without scanning entire files."""
+    header = content[:8192].decode("utf-8", errors="ignore").lower()
+    return any(marker in header for marker in GENERATED_CONTENT_MARKERS)
+
+
+def looks_minified(content: bytes, extension: str) -> bool:
+    """Identify dense JS/CSS bundles that are not useful retrieval sources."""
+    if extension not in {".css", ".js", ".jsx", ".mjs", ".ts", ".tsx"}:
+        return False
+    text = content[:256 * 1024].decode("utf-8", errors="ignore")
+    non_empty_lines = [line for line in text.splitlines() if line.strip()]
+    return bool(
+        len(text) >= 16_384
+        and non_empty_lines
+        and max(map(len, non_empty_lines)) >= 8_192
+    )
 
 
 def matches_pattern(path: str, patterns) -> bool:
@@ -224,7 +246,7 @@ def build_folder_preview(
             FolderPreviewEntry(
                 relative_path=path,
                 original_name=path_obj.name,
-                extension=PurePosixPath(path_obj.name).suffix.lower(),
+                extension=document_extension(path_obj.name),
                 size_bytes=len(content),
                 reason=reason,
                 rule_source=source,
@@ -237,7 +259,7 @@ def build_folder_preview(
         path_obj = PurePosixPath(path)
         name = path_obj.name
         lower_name = name.lower()
-        extension = PurePosixPath(name).suffix.lower()
+        extension = document_extension(name)
         depth = len(path_obj.parts) - 1
         forced = path in normalized_overrides
 
@@ -341,6 +363,30 @@ def build_folder_preview(
                 path,
                 content,
                 "default_file_ignore",
+                "default_ignore",
+                True,
+            )
+            continue
+        if (
+            (
+                matches_pattern(path, GENERATED_FILE_PATTERNS)
+                or has_generated_content_marker(content)
+            )
+            and not forced
+        ):
+            exclude(
+                path,
+                content,
+                "generated_file",
+                "default_ignore",
+                True,
+            )
+            continue
+        if looks_minified(content, extension) and not forced:
+            exclude(
+                path,
+                content,
+                "minified_file",
                 "default_ignore",
                 True,
             )

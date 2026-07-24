@@ -207,9 +207,7 @@ async def test_search_index_rebuilder_rejects_malformed_embedding_results(
 async def test_search_index_rebuilder_database_failure_exits_transaction():
     client = make_client()
     client.cursor_execute_exceptions = [
-        None,
-        None,
-        None,
+        *([None] * 13),
         RuntimeError("message insert failed"),
     ]
     rebuilder = SearchIndexer(client, RecordingEmbeddingService())
@@ -221,5 +219,5 @@ async def test_search_index_rebuilder_database_failure_exits_transaction():
             ["project-1"],
         )
 
-    assert client.transaction_enters == 1
-    assert client.transaction_exits == 1
+    assert client.transaction_enters == 3
+    assert client.transaction_exits == 3

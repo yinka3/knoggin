@@ -28,7 +28,7 @@ from core.agent.types import (
 from core.project.state import ProjectState
 from infrastructure.redis_client import RedisKeys
 
-COMMUNITY_ENABLED_TOOLS = AAC_READ_TOOL_NAMES
+COMMUNITY_ENABLED_TOOLS = [*AAC_READ_TOOL_NAMES, "restore_brain_section"]
 ACTIVE_DISCUSSION_TTL_SECONDS = 2 * 60 * 60
 
 COMMUNITY_RUN_CONFIG = AgentRunConfig(
@@ -48,6 +48,7 @@ COMMUNITY_RUN_CONFIG = AgentRunConfig(
         ("list_documents", 2),
         ("read_brain", 4),
         ("edit_brain", 2),
+        ("restore_brain_section", 2),
         ("save_insight", 4),
         ("spawn_specialist", 2),
     ),
@@ -69,6 +70,13 @@ class CommunityManager:
     _RELEASE_ACTIVE_DISCUSSION_SCRIPT = """
     if redis.call('get', KEYS[1]) == ARGV[1] then
         return redis.call('del', KEYS[1])
+    end
+    return 0
+    """
+
+    _RENEW_ACTIVE_DISCUSSION_SCRIPT = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('expire', KEYS[1], ARGV[2])
     end
     return 0
     """
@@ -145,6 +153,16 @@ class CommunityManager:
             discussion_id,
         )
 
+    async def _renew_active_discussion(self, discussion_id: str) -> bool:
+        renewed = await self.resources.redis.eval(
+            self._RENEW_ACTIVE_DISCUSSION_SCRIPT,
+            1,
+            self._active_discussion_key(),
+            discussion_id,
+            ACTIVE_DISCUSSION_TTL_SECONDS,
+        )
+        return bool(renewed)
+
     async def trigger_discussion(self) -> None:
         """Main entry point called by scheduler."""
         if await self._is_discussion_active():
@@ -164,7 +182,13 @@ class CommunityManager:
         self._active_discussion_id = discussion_id
 
         try:
-            seed_data = await self._seed_discussion()
+            community_settings = (
+                ConfigManager.get().config.developer_settings.community
+            )
+            seed_data = await asyncio.wait_for(
+                self._seed_discussion(),
+                timeout=community_settings.seeding_timeout_seconds,
+            )
             if not seed_data:
                 await self._release_active_discussion(discussion_id)
                 self._active_discussion_id = None
@@ -186,8 +210,19 @@ class CommunityManager:
 
             topic = seed_data["topic"]
             await self.resources.knowledge_store.community.create_discussion(
-                discussion_id, topic, valid_agent_ids
+                discussion_id,
+                topic,
+                valid_agent_ids,
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
             )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "AAC: Seeding exceeded the configured timeout; skipping discussion."
+            )
+            await self._release_active_discussion(discussion_id)
+            self._active_discussion_id = None
+            return
         except BaseException:
             await self._release_active_discussion(discussion_id)
             self._active_discussion_id = None
@@ -219,7 +254,9 @@ class CommunityManager:
                 self._active_discussion_id = None
                 try:
                     await self.resources.knowledge_store.community.close_discussion(
-                        discussion_id
+                        discussion_id,
+                        user_name=self.user_name,
+                        project_id=self.project_state.project_id,
                     )
                 except Exception as e:
                     logger.error(
@@ -256,10 +293,7 @@ class CommunityManager:
         history = []
 
         for turn in range(max_turns):
-            active_id = await self.resources.redis.get(
-                self._active_discussion_key()
-            )
-            if not active_id or active_id != discussion_id:
+            if not await self._renew_active_discussion(discussion_id):
                 logger.info(
                     f"AAC [{discussion_id}]: Discussion manually closed or "
                     "superseded. Aborting loop."
@@ -302,7 +336,12 @@ class CommunityManager:
             )
 
             await self.resources.knowledge_store.community.add_message(
-                discussion_id, agent_id, message, "assistant"
+                discussion_id,
+                agent_id,
+                message,
+                "assistant",
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
             )
 
             await emit_community(
@@ -426,7 +465,7 @@ class CommunityManager:
         return full_response.strip() if full_response else None
 
     def _resolve_agent_tools(self, agent: AgentConfig) -> tuple[List[str], List[Dict]]:
-        if not agent.enabled_tools:
+        if agent.enabled_tools is None:
             return COMMUNITY_ENABLED_TOOLS, AAC_SPECIFIC_SCHEMAS
 
         allowed = set(agent.enabled_tools)
@@ -478,7 +517,8 @@ class CommunityManager:
     meaningful discussion.
 
     You must decide:
-    1. TOPIC: What specific subject should agents discuss? Be concrete, not vague.
+    1. TOPIC: What specific subject should agents discuss? Be concrete, not \
+       vague.
     2. OBJECTIVE: What should they achieve? (e.g., resolve a contradiction,
        explore a connection, brainstorm applications, debate a decision)
     3. DISCUSSION_TYPE: "brainstorm" | "debate" | "investigation" | "synthesis"
@@ -491,7 +531,8 @@ class CommunityManager:
     - Avoid repeating recent discussion topics
     - Match agents to topics based on their personas
     - Prefer depth over breadth — focused discussions are better
-    - You now have access to project documents via search_documents. Consider initiating discussions around analyzing uploaded files!
+    - You now have access to project documents via search_documents. Consider \
+      initiating discussions around analyzing uploaded files!
     </seeding_role>
     """
 
@@ -622,7 +663,7 @@ class CommunityManager:
         }
 
     async def _build_seeding_context(self) -> str:
-        """Gather rich context for seeding agent decision-making."""
+        """Gather graph and discussion context for seeding decisions."""
         lines = []
 
         try:
@@ -632,11 +673,16 @@ class CommunityManager:
             stats = await self.resources.knowledge_store.get_graph_stats(
                 visible_project_ids=visible_project_ids
             )
-            past_discussions = (
-                await self.resources.knowledge_store.community.get_recent_discussions(5)
+            community_store = self.resources.knowledge_store.community
+            past_discussions = await community_store.get_recent_discussions(
+                5,
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
             )
-            insights = (
-                await self.resources.knowledge_store.community.get_discussion_insights(5)
+            insights = await community_store.get_discussion_insights(
+                5,
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
             )
         except Exception as e:
             logger.warning(f"Failed to gather seeding context: {e}")

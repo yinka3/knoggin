@@ -7,13 +7,16 @@ import secrets
 import uuid
 from typing import Any, Dict, List, Optional
 
+from loguru import logger
+
 from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.events import emit
 from common.utils.time_utils import get_now, parse_iso_time
-from infrastructure.postgres_client import PostgresClient
-from infrastructure.redis_client import RedisKeys
+from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
+from infrastructure.postgres_client import PostgresClient
+from infrastructure.redis_client import RedisKeys
 
 MERGE_ROLLBACK_RETENTION_HOURS = 5
 
@@ -33,6 +36,7 @@ class EntityMergeService:
         self.redis = redis
         self.merge_audit_reader = MergeAuditReader(postgres)
         self.merge_audit_writer = MergeAuditWriter(postgres)
+        self.projection_rebuilder = GraphBuilder(postgres)
 
     async def propose(
         self,
@@ -54,9 +58,7 @@ class EntityMergeService:
         message_ids = self._positive_int_ids(evidence_message_ids)
         episode_ids = list(
             dict.fromkeys(
-                str(item).strip()
-                for item in evidence_episode_ids
-                if str(item).strip()
+                str(item).strip() for item in evidence_episode_ids if str(item).strip()
             )
         )
         if not message_ids and not episode_ids:
@@ -91,9 +93,7 @@ class EntityMergeService:
         primary_type = self._normalize(primary.get("type"))
         duplicate_type = self._normalize(duplicate.get("type"))
         type_compatible = (
-            not primary_type
-            or not duplicate_type
-            or primary_type == duplicate_type
+            not primary_type or not duplicate_type or primary_type == duplicate_type
         )
         checks["entity_types_compatible"] = type_compatible
         if not type_compatible:
@@ -104,8 +104,7 @@ class EntityMergeService:
             )
 
         snapshot_message_ids = {
-            int(message_ref["message_id"])
-            for message_ref in snapshot["message_refs"]
+            int(message_ref["message_id"]) for message_ref in snapshot["message_refs"]
         }
         snapshot_episode_ids = {
             str(episode_entity["episode_id"])
@@ -188,106 +187,105 @@ class EntityMergeService:
         confirmed_by: str,
     ) -> Dict[str, Any]:
         """User/admin entry point. This method is intentionally not an agent tool."""
-        proposal = await self.merge_audit_reader.get_proposal(proposal_id)
-        if not proposal:
-            return {"policy_result": "rejected", "reason": "Unknown merge proposal."}
+        try:
+            async with self.postgres.transaction() as cur:
+                await cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                proposal = await self.merge_audit_reader.get_proposal_for_update(
+                    cur, proposal_id
+                )
+                rejection = self._confirmation_rejection(
+                    proposal, confirmation_token, confirmed_by
+                )
+                if rejection:
+                    return {"policy_result": "rejected", "reason": rejection}
 
-        if proposal["status"] != "confirmation_required":
+                primary_id = int(proposal["primary_entity_id"])
+                duplicate_id = int(proposal["duplicate_entity_id"])
+                project_id = proposal["project_id"]
+                await self._lock_entities(
+                    cur,
+                    proposal["user_name"],
+                    project_id,
+                    primary_id,
+                    duplicate_id,
+                )
+                before_state = await self._snapshot(
+                    proposal["user_name"],
+                    project_id,
+                    primary_id,
+                    duplicate_id,
+                    cur=cur,
+                )
+                if self._state_hash(before_state) != proposal["reviewed_state_hash"]:
+                    await cur.execute(
+                        """
+                        UPDATE entity_merge_proposals
+                        SET status = 'rejected', failure_reason = %s
+                        WHERE proposal_id = %s
+                        """,
+                        (
+                            "The entities changed after review; create a new proposal.",
+                            proposal_id,
+                        ),
+                    )
+                    return {
+                        "policy_result": "rejected",
+                        "reason": (
+                            "The merge proposal is stale because the candidate state "
+                            "changed."
+                        ),
+                    }
+
+                claimed = await self.merge_audit_writer.claim_proposal_for_execution(
+                    proposal_id, confirmed_by, cur=cur
+                )
+                if claimed != 1:
+                    raise RuntimeError("Locked merge proposal could not be claimed")
+                audit_id = str(uuid.uuid4())
+                await self.merge_audit_writer.create_audit(
+                    audit_id=audit_id,
+                    proposal=proposal,
+                    evidence_message_ids=self._json_value(
+                        proposal["evidence_message_ids"]
+                    ),
+                    evidence_episode_ids=self._json_value(
+                        proposal["evidence_episode_ids"]
+                    ),
+                    before_state=before_state,
+                    confirmed_by=confirmed_by,
+                    cur=cur,
+                )
+                merged = await self.knowledge_store.merge_entities(
+                    primary_id,
+                    duplicate_id,
+                    project_id=project_id,
+                    cur=cur,
+                )
+                if not merged:
+                    raise RuntimeError("Canonical merge transaction was rejected")
+                after_state = await self._snapshot(
+                    proposal["user_name"],
+                    project_id,
+                    primary_id,
+                    duplicate_id,
+                    cur=cur,
+                )
+                await self.merge_audit_writer.mark_audit_executed(
+                    audit_id=audit_id,
+                    after_state=after_state,
+                    rollback_retention_hours=MERGE_ROLLBACK_RETENTION_HOURS,
+                    cur=cur,
+                )
+                await self.merge_audit_writer.mark_proposal_executed(
+                    proposal_id, cur=cur
+                )
+        except Exception:
+            logger.exception("Atomic entity merge failed for proposal {}", proposal_id)
             return {
                 "policy_result": "rejected",
-                "reason": f"Proposal is already {proposal['status']}.",
-            }
-        if not secrets.compare_digest(
-            proposal["confirmation_token_hash"],
-            self._token_hash(confirmation_token),
-        ):
-            return {
-                "policy_result": "rejected",
-                "reason": "Invalid confirmation token.",
-            }
-        if confirmed_by != proposal["user_name"]:
-            return {
-                "policy_result": "rejected",
-                "reason": "The confirmation actor is not authorized for this proposal.",
+                "reason": "The canonical merge transaction failed without committing.",
             }
 
-        primary_id = int(proposal["primary_entity_id"])
-        duplicate_id = int(proposal["duplicate_entity_id"])
-        project_id = proposal["project_id"]
-        before_state = await self._snapshot(
-            proposal["user_name"],
-            project_id,
-            primary_id,
-            duplicate_id,
-        )
-        if self._state_hash(before_state) != proposal["reviewed_state_hash"]:
-            await self.merge_audit_writer.set_proposal_failure(
-                proposal_id,
-                "rejected",
-                "The entities changed after review; create a new proposal.",
-            )
-            return {
-                "policy_result": "rejected",
-                "reason": (
-                    "The merge proposal is stale because the candidate state "
-                    "changed."
-                ),
-            }
-
-        claimed = await self.merge_audit_writer.claim_proposal_for_execution(
-            proposal_id,
-            confirmed_by,
-        )
-        if claimed != 1:
-            return {
-                "policy_result": "rejected",
-                "reason": "The proposal was already claimed or changed.",
-            }
-
-        audit_id = str(uuid.uuid4())
-        evidence_message_ids = self._json_value(proposal["evidence_message_ids"])
-        evidence_episode_ids = self._json_value(proposal["evidence_episode_ids"])
-        await self.merge_audit_writer.create_audit(
-            audit_id=audit_id,
-            proposal=proposal,
-            evidence_message_ids=evidence_message_ids,
-            evidence_episode_ids=evidence_episode_ids,
-            before_state=before_state,
-            confirmed_by=confirmed_by,
-        )
-
-        merged = await self.knowledge_store.merge_entities(
-            primary_id,
-            duplicate_id,
-            project_id=project_id,
-        )
-        if not merged:
-            await self.merge_audit_writer.mark_audit_failed(
-                audit_id,
-                "The canonical merge transaction rejected or failed.",
-            )
-            await self.merge_audit_writer.set_proposal_failure(
-                proposal_id,
-                "failed",
-                "The canonical merge transaction rejected or failed.",
-            )
-            return {
-                "policy_result": "rejected",
-                "reason": "The canonical merge transaction failed.",
-            }
-
-        after_state = await self._snapshot(
-            proposal["user_name"],
-            project_id,
-            primary_id,
-            duplicate_id,
-        )
-        await self.merge_audit_writer.mark_audit_executed(
-            audit_id=audit_id,
-            after_state=after_state,
-            rollback_retention_hours=MERGE_ROLLBACK_RETENTION_HOURS,
-        )
-        await self.merge_audit_writer.mark_proposal_executed(proposal_id)
         if self.redis:
             merge_key = RedisKeys.merge_queue(proposal["user_name"], project_id)
             await self.redis.srem(merge_key, str(primary_id), str(duplicate_id))
@@ -316,67 +314,87 @@ class EntityMergeService:
 
     async def rollback(self, audit_id: str, actor: str) -> Dict[str, Any]:
         """Admin/service-only entry point. This method is not an agent tool."""
-        audit = await self.merge_audit_reader.get_audit(audit_id)
-        if not audit:
-            return {"policy_result": "rejected", "reason": "Unknown merge audit."}
+        try:
+            async with self.postgres.transaction() as cur:
+                await cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                audit = await self.merge_audit_reader.get_audit_for_update(
+                    cur, audit_id
+                )
+                if not audit:
+                    return {
+                        "policy_result": "rejected",
+                        "reason": "Unknown merge audit.",
+                    }
+                reason = self._rollback_preflight_rejection(audit)
+                if reason:
+                    return {"policy_result": "rejected", "reason": reason}
 
-        reason = self._rollback_preflight_rejection(audit)
-        if reason:
-            return {"policy_result": "rejected", "reason": reason}
+                before_state = self._json_value(audit["before_state"])
+                after_state = self._json_value(audit["after_state"])
+                user_name = audit["user_name"]
+                project_id = audit["project_id"]
+                primary_id = int(audit["primary_entity_id"])
+                duplicate_id = int(audit["duplicate_entity_id"])
+                await self._lock_entities(
+                    cur,
+                    user_name,
+                    project_id,
+                    primary_id,
+                    duplicate_id,
+                    require_duplicate=False,
+                )
+                current_state = await self._snapshot(
+                    user_name,
+                    project_id,
+                    primary_id,
+                    duplicate_id,
+                    cur=cur,
+                )
+                if any(
+                    int(entity["entity_id"]) == duplicate_id
+                    for entity in current_state["entities"]
+                ):
+                    reason = (
+                        "Duplicate entity ID has been reused; rollback requires "
+                        "manual repair."
+                    )
+                    await self.merge_audit_writer.mark_rollback_failure(
+                        audit_id, reason, cur=cur
+                    )
+                    return {"policy_result": "rejected", "reason": reason}
+                if self._state_hash(current_state) != self._state_hash(after_state):
+                    reason = (
+                        "Current merge state differs from the audited post-merge "
+                        "state; "
+                        "rollback requires manual repair."
+                    )
+                    await self.merge_audit_writer.mark_rollback_failure(
+                        audit_id, reason, cur=cur
+                    )
+                    return {"policy_result": "rejected", "reason": reason}
 
-        before_state = self._json_value(audit["before_state"])
-        after_state = self._json_value(audit["after_state"])
-        user_name = audit["user_name"]
-        project_id = audit["project_id"]
-        primary_id = int(audit["primary_entity_id"])
-        duplicate_id = int(audit["duplicate_entity_id"])
-
-        current_state = await self._snapshot(
-            user_name,
-            project_id,
-            primary_id,
-            duplicate_id,
-        )
-        duplicate_reused = any(
-            int(entity["entity_id"]) == duplicate_id
-            for entity in current_state["entities"]
-        )
-        if duplicate_reused:
-            reason = (
-                "Duplicate entity ID has been reused; rollback requires manual repair."
-            )
-            await self.merge_audit_writer.mark_rollback_failure(audit_id, reason)
-            return {"policy_result": "rejected", "reason": reason}
-
-        if self._state_hash(current_state) != self._state_hash(after_state):
-            reason = (
-                "Current merge state differs from the audited post-merge state; "
-                "rollback requires manual repair."
-            )
-            await self.merge_audit_writer.mark_rollback_failure(audit_id, reason)
-            return {"policy_result": "rejected", "reason": reason}
-
-        await self.merge_audit_writer.restore_before_state(
-            before_state,
-            project_id=project_id,
-            primary_id=primary_id,
-            duplicate_id=duplicate_id,
-            audit_id=audit_id,
-            actor=actor,
-        )
-
-        projection_result = None
-        projection_error = None
-        rebuild_projection = getattr(
-            self.knowledge_store,
-            "rebuild_project_projection",
-            None,
-        )
-        if rebuild_projection is not None:
-            try:
-                projection_result = await rebuild_projection(project_id, user_name)
-            except Exception as exc:
-                projection_error = str(exc)
+                await self.merge_audit_writer.restore_before_state(
+                    before_state,
+                    project_id=project_id,
+                    primary_id=primary_id,
+                    duplicate_id=duplicate_id,
+                    audit_id=audit_id,
+                    actor=actor,
+                    cur=cur,
+                )
+                projection_result = (
+                    await self.projection_rebuilder.rebuild_project_projection(
+                        project_id,
+                        user_name,
+                        cur=cur,
+                    )
+                )
+        except Exception:
+            logger.exception("Atomic merge rollback failed for audit {}", audit_id)
+            return {
+                "policy_result": "rejected",
+                "reason": "The merge rollback failed without committing.",
+            }
 
         result = {
             "policy_result": "rolled_back",
@@ -387,8 +405,6 @@ class EntityMergeService:
         }
         if projection_result is not None:
             result["projection_rebuild"] = projection_result
-        if projection_error is not None:
-            result["projection_rebuild_error"] = projection_error
         return result
 
     async def _snapshot(
@@ -397,13 +413,63 @@ class EntityMergeService:
         project_id: str,
         primary_id: int,
         duplicate_id: int,
+        *,
+        cur=None,
     ) -> Dict[str, Any]:
         return await self.merge_audit_reader.snapshot(
             user_name,
             project_id,
             primary_id,
             duplicate_id,
+            cur=cur,
         )
+
+    @staticmethod
+    def _confirmation_rejection(
+        proposal: Optional[Dict[str, Any]],
+        confirmation_token: str,
+        confirmed_by: str,
+    ) -> Optional[str]:
+        if not proposal:
+            return "Unknown merge proposal."
+        if proposal["status"] != "confirmation_required":
+            return f"Proposal is already {proposal['status']}."
+        if not secrets.compare_digest(
+            proposal["confirmation_token_hash"],
+            EntityMergeService._token_hash(confirmation_token),
+        ):
+            return "Invalid confirmation token."
+        if confirmed_by != proposal["user_name"]:
+            return "The confirmation actor is not authorized for this proposal."
+        return None
+
+    @staticmethod
+    async def _lock_entities(
+        cur,
+        user_name: str,
+        project_id: str,
+        primary_id: int,
+        duplicate_id: int,
+        *,
+        require_duplicate: bool = True,
+    ) -> None:
+        entity_ids = [primary_id, duplicate_id]
+        await cur.execute(
+            """
+            SELECT entity_id
+            FROM entities
+            WHERE user_name = %s
+              AND project_id = %s
+              AND entity_id = ANY(%s)
+            ORDER BY entity_id
+            FOR UPDATE
+            """,
+            (user_name, project_id, entity_ids),
+        )
+        locked_ids = {int(row["entity_id"]) for row in await cur.fetchall()}
+        required_ids = set(entity_ids if require_duplicate else [primary_id])
+        if locked_ids != required_ids:
+            raise RuntimeError("Merge entities changed before they could be locked")
 
     @staticmethod
     def _entities_visible_in_scope(
@@ -452,9 +518,9 @@ class EntityMergeService:
         for message_ref in snapshot["message_refs"]:
             content = str(message_ref.get("content") or "").strip()
             if content:
-                messages_by_entity.setdefault(
-                    int(message_ref["entity_id"]), []
-                ).append(content)
+                messages_by_entity.setdefault(int(message_ref["entity_id"]), []).append(
+                    content
+                )
         for entity in snapshot["entities"]:
             entity_id = int(entity["entity_id"])
             text = " ".join(
@@ -467,8 +533,7 @@ class EntityMergeService:
             values[entity_id] = {
                 "email": {match.lower() for match in self._EMAIL_RE.findall(text)},
                 "phone": {
-                    re.sub(r"\D", "", match)
-                    for match in self._PHONE_RE.findall(text)
+                    re.sub(r"\D", "", match) for match in self._PHONE_RE.findall(text)
                 },
             }
 

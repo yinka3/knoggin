@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import PurePosixPath
-from typing import Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -12,27 +12,47 @@ from common.schema.document import (
     FolderPreview,
     FolderScanSettings,
     FolderUploadEntry,
+    WorkspaceSyncChanges,
 )
 from common.utils.time_utils import get_now_iso
-from infrastructure.postgres_client import PostgresClient
+from core.knowledge.db.readers.document_reader import DocumentReader
+from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.services.embedding_service import EmbeddingService
+from infrastructure.background_work import (
+    BackgroundWorkCoordinator,
+    BackgroundWorkRejected,
+)
+from infrastructure.postgres_client import PostgresClient
 
 from .constants import (
     ACCEPTED_EXTENSIONS,
+    DOCUMENT_RERANK_DEFAULT_CANDIDATES,
     EXPECTED_EMBEDDING_DIMENSION,
+    HYBRID_SEARCH_CANDIDATE_MULTIPLIER,
+    HYBRID_SEARCH_MAX_CANDIDATES,
+    HYBRID_SEARCH_MIN_CANDIDATES,
+    INDEX_EMBEDDING_CHUNK_BATCH_SIZE,
+    INLINE_INDEX_MAX_BYTES,
     MAX_DOCUMENT_SIZE,
     MAX_ERROR_MESSAGE_LENGTH,
     MAX_READ_CHARACTERS,
     MAX_READ_LINES,
-    INDEX_EMBEDDING_CHUNK_BATCH_SIZE,
-    INLINE_INDEX_MAX_BYTES,
     VALID_VISIBILITY_SCOPES,
+    WORKSPACE_INDEX_DOCUMENT_BATCH_SIZE,
+    WORKSPACE_PREPARE_CONCURRENCY,
+    document_extension,
 )
-from infrastructure.background_work import BackgroundWorkCoordinator, BackgroundWorkRejected
-from .storage import extract_text, split_text
 from .scanning import build_folder_preview, normalize_relative_path
-from core.knowledge.db.readers.document_reader import DocumentReader
-from core.knowledge.db.writers.document_writer import DocumentWriter
+from .storage import DocumentChunk, embedding_text, extract_text, split_document
+
+BlockingRunner = Callable[..., Awaitable[Any]]
+
+
+async def _run_in_worker(
+    function: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    """Run CPU- or blocking-I/O work without blocking the event loop."""
+    return await asyncio.to_thread(function, *args, **kwargs)
 
 
 class DocumentService:
@@ -45,6 +65,10 @@ class DocumentService:
         embedding_service: EmbeddingService,
         background_work: Optional[BackgroundWorkCoordinator] = None,
         inline_index_max_bytes: int = INLINE_INDEX_MAX_BYTES,
+        blocking_runner: BlockingRunner = _run_in_worker,
+        document_rerank_enabled: bool = True,
+        document_rerank_candidates: int = DOCUMENT_RERANK_DEFAULT_CANDIDATES,
+        workspace_prepare_concurrency: int = WORKSPACE_PREPARE_CONCURRENCY,
     ):
         self.project_id = project_id
         self._embedding = embedding_service
@@ -52,7 +76,26 @@ class DocumentService:
         self._writer = DocumentWriter(postgres_client, project_id)
         self._background_work = background_work
         self._inline_index_max_bytes = inline_index_max_bytes
+        self._run_blocking = blocking_runner
+        if not isinstance(document_rerank_enabled, bool):
+            raise ValueError("document_rerank_enabled must be a boolean")
+        if (
+            not isinstance(document_rerank_candidates, int)
+            or isinstance(document_rerank_candidates, bool)
+            or not 1 <= document_rerank_candidates <= 50
+        ):
+            raise ValueError("document_rerank_candidates must be between 1 and 50")
+        self._document_rerank_enabled = document_rerank_enabled
+        self._document_rerank_candidates = document_rerank_candidates
+        if (
+            not isinstance(workspace_prepare_concurrency, int)
+            or isinstance(workspace_prepare_concurrency, bool)
+            or workspace_prepare_concurrency < 1
+        ):
+            raise ValueError("workspace_prepare_concurrency must be positive")
+        self._workspace_prepare_concurrency = workspace_prepare_concurrency
         self._background_tasks: set[asyncio.Task] = set()
+        self._workspace_source_tasks: dict[str, asyncio.Task] = {}
         self._recovered_count = 0
         self._last_recovery_requeued = 0
 
@@ -79,7 +122,7 @@ class DocumentService:
             scan_settings = settings
             if not isinstance(scan_settings, FolderScanSettings):
                 scan_settings = FolderScanSettings.model_validate(scan_settings)
-        return await asyncio.to_thread(
+        return await self._run_blocking(
             build_folder_preview,
             folder_name.strip(),
             validated_entries,
@@ -158,6 +201,473 @@ class DocumentService:
                 metadata[key] = value.isoformat()
         return metadata
 
+    @staticmethod
+    def _public_workspace_source(row: Dict) -> Dict:
+        source = dict(row)
+        if source.get("source_id") is not None:
+            source["source_id"] = str(source["source_id"])
+        for key in ("created_at", "updated_at", "last_synced_at"):
+            value = source.get(key)
+            if isinstance(value, datetime):
+                source[key] = value.isoformat()
+        return source
+
+    async def create_workspace_source(
+        self,
+        *,
+        display_name: str,
+        session_id: Optional[str] = None,
+        visibility_scope: str = "project",
+    ) -> Dict:
+        """Create a stable source identity for future workspace syncs.
+
+        This does not upload, queue, or index files.  The returned ``source_id``
+        is the durable handle a caller keeps when it later submits a manifest.
+        """
+        self._validate_visibility(visibility_scope, session_id)
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise ValueError("display_name must not be empty")
+
+        source_id = str(uuid.uuid4())
+        created_at = get_now_iso()
+        normalized_name = display_name.strip()
+        await self._writer.insert_workspace_source(
+            source_id=source_id,
+            session_id=session_id,
+            visibility_scope=visibility_scope,
+            display_name=normalized_name,
+            created_at=created_at,
+        )
+        return {
+            "source_id": source_id,
+            "project_id": self.project_id,
+            "session_id": session_id,
+            "visibility_scope": visibility_scope,
+            "display_name": normalized_name,
+            "last_synced_at": None,
+            "last_manifest_candidate_count": 0,
+            "last_manifest_included_count": 0,
+            "last_manifest_excluded_count": 0,
+            "last_manifest_excluded_reason_counts": {},
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+
+    async def get_workspace_source(
+        self,
+        *,
+        source_id: str,
+        session_id: Optional[str] = None,
+    ) -> Dict:
+        """Return one visible workspace source by its durable identity."""
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("source_id must not be empty")
+        source = await self._reader.fetch_workspace_source(
+            source_id=source_id.strip(),
+            session_id=session_id,
+        )
+        if source is None:
+            raise FileNotFoundError("Workspace source not found")
+        return self._public_workspace_source(source)
+
+    async def sync_workspace_source(
+        self,
+        *,
+        source_id: str,
+        entries: List[FolderUploadEntry],
+        settings: Optional[FolderScanSettings] = None,
+        force_include_paths: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict:
+        """Admit a complete workspace manifest without waiting for indexing.
+
+        The manifest is filtered with the same safety rules as a folder preview.
+        Files whose normalized path and hash are unchanged remain indexed; new
+        or changed files become durable ``queued`` documents. Files omitted by
+        the manifest (including newly excluded files) are removed.
+        """
+        source = await self.get_workspace_source(
+            source_id=source_id,
+            session_id=session_id,
+        )
+        validated_entries = [
+            entry
+            if isinstance(entry, FolderUploadEntry)
+            else FolderUploadEntry.model_validate(entry)
+            for entry in entries
+        ]
+        preview = await self.preview_folder(
+            folder_name=source["display_name"],
+            entries=validated_entries,
+            settings=settings,
+            force_include_paths=force_include_paths,
+        )
+        entry_content = {
+            normalize_relative_path(
+                entry.relative_path,
+                entry.relative_path,
+            ): entry.content
+            for entry in validated_entries
+        }
+        documents = [
+            {
+                "original_name": item.original_name,
+                "relative_path": item.relative_path,
+                "extension": item.extension,
+                "size_bytes": item.size_bytes,
+                "content_hash": item.content_hash,
+                "content": entry_content[item.relative_path],
+                "visibility_scope": source["visibility_scope"],
+            }
+            for item in preview.included
+        ]
+        counts = await self._writer.sync_workspace_manifest(
+            source_id=source["source_id"],
+            session_id=session_id,
+            documents=documents,
+            candidate_count=len(validated_entries),
+            included_count=preview.summary.included_count,
+            excluded_count=preview.summary.excluded_count,
+            excluded_reason_counts=preview.summary.reason_counts,
+            updated_at=get_now_iso(),
+        )
+        if counts["queued"]:
+            self._submit_workspace_source_batch(
+                source_id=source["source_id"],
+                session_id=session_id,
+            )
+        return {
+            "source": source,
+            "candidate_count": len(validated_entries),
+            "candidate_bytes": sum(
+                len(entry.content) for entry in validated_entries
+            ),
+            "included_count": preview.summary.included_count,
+            "excluded_count": preview.summary.excluded_count,
+            "excluded_reason_counts": preview.summary.reason_counts,
+            **counts,
+        }
+
+    async def sync_workspace_changes(
+        self,
+        *,
+        source_id: str,
+        changes: WorkspaceSyncChanges,
+        settings: Optional[FolderScanSettings] = None,
+        force_include_paths: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict:
+        """Apply changed/new files and deletions without replacing a manifest.
+
+        This is the server-side contract used by future local workspace
+        watchers. It deliberately leaves paths absent from ``changes`` alone;
+        callers use :meth:`sync_workspace_source` for a complete rescan.
+        """
+        source = await self.get_workspace_source(
+            source_id=source_id,
+            session_id=session_id,
+        )
+        validated_changes = (
+            changes
+            if isinstance(changes, WorkspaceSyncChanges)
+            else WorkspaceSyncChanges.model_validate(changes)
+        )
+        validated_entries = list(validated_changes.upserts)
+        normalized_upsert_paths = {
+            normalize_relative_path(entry.relative_path, entry.relative_path)
+            for entry in validated_entries
+        }
+        if len(normalized_upsert_paths) != len(validated_entries):
+            raise ValueError(
+                "upserts contain duplicate normalized relative_path values"
+            )
+        normalized_deleted_paths = {
+            normalize_relative_path(path, path)
+            for path in validated_changes.deleted_paths
+        }
+        if len(normalized_deleted_paths) != len(validated_changes.deleted_paths):
+            raise ValueError(
+                "deleted_paths contain duplicate normalized relative_path values"
+            )
+        overlap = normalized_upsert_paths & normalized_deleted_paths
+        if overlap:
+            raise ValueError(
+                "a workspace path cannot be both upserted and deleted: "
+                + ", ".join(sorted(overlap))
+            )
+        if not normalized_upsert_paths and not normalized_deleted_paths:
+            raise ValueError("workspace changes must include an upsert or deletion")
+
+        preview = await self.preview_folder(
+            folder_name=source["display_name"],
+            entries=validated_entries,
+            settings=settings,
+            force_include_paths=force_include_paths,
+        )
+        entry_content = {
+            normalize_relative_path(
+                entry.relative_path,
+                entry.relative_path,
+            ): entry.content
+            for entry in validated_entries
+        }
+        documents = [
+            {
+                "original_name": item.original_name,
+                "relative_path": item.relative_path,
+                "extension": item.extension,
+                "size_bytes": item.size_bytes,
+                "content_hash": item.content_hash,
+                "content": entry_content[item.relative_path],
+                "visibility_scope": source["visibility_scope"],
+            }
+            for item in preview.included
+        ]
+        excluded_paths = {item.relative_path for item in preview.excluded}
+        counts = await self._writer.sync_workspace_changes(
+            source_id=source["source_id"],
+            session_id=session_id,
+            documents=documents,
+            deleted_paths=sorted(normalized_deleted_paths | excluded_paths),
+            updated_at=get_now_iso(),
+        )
+        if counts["queued"]:
+            self._submit_workspace_source_batch(
+                source_id=source["source_id"],
+                session_id=session_id,
+            )
+        return {
+            "source": source,
+            "upsert_count": len(validated_entries),
+            "upsert_bytes": sum(len(entry.content) for entry in validated_entries),
+            "included_count": preview.summary.included_count,
+            "excluded_count": preview.summary.excluded_count,
+            "excluded_reason_counts": preview.summary.reason_counts,
+            "deleted_path_count": len(normalized_deleted_paths),
+            **counts,
+        }
+
+    async def get_workspace_indexing_status(
+        self,
+        *,
+        source_id: str,
+        session_id: Optional[str] = None,
+    ) -> Dict:
+        """Return source lifecycle metadata and aggregate indexing progress."""
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("source_id must not be empty")
+        status = await self._reader.fetch_workspace_indexing_status(
+            source_id=source_id.strip(),
+            session_id=session_id,
+        )
+        if status is None:
+            raise FileNotFoundError("Workspace source not found")
+        result = self._public_workspace_source(status)
+        queued = int(result["queued_count"])
+        indexing = int(result["indexing_count"])
+        failed = int(result["failed_count"])
+        indexed = int(result["indexed_count"])
+        result["status"] = (
+            "indexing"
+            if queued or indexing
+            else "failed"
+            if failed and not indexed
+            else "ready_with_failures"
+            if failed
+            else "ready"
+        )
+        return result
+
+    def _submit_workspace_source_batch(
+        self,
+        *,
+        source_id: str,
+        session_id: Optional[str],
+    ) -> None:
+        """Submit one bounded workspace batch without blocking its caller."""
+        if self._background_work is None:
+            return
+        existing = self._workspace_source_tasks.get(source_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._background_work.submit(
+                self.project_id,
+                lambda: self._index_workspace_source_batch(
+                    source_id=source_id,
+                    session_id=session_id,
+                ),
+                name="workspace-source-index",
+                coalesce_key=f"workspace-source-index:{source_id}",
+            ),
+            name=f"workspace-source-index:{self.project_id}:{source_id}",
+        )
+        self._background_tasks.add(task)
+        self._workspace_source_tasks[source_id] = task
+        task.add_done_callback(
+            lambda completed: self._observe_workspace_source_batch(
+                completed,
+                source_id=source_id,
+                session_id=session_id,
+            )
+        )
+
+    async def _index_workspace_source_batch(
+        self,
+        *,
+        source_id: str,
+        session_id: Optional[str],
+    ) -> bool:
+        """Index one fair, cross-file batch of queued workspace documents."""
+        claimed = await self._writer.claim_workspace_documents(
+            source_id=source_id,
+            limit=WORKSPACE_INDEX_DOCUMENT_BATCH_SIZE,
+            updated_at=get_now_iso(),
+        )
+        if not claimed:
+            return False
+
+        semaphore = asyncio.Semaphore(self._workspace_prepare_concurrency)
+
+        async def prepare_document(document: Dict):
+            document_id = str(document["document_id"])
+            try:
+                async with semaphore:
+                    raw_bytes = await self._reader.fetch_document_content(
+                        document_id=document_id,
+                        session_id=document["session_id"],
+                    )
+                    if raw_bytes is None:
+                        raise FileNotFoundError("Document content is missing")
+                    text = await self._run_blocking(
+                        extract_text,
+                        raw_bytes,
+                        document["extension"],
+                    )
+                    chunks = await self._run_blocking(
+                        split_document,
+                        text,
+                        extension=document["extension"],
+                    )
+            except Exception as exc:
+                return document, None, None, exc
+            return document, text, chunks, None
+
+        preparation_results = await asyncio.gather(
+            *(prepare_document(document) for document in claimed)
+        )
+        prepared: list[tuple[Dict, str, List[DocumentChunk]]] = []
+        for document, text, chunks, error in preparation_results:
+            if error is not None:
+                await self._record_workspace_index_failure(
+                    document_id=str(document["document_id"]),
+                    session_id=session_id,
+                    error=error,
+                )
+            else:
+                prepared.append((document, text, chunks))
+
+        try:
+            all_chunks = [chunk for _, _, chunks in prepared for chunk in chunks]
+            all_embedding_texts = [
+                embedding_text(chunk, document["relative_path"])
+                for document, _, chunks in prepared
+                for chunk in chunks
+            ]
+            embeddings = (
+                await self._embedding.encode(all_embedding_texts)
+                if all_embedding_texts
+                else []
+            )
+            self._validate_embeddings(embeddings, all_chunks)
+        except Exception as exc:
+            for document, _, _ in prepared:
+                await self._record_workspace_index_failure(
+                    document_id=str(document["document_id"]),
+                    session_id=session_id,
+                    error=exc,
+                )
+        else:
+            offset = 0
+            indexed_documents = []
+            for document, text, chunks in prepared:
+                next_offset = offset + len(chunks)
+                indexed_documents.append(
+                    {
+                        "document_id": str(document["document_id"]),
+                        "relative_path": document["relative_path"],
+                        "content_hash": document["content_hash"],
+                        "extracted_text": text,
+                        "chunks": chunks,
+                        "embeddings": embeddings[offset:next_offset],
+                    }
+                )
+                offset = next_offset
+            try:
+                await self._writer.persist_workspace_indexed_documents(
+                    documents=indexed_documents,
+                    indexed_at=get_now_iso(),
+                )
+            except Exception as exc:
+                for document in indexed_documents:
+                    await self._record_workspace_index_failure(
+                        document_id=document["document_id"],
+                        session_id=session_id,
+                        error=exc,
+                    )
+        finally:
+            has_more = bool(
+                await self._reader.count_queued_workspace_documents(source_id)
+            )
+        return has_more
+
+    def _observe_workspace_source_batch(
+        self,
+        task: asyncio.Task,
+        *,
+        source_id: str,
+        session_id: Optional[str],
+    ) -> None:
+        """Schedule the next fair source batch after this one has released it."""
+        self._background_tasks.discard(task)
+        if self._workspace_source_tasks.get(source_id) is task:
+            del self._workspace_source_tasks[source_id]
+        if task.cancelled():
+            return
+        try:
+            has_more = task.result()
+        except BackgroundWorkRejected as exc:
+            logger.warning("Workspace indexing remains queued: {}", exc.message)
+        except Exception as exc:
+            logger.error("Workspace indexing batch failed: {}", exc)
+        else:
+            if has_more:
+                self._submit_workspace_source_batch(
+                    source_id=source_id,
+                    session_id=session_id,
+                )
+
+    async def _record_workspace_index_failure(
+        self,
+        *,
+        document_id: str,
+        session_id: Optional[str],
+        error: Exception,
+    ) -> None:
+        error_message = str(error).strip() or type(error).__name__
+        try:
+            await self._record_index_failure(
+                document_id=document_id,
+                session_id=session_id,
+                error_message=error_message[:MAX_ERROR_MESSAGE_LENGTH],
+            )
+        except Exception as failure_error:
+            logger.error(
+                "Failed to record workspace document indexing failure for {}: {}",
+                document_id,
+                failure_error,
+            )
+
     async def get_document_info(
         self,
         *,
@@ -221,16 +731,23 @@ class DocumentService:
             )
 
         document_metadata = rows[0]
-        raw_bytes = await self._reader.fetch_document_content(
-            str(document_metadata["document_id"])
+        text = await self._reader.fetch_extracted_text(
+            document_id=str(document_metadata["document_id"]),
+            content_hash=document_metadata["content_hash"],
+            session_id=session_id,
         )
-        if raw_bytes is None:
-            raise FileNotFoundError("Document content is missing")
-        text = await asyncio.to_thread(
-            extract_text,
-            raw_bytes,
-            document_metadata["extension"],
-        )
+        if text is None:
+            raw_bytes = await self._reader.fetch_document_content(
+                document_id=str(document_metadata["document_id"]),
+                session_id=session_id,
+            )
+            if raw_bytes is None:
+                raise FileNotFoundError("Document content is missing")
+            text = await self._run_blocking(
+                extract_text,
+                raw_bytes,
+                document_metadata["extension"],
+            )
         lines = text.splitlines() or [text]
         total_lines = len(lines)
         if start_line > total_lines:
@@ -289,7 +806,7 @@ class DocumentService:
     @staticmethod
     def _validate_embeddings(
         embeddings: List[List[float]],
-        chunks: List[str],
+        chunks: List[DocumentChunk],
     ) -> None:
         if len(embeddings) != len(chunks):
             raise ValueError("Embedding count does not match chunk count")
@@ -307,8 +824,9 @@ class DocumentService:
         *,
         document_id: str,
         session_id: Optional[str],
-        chunks: List[str],
+        chunks: List[DocumentChunk],
         embeddings: List[List[float]],
+        extracted_text: str,
     ) -> Dict:
         indexed_at = get_now_iso()
         row = await self._writer.persist_indexed_chunks(
@@ -316,6 +834,7 @@ class DocumentService:
             session_id=session_id,
             chunks=chunks,
             embeddings=embeddings,
+            extracted_text=extracted_text,
             indexed_at=indexed_at,
         )
         if row is None:
@@ -412,13 +931,19 @@ class DocumentService:
             content = entry_content[relative_path]
             preview_entry = included_by_path[relative_path]
             document_id = str(uuid.uuid4())
-            text = await asyncio.to_thread(
+            text = await self._run_blocking(
                 extract_text,
                 content,
                 preview_entry.extension,
             )
-            chunks = await asyncio.to_thread(split_text, text)
-            embeddings = await self._embedding.encode(chunks)
+            chunks = await self._run_blocking(
+                split_document,
+                text,
+                extension=preview_entry.extension,
+            )
+            embeddings = await self._embedding.encode(
+                [embedding_text(chunk, relative_path) for chunk in chunks]
+            )
             self._validate_embeddings(embeddings, chunks)
             prepared_documents.append(
                 {
@@ -429,6 +954,7 @@ class DocumentService:
                     "size_bytes": preview_entry.size_bytes,
                     "content_hash": preview_entry.content_hash,
                     "content": content,
+                    "extracted_text": text,
                     "chunks": list(zip(chunks, embeddings)),
                     "chunk_count": len(chunks),
                 }
@@ -515,7 +1041,7 @@ class DocumentService:
             raise ValueError("original_name must not be empty")
         if "\x00" in original_name:
             raise ValueError("original_name contains an invalid null byte")
-        extension = PurePosixPath(original_name).suffix.lower()
+        extension = document_extension(original_name)
         if extension not in ACCEPTED_EXTENSIONS:
             raise ValueError(
                 f"Unsupported file type '{extension}'. "
@@ -598,29 +1124,34 @@ class DocumentService:
 
         try:
             raw_bytes = await self._reader.fetch_document_content(
-                str(document_metadata["document_id"])
+                document_id=str(document_metadata["document_id"]),
+                session_id=session_id,
             )
             if raw_bytes is None:
                 raise FileNotFoundError("Document content is missing")
-            text = await asyncio.to_thread(
+            text = await self._run_blocking(
                 extract_text,
                 raw_bytes,
                 document_metadata["extension"],
             )
-            chunks = await asyncio.to_thread(split_text, text)
-            embeddings = []
-            for start in range(0, len(chunks), INDEX_EMBEDDING_CHUNK_BATCH_SIZE):
-                embeddings.extend(
-                    await self._embedding.encode(
-                        chunks[start : start + INDEX_EMBEDDING_CHUNK_BATCH_SIZE]
-                    )
-                )
+            chunks = await self._run_blocking(
+                split_document,
+                text,
+                extension=document_metadata["extension"],
+            )
+            embeddings = await self._embedding.encode(
+                [
+                    embedding_text(chunk, document_metadata["relative_path"])
+                    for chunk in chunks
+                ]
+            )
             self._validate_embeddings(embeddings, chunks)
             return await self._persist_indexed_chunks(
                 document_id=document_id,
                 session_id=session_id,
                 chunks=chunks,
                 embeddings=embeddings,
+                extracted_text=text,
             )
         except FileNotFoundError:
             raise
@@ -742,6 +1273,7 @@ class DocumentService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
+        self._workspace_source_tasks.clear()
 
     async def recover_pending_indexes(self, limit: int = 16) -> int:
         """Resume durable queued work and repair indexes interrupted by a restart."""
@@ -754,18 +1286,29 @@ class DocumentService:
                 document_id=str(document["document_id"]),
                 session_id=document.get("session_id"),
             )
-        self._recovered_count += len(pending)
-        if pending or self._last_recovery_requeued:
+        workspace_sources = await self._reader.list_workspace_sources_for_index_recovery(
+            limit
+        )
+        for source in workspace_sources:
+            self._submit_workspace_source_batch(
+                source_id=str(source["source_id"]),
+                session_id=source.get("session_id"),
+            )
+        recovered = len(pending) + len(workspace_sources)
+        self._recovered_count += recovered
+        if recovered or self._last_recovery_requeued:
             logger.info(
                 "Document indexing recovery for {}: requeued={}, submitted={}",
                 self.project_id,
                 self._last_recovery_requeued,
-                len(pending),
+                recovered,
             )
-        return len(pending)
+        return recovered
 
     async def pending_index_count(self) -> int:
-        return await self._reader.count_documents_for_index_recovery()
+        legacy = await self._reader.count_documents_for_index_recovery()
+        workspace = await self._reader.count_workspace_documents_for_index_recovery()
+        return legacy + workspace
 
     def indexing_snapshot(self) -> Dict:
         """Expose cheap document-indexing health for future API instrumentation."""
@@ -1079,15 +1622,62 @@ class DocumentService:
                 f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
             )
 
+        retrieval_limit = (
+            max(n_results, self._document_rerank_candidates)
+            if self._document_rerank_enabled
+            else n_results
+        )
         rows = await self._reader.search_chunks(
             session_id=session_id,
+            query_text=query.strip(),
             query_embedding=query_embedding,
-            n_results=n_results,
+            n_results=retrieval_limit,
+            candidate_limit=min(
+                HYBRID_SEARCH_MAX_CANDIDATES,
+                max(
+                    HYBRID_SEARCH_MIN_CANDIDATES,
+                    retrieval_limit * HYBRID_SEARCH_CANDIDATE_MULTIPLIER,
+                ),
+            ),
             document_filter=document_filter,
             folder_root_id=folder_root_id,
             relative_path=normalized_relative_path,
             path_prefix=normalized_prefix,
         )
+        if self._document_rerank_enabled and len(rows) > 1:
+            try:
+                rerank_inputs = [
+                    "\n".join(
+                        part
+                        for part in (
+                            f"File: {row['relative_path']}",
+                            f"Symbol: {row['symbol_name']}"
+                            if row.get("symbol_name")
+                            else None,
+                            row["content"],
+                        )
+                        if part
+                    )
+                    for row in rows
+                ]
+                rerank_scores = await self._embedding.rerank(
+                    query.strip(), rerank_inputs
+                )
+                if len(rerank_scores) != len(rows):
+                    raise ValueError(
+                        "Document reranker returned an unexpected score count"
+                    )
+                rows = [
+                    row
+                    for row, _ in sorted(
+                        zip(rows, rerank_scores),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )
+                ]
+            except Exception as exc:
+                logger.warning(f"Document reranking failed; using hybrid rank: {exc}")
+        rows = rows[:n_results]
         results = []
         for row in rows:
             result = dict(row)

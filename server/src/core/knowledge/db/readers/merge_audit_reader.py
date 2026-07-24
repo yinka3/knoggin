@@ -9,15 +9,37 @@ class MergeAuditReader:
     def __init__(self, client: PostgresClient):
         self.client = client
 
+    async def _fetch_all(self, cur, query: str, params):
+        if cur is None:
+            return await self.client.fetch_all(query, params)
+        await cur.execute(query, params)
+        return await cur.fetchall()
+
     async def snapshot(
         self,
         user_name: str,
         project_id: str,
         primary_id: int,
         duplicate_id: int,
+        *,
+        cur=None,
     ) -> Dict[str, Any]:
+        if cur is None:
+            async with self.client.transaction() as snapshot_cursor:
+                await snapshot_cursor.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                )
+                return await self.snapshot(
+                    user_name,
+                    project_id,
+                    primary_id,
+                    duplicate_id,
+                    cur=snapshot_cursor,
+                )
+
         ids = (primary_id, duplicate_id)
-        entities = await self.client.fetch_all(
+        entities = await self._fetch_all(
+            cur,
             """
             SELECT
                 e.entity_id,
@@ -46,7 +68,8 @@ class MergeAuditReader:
             """,
             (user_name, project_id, list(ids)),
         )
-        message_refs = await self.client.fetch_all(
+        message_refs = await self._fetch_all(
+            cur,
             """
             SELECT
                 ref.message_id,
@@ -64,24 +87,29 @@ class MergeAuditReader:
             """,
             (user_name, project_id, list(ids)),
         )
-        episode_entities = await self.client.fetch_all(
+        episode_entities = await self._fetch_all(
+            cur,
             """
             SELECT episode_entity.*
             FROM episode_entities episode_entity
-            JOIN episodes episode ON episode.episode_id = episode_entity.episode_id
+            JOIN episodes episode
+              ON episode.episode_id = episode_entity.episode_id
+             AND episode.project_id = episode_entity.project_id
             WHERE episode.project_id = %s
               AND episode_entity.entity_id = ANY(%s)
             ORDER BY episode_entity.episode_id, episode_entity.entity_id
             """,
             (project_id, list(ids)),
         )
-        relationships = await self.client.fetch_all(
+        relationships = await self._fetch_all(
+            cur,
             """
             SELECT
                 r.*,
                 COALESCE(
                     json_agg(
                         json_build_object(
+                            'project_id', ref.project_id,
                             'user_name', ref.user_name,
                             'session_id', ref.session_id,
                             'message_id', ref.message_id
@@ -96,6 +124,7 @@ class MergeAuditReader:
             FROM relationships r
             LEFT JOIN relationship_evidence_refs ref
               ON ref.relationship_id = r.relationship_id
+             AND ref.project_id = r.project_id
              AND ref.user_name = %s
             WHERE r.user_name = %s
               AND r.project_id = %s
@@ -105,7 +134,31 @@ class MergeAuditReader:
             """,
             (user_name, user_name, project_id, list(ids), list(ids)),
         )
-        hierarchy = await self.client.fetch_all(
+        episode_relationships = await self._fetch_all(
+            cur,
+            """
+            SELECT episode_relationship.*
+            FROM episode_relationships episode_relationship
+            JOIN episodes episode
+              ON episode.episode_id = episode_relationship.episode_id
+             AND episode.project_id = episode_relationship.project_id
+            JOIN relationships relationship
+              ON relationship.relationship_id = episode_relationship.relationship_id
+             AND relationship.project_id = episode_relationship.project_id
+            WHERE episode.project_id = %s
+              AND relationship.project_id = %s
+              AND (
+                  relationship.entity_a_id = ANY(%s)
+                  OR relationship.entity_b_id = ANY(%s)
+              )
+            ORDER BY
+                episode_relationship.episode_id,
+                episode_relationship.relationship_id
+            """,
+            (project_id, project_id, list(ids), list(ids)),
+        )
+        hierarchy = await self._fetch_all(
+            cur,
             """
             SELECT h.*
             FROM hierarchy_edges h
@@ -128,6 +181,7 @@ class MergeAuditReader:
             "message_refs": message_refs,
             "episode_entities": episode_entities,
             "relationships": relationships,
+            "episode_relationships": episode_relationships,
             "hierarchy": hierarchy,
         }
 
@@ -142,6 +196,18 @@ class MergeAuditReader:
         )
         return rows[0] if rows else None
 
+    async def get_proposal_for_update(self, cur, proposal_id: str) -> Optional[Dict]:
+        await cur.execute(
+            """
+            SELECT *
+            FROM entity_merge_proposals
+            WHERE proposal_id = %s
+            FOR UPDATE
+            """,
+            (proposal_id,),
+        )
+        return await cur.fetchone()
+
     async def get_audit(self, audit_id: str) -> Optional[Dict[str, Any]]:
         rows = await self.client.fetch_all(
             """
@@ -152,3 +218,15 @@ class MergeAuditReader:
             (audit_id,),
         )
         return rows[0] if rows else None
+
+    async def get_audit_for_update(self, cur, audit_id: str) -> Optional[Dict]:
+        await cur.execute(
+            """
+            SELECT *
+            FROM entity_merge_audits
+            WHERE audit_id = %s
+            FOR UPDATE
+            """,
+            (audit_id,),
+        )
+        return await cur.fetchone()

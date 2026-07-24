@@ -174,6 +174,7 @@ class RedisKeys:
             "dlq_state",
             "dlq_claims",
             "dlq_parked",
+            "dlq_completed",
             "community_discussion_active",
             "community_pubsub_channel",
             "dirty_entities",
@@ -222,6 +223,10 @@ class RedisKeys:
         return f"dlq:parked:{user}:{project_id}"
 
     @staticmethod
+    def dlq_completed(user: str, project_id: str) -> str:
+        return f"dlq:completed:{user}:{project_id}"
+
+    @staticmethod
     def project_last_processed(user: str, project_id: str) -> str:
         return f"project_last_processed_msg:{user}:{project_id}"
 
@@ -257,6 +262,7 @@ class RedisKeys:
             RedisKeys.dlq_state(user, project_id),
             RedisKeys.dlq_claims(user, project_id),
             RedisKeys.dlq_parked(user, project_id),
+            RedisKeys.dlq_completed(user, project_id),
             RedisKeys.project_last_processed(user, project_id),
             RedisKeys.project_last_activity(user, project_id),
             RedisKeys.project_heartbeat_counter(user, project_id),

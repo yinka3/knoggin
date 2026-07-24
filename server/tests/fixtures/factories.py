@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from common.conf.topics_config import TopicConfig
 from common.schema.settings import TopicSchema

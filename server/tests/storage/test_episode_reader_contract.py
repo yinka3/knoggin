@@ -148,6 +148,30 @@ async def test_episode_reader_returns_scoped_semantic_matches():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_episode_reader_uses_the_stored_lexical_search_vector():
+    client = RecordingPostgresClient(
+        fetch_all_results=[[episode_row()], *attachment_results()]
+    )
+    reader = EpisodeReader(client)
+
+    episodes = await reader.search_episodes(
+        "episodic memory",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        limit=4,
+    )
+
+    assert [episode.episode_id for episode in episodes] == ["episode-1"]
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "e.search_tsvector @@ q.terms" in query
+    assert "ts_rank_cd(e.search_tsvector, q.terms)" in query
+    assert "to_tsvector" not in query
+    assert params == ("episodic memory", "ada", "project-1", "session-1", 4)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_episode_reader_ranks_prior_episodes_by_source_entity_overlap():
     client = RecordingPostgresClient(
         fetch_all_results=[[episode_row()], *attachment_results()]

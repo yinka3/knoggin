@@ -1,15 +1,15 @@
 import json
+from contextlib import asynccontextmanager
 from datetime import date, datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from loguru import logger
 
-from common.scoping import IDENTITY_ENTITY_ID
-from common.scoping import require_scope_value
-from infrastructure.postgres_client import PostgresClient
+from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from core.knowledge.db.writers.age_projection_writer import (
     AgeProjectionWriter,
 )
+from infrastructure.postgres_client import PostgresClient
 
 
 class GraphBuilder:
@@ -18,6 +18,14 @@ class GraphBuilder:
     def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.projection = AgeProjectionWriter(client, graph_name=graph_name)
+
+    @asynccontextmanager
+    async def _projection_cursor(self, cur):
+        if cur is not None:
+            yield cur
+            return
+        async with self.client.transaction() as transaction_cursor:
+            yield transaction_cursor
 
     @staticmethod
     def _to_iso(value):
@@ -72,6 +80,8 @@ class GraphBuilder:
         self,
         project_id: str,
         user_name: str,
+        *,
+        cur=None,
     ) -> Dict[str, int]:
         project_id = require_scope_value(
             project_id,
@@ -83,8 +93,9 @@ class GraphBuilder:
             "user_name",
             "rebuild_project_projection",
         )
+        using_existing_cursor = cur is not None
         try:
-            async with self.client.transaction() as cur:
+            async with self._projection_cursor(cur) as cur:
                 await self.projection.clear_project_projection(cur, project_id)
 
                 messages = await self._fetch_messages(
@@ -138,14 +149,15 @@ class GraphBuilder:
                     "hierarchy_edges": len(hierarchy_edges),
                 }
                 logger.info(
-                    "Rebuilt AGE projection for project "
-                    f"{project_id}: {summary}"
+                    f"Rebuilt AGE projection for project {project_id}: {summary}"
                 )
                 return summary
         except Exception as e:
             logger.error(
                 f"Failed to rebuild AGE projection for project {project_id}: {e}"
             )
+            if using_existing_cursor:
+                raise
             return {
                 "messages": 0,
                 "entities": 0,
@@ -237,6 +249,7 @@ class GraphBuilder:
                 COALESCE(
                     json_agg(
                         json_build_object(
+                            'project_id', ref.project_id,
                             'user_name', ref.user_name,
                             'session_id', ref.session_id,
                             'message_id', ref.message_id
@@ -248,6 +261,7 @@ class GraphBuilder:
             FROM relationships rel
             LEFT JOIN relationship_evidence_refs ref
               ON ref.relationship_id = rel.relationship_id
+             AND ref.project_id = rel.project_id
             WHERE rel.project_id = %s
               AND rel.user_name = %s
             GROUP BY rel.relationship_id

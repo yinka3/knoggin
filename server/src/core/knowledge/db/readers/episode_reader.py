@@ -63,7 +63,10 @@ class EpisodeReader:
         )
         query = self._episode_query(
             "ee.entity_id = %s",
-            joins="JOIN episode_entities ee ON ee.episode_id = e.episode_id",
+            joins=(
+                "JOIN episode_entities ee ON ee.episode_id = e.episode_id "
+                "AND ee.project_id = e.project_id"
+            ),
             ordering=(
                 "ee.is_focus_entity DESC, ee.prominence_weight DESC, "
                 "e.importance DESC, e.updated_at DESC"
@@ -118,7 +121,9 @@ class EpisodeReader:
             JOIN sessions s
               ON s.session_id = e.session_id
              AND s.project_id = e.project_id
-            JOIN episode_entities ee ON ee.episode_id = e.episode_id
+            JOIN episode_entities ee
+              ON ee.episode_id = e.episode_id
+             AND ee.project_id = e.project_id
             WHERE ee.entity_id = ANY(%s)
               AND s.user_name = %s
               AND e.project_id = %s
@@ -219,7 +224,9 @@ class EpisodeReader:
                             e.updated_at DESC
                     ) AS evidence_rank
                 FROM episode_entities ee
-                JOIN episodes e ON e.episode_id = ee.episode_id
+                JOIN episodes e
+                  ON e.episode_id = ee.episode_id
+                 AND e.project_id = ee.project_id
                 WHERE ee.entity_id = ANY(%s)
                   AND e.project_id = %s
             )
@@ -251,8 +258,14 @@ class EpisodeReader:
                             ORDER BY em.influence_weight DESC, em.message_position
                         ) AS source_rank
                     FROM episode_messages em
-                    JOIN episodes e ON e.episode_id = em.episode_id
-                    JOIN messages m ON m.message_id = em.message_id
+                    JOIN episodes e
+                      ON e.episode_id = em.episode_id
+                     AND e.project_id = em.project_id
+                     AND e.session_id = em.session_id
+                    JOIN messages m
+                      ON m.message_id = em.message_id
+                     AND m.project_id = em.project_id
+                     AND m.session_id = em.session_id
                     WHERE em.episode_id = ANY(%s)
                       AND e.project_id = %s
                       AND m.project_id = %s
@@ -317,12 +330,11 @@ class EpisodeReader:
             session_id,
             "search_episodes",
         )
-        document = (
-            "to_tsvector('simple', concat_ws(' ', e.summary, "
-            "e.new_developments::text, e.updates::text, e.unresolved::text))"
-        )
         rows = await self.client.fetch_all(
-            f"""
+            """
+            WITH query_terms AS (
+                SELECT websearch_to_tsquery('simple', %s) AS terms
+            )
             SELECT
                 e.episode_id,
                 e.project_id,
@@ -343,17 +355,18 @@ class EpisodeReader:
             JOIN sessions s
               ON s.session_id = e.session_id
              AND s.project_id = e.project_id
+            CROSS JOIN query_terms q
             WHERE s.user_name = %s
               AND e.project_id = %s
               AND e.session_id = %s
-              AND {document} @@ websearch_to_tsquery('simple', %s)
+              AND e.search_tsvector @@ q.terms
             ORDER BY
-                ts_rank_cd({document}, websearch_to_tsquery('simple', %s)) DESC,
+                ts_rank_cd(e.search_tsvector, q.terms) DESC,
                 e.importance DESC,
                 e.updated_at DESC
             LIMIT %s
             """,
-            (*scope, normalized_query, normalized_query, limit),
+            (normalized_query, *scope, limit),
         )
         return [await self._hydrate_episode(row) for row in rows]
 
@@ -478,8 +491,14 @@ class EpisodeReader:
         JOIN sessions s
           ON s.session_id = e.session_id
          AND s.project_id = e.project_id
-        JOIN episode_messages em ON em.episode_id = e.episode_id
-        JOIN messages m ON m.message_id = em.message_id
+        JOIN episode_messages em
+          ON em.episode_id = e.episode_id
+         AND em.project_id = e.project_id
+         AND em.session_id = e.session_id
+        JOIN messages m
+          ON m.message_id = em.message_id
+         AND m.project_id = em.project_id
+         AND m.session_id = em.session_id
         WHERE e.episode_id = %s
           AND s.user_name = %s
           AND e.project_id = %s
@@ -656,8 +675,14 @@ class EpisodeReader:
             """
             SELECT rer.message_id, rer.relationship_id
             FROM relationship_evidence_refs rer
-            JOIN relationships r ON r.relationship_id = rer.relationship_id
-            JOIN messages m ON m.message_id = rer.message_id
+            JOIN relationships r
+              ON r.relationship_id = rer.relationship_id
+             AND r.project_id = rer.project_id
+            JOIN messages m
+              ON m.user_name = rer.user_name
+             AND m.session_id = rer.session_id
+             AND m.message_id = rer.message_id
+             AND m.project_id = rer.project_id
             WHERE rer.message_id = ANY(%s)
               AND rer.user_name = %s
               AND rer.session_id = %s
@@ -742,8 +767,14 @@ class EpisodeReader:
                 array_agg(DISTINCT rer.message_id ORDER BY rer.message_id)
                     AS evidence_message_ids
             FROM relationship_evidence_refs rer
-            JOIN relationships r ON r.relationship_id = rer.relationship_id
-            JOIN messages m ON m.message_id = rer.message_id
+            JOIN relationships r
+              ON r.relationship_id = rer.relationship_id
+             AND r.project_id = rer.project_id
+            JOIN messages m
+              ON m.user_name = rer.user_name
+             AND m.session_id = rer.session_id
+             AND m.message_id = rer.message_id
+             AND m.project_id = rer.project_id
             JOIN entities entity_a ON entity_a.entity_id = r.entity_a_id
             JOIN entities entity_b ON entity_b.entity_id = r.entity_b_id
             WHERE rer.message_id = ANY(%s)

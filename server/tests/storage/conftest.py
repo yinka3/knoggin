@@ -53,6 +53,7 @@ async def _reset_storage_db(client: PostgresClient):
             document_chunks,
             project_documents,
             document_folder_uploads,
+            document_workspace_sources,
             project_document_scan_settings,
             entity_merge_audits,
             entity_merge_proposals,
@@ -65,6 +66,8 @@ async def _reset_storage_db(client: PostgresClient):
             messages,
             entity_search,
             message_search,
+            project_search_revisions,
+            identity_search_revisions,
             sessions,
             projects
         RESTART IDENTITY CASCADE;

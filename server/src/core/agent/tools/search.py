@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
+    from core.knowledge.documents import DocumentService
+    from core.knowledge.entity.resolver import EntityResolver
+    from core.knowledge.services.embedding_service import EmbeddingService
     from infrastructure.knowledge_store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
-    from core.knowledge.entity.resolver import EntityResolver
-    from core.knowledge.documents import DocumentService
-    from core.knowledge.services.embedding_service import EmbeddingService
 
 import httpx
 from loguru import logger

@@ -238,9 +238,13 @@ def test_compact_uuid_handles_do_not_cross_agent_runs():
         first_ctx,
         "episode_check",
         {
-            "data": {
-                "results": [
-                    {"episodes": [{"episode_id": "f9036df8-5555-4444-8888-555555555555"}]}
+                "data": {
+                    "results": [
+                    {
+                        "episodes": [
+                            {"episode_id": "f9036df8-5555-4444-8888-555555555555"}
+                        ]
+                    }
                 ]
             }
         },

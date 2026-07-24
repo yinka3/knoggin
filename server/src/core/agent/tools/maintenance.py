@@ -2,8 +2,8 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from infrastructure.redis_client import RedisKeys
 from core.knowledge.entity.merge_service import EntityMergeService
+from infrastructure.redis_client import RedisKeys
 
 
 class MaintenanceTools:

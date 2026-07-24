@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.time_utils import get_now_ms
@@ -137,6 +137,25 @@ class AgeProjectionWriter:
         await cur.execute(
             self._build_cypher(orphan_topic_cypher),
             (json.dumps({}),),
+        )
+
+    async def delete_session_message_projection(
+        self,
+        cur,
+        user_name: str,
+        session_id: str,
+    ) -> None:
+        """Remove AGE message nodes for one deleted canonical session."""
+        cypher = """
+        MATCH (m:Message)
+        WHERE m.user_name = $user_name
+          AND m.session_id = $session_id
+        DETACH DELETE m
+        RETURN count(m)
+        """
+        await cur.execute(
+            self._build_cypher(cypher),
+            (json.dumps({"user_name": user_name, "session_id": session_id}),),
         )
 
     async def project_entity_topics(self, cur, topics: List[Dict]) -> None:

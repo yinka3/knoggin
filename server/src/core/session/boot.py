@@ -5,11 +5,12 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.utils.events import EventEmitter
-from infrastructure.resources import ResourceManager
 from core.ingestion.services.batch_consumer import IngestionWorker
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.project.state import ProjectState
 from core.session.context import Session
+from infrastructure.resources import ResourceManager
+
 
 class SessionFactory:
     """

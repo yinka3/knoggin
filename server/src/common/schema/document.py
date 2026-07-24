@@ -1,4 +1,5 @@
 from collections import Counter
+from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional, Set
 
 from pydantic import (
@@ -17,6 +18,15 @@ class FolderUploadEntry(BaseModel):
 
     relative_path: str = Field(min_length=1)
     content: bytes = Field(repr=False)
+
+
+class WorkspaceSyncChanges(BaseModel):
+    """Incremental changes to one previously synchronized workspace source."""
+
+    model_config = ConfigDict(frozen=True)
+
+    upserts: List[FolderUploadEntry] = Field(default_factory=list)
+    deleted_paths: List[str] = Field(default_factory=list)
 
 
 class FolderScanSettings(BaseModel):
@@ -80,7 +90,8 @@ class FolderScanSettings(BaseModel):
         }
 
 
-class FolderPreviewEntry(BaseModel):
+@dataclass(slots=True)
+class FolderPreviewEntry:
     """Lightweight metadata for one included or excluded manifest entry."""
 
     relative_path: str
@@ -93,13 +104,14 @@ class FolderPreviewEntry(BaseModel):
     overridable: bool = False
 
 
-class FolderPreviewSummary(BaseModel):
+@dataclass(slots=True)
+class FolderPreviewSummary:
     included_count: int
     excluded_count: int
     included_bytes: int
     excluded_bytes: int
     excluded_directory_count: int
-    reason_counts: Dict[str, int] = Field(default_factory=dict)
+    reason_counts: Dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_entries(
@@ -121,13 +133,14 @@ class FolderPreviewSummary(BaseModel):
         )
 
 
-class FolderPreview(BaseModel):
+@dataclass(slots=True)
+class FolderPreview:
     folder_name: str
     settings: FolderScanSettings
-    force_include_paths: List[str] = Field(default_factory=list)
-    included: List[FolderPreviewEntry] = Field(default_factory=list)
-    excluded: List[FolderPreviewEntry] = Field(default_factory=list)
     summary: FolderPreviewSummary
+    force_include_paths: List[str] = field(default_factory=list)
+    included: List[FolderPreviewEntry] = field(default_factory=list)
+    excluded: List[FolderPreviewEntry] = field(default_factory=list)
 
 
 class DocumentFocus(BaseModel):

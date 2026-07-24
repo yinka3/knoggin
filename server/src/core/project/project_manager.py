@@ -18,10 +18,13 @@ from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.db.write_graph_db import write_batch_callback
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
-from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
+from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.jobs.merge_rollback_cleanup_job import (
     MergeCleanupJob,
+)
+from core.knowledge.jobs.audit_retention_cleanup_job import (
+    AuditRetentionCleanupJob,
 )
 from core.project.state import ProjectState
 from infrastructure.job.scheduler import Scheduler
@@ -76,40 +79,43 @@ class ProjectManager:
             for topic, config in load_topic_seed().items()
         }
 
-        query = """
+        project_query = """
             INSERT INTO public.projects (
                 project_id, user_name, name, description, access_mode, status,
                 topic_config
             ) VALUES (
                 %(project_id)s, %(user_name)s, %(name)s, %(description)s,
                 %(access_mode)s, %(status)s, %(topic_config)s
-            ) RETURNING created_at, updated_at
+            )
         """
-        await self.pg.fetch_all(
-            query,
-            {
-                "project_id": project_id,
-                "user_name": self.user_name,
-                "name": name,
-                "description": description,
-                "access_mode": access_mode,
-                "status": ProjectStatus.ACTIVE.value,
-                "topic_config": json.dumps(topic_seed),
-            },
-        )
-        for allowed_id in allowed_projects:
-            scope_query = """
-                INSERT INTO public.project_read_scopes (user_name, project_id, readable_project_id)
-                VALUES (%(user_name)s, %(project_id)s, %(readable)s)
-            """
-            await self.pg.execute(
-                scope_query,
+        scope_query = """
+            INSERT INTO public.project_read_scopes (
+                user_name, project_id, readable_project_id
+            )
+            VALUES (%(user_name)s, %(project_id)s, %(readable)s)
+        """
+        async with self.pg.transaction() as cur:
+            await cur.execute(
+                project_query,
                 {
-                    "user_name": self.user_name,
                     "project_id": project_id,
-                    "readable": allowed_id,
+                    "user_name": self.user_name,
+                    "name": name,
+                    "description": description,
+                    "access_mode": access_mode,
+                    "status": ProjectStatus.ACTIVE.value,
+                    "topic_config": json.dumps(topic_seed),
                 },
             )
+            for allowed_id in allowed_projects:
+                await cur.execute(
+                    scope_query,
+                    {
+                        "user_name": self.user_name,
+                        "project_id": project_id,
+                        "readable": allowed_id,
+                    },
+                )
 
         logger.info(f"Created project {project_id} ('{name}')")
         return await self.get_project(project_id)
@@ -327,33 +333,37 @@ class ProjectManager:
                 await active_state.shutdown()
                 del self.active_projects[project_id]
 
-            # Replace read scopes
-            await self.pg.execute(
-                "DELETE FROM public.project_read_scopes "
-                "WHERE user_name = %(user_name)s "
-                "AND project_id = %(project_id)s",
-                {"user_name": self.user_name, "project_id": project_id},
-            )
-            for allowed_id in validated_allowed:
-                await self.pg.execute(
-                    """
-                    INSERT INTO public.project_read_scopes (user_name, project_id, readable_project_id)
-                    VALUES (%(user_name)s, %(project_id)s, %(readable)s)
-                    """,
-                    {
-                        "user_name": self.user_name,
-                        "project_id": project_id,
-                        "readable": allowed_id,
-                    },
-                )
+        if allowed_projects is not None or col_values:
+            async with self.pg.transaction() as cur:
+                if allowed_projects is not None:
+                    await cur.execute(
+                        "DELETE FROM public.project_read_scopes "
+                        "WHERE user_name = %(user_name)s "
+                        "AND project_id = %(project_id)s",
+                        {"user_name": self.user_name, "project_id": project_id},
+                    )
+                    for allowed_id in validated_allowed:
+                        await cur.execute(
+                            """
+                            INSERT INTO public.project_read_scopes (
+                                user_name, project_id, readable_project_id
+                            )
+                            VALUES (%(user_name)s, %(project_id)s, %(readable)s)
+                            """,
+                            {
+                                "user_name": self.user_name,
+                                "project_id": project_id,
+                                "readable": allowed_id,
+                            },
+                        )
 
-        if col_values:
-            fields = ", ".join(f"{column} = %s" for column in col_values)
-            await self.pg.execute(
-                f"UPDATE public.projects SET {fields}, updated_at = now()"
-                " WHERE user_name = %s AND project_id = %s",
-                [*col_values.values(), self.user_name, project_id],
-            )
+                if col_values:
+                    fields = ", ".join(f"{column} = %s" for column in col_values)
+                    await cur.execute(
+                        f"UPDATE public.projects SET {fields}, updated_at = now()"
+                        " WHERE user_name = %s AND project_id = %s",
+                        [*col_values.values(), self.user_name, project_id],
+                    )
 
         return await self.get_project(project_id)
 
@@ -918,6 +928,18 @@ class ProjectManager:
             config_mgr.subscribe(
                 rollback_cleanup_job.update_settings,
                 "developer_settings.jobs.merge_rollback",
+            )
+        )
+
+        audit_retention_job = AuditRetentionCleanupJob(
+            knowledge_store=self.resources.knowledge_store,
+            settings=jobs_cfg.audit_retention,
+        )
+        scheduler.register(audit_retention_job)
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                audit_retention_job.update_settings,
+                "developer_settings.jobs.audit_retention",
             )
         )
 

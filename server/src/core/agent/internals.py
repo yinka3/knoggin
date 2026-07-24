@@ -6,16 +6,16 @@ from typing import Dict, List, Optional, Tuple, Union
 from loguru import logger
 
 from common.exceptions import ToolExecutionError
-from common.utils.local_references import (
-    register_short_uuid_references,
-    resolve_local_id,
-)
 from common.schema.tool_schema import (
     READ_CAPABILITY,
     TOOL_SCHEMAS,
     TOOL_SCHEMAS_BY_NAME,
     get_schema_capability,
     validate_tool_arguments,
+)
+from common.utils.local_references import (
+    register_short_uuid_references,
+    resolve_local_id,
 )
 from common.utils.time_utils import parse_iso_time_or_now
 from core.agent.formatters import (
@@ -335,7 +335,9 @@ def build_user_message(
             if "error" in r:
                 msg += f"- `{tool}`: Error - {r['error']}\n"
             elif tool in ("episode_check", "read_recent_episodes"):
-                result_groups = data.get("results", []) if isinstance(data, dict) else []
+                result_groups = (
+                    data.get("results", []) if isinstance(data, dict) else []
+                )
                 count = sum(
                     len(group.get("episodes", []))
                     for group in result_groups

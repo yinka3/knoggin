@@ -65,7 +65,10 @@ class AgentManager:
             FROM public.agents
             WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
         '''
-        rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "agent_id": agent_id})
+        rows = await self.pg.fetch_all(
+            query,
+            {"user_name": self.user_name, "agent_id": agent_id},
+        )
         if not rows:
             return None
 
@@ -99,7 +102,10 @@ class AgentManager:
             WHERE user_name = %(user_name)s AND LOWER(name) = LOWER(%(name)s)
             LIMIT 1
         '''
-        rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "name": name})
+        rows = await self.pg.fetch_all(
+            query,
+            {"user_name": self.user_name, "name": name},
+        )
         if not rows:
             return None
 
@@ -125,7 +131,10 @@ class AgentManager:
 
     async def get_default_agent_id(self) -> str:
         """Get default agent ID. Seeds defaults if none exist."""
-        query = "SELECT agent_id FROM public.agents WHERE user_name = %(user_name)s AND is_default = true LIMIT 1"
+        query = (
+            "SELECT agent_id FROM public.agents "
+            "WHERE user_name = %(user_name)s AND is_default = true LIMIT 1"
+        )
         rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
 
         if not rows:
@@ -307,8 +316,14 @@ class AgentManager:
         if not config or config.is_default:
             return False
 
-        query = "DELETE FROM public.agents WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s"
-        await self.pg.execute(query, {"user_name": self.user_name, "agent_id": agent_id})
+        query = (
+            "DELETE FROM public.agents WHERE user_name = %(user_name)s "
+            "AND agent_id = %(agent_id)s"
+        )
+        await self.pg.execute(
+            query,
+            {"user_name": self.user_name, "agent_id": agent_id},
+        )
         logger.info(f"Deleted agent: {agent_id}")
         return True
 
@@ -318,11 +333,26 @@ class AgentManager:
         if not config:
             return False
 
-        query_clear = "UPDATE public.agents SET is_default = false WHERE user_name = %(user_name)s AND is_default = true"
-        await self.pg.execute(query_clear, {"user_name": self.user_name})
-
-        query_set = "UPDATE public.agents SET is_default = true WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s"
-        await self.pg.execute(query_set, {"user_name": self.user_name, "agent_id": agent_id})
+        async with self.pg.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE public.agents
+                SET is_default = false,
+                    updated_at = now()
+                WHERE user_name = %(user_name)s AND is_default = true
+                """,
+                {"user_name": self.user_name},
+            )
+            await cur.execute(
+                """
+                UPDATE public.agents
+                SET is_default = true,
+                    updated_at = now()
+                WHERE user_name = %(user_name)s
+                  AND agent_id = %(agent_id)s
+                """,
+                {"user_name": self.user_name, "agent_id": agent_id},
+            )
 
         logger.info(f"Set default agent: {agent_id}")
         return True
@@ -334,16 +364,27 @@ class AgentManager:
         try:
             default_config = load_agent_config("AGENT_IDENTITY")
         except Exception as e:
-            logger.warning(f"Could not load AGENT_IDENTITY.md: {e}. Falling back to hardcoded defaults.")
+            logger.warning(
+                "Could not load AGENT_IDENTITY.md: "
+                f"{e}. Falling back to hardcoded defaults."
+            )
             default_config = None
 
         stella_id = str(uuid.uuid4())
         name = default_config.name if default_config else "STELLA"
         model = default_config.model if default_config else None
         temperature = default_config.temperature if default_config else 0.7
-        tools_json = json.dumps(default_config.enabled_tools) if default_config and default_config.enabled_tools else None
+        tools_json = (
+            json.dumps(default_config.enabled_tools)
+            if default_config and default_config.enabled_tools
+            else None
+        )
 
-        brain = default_config.brain if default_config else "Warm and direct. Match their energy. No corporate filler."
+        brain = (
+            default_config.brain
+            if default_config
+            else "Warm and direct. Match their energy. No corporate filler."
+        )
         persona = (
             default_config.persona_markdown
             if default_config
@@ -356,12 +397,13 @@ class AgentManager:
         query = '''
             WITH inserted AS (
                 INSERT INTO public.agents (
-                agent_id, user_name, name, persona, brain, model, temperature, enabled_tools, is_default
+                agent_id, user_name, name, persona, brain, model, temperature,
+                enabled_tools, is_default
                 ) VALUES (
                     %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
                     %(model)s, %(temperature)s, %(enabled_tools)s, true
                 )
-                ON CONFLICT (agent_id) DO NOTHING
+                ON CONFLICT (user_name) WHERE is_default DO NOTHING
                 RETURNING agent_id, user_name, brain_revision, brain
             )
             INSERT INTO public.agent_brain_snapshots (

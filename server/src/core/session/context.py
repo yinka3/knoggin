@@ -22,13 +22,6 @@ from common.utils.core_utils import (
 from common.utils.events import EventEmitter, emit
 from common.utils.tasks import BackgroundTaskGroup
 from common.utils.time_utils import parse_iso_time_or_now
-from infrastructure.redis_client import (
-    RedisKeys,
-    SESSION_RUNTIME_TTL_SECONDS,
-    SHORT_LIVED_DEDUP_TTL_SECONDS,
-)
-from infrastructure.resources import ResourceManager
-
 from core.ingestion.services.batch_consumer import IngestionWorker
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.db.write_graph_db import (
@@ -37,6 +30,12 @@ from core.knowledge.db.write_graph_db import (
 )
 from core.knowledge.documents import DocumentService
 from core.project.state import ProjectState
+from infrastructure.redis_client import (
+    SESSION_RUNTIME_TTL_SECONDS,
+    SHORT_LIVED_DEDUP_TTL_SECONDS,
+    RedisKeys,
+)
+from infrastructure.resources import ResourceManager
 
 SESSION_KEY_TTL = SESSION_RUNTIME_TTL_SECONDS
 

@@ -10,12 +10,15 @@ from common.schema.document import DocumentFocus
 from common.utils.events import EventEmitter
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
+from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.project.project_manager import ProjectManager
 from core.session.context import Session
 from infrastructure.redis_client import RedisKeys
 
 
 class SessionManager:
+    _METADATA_UPDATE_COLUMNS = frozenset({"model", "agent_id", "enabled_tools"})
+
     def __init__(
         self,
         resources: Any,
@@ -28,6 +31,7 @@ class SessionManager:
         self.active_sessions = active_sessions
         self.project_manager = project_manager
         self.pg = resources.postgres
+        self._session_deletion_writer = SessionDeletionWriter(self.pg)
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
@@ -366,41 +370,67 @@ class SessionManager:
 
         await self.deactivate_runtime_session(session_id)
 
-        # Ephemeral Redis Cleanup
+        # Canonical Postgres and AGE deletion must either both commit or both
+        # roll back. Redis is a recoverable cache and follows the durable work.
+        await self._session_deletion_writer.delete_session(
+            user_name=user,
+            session_id=session_id,
+        )
+
+        # Ephemeral Redis cleanup is deliberately best-effort after durable
+        # deletion. A transient cache failure must not report the committed
+        # session deletion as failed.
         direct_keys = RedisKeys.session_keys(user, session_id)
         deleted = 0
-        for pattern in (
-            RedisKeys.session_memory_pattern(user, session_id),
-            RedisKeys.message_dedup_pattern(user, session_id),
-        ):
-            cursor = 0
-            while True:
-                cursor, keys = await redis.scan(cursor, match=pattern, count=100)
-                if keys:
-                    deleted += int(await redis.delete(*keys))
-                if cursor == 0:
-                    break
+        try:
+            for pattern in (
+                RedisKeys.session_memory_pattern(user, session_id),
+                RedisKeys.message_dedup_pattern(user, session_id),
+            ):
+                cursor = 0
+                while True:
+                    cursor, keys = await redis.scan(
+                        cursor,
+                        match=pattern,
+                        count=100,
+                    )
+                    if keys:
+                        deleted += int(await redis.delete(*keys))
+                    if cursor == 0:
+                        break
 
-        if direct_keys:
-            deleted += await redis.delete(*direct_keys)
+            if direct_keys:
+                deleted += await redis.delete(*direct_keys)
+            await self._delete_redis_session_metadata(session_id, project_id)
+        except Exception as exc:
+            logger.error(
+                "Durable session deletion committed, but Redis cleanup failed "
+                f"for {session_id}: {exc}"
+            )
 
-        # Postgres Durable Deletion
-        del_msgs_query = "DELETE FROM public.messages WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
-        await self.pg.execute(del_msgs_query, {"user_name": user, "session_id": session_id})
-
-        del_query = "DELETE FROM public.sessions WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
-        await self.pg.execute(del_query, {"user_name": user, "session_id": session_id})
-
-        if project_id:
-            await self.project_manager.remove_session(project_id, session_id)
-        await self._delete_redis_session_metadata(session_id, project_id)
-
-        logger.info(f"Cleaned up {deleted} Redis keys and deleted Postgres session {session_id}")
+        logger.info(
+            f"Cleaned up {deleted} Redis keys after deleting session {session_id}"
+        )
         return deleted
 
     async def update_session_metadata(self, session_id: str, new_data: dict) -> dict:
-        """Update session metadata directly."""
-        cols = {k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in new_data.items()}
+        """Update explicitly allowed session configuration fields."""
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must not be empty")
+        if not isinstance(new_data, dict):
+            raise ValueError("new_data must be a dictionary")
+
+        unknown_columns = set(new_data) - self._METADATA_UPDATE_COLUMNS
+        if unknown_columns:
+            raise ValueError(
+                "update_session_metadata does not allow: "
+                + ", ".join(sorted(unknown_columns))
+            )
+
+        cols = {
+            key: json.dumps(value) if isinstance(value, (dict, list)) else value
+            for key, value in new_data.items()
+        }
 
         if not cols:
             return {}

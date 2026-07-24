@@ -1,9 +1,9 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from common.exceptions import ToolExecutionError
-from infrastructure.redis_client import RedisKeys
 from core.agent.executor import AgentExecutor
 from core.agent.types import (
     AgentContext,
@@ -13,6 +13,7 @@ from core.agent.types import (
     RetrievedEvidence,
     ToolCall,
 )
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -199,6 +200,72 @@ async def test_execute_tools_global_limit_blocks_all_calls(monkeypatch):
 
 
 @pytest.mark.no_network
+async def test_execute_tools_stops_a_batch_when_the_global_limit_is_reached(
+    monkeypatch,
+):
+    state = AgentState(call_count=1)
+    executor = make_executor(config=AgentRunConfig(max_calls=2), state=state)
+    executed_tools = []
+
+    async def fake_execute_tool(_tools, name, _args):
+        executed_tools.append(name)
+        return {"data": []}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute_tool)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall(name="search_messages", args={"query": "first"}),
+                ToolCall(name="search_entity", args={"query": "second"}),
+            ],
+            results,
+        )
+    ]
+
+    assert executed_tools == ["search_messages"]
+    assert executor.ctx.state.call_count == 2
+    assert events[-1] == {
+        "event": "tool_error",
+        "data": {"tool": "all", "error": "Global call limit reached (2)"},
+    }
+    assert results[-1] == {
+        "tool": "all",
+        "error": "Global call limit reached (2)",
+    }
+
+
+@pytest.mark.no_network
+async def test_execute_tools_times_out_and_records_a_recoverable_error(monkeypatch):
+    executor = make_executor(config=AgentRunConfig(max_calls=2, tool_timeout=0.01))
+
+    async def stalled_execute_tool(*_args):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(
+        "core.agent.executor.execute_tool",
+        stalled_execute_tool,
+    )
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall(name="search_messages", args={"query": "profile"})],
+            results,
+        )
+    ]
+
+    message = "Tool execution timed out after 0.01 seconds"
+    assert events[-1] == {
+        "event": "tool_error",
+        "data": {"tool": "search_messages", "error": message},
+    }
+    assert results == [{"tool": "search_messages", "error": message}]
+    assert executor.ctx.state.consecutive_errors == 1
+
+
+@pytest.mark.no_network
 async def test_execute_tools_tool_limit_duplicate_and_parse_error_skip_methods(
     monkeypatch,
 ):
@@ -372,7 +439,10 @@ async def test_execute_tools_tool_errors_increment_and_success_resets(monkeypatc
             [
                 ToolCall(name="search_messages", args={"query": "one"}),
                 ToolCall(name="search_messages", args={"query": "two"}),
-                ToolCall(name="episode_check", args={"entity_name": "Ada", "query": "q"}),
+                ToolCall(
+                    name="episode_check",
+                    args={"entity_name": "Ada", "query": "q"},
+                ),
             ],
             results,
         )

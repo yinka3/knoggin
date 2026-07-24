@@ -29,11 +29,18 @@ class CandidateSuggestionWriter:
             scope.session_id, "session_id", "save_candidate_suggestions"
         )
 
-        for suggestion in suggestions:
-            await self.client.execute(
-                self._insert_sql(),
-                self._insert_params(user_name, project_id, session_id, suggestion),
-            )
+        insert_sql = self._insert_sql()
+        async with self.client.transaction() as cur:
+            for suggestion in suggestions:
+                await cur.execute(
+                    insert_sql,
+                    self._insert_params(
+                        user_name,
+                        project_id,
+                        session_id,
+                        suggestion,
+                    ),
+                )
         return len(suggestions)
 
     @classmethod

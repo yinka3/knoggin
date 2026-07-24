@@ -3,7 +3,6 @@ import json
 import pytest
 
 from common.exceptions import LLMProviderError, ToolExecutionError
-from infrastructure.redis_client import RedisKeys
 from core.agent.executor import AgentExecutor
 from core.agent.types import (
     AgentContext,
@@ -13,6 +12,7 @@ from core.agent.types import (
     RetrievedEvidence,
     ToolCall,
 )
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeRedis
 
 

@@ -314,10 +314,64 @@ async def test_delete_session_data_does_not_remove_project_documents(
     assert active_sessions == {}
     assert project_manager.release_calls == ["project-1"]
     assert unregister_calls == [("project-1", "session-1")]
-    assert project_manager.remove_session_calls == [("project-1", "session-1")]
+    assert project_manager.remove_session_calls == []
     assert await resources.redis.hget(RedisKeys.sessions("ada"), "session-1") is None
     assert await resources.redis.get(memory_key) is None
     assert await resources.redis.get(dedup_key) is None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_delete_session_keeps_redis_state_when_durable_deletion_fails(
+    monkeypatch,
+    session_manager,
+):
+    manager, resources, _, active_sessions = session_manager
+    active_sessions["session-1"] = FakeSession(
+        session_id="session-1",
+        project_id="project-1",
+    )
+    memory_key = RedisKeys.session_memory("ada", "session-1", "notes")
+    await resources.redis.set(memory_key, "keep until durable delete succeeds")
+
+    async def fail_durable_delete(**_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(
+        manager._session_deletion_writer,
+        "delete_session",
+        fail_durable_delete,
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await manager.delete_session_data("session-1")
+
+    assert await resources.redis.get(memory_key) == "keep until durable delete succeeds"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_delete_session_treats_redis_cleanup_failure_as_recoverable(
+    monkeypatch,
+    session_manager,
+):
+    manager, resources, _, _ = session_manager
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+    }
+    memory_key = RedisKeys.session_memory("ada", "session-1", "notes")
+    await resources.redis.set(memory_key, "stale cache")
+
+    async def fail_delete(*_keys):
+        raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(resources.redis, "delete", fail_delete)
+
+    assert await manager.delete_session_data("session-1") == 0
+    assert "session-1" not in resources.postgres.sessions
+    assert await resources.redis.get(memory_key) == "stale cache"
 
 
 @pytest.mark.runtime

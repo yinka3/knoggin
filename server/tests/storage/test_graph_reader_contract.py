@@ -1,0 +1,191 @@
+import json
+
+import pytest
+
+from common.scoping import IDENTITY_ENTITY_ID
+from core.knowledge.db.readers.graph_reader import GraphReader
+from tests.fixtures.fakes import RecordingPostgresClient
+
+
+def _message(message_id: int, timestamp: int | None) -> dict:
+    return {
+        "id": message_id,
+        "user_name": "ada",
+        "session_id": "session-1",
+        "role": "user",
+        "content": f"message {message_id}",
+        "timestamp": timestamp,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_surrounding_messages_use_strict_timestamp_and_message_id_bounds():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [_message(3, 200)],
+            [_message(2, 200), _message(1, 100)],
+            [_message(4, 200), _message(5, 300)],
+        ]
+    )
+
+    messages = await GraphReader(client).get_surrounding_messages(
+        3,
+        user_name="ada",
+        session_id="session-1",
+        visible_project_ids=["project-1"],
+        forward=2,
+        target_total=5,
+    )
+
+    assert [message["id"] for message in messages] == [1, 2, 3, 4, 5]
+    _, back_query, back_params = client.calls[1]
+    _, forward_query, forward_params = client.calls[2]
+    assert "timestamp_ms = %s AND message_id < %s" in back_query
+    assert "ORDER BY timestamp_ms DESC NULLS FIRST, message_id DESC" in back_query
+    assert "timestamp_ms = %s AND message_id > %s" in forward_query
+    assert "ORDER BY timestamp_ms ASC NULLS LAST, message_id ASC" in forward_query
+    assert back_params[:6] == (200, 200, 3, 200, 200, 3)
+    assert forward_params[:6] == (200, 200, 3, 200, 200, 3)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_recent_project_messages_uses_an_exclusive_cursor():
+    client = RecordingPostgresClient(fetch_all_results=[[_message(6, 600)]])
+
+    await GraphReader(client).get_recent_project_messages(
+        "ada",
+        "project-1",
+        limit=10,
+        before_message_id=7,
+    )
+
+    _, query, params = client.calls[0]
+    assert "AND message_id < %s" in query
+    assert params == ("ada", "project-1", 7, 10)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("connected", "expected"),
+    [("false", False), ('"false"', False), ("true", True), (True, True)],
+)
+async def test_direct_edge_scopes_relationship_and_decodes_age_booleans(
+    connected,
+    expected,
+):
+    client = RecordingPostgresClient(fetch_one_results=[{"connected": connected}])
+
+    result = await GraphReader(client).has_direct_edge(
+        IDENTITY_ENTITY_ID,
+        2,
+        visible_project_ids=["project-1"],
+    )
+
+    assert result is expected
+    _, query, params = client.calls[0]
+    assert "AND r.project_id IN $visible_project_ids" in query
+    assert json.loads(params[0]) == {
+        "id_a": IDENTITY_ENTITY_ID,
+        "id_b": 2,
+        "visible_project_ids": ["project-1"],
+        "identity_entity_id": IDENTITY_ENTITY_ID,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_surrounding_messages_do_not_repeat_same_timestamp_rows(
+    real_postgres_client,
+):
+    await real_postgres_client.execute(
+        """
+        INSERT INTO sessions (session_id, user_name, project_id)
+        VALUES ('session-1', 'ada', 'project-1')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO messages (
+            user_name, session_id, message_id, project_id, role, content, timestamp_ms
+        )
+        VALUES
+            ('ada', 'session-1', 1, 'project-1', 'user', 'one', 100),
+            ('ada', 'session-1', 2, 'project-1', 'user', 'two', 200),
+            ('ada', 'session-1', 3, 'project-1', 'user', 'three', 200),
+            ('ada', 'session-1', 4, 'project-1', 'user', 'four', 200),
+            ('ada', 'session-1', 5, 'project-1', 'user', 'five', 300)
+        """
+    )
+
+    messages = await GraphReader(real_postgres_client).get_surrounding_messages(
+        3,
+        user_name="ada",
+        session_id="session-1",
+        visible_project_ids=["project-1"],
+        forward=2,
+        target_total=5,
+    )
+
+    assert [message["id"] for message in messages] == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_direct_edge_ignores_an_edge_from_an_invisible_project(
+    real_postgres_client,
+):
+    await real_postgres_client.fetch_one(
+        real_postgres_client.build_cypher(
+            """
+            UNWIND $nodes AS node
+            CREATE (:Entity {id: node.id, project_id: node.project_id})
+            RETURN count(*) AS created
+            """,
+            "created agtype",
+        ),
+        (
+            json.dumps(
+                {
+                    "nodes": [
+                        {"id": IDENTITY_ENTITY_ID, "project_id": "identity"},
+                        {"id": 2, "project_id": "project-1"},
+                    ]
+                }
+            ),
+        ),
+    )
+    await real_postgres_client.fetch_one(
+        real_postgres_client.build_cypher(
+            """
+            MATCH (a:Entity {id: $identity_entity_id})
+            MATCH (b:Entity {id: $entity_id})
+            CREATE (a)-[:RELATED_TO {project_id: $relationship_project_id}]->(b)
+            RETURN true AS created
+            """,
+            "created agtype",
+        ),
+        (
+            json.dumps(
+                {
+                    "identity_entity_id": IDENTITY_ENTITY_ID,
+                    "entity_id": 2,
+                    "relationship_project_id": "project-2",
+                }
+            ),
+        ),
+    )
+
+    reader = GraphReader(real_postgres_client)
+    assert (
+        await reader.has_direct_edge(
+            IDENTITY_ENTITY_ID,
+            2,
+            visible_project_ids=["project-1"],
+        )
+        is False
+    )

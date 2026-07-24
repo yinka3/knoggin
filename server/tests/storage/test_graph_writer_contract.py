@@ -700,13 +700,33 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     assert any(
         call[0] == "execute"
         and "INSERT INTO episode_entities" in call[1]
-        and call[2] == (2, 3)
+        and call[2] == (2, 3, "project-1")
+        for call in client.calls
+    )
+    assert any(
+        call[0] == "execute"
+        and "UPDATE episode_entities" in call[1]
+        and "COUNT(DISTINCT em.message_id)" in call[1]
+        and call[2] == (2, "project-1", 2)
         for call in client.calls
     )
     assert any(
         call[0] == "execute"
         and "FROM relationships" in call[1]
         and call[2] == ("project-1", 3, 3)
+        for call in client.calls
+    )
+    assert any(
+        call[0] == "execute"
+        and "INSERT INTO episode_relationships" in call[1]
+        and call[2] == ("project-1:2:9", "project-1:3:9", "project-1")
+        for call in client.calls
+    )
+    assert any(
+        call[0] == "execute"
+        and "UPDATE episode_relationships" in call[1]
+        and "COUNT(DISTINCT em.message_id)" in call[1]
+        and call[2] == ("project-1:2:9", "project-1", "project-1:2:9")
         for call in client.calls
     )
     hierarchy_rewrite_call = next(

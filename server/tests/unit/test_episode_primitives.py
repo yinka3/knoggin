@@ -2,8 +2,8 @@ import pytest
 from pydantic import ValidationError
 
 from common.schema.primitives import (
-    Episode,
     EntityEpisode,
+    Episode,
     MessageEpisode,
     RelationshipEpisode,
 )

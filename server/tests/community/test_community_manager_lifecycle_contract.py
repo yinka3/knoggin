@@ -6,7 +6,11 @@ import pytest
 from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent_contracts import AgentConfig
 from common.schema.settings import CommunitySettings, DeveloperSettings, RootConfig
-from core.community.community_manager import CommunityManager
+from core.community.community_manager import (
+    ACTIVE_DISCUSSION_TTL_SECONDS,
+    COMMUNITY_ENABLED_TOOLS,
+    CommunityManager,
+)
 from tests.fixtures.fakes import FakePostgresClient, FakeRedis
 
 
@@ -16,25 +20,33 @@ class RecordingCommunityGraph:
         self.closed = []
         self.messages = []
 
-    async def create_discussion(self, discussion_id, topic, agent_ids):
+    async def create_discussion(
+        self, discussion_id, topic, agent_ids, *, user_name, project_id
+    ):
         self.created.append(
             {
                 "discussion_id": discussion_id,
                 "topic": topic,
                 "agent_ids": list(agent_ids),
+                "user_name": user_name,
+                "project_id": project_id,
             }
         )
 
-    async def close_discussion(self, discussion_id):
-        self.closed.append(discussion_id)
+    async def close_discussion(self, discussion_id, *, user_name, project_id):
+        self.closed.append((discussion_id, user_name, project_id))
 
-    async def add_message(self, discussion_id, agent_id, message, role):
+    async def add_message(
+        self, discussion_id, agent_id, message, role, *, user_name, project_id
+    ):
         self.messages.append(
             {
                 "discussion_id": discussion_id,
                 "agent_id": agent_id,
                 "message": message,
                 "role": role,
+                "user_name": user_name,
+                "project_id": project_id,
             }
         )
 
@@ -248,7 +260,9 @@ async def test_trigger_discussion_creates_discussion_and_cleans_up_after_error(
     discussion_id = created[0]["discussion_id"]
     assert created[0]["topic"] == "Profile stability"
     assert created[0]["agent_ids"] == ["agent-1"]
-    assert resources.knowledge_store.community.closed == [discussion_id]
+    assert resources.knowledge_store.community.closed == [
+        (discussion_id, "ada", "project-1")
+    ]
     assert await redis.get(manager._active_discussion_key()) is None
     assert manager._active_discussion_id is None
     assert [event[2] for event in events] == [
@@ -275,6 +289,29 @@ async def test_trigger_discussion_claims_before_running_the_seed(monkeypatch):
 
     await manager.trigger_discussion()
 
+    assert await redis.get(manager._active_discussion_key()) is None
+    assert manager._active_discussion_id is None
+
+
+@pytest.mark.no_network
+async def test_trigger_discussion_releases_claim_when_seeding_times_out(monkeypatch):
+    patch_manager_config(monkeypatch)
+    patch_events(monkeypatch)
+    redis = FakeRedis()
+    resources = make_resources(redis=redis)
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    async def timed_out_wait_for(coroutine, *, timeout):
+        coroutine.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "core.community.community_manager.asyncio.wait_for", timed_out_wait_for
+    )
+
+    await manager.trigger_discussion()
+
+    assert resources.knowledge_store.community.created == []
     assert await redis.get(manager._active_discussion_key()) is None
     assert manager._active_discussion_id is None
 
@@ -362,15 +399,31 @@ async def test_run_loop_rotates_participants_persists_messages_and_stops_on_end(
             "agent_id": "agent-1",
             "message": "First contribution",
             "role": "assistant",
+            "user_name": "ada",
+            "project_id": "project-1",
         },
         {
             "discussion_id": "disc-1",
             "agent_id": "agent-2",
             "message": "Second contribution [[END_DISCUSSION]]",
             "role": "assistant",
+            "user_name": "ada",
+            "project_id": "project-1",
         },
     ]
     assert [event[2] for event in events] == ["message_added", "message_added"]
+    assert [args for _, args in resources.redis.evals] == [
+        (
+            manager._active_discussion_key(),
+            "disc-1",
+            ACTIVE_DISCUSSION_TTL_SECONDS,
+        ),
+        (
+            manager._active_discussion_key(),
+            "disc-1",
+            ACTIVE_DISCUSSION_TTL_SECONDS,
+        ),
+    ]
 
 
 @pytest.mark.no_network
@@ -515,3 +568,42 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
             },
         )
     ]
+
+
+@pytest.mark.no_network
+def test_community_tool_resolution_preserves_empty_allowlists_and_brain_restore():
+    manager = CommunityManager(
+        make_project_state(),
+        "ada",
+        make_resources(),
+    )
+
+    default_agent = AgentConfig(
+        id="agent-default",
+        name="Default",
+        persona="Default persona",
+        enabled_tools=None,
+    )
+    empty_agent = AgentConfig(
+        id="agent-empty",
+        name="Empty",
+        persona="Empty persona",
+        enabled_tools=[],
+    )
+    restore_agent = AgentConfig(
+        id="agent-restore",
+        name="Restore",
+        persona="Restore persona",
+        enabled_tools=["restore_brain_section"],
+    )
+
+    enabled, client_tools = manager._resolve_agent_tools(default_agent)
+    assert enabled == COMMUNITY_ENABLED_TOOLS
+    assert "restore_brain_section" in enabled
+    assert client_tools == AAC_SPECIFIC_SCHEMAS
+
+    assert manager._resolve_agent_tools(empty_agent) == ([], [])
+    assert manager._resolve_agent_tools(restore_agent) == (
+        ["restore_brain_section"],
+        [],
+    )

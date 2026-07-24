@@ -1,3 +1,5 @@
+from dataclasses import asdict
+
 import pytest
 
 from common.schema.contracts import (
@@ -338,7 +340,7 @@ async def test_graph_mutation_plan_keeps_only_safe_message_entity_references():
         user_name="ada",
     )
 
-    assert [reference.model_dump() for reference in plan.message_entity_refs] == [
+    assert [asdict(reference) for reference in plan.message_entity_refs] == [
         {"message_id": 7, "entity_id": 2},
         {"message_id": 8, "entity_id": 3},
     ]
@@ -359,7 +361,7 @@ async def test_graph_mutation_plan_marks_processed_messages_episode_eligible():
         user_name="ada",
     )
 
-    assert [eligibility.model_dump() for eligibility in plan.eligible_messages] == [
+    assert [asdict(eligibility) for eligibility in plan.eligible_messages] == [
         {"message_id": 7, "episode_type": None},
         {"message_id": 8, "episode_type": None},
     ]
@@ -370,7 +372,7 @@ async def test_graph_mutation_plan_marks_processed_messages_episode_eligible():
 def test_episode_eligibility_supports_an_optional_type():
     eligibility = EpisodeEligibility(message_id=7, episode_type="decision")
 
-    assert eligibility.model_dump() == {
+    assert asdict(eligibility) == {
         "message_id": 7,
         "episode_type": "decision",
     }
@@ -482,7 +484,7 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
             {},
         )
     ]
-    assert summary.model_dump() == {
+    assert asdict(summary) == {
         "entities_written": 2,
         "relationships_written": 2,
         "user_relationships_written": 1,
@@ -508,7 +510,7 @@ async def test_write_batch_to_graph_marks_skipped_work_unit_metadata():
         user_name="ada",
     )
 
-    assert summary.model_dump() == {
+    assert asdict(summary) == {
         "entities_written": 0,
         "relationships_written": 0,
         "user_relationships_written": 0,
@@ -521,7 +523,7 @@ async def test_write_batch_to_graph_marks_skipped_work_unit_metadata():
     assert graph_work["kind"] == "graph_write"
     assert graph_work["status"] == "skipped"
     assert graph_work["trace"]["summary"] == "No graph writes"
-    assert batch.work_unit.metadata["graph_write"] == summary.model_dump()
+    assert batch.work_unit.metadata["graph_write"] == asdict(summary)
 
 
 @pytest.mark.storage

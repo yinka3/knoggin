@@ -13,6 +13,10 @@ from common.utils.time_utils import get_now
 from infrastructure.postgres_client import PostgresClient
 
 
+_MAX_QUERY_LIMIT = 100
+_MAX_ENTITY_LIST_OFFSET = 10_000
+
+
 class EntityReader:
     def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
@@ -38,6 +42,45 @@ class EntityReader:
     @staticmethod
     def _ms_to_seconds(value) -> float:
         return float(value or 0) / 1000
+
+    @staticmethod
+    def _validate_query_limit(limit: int, operation: str) -> int:
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= _MAX_QUERY_LIMIT
+        ):
+            raise ValueError(
+                f"{operation}: limit must be an integer between 1 and "
+                f"{_MAX_QUERY_LIMIT}"
+            )
+        return limit
+
+    @staticmethod
+    def _validate_entity_list_offset(offset: int) -> int:
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or not 0 <= offset <= _MAX_ENTITY_LIST_OFFSET
+        ):
+            raise ValueError(
+                "list_entities: offset must be an integer between 0 and "
+                f"{_MAX_ENTITY_LIST_OFFSET}"
+            )
+        return offset
+
+    @staticmethod
+    def _validate_activity_days(days: int) -> int:
+        if (
+            not isinstance(days, int)
+            or isinstance(days, bool)
+            or not 1 <= days <= 365
+        ):
+            raise ValueError(
+                "get_recently_active_entities: days must be an integer "
+                "between 1 and 365"
+            )
+        return days
 
     def _parse_aliases(self, value) -> List[str]:
         aliases = self._parse_agtype(value) or []
@@ -150,6 +193,8 @@ class EntityReader:
         search: Optional[str] = None,
     ) -> Tuple[List[Dict], int]:
         """Paginated entity listing with optional filters."""
+        limit = self._validate_query_limit(limit, "list_entities")
+        offset = self._validate_entity_list_offset(offset)
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "list_entities",
@@ -189,16 +234,23 @@ class EntityReader:
         """
 
         try:
-            count_row = await self.client.fetch_one(count_query, tuple(params))
-            total = int(count_row["total"]) if count_row and count_row["total"] else 0
+            async with self.client.transaction() as cur:
+                await cur.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                )
+                await cur.execute(count_query, tuple(params))
+                count_row = await cur.fetchone()
+                total = (
+                    int(count_row["total"])
+                    if count_row and count_row["total"]
+                    else 0
+                )
 
-            if total == 0:
-                return [], 0
+                if total == 0:
+                    return [], 0
 
-            entities_res = await self.client.fetch_all(
-                data_query,
-                (*params, offset, limit),
-            )
+                await cur.execute(data_query, (*params, offset, limit))
+                entities_res = await cur.fetchall()
             entities = []
             for row in entities_res:
                 entities.append(
@@ -453,6 +505,7 @@ class EntityReader:
         visible_project_ids: List[str],
         limit: int = 50,
     ) -> List[Tuple[int, float]]:
+        limit = self._validate_query_limit(limit, "search_similar_entities")
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "search_similar_entities",
@@ -498,6 +551,10 @@ class EntityReader:
         limit: int = 10,
         score_threshold: float = 0.8,
     ) -> List[Tuple[int, float]]:
+        limit = self._validate_query_limit(
+            limit,
+            "search_entities_by_embedding",
+        )
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "search_entities_by_embedding",
@@ -709,6 +766,7 @@ class EntityReader:
     async def get_top_connected_entities(
         self, *, visible_project_ids: List[str], limit: int = 10
     ) -> List[Dict]:
+        limit = self._validate_query_limit(limit, "get_top_connected_entities")
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "get_top_connected_entities",
@@ -789,6 +847,7 @@ class EntityReader:
           END
         LEFT JOIN relationship_evidence_refs ref
           ON ref.relationship_id = r.relationship_id
+         AND ref.project_id = r.project_id
         WHERE %s IN (r.entity_a_id, r.entity_b_id)
           AND r.project_id = ANY(%s)
           AND (neighbor.project_id = ANY(%s) OR neighbor.entity_id = %s)
@@ -837,6 +896,8 @@ class EntityReader:
         days: int = 7,
         limit: int = 10,
     ) -> List[Dict]:
+        days = self._validate_activity_days(days)
+        limit = self._validate_query_limit(limit, "get_recently_active_entities")
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "get_recently_active_entities",
@@ -885,6 +946,7 @@ class EntityReader:
     async def get_notable_entities(
         self, *, visible_project_ids: List[str], limit: int = 10
     ) -> List[Dict]:
+        limit = self._validate_query_limit(limit, "get_notable_entities")
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "get_notable_entities",

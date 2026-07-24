@@ -21,6 +21,7 @@ from core.knowledge.db.writers.entity_writer import EntityWriter
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
+from core.knowledge.db.writers.retention_writer import RetentionWriter
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
@@ -29,13 +30,17 @@ class KnowledgeStore:
     """
     Application-facing facade over durable knowledge persistence.
 
-    Owns one PostgresClient and composes the focused readers, writers,
-    rebuilders, tool queries, and community store that share it. Callers use
-    this boundary without depending on the underlying SQL, AGE, or index layout.
+    Composes focused readers, writers, rebuilders, tool queries, and the
+    community store over the application-owned PostgresClient. Callers use this
+    boundary without depending on the underlying SQL, AGE, or index layout.
     """
 
-    def __init__(self, dsn: str, embedding_service: EmbeddingService):
-        self._postgres_client = PostgresClient(dsn=dsn)
+    def __init__(
+        self,
+        postgres_client: PostgresClient,
+        embedding_service: EmbeddingService,
+    ):
+        self._postgres_client = postgres_client
         self._id_allocator = IdAllocator(self._postgres_client)
         self._entity_writer = EntityWriter(self._postgres_client)
         self._episode_writer = EpisodeWriter(self._postgres_client)
@@ -44,6 +49,7 @@ class KnowledgeStore:
         )
         self._graph_writer = GraphWriter(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
+        self._retention_writer = RetentionWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
         self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
@@ -56,16 +62,6 @@ class KnowledgeStore:
         )
         self._community = CommunityStore(self._postgres_client)
         logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
-
-    async def connect(self):
-        await self._postgres_client.connect()
-
-    async def close(self):
-        await self._postgres_client.close()
-
-    @property
-    def postgres(self) -> PostgresClient:
-        return self._postgres_client
 
     @property
     def community(self) -> CommunityStore:
@@ -376,12 +372,14 @@ class KnowledgeStore:
         *,
         project_id: str,
         final_topic: Optional[str] = None,
+        cur=None,
     ) -> bool:
         return await self._graph_writer.merge_entities(
             primary_id,
             secondary_id,
             project_id=project_id,
             final_topic=final_topic,
+            cur=cur,
         )
 
     async def cleanup_null_entities(self, *, project_id: str) -> List[int]:
@@ -408,6 +406,23 @@ class KnowledgeStore:
             cutoff,
             user_name=user_name,
             project_id=project_id,
+        )
+
+    async def purge_expired_operational_records(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        candidate_suggestion_cutoff: datetime,
+        tool_audit_cutoff: datetime,
+        merge_history_cutoff: datetime,
+    ) -> Dict[str, int]:
+        return await self._retention_writer.purge_expired_records(
+            user_name=user_name,
+            project_id=project_id,
+            candidate_suggestion_cutoff=candidate_suggestion_cutoff,
+            tool_audit_cutoff=tool_audit_cutoff,
+            merge_history_cutoff=merge_history_cutoff,
         )
 
     async def delete_relationship(

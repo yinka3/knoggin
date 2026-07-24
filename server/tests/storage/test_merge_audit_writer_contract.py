@@ -160,6 +160,15 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
                 ],
             }
         ],
+        "episode_relationships": [
+            {
+                "episode_id": "episode-1",
+                "relationship_id": "project-1:2:9",
+                "prominence_weight": 0.7,
+                "is_central_relationship": True,
+                "source_message_count": 1,
+            }
+        ],
         "hierarchy": [
             {
                 "project_id": "project-1",
@@ -187,6 +196,7 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
     assert "INSERT INTO episode_entities" in executed_sql
     assert "INSERT INTO relationships" in executed_sql
     assert "INSERT INTO relationship_evidence_refs" in executed_sql
+    assert "INSERT INTO episode_relationships" in executed_sql
     assert "INSERT INTO hierarchy_edges" in executed_sql
     assert "rollback_status = 'rolled_back'" in executed_sql
 

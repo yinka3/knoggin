@@ -437,7 +437,9 @@ class EpisodeWriter:
             """
             SELECT rer.message_id, rer.relationship_id
             FROM relationship_evidence_refs rer
-            JOIN relationships r ON r.relationship_id = rer.relationship_id
+            JOIN relationships r
+              ON r.relationship_id = rer.relationship_id
+             AND r.project_id = rer.project_id
             WHERE rer.message_id = ANY(%s)
               AND rer.user_name = %s
               AND rer.session_id = %s
@@ -679,12 +681,14 @@ class EpisodeWriter:
                 """
                 INSERT INTO episode_messages (
                     episode_id,
+                    project_id,
+                    session_id,
                     message_id,
                     influence_weight,
                     influence_reason,
                     message_position
                 )
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (episode_id, message_id) DO UPDATE
                 SET influence_weight = EXCLUDED.influence_weight,
                     influence_reason = EXCLUDED.influence_reason,
@@ -692,6 +696,8 @@ class EpisodeWriter:
                 """,
                 (
                     episode.episode_id,
+                    episode.project_id,
+                    episode.session_id,
                     message.message_id,
                     message.influence_weight,
                     message.influence_reason,
@@ -744,6 +750,7 @@ class EpisodeWriter:
                 """
                 INSERT INTO episode_entities (
                     episode_id,
+                    project_id,
                     entity_id,
                     prominence_weight,
                     role,
@@ -752,7 +759,7 @@ class EpisodeWriter:
                     first_seen_at,
                     last_seen_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (episode_id, entity_id) DO UPDATE
                 SET prominence_weight = EXCLUDED.prominence_weight,
                     role = EXCLUDED.role,
@@ -763,6 +770,7 @@ class EpisodeWriter:
                 """,
                 (
                     episode.episode_id,
+                    episode.project_id,
                     entity_id,
                     prominence_weight,
                     ranked.role if ranked else None,
@@ -807,12 +815,13 @@ class EpisodeWriter:
                 """
                 INSERT INTO episode_relationships (
                     episode_id,
+                    project_id,
                     relationship_id,
                     prominence_weight,
                     is_central_relationship,
                     source_message_count
                 )
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (episode_id, relationship_id) DO UPDATE
                 SET prominence_weight = EXCLUDED.prominence_weight,
                     is_central_relationship = EXCLUDED.is_central_relationship,
@@ -820,6 +829,7 @@ class EpisodeWriter:
                 """,
                 (
                     episode.episode_id,
+                    episode.project_id,
                     relationship_id,
                     prominence_weight,
                     ranked.is_central_relationship if ranked else False,

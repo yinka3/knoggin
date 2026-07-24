@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from common.exceptions import StorageUnavailableError
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -13,10 +14,21 @@ from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
 
 
+_MAX_PATH_DEPTH = 4
+
+
 class ToolQueries:
     def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
         self.graph_name = graph_name
+
+    @staticmethod
+    def _raise_storage_unavailable(operation: str, exc: Exception) -> None:
+        logger.error(f"Storage query failed for {operation}: {exc}")
+        raise StorageUnavailableError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
 
     def _build_path_data(
         self, names: List[str], topics: List[str], evidence: List[List[str]]
@@ -43,6 +55,20 @@ class ToolQueries:
             "visible_project_ids": visible_project_ids,
             "identity_entity_id": IDENTITY_ENTITY_ID,
         }
+
+    @staticmethod
+    def _validate_path_depth(max_depth: int, operation: str) -> int:
+        """Validate the one value interpolated into AGE Cypher syntax."""
+        if (
+            not isinstance(max_depth, int)
+            or isinstance(max_depth, bool)
+            or not 1 <= max_depth <= _MAX_PATH_DEPTH
+        ):
+            raise ValueError(
+                f"{operation}: max_depth must be an integer between 1 and "
+                f"{_MAX_PATH_DEPTH}"
+            )
+        return max_depth
 
     async def get_hot_topic_context_with_messages(
         self,
@@ -76,13 +102,15 @@ class ToolQueries:
                         )
                     )
                     FROM (
-                        SELECT r.relationship_id
+                        SELECT r.relationship_id, r.project_id
                         FROM relationships r
                         WHERE (r.entity_a_id = e.entity_id OR r.entity_b_id = e.entity_id)
                           AND r.project_id = ANY(%s)
                         LIMIT 10
                     ) rels
-                    JOIN relationship_evidence_refs rer ON rer.relationship_id = rels.relationship_id
+                    JOIN relationship_evidence_refs rer
+                      ON rer.relationship_id = rels.relationship_id
+                     AND rer.project_id = rels.project_id
                 ),
                 '[]'::jsonb
             ) as msg_ids
@@ -145,8 +173,7 @@ class ToolQueries:
                 }
             return result
         except Exception as e:
-            logger.error(f"Failed to get hot topic context: {e}")
-            return {}
+            self._raise_storage_unavailable("get_hot_topic_context_with_messages", e)
 
     @staticmethod
     def _sanitize_fts_query(query: str) -> str:
@@ -206,8 +233,7 @@ class ToolQueries:
                 for row in res
             ]
         except Exception as e:
-            logger.error(f"Postgres FTS search failed: {e}")
-            return []
+            self._raise_storage_unavailable("search_messages_fts", e)
 
     async def search_entity(
         self,
@@ -345,6 +371,7 @@ class ToolQueries:
                         )
                         FROM relationship_evidence_refs rer
                         WHERE rer.relationship_id = r.relationship_id
+                          AND rer.project_id = r.project_id
                     ),
                     '[]'::jsonb
                 ) as evidence_refs
@@ -404,8 +431,7 @@ class ToolQueries:
             return result[:limit]
 
         except Exception as e:
-            logger.error(f"Failed search_entity: {e}")
-            return []
+            self._raise_storage_unavailable("search_entity", e)
 
     async def get_related_entities(
         self,
@@ -438,6 +464,7 @@ class ToolQueries:
                     )
                     FROM relationship_evidence_refs rer
                     WHERE rer.relationship_id = r.relationship_id
+                      AND rer.project_id = r.project_id
                 ),
                 '[]'::jsonb
             ) as evidence_refs,
@@ -494,8 +521,7 @@ class ToolQueries:
                 for r in data
             ]
         except Exception as e:
-            logger.error(f"Failed get_related_entities: {e}")
-            return []
+            self._raise_storage_unavailable("get_related_entities", e)
 
     async def get_recent_activity(
         self,
@@ -527,6 +553,7 @@ class ToolQueries:
                     )
                     FROM relationship_evidence_refs rer
                     WHERE rer.relationship_id = r.relationship_id
+                      AND rer.project_id = r.project_id
                 ),
                 '[]'::jsonb
             ) as evidence_refs,
@@ -577,8 +604,7 @@ class ToolQueries:
                 for r in data
             ]
         except Exception as e:
-            logger.error(f"Failed get_recent_activity: {e}")
-            return []
+            self._raise_storage_unavailable("get_recent_activity", e)
 
     async def _find_shortest_path(
         self,
@@ -589,6 +615,10 @@ class ToolQueries:
         active_topics: Optional[List[str]] = None,
         max_depth: int = 4,
     ) -> Optional[Tuple[List[str], List[str], List[List[str]], bool]]:
+        max_depth = self._validate_path_depth(
+            max_depth,
+            "_find_shortest_path",
+        )
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "_find_shortest_path",
@@ -650,8 +680,7 @@ class ToolQueries:
                 bool(row["has_inactive"]),
             )
         except Exception as e:
-            logger.error(f"Failed _find_shortest_path: {e}")
-            return None
+            self._raise_storage_unavailable("find_shortest_path", e)
 
     async def _find_active_only_path(
         self,
@@ -662,6 +691,10 @@ class ToolQueries:
         active_topics: Optional[List[str]] = None,
         max_depth: int = 4,
     ) -> Optional[Tuple[List[str], List[str], List[List[str]]]]:
+        max_depth = self._validate_path_depth(
+            max_depth,
+            "_find_active_only_path",
+        )
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "_find_active_only_path",
@@ -716,8 +749,7 @@ class ToolQueries:
             row = data[0]
             return (row["names"], row["node_topics"], row["evidence_refs"])
         except Exception as e:
-            logger.error(f"Failed _find_active_only_path: {e}")
-            return None
+            self._raise_storage_unavailable("find_active_only_path", e)
 
     async def find_path_filtered(
         self,
@@ -728,6 +760,10 @@ class ToolQueries:
         active_topics: Optional[List[str]] = None,
         max_depth: int = 4,
     ) -> Tuple[List[Dict], bool]:
+        max_depth = self._validate_path_depth(
+            max_depth,
+            "find_path_filtered",
+        )
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "find_path_filtered",

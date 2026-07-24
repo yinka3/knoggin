@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +39,16 @@ class RecordingPostgres:
         self.fetch_results = list(fetch_results or [])
         self.execute_results = list(execute_results or [])
         self.calls = []
+        self.transaction_enters = 0
+        self.transaction_exits = 0
+
+    @asynccontextmanager
+    async def transaction(self):
+        self.transaction_enters += 1
+        try:
+            yield _RecordingCursor(self)
+        finally:
+            self.transaction_exits += 1
 
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
@@ -46,6 +57,14 @@ class RecordingPostgres:
     async def execute(self, query, params=None):
         self.calls.append(("execute", query, params))
         return self.execute_results.pop(0) if self.execute_results else 1
+
+
+class _RecordingCursor:
+    def __init__(self, postgres):
+        self.postgres = postgres
+
+    async def execute(self, query, params=None):
+        return await self.postgres.execute(query, params)
 
 
 class RecordingProjectDeletionWriter:
@@ -69,7 +88,6 @@ def make_manager(postgres):
 async def test_create_project_persists_metadata_and_default_topics(monkeypatch):
     postgres = RecordingPostgres(
         [
-            [{"created_at": None, "updated_at": None}],
             [project_row()],
         ]
     )
@@ -84,13 +102,15 @@ async def test_create_project_persists_metadata_and_default_topics(monkeypatch):
     insert = next(
         call
         for call in postgres.calls
-        if call[0] == "fetch_all" and "INSERT INTO public.projects" in call[1]
+        if call[0] == "execute" and "INSERT INTO public.projects" in call[1]
     )
     assert insert[2]["name"] == "Research"
     assert insert[2]["status"] == ProjectStatus.ACTIVE.value
     assert insert[2]["topic_config"]
     assert result["id"] == "project-1"
     assert "topic_config" not in result
+    assert postgres.transaction_enters == 1
+    assert postgres.transaction_exits == 1
 
 
 @pytest.mark.runtime
@@ -178,6 +198,8 @@ async def test_update_project_replaces_read_scope_in_postgres():
     assert any("INSERT INTO public.project_read_scopes" in call[1] for call in writes)
     assert any("UPDATE public.projects SET name" in call[1] for call in writes)
     assert result["allowed_projects"] == ["project-2"]
+    assert postgres.transaction_enters == 1
+    assert postgres.transaction_exits == 1
 
 
 @pytest.mark.runtime

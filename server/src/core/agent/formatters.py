@@ -47,7 +47,7 @@ def _format_timestamp(ts) -> str:
 
 
 def format_retrieved_messages(messages: List[Dict]) -> str:
-    """Format an array of raw message evidence into a human-readable transcription block."""
+    """Format raw message evidence into a human-readable transcription block."""
     if not messages:
         return "No messages found."
 
@@ -127,7 +127,10 @@ def format_entity_results(entities: List[Dict], evidence_limit: int = 5) -> str:
                 alias_str = f" (aka {', '.join(conn_aliases)})" if conn_aliases else ""
                 conn_context = conn.get("context")
                 if conn_context:
-                    block += f"  -> {conn_name}{alias_str} | Context: {conn_context} | weight: {weight}\n"
+                    block += (
+                        f"  -> {conn_name}{alias_str} | Context: {conn_context} "
+                        f"| weight: {weight}\n"
+                    )
                 else:
                     block += f"  -> {conn_name}{alias_str} | weight: {weight}\n"
 
@@ -274,7 +277,7 @@ def format_hierarchy_results(results: List[Dict]) -> str:
 
 
 def format_memory_context(blocks: dict) -> str:
-    """Format short-term and persistent memory blocks for the agent's system prompt context."""
+    """Format short-term and persistent memory blocks for the system prompt."""
     if not blocks:
         return ""
 
@@ -340,8 +343,9 @@ def format_episode_results(results: List[Dict]) -> str:
         if res_type == "fallback":
             header = (
                 "--- Episode Check Fallback: Entity match not found ---\n"
-                "The system could not resolve a specific entity in the knowledge graph. "
-                "Below is a semantic search over conversation context for related clues:\n"
+                "The system could not resolve a specific entity in the "
+                "knowledge graph. Below is a semantic search over conversation "
+                "context for related clues:\n"
             )
             output.append(f"{header}{format_retrieved_messages(items)}")
         else:

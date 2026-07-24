@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from common.schema.primitives import Message
-from infrastructure.redis_client import RedisKeys
 from core.session.context import Session
+from infrastructure.redis_client import RedisKeys
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer, FakeResources
 
