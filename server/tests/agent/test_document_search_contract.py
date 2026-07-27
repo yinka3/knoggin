@@ -1,5 +1,6 @@
 import pytest
 
+from common.schema.source_reference import SourceReferenceCandidate
 from common.schema.tool_schema import TOOL_SCHEMAS
 from core.agent.tools.search import SearchTools
 
@@ -22,8 +23,9 @@ class EmptyDocumentService:
 
 
 class SearchableDocumentService:
-    def __init__(self, files):
+    def __init__(self, files, search_results=None):
         self.files = files
+        self.search_results = search_results
         self.search_calls = []
 
     async def list_documents(
@@ -72,6 +74,8 @@ class SearchableDocumentService:
                 "path_prefix": path_prefix,
             }
         )
+        if self.search_results is not None:
+            return self.search_results
         return [
             {
                 "document_id": document_filter or "file-1",
@@ -85,8 +89,9 @@ class SearchableDocumentService:
 
 
 class ReadOnlyDocumentService:
-    def __init__(self):
+    def __init__(self, read_result=None):
         self.calls = []
+        self.read_result = read_result
 
     async def list_documents(
         self,
@@ -149,7 +154,7 @@ class ReadOnlyDocumentService:
                 end_line,
             )
         )
-        return {
+        return self.read_result or {
             "document_id": document_id or "file-1",
             "document_name": "notes.md",
             "relative_path": relative_path or "docs/notes.md",
@@ -539,6 +544,238 @@ async def test_exact_document_focus_defaults_info_and_content_reads():
         ("get_document_info", "session-1", "file-1", None),
         ("read_document", "session-1", "file-1", None, 1, None),
     ]
+
+
+@pytest.mark.no_network
+async def test_request_document_focus_cannot_be_bypassed_by_tool_arguments():
+    document_service = ReadOnlyDocumentService()
+    tools = SearchTools()
+    tools.document_service = document_service
+    tools.document_focus = {
+        "mode": "request",
+        "target_type": "document",
+        "document_id": "file-1",
+        "relative_path": "docs/notes.md",
+    }
+    tools.session_id = "session-1"
+
+    await tools.read_document(document_id="file-1", use_focus=False)
+    with pytest.raises(ValueError, match="restricted to the selected document"):
+        await tools.read_document(document_id="file-2", use_focus=False)
+    with pytest.raises(ValueError, match="restricted to the selected document"):
+        await tools.read_document(relative_path="docs/other.md")
+
+    assert document_service.calls == [
+        ("read_document", "session-1", "file-1", None, 1, None),
+    ]
+
+
+@pytest.mark.no_network
+async def test_request_document_focus_forces_search_to_the_selected_document():
+    document_service = SearchableDocumentService(
+        [
+            {
+                "document_id": "file-1",
+                "original_name": "notes.md",
+                "relative_path": "docs/notes.md",
+                "visibility_scope": "project",
+                "status": "indexed",
+            },
+            {
+                "document_id": "file-2",
+                "original_name": "other.md",
+                "relative_path": "docs/other.md",
+                "visibility_scope": "project",
+                "status": "indexed",
+            },
+        ]
+    )
+    tools = SearchTools()
+    tools.document_service = document_service
+    tools.document_focus = {
+        "mode": "request",
+        "target_type": "document",
+        "document_id": "file-1",
+        "relative_path": "docs/notes.md",
+    }
+    tools.session_id = "session-1"
+
+    with pytest.raises(ValueError, match="restricted to the selected document"):
+        await tools.search_documents(
+            "alpha",
+            relative_path="docs/other.md",
+            use_focus=False,
+        )
+
+    await tools.search_documents("alpha", use_focus=False)
+
+    assert document_service.search_calls[0]["document_filter"] == "file-1"
+
+
+@pytest.mark.no_network
+async def test_search_documents_adds_source_context_from_the_stored_chunk():
+    content_hash = "a" * 64
+    stored_chunk = {
+        "document_id": "file-1",
+        "original_name": "report.pdf",
+        "relative_path": "reports/q2.pdf",
+        "extension": ".pdf",
+        "content_hash": content_hash,
+        "chunk_index": 3,
+        "content": "Revenue grew 18% year over year.",
+        "page_number": 7,
+        "status": "indexed",
+    }
+    document_service = SearchableDocumentService(
+        [
+            {
+                "document_id": "file-1",
+                "original_name": "report.pdf",
+                "relative_path": "reports/q2.pdf",
+                "status": "indexed",
+            }
+        ],
+        search_results=[stored_chunk],
+    )
+    tools = SearchTools()
+    tools.document_service = document_service
+    tools.session_id = "session-1"
+
+    results = await tools.search_documents("revenue")
+
+    assert results[0]["content"] == stored_chunk["content"]
+    assert results[0]["source_context"] == {
+        "source_kind": "pdf_document",
+        "document_id": "file-1",
+        "content_hash": content_hash,
+        "locator": {"kind": "pdf_page", "page": 7},
+        "excerpt": stored_chunk["content"],
+        "metadata": {
+            "document_name": "report.pdf",
+            "relative_path": "reports/q2.pdf",
+            "extension": ".pdf",
+            "chunk_index": 3,
+        },
+    }
+    candidate = SourceReferenceCandidate.model_validate(
+        {
+            **results[0]["source_context"],
+            "project_id": "project-1",
+            "session_id": "session-1",
+            "encounter_kind": "document_search",
+            "agent_run_id": "run-1",
+            "tool_call_id": "call-1",
+            "result_position": 0,
+        }
+    )
+    assert candidate.excerpt == stored_chunk["content"]
+
+
+@pytest.mark.no_network
+async def test_read_document_adds_source_context_from_the_returned_read_range():
+    content_hash = "b" * 64
+    read_result = {
+        "document_id": "file-1",
+        "document_name": "notes.md",
+        "relative_path": "docs/notes.md",
+        "extension": ".md",
+        "content_hash": content_hash,
+        "chunk_index": "lines:3-4",
+        "content": "3: alpha\n4: beta",
+        "locator": {
+            "kind": "text_lines",
+            "start_line": 3,
+            "end_line": 4,
+            "section_path": ["Results"],
+        },
+    }
+
+
+@pytest.mark.no_network
+async def test_search_documents_adds_docx_paragraph_source_context():
+    content_hash = "d" * 64
+    stored_chunk = {
+        "document_id": "file-1",
+        "original_name": "outline.docx",
+        "relative_path": "docs/outline.docx",
+        "extension": ".docx",
+        "content_hash": content_hash,
+        "chunk_index": 3,
+        "content": "Architecture\nThe worker stores each passage.",
+        "locator": {
+            "kind": "docx_paragraphs",
+            "start_paragraph": 7,
+            "end_paragraph": 8,
+            "heading_path": ["Architecture"],
+        },
+    }
+
+    result = SearchTools._with_document_source_context(stored_chunk)
+
+    assert result["source_context"]["source_kind"] == "text_document"
+    assert result["source_context"]["locator"] == stored_chunk["locator"]
+    tools = SearchTools()
+    tools.document_service = ReadOnlyDocumentService(read_result=read_result)
+    tools.session_id = "session-1"
+
+    results = await tools.read_document(document_id="file-1", start_line=3, end_line=4)
+
+    assert results[0]["source_context"] == {
+        "source_kind": "text_document",
+        "document_id": "file-1",
+        "content_hash": content_hash,
+        "locator": {
+            "kind": "text_lines",
+            "start_line": 3,
+            "end_line": 4,
+            "section_path": ["Results"],
+        },
+        "excerpt": "3: alpha\n4: beta",
+        "metadata": {
+            "document_name": "notes.md",
+            "relative_path": "docs/notes.md",
+            "extension": ".md",
+            "chunk_index": "lines:3-4",
+        },
+    }
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "document_id": "file-1",
+            "document_name": "legacy.txt",
+            "relative_path": "docs/legacy.txt",
+            "extension": ".txt",
+            "content_hash": "c" * 64,
+            "content": "A locator-less legacy chunk.",
+        },
+        {
+            "document_id": "file-1",
+            "document_name": "outline.docx",
+            "relative_path": "docs/outline.docx",
+            "extension": ".docx",
+            "content_hash": "c" * 64,
+            "content": "A DOCX paragraph.",
+            "start_line": 1,
+            "end_line": 1,
+        },
+        {
+            "document_id": "file-1",
+            "document_name": "empty.txt",
+            "relative_path": "docs/empty.txt",
+            "extension": ".txt",
+            "content_hash": "c" * 64,
+            "content": "   ",
+            "start_line": 1,
+            "end_line": 1,
+        },
+    ],
+)
+def test_document_source_context_excludes_unsupported_or_unlocatable_results(result):
+    assert SearchTools._with_document_source_context(result) == result
 
 
 @pytest.mark.no_network

@@ -5,6 +5,12 @@ from loguru import logger
 
 from common.schema.contracts import CandidateSuggestion, EngineScope, EpisodeEligibility
 from common.schema.primitives import Episode, EpisodeCheckpoint
+from common.schema.source_reference import (
+    AssistantMessageWithSources,
+    SourceConsulted,
+    SourceReference,
+    SourceReferenceCandidate,
+)
 from core.community.community_store import CommunityStore
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
@@ -12,6 +18,7 @@ from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
+from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.search_index_rebuilder import SearchIndexer
 from core.knowledge.db.tool_queries import ToolQueries
 from core.knowledge.db.writers.candidate_suggestion_writer import (
@@ -22,6 +29,7 @@ from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.db.writers.retention_writer import RetentionWriter
+from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
@@ -50,10 +58,12 @@ class KnowledgeStore:
         self._graph_writer = GraphWriter(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._retention_writer = RetentionWriter(self._postgres_client)
+        self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
         self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
+        self._source_reference_reader = SourceReferenceReader(self._postgres_client)
         self._tools = ToolQueries(self._postgres_client)
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._search_index_rebuilder = SearchIndexer(
@@ -70,6 +80,32 @@ class KnowledgeStore:
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         return await self._graph_writer.save_message_logs(messages)
 
+    async def save_assistant_message_with_source_refs(
+        self,
+        message: Dict,
+        candidates: List[SourceReferenceCandidate],
+    ) -> List[SourceReference]:
+        """Persist one assistant message and its source audit trail together."""
+
+        if message.get("role") != "assistant":
+            raise ValueError(
+                "source references can only be saved for assistant messages"
+            )
+        if not candidates:
+            await self.save_message_logs([message])
+            return []
+
+        async with self._postgres_client.transaction() as cur:
+            await self._graph_writer.save_message_logs([message], cur=cur)
+            return await self._source_reference_writer.write_for_assistant_message(
+                message["id"],
+                candidates,
+                user_name=message["user_name"],
+                project_id=message["project_id"],
+                session_id=message["session_id"],
+                cursor=cur,
+            )
+
     async def save_candidate_suggestions(
         self,
         scope: EngineScope,
@@ -77,6 +113,68 @@ class KnowledgeStore:
     ) -> int:
         return await self._candidate_suggestion_writer.save_candidate_suggestions(
             scope, suggestions
+        )
+
+    async def write_message_source_refs(
+        self,
+        message_id: int,
+        candidates: List[SourceReferenceCandidate],
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> List[SourceReference]:
+        return await self._source_reference_writer.write_for_assistant_message(
+            message_id,
+            candidates,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_message_source_refs(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> List[SourceConsulted]:
+        return await self._source_reference_reader.get_message_source_refs(
+            message_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_assistant_message_with_sources(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> Optional[AssistantMessageWithSources]:
+        return await self._source_reference_reader.get_assistant_message_with_sources(
+            message_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_episode_source_refs(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> List[SourceConsulted]:
+        return await self._source_reference_reader.get_episode_source_refs(
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
         )
 
     async def allocate_entity_id(self) -> int:

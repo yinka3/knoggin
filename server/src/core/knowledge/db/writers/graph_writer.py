@@ -129,11 +129,11 @@ class GraphWriter:
             for row in rows
         ]
 
-    async def save_message_logs(self, messages: List[Dict]) -> bool:
+    async def save_message_logs(self, messages: List[Dict], *, cur=None) -> bool:
         if not messages:
             return True
 
-        async with self.client.transaction() as cur:
+        async with self._merge_cursor(cur) as cur:
             batch_params = []
             for msg in messages:
                 missing = [

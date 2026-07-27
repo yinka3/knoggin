@@ -144,11 +144,11 @@ class FolderPreview:
 
 
 class DocumentFocus(BaseModel):
-    """Validated session-scoped document focus."""
+    """Validated session- or request-scoped document focus."""
 
     model_config = ConfigDict(frozen=True)
 
-    mode: Literal["pinned"] = "pinned"
+    mode: Literal["pinned", "request"] = "pinned"
     target_type: Literal["document", "subtree", "folder_upload"]
     document_id: Optional[str] = None
     relative_path: Optional[str] = None

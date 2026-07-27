@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
@@ -27,6 +30,180 @@ except ImportError:
     DDGS = None
 
 
+def _positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _valid_range(start, end) -> bool:
+    return _positive_int(start) and _positive_int(end) and end >= start
+
+
+def _text_locator(start_line: int, end_line: int, section_path) -> Optional[Dict]:
+    locator = {
+        "kind": "text_lines",
+        "start_line": start_line,
+        "end_line": end_line,
+    }
+    if section_path is None:
+        return locator
+    if (
+        not isinstance(section_path, (list, tuple))
+        or not section_path
+        or any(not isinstance(part, str) or not part.strip() for part in section_path)
+    ):
+        return None
+    locator["section_path"] = list(section_path)
+    return locator
+
+
+def _code_locator(start_line: int, end_line: int, symbol_name) -> Optional[Dict]:
+    locator = {
+        "kind": "code_lines",
+        "start_line": start_line,
+        "end_line": end_line,
+    }
+    if symbol_name is None:
+        return locator
+    if not isinstance(symbol_name, str) or not symbol_name.strip():
+        return None
+    locator["symbol_name"] = symbol_name
+    return locator
+
+
+def _docx_locator(start_paragraph: int, end_paragraph: int, heading_path) -> Optional[Dict]:
+    locator = {
+        "kind": "docx_paragraphs",
+        "start_paragraph": start_paragraph,
+        "end_paragraph": end_paragraph,
+    }
+    if heading_path is None:
+        return locator
+    if (
+        not isinstance(heading_path, (list, tuple))
+        or not heading_path
+        or any(not isinstance(part, str) or not part.strip() for part in heading_path)
+    ):
+        return None
+    locator["heading_path"] = list(heading_path)
+    return locator
+
+
+_UNSUPPORTED_SOURCE_CONTEXT_EXTENSIONS = {
+    ".aac",
+    ".avi",
+    ".bmp",
+    ".flac",
+    ".gif",
+    ".heic",
+    ".jpeg",
+    ".jpg",
+    ".m4a",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".ogg",
+    ".opus",
+    ".png",
+    ".svg",
+    ".tif",
+    ".tiff",
+    ".wav",
+    ".webm",
+    ".webp",
+    ".wma",
+    ".wmv",
+}
+_SEARCH_ERROR_TITLES = {
+    "error",
+    "no results",
+    "not available",
+    "search error",
+    "timeout",
+}
+
+
+def _search_source_context(
+    *,
+    result: Dict,
+    source_kind: str,
+    provider: str,
+    query: str,
+    rank: int,
+) -> Optional[Dict]:
+    title = result.get("title")
+    url = result.get("url")
+    snippet = result.get("snippet")
+    canonical_url = _canonical_search_url(url)
+    if (
+        source_kind not in {"web_search_result", "news_search_result"}
+        or not isinstance(provider, str)
+        or not provider.strip()
+        or not isinstance(query, str)
+        or not query.strip()
+        or not isinstance(rank, int)
+        or rank < 1
+        or not isinstance(title, str)
+        or not title.strip()
+        or title.strip().casefold() in _SEARCH_ERROR_TITLES
+        or not isinstance(snippet, str)
+        or not snippet.strip()
+        or canonical_url is None
+    ):
+        return None
+
+    payload = {
+        "provider": provider,
+        "query": query,
+        "rank": rank,
+        "title": title,
+        "url": url,
+        "snippet": snippet,
+    }
+    content_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "source_kind": source_kind,
+        "canonical_url": canonical_url,
+        "content_hash": content_hash,
+        "locator": {
+            "kind": "search_result",
+            "provider": provider,
+            "query": query,
+            "rank": rank,
+        },
+        "excerpt": snippet,
+        "metadata": {
+            "title": title,
+            "provider": provider,
+            "query": query,
+            "rank": rank,
+            "discovery_snippet": True,
+        },
+    }
+
+
+def _canonical_search_url(value) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = urlsplit(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path,
+            parsed.query,
+            "",
+        )
+    )
+
+
 class SearchTools:
     redis: aioredis.Redis
     knowledge_store: KnowledgeStore
@@ -40,6 +217,188 @@ class SearchTools:
     active_topics: Optional[List[str]]
     entities: EntityResolver
     readable_project_ids: Optional[List[str]]
+
+    _CONTENT_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+    def _request_focus_document_id(self) -> Optional[str]:
+        """Return the document ID for an unbypassable request selector."""
+        if (
+            self.document_focus
+            and self.document_focus.get("mode") == "request"
+            and self.document_focus.get("target_type") == "document"
+        ):
+            return self.document_focus["document_id"]
+        return None
+
+    @classmethod
+    def _with_search_source_contexts(
+        cls,
+        results: List[Dict],
+        *,
+        source_kind: str,
+        query: str,
+        fallback_provider: str,
+    ) -> List[Dict]:
+        """Normalize successful provider snippets without reading their URLs."""
+        return [
+            cls._with_search_source_context(
+                result,
+                source_kind=source_kind,
+                query=query,
+                rank=rank,
+                fallback_provider=fallback_provider,
+            )
+            for rank, result in enumerate(results, start=1)
+        ]
+
+    @staticmethod
+    def _with_search_source_context(
+        result: Dict,
+        *,
+        source_kind: str,
+        query: str,
+        rank: int,
+        fallback_provider: str,
+    ) -> Dict:
+        if not isinstance(result, dict):
+            return result
+        normalized = dict(result)
+        provider = normalized.pop("_source_provider", fallback_provider)
+        source_context = _search_source_context(
+            result=normalized,
+            source_kind=source_kind,
+            provider=provider,
+            query=query,
+            rank=rank,
+        )
+        if source_context is None:
+            return normalized
+        return {**normalized, "source_context": source_context}
+
+    @classmethod
+    def _with_document_source_context(cls, result: Dict) -> Dict:
+        """Attach source data only when this result is a reliable passage."""
+        source_context = cls._document_source_context(result)
+        if source_context is None:
+            return result
+        return {**result, "source_context": source_context}
+
+    @classmethod
+    def _document_source_context(cls, result: Dict) -> Optional[Dict]:
+        """Build a small, exact source payload from stored document result data."""
+        content = result.get("content")
+        document_id = result.get("document_id")
+        content_hash = result.get("content_hash")
+        document_name = result.get("document_name") or result.get("original_name")
+        relative_path = result.get("relative_path")
+        extension = str(result.get("extension") or "").lower()
+        if (
+            not isinstance(content, str)
+            or not content.strip()
+            or not isinstance(document_id, str)
+            or not document_id.strip()
+            or not isinstance(content_hash, str)
+            or cls._CONTENT_HASH_RE.fullmatch(content_hash) is None
+            or not isinstance(document_name, str)
+            or not document_name.strip()
+            or not isinstance(relative_path, str)
+            or not relative_path.strip()
+            or not extension
+            or extension in _UNSUPPORTED_SOURCE_CONTEXT_EXTENSIONS
+        ):
+            return None
+
+        locator = cls._document_result_locator(result, extension)
+        if locator is None:
+            return None
+        source_kind = "pdf_document" if extension == ".pdf" else "text_document"
+        if source_kind == "pdf_document" and locator["kind"] != "pdf_page":
+            return None
+        if source_kind == "text_document" and locator["kind"] == "pdf_page":
+            return None
+
+        metadata = {
+            "document_name": document_name,
+            "relative_path": relative_path,
+            "extension": extension,
+        }
+        if result.get("chunk_index") is not None:
+            metadata["chunk_index"] = result["chunk_index"]
+        return {
+            "source_kind": source_kind,
+            "document_id": document_id,
+            "content_hash": content_hash,
+            "locator": locator,
+            "excerpt": content,
+            "metadata": metadata,
+        }
+
+    @staticmethod
+    def _document_result_locator(
+        result: Dict,
+        extension: str,
+    ) -> Optional[Dict]:
+        """Return a canonical locator without attempting text-based recovery."""
+        locator = result.get("locator")
+        if isinstance(locator, dict):
+            kind = locator.get("kind")
+            if kind == "pdf_page" and _positive_int(locator.get("page")):
+                return {"kind": "pdf_page", "page": locator["page"]}
+            if kind == "csv_rows" and _valid_range(
+                locator.get("start_row"), locator.get("end_row")
+            ):
+                return {
+                    "kind": "csv_rows",
+                    "start_row": locator["start_row"],
+                    "end_row": locator["end_row"],
+                }
+            if kind == "code_lines" and _valid_range(
+                locator.get("start_line"), locator.get("end_line")
+            ):
+                return _code_locator(
+                    locator["start_line"],
+                    locator["end_line"],
+                    locator.get("symbol_name"),
+                )
+            if kind == "text_lines" and _valid_range(
+                locator.get("start_line"), locator.get("end_line")
+            ):
+                return _text_locator(
+                    locator["start_line"],
+                    locator["end_line"],
+                    locator.get("section_path"),
+                )
+            if kind == "docx_paragraphs" and _valid_range(
+                locator.get("start_paragraph"), locator.get("end_paragraph")
+            ):
+                return _docx_locator(
+                    locator["start_paragraph"],
+                    locator["end_paragraph"],
+                    locator.get("heading_path"),
+                )
+            return None
+
+        if extension == ".pdf" and _positive_int(result.get("page_number")):
+            return {"kind": "pdf_page", "page": result["page_number"]}
+        if _valid_range(result.get("start_row"), result.get("end_row")):
+            return {
+                "kind": "csv_rows",
+                "start_row": result["start_row"],
+                "end_row": result["end_row"],
+            }
+        if not _valid_range(result.get("start_line"), result.get("end_line")):
+            return None
+        if result.get("chunk_kind") == "code":
+            return _code_locator(
+                result["start_line"],
+                result["end_line"],
+                result.get("symbol_name"),
+            )
+        return _text_locator(
+            result["start_line"],
+            result["end_line"],
+            result.get("section_path"),
+        )
 
     async def list_documents(
         self,
@@ -204,6 +563,7 @@ class SearchTools:
         self,
         document_id: str = None,
         relative_path: str = None,
+        page_number: int = None,
         start_line: int = 1,
         end_line: int = None,
         use_focus: bool = True,
@@ -211,7 +571,22 @@ class SearchTools:
         """Read a bounded line range from one visible document."""
         if not self.document_service:
             return [{"error": "No project document service available"}]
-        if (
+        request_document_id = self._request_focus_document_id()
+        if request_document_id is not None:
+            if document_id is not None and document_id != request_document_id:
+                raise ValueError(
+                    "read_document is restricted to the selected document"
+                )
+            if (
+                relative_path is not None
+                and relative_path != self.document_focus["relative_path"]
+            ):
+                raise ValueError(
+                    "read_document is restricted to the selected document"
+                )
+            document_id = request_document_id
+            relative_path = None
+        elif (
             document_id is None
             and relative_path is None
             and use_focus
@@ -219,14 +594,19 @@ class SearchTools:
             and self.document_focus["target_type"] == "document"
         ):
             document_id = self.document_focus["document_id"]
+        read_kwargs = {
+            "session_id": self.session_id,
+            "document_id": document_id,
+            "relative_path": relative_path,
+            "start_line": start_line,
+            "end_line": end_line,
+        }
+        if page_number is not None:
+            read_kwargs["page_number"] = page_number
         result = await self.document_service.read_document(
-            session_id=self.session_id,
-            document_id=document_id,
-            relative_path=relative_path,
-            start_line=start_line,
-            end_line=end_line,
+            **read_kwargs,
         )
-        return [result]
+        return [self._with_document_source_context(result)]
 
     async def search_messages(self, query: str, limit: int = None) -> List[Dict]:
         """
@@ -384,8 +764,20 @@ class SearchTools:
                 "path_prefix cannot be combined with an exact document selector"
             )
 
-        document_filter = None
-        if (
+        request_document_id = self._request_focus_document_id()
+        if request_document_id is not None:
+            if (
+                relative_path is not None
+                and relative_path != self.document_focus["relative_path"]
+            ):
+                raise ValueError(
+                    "search_documents is restricted to the selected document"
+                )
+            relative_path = None
+            folder_root_id = None
+            path_prefix = None
+        document_filter = request_document_id
+        if request_document_id is None and (
             use_focus
             and document_name is None
             and relative_path is None
@@ -474,7 +866,7 @@ class SearchTools:
                 {"info": "No relevant content found in indexed documents"}
             ]
 
-        return results
+        return [self._with_document_source_context(result) for result in results]
 
     async def web_search(
         self, query: str, limit: int = 5, freshness: str = None
@@ -488,17 +880,29 @@ class SearchTools:
         tavily_key = self.search_cfg.get("tavily_api_key", "")
 
         if provider == "brave" and brave_key:
-            return await self._search_brave(query, limit, brave_key, freshness)
+            results = await self._search_brave(query, limit, brave_key, freshness)
+            fallback_provider = "brave"
         elif provider == "tavily" and tavily_key:
-            return await self._search_tavily(query, limit, tavily_key)
+            results = await self._search_tavily(query, limit, tavily_key)
+            fallback_provider = "tavily"
         elif provider == "duckduckgo":
-            return await self._search_duckduckgo(query, limit, freshness)
-
-        if brave_key:
-            return await self._search_brave(query, limit, brave_key, freshness)
-        if tavily_key:
-            return await self._search_tavily(query, limit, tavily_key)
-        return await self._search_duckduckgo(query, limit, freshness)
+            results = await self._search_duckduckgo(query, limit, freshness)
+            fallback_provider = "duckduckgo"
+        elif brave_key:
+            results = await self._search_brave(query, limit, brave_key, freshness)
+            fallback_provider = "brave"
+        elif tavily_key:
+            results = await self._search_tavily(query, limit, tavily_key)
+            fallback_provider = "tavily"
+        else:
+            results = await self._search_duckduckgo(query, limit, freshness)
+            fallback_provider = "duckduckgo"
+        return self._with_search_source_contexts(
+            results,
+            source_kind="web_search_result",
+            query=query,
+            fallback_provider=fallback_provider,
+        )
 
     async def news_search(
         self, query: str, limit: int = 5, freshness: str = None
@@ -518,7 +922,13 @@ class SearchTools:
                         ),
                 }
             ]
-        return await self._news_brave(query, limit, brave_key, freshness or "pw")
+        results = await self._news_brave(query, limit, brave_key, freshness or "pw")
+        return self._with_search_source_contexts(
+            results,
+            source_kind="news_search_result",
+            query=query,
+            fallback_provider="brave",
+        )
 
     # Internal helpers
 
@@ -930,6 +1340,7 @@ class SearchTools:
                         "title": r.get("title", "Untitled"),
                         "url": r.get("href", r.get("link", "")),
                         "snippet": r.get("body", r.get("snippet", "")),
+                        "_source_provider": "duckduckgo",
                     }
                 )
             return results
@@ -974,6 +1385,7 @@ class SearchTools:
                         "title": r.get("title", "Untitled"),
                         "url": r.get("url", ""),
                         "snippet": r.get("content", ""),
+                        "_source_provider": "tavily",
                     }
                 )
 
@@ -1052,6 +1464,7 @@ class SearchTools:
                         "title": result.get("title", "Untitled"),
                         "url": result.get("url", ""),
                         "snippet": snippet,
+                        "_source_provider": "brave",
                     }
                 )
 
@@ -1118,6 +1531,7 @@ class SearchTools:
                         "snippet": snippet,
                         "source": article.get("meta_url", {}).get("hostname", ""),
                         "date": article.get("age", ""),
+                        "_source_provider": "brave",
                     }
                 )
 

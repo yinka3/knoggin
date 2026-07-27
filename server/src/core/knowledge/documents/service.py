@@ -43,7 +43,16 @@ from .constants import (
     document_extension,
 )
 from .scanning import build_folder_preview, normalize_relative_path
-from .storage import DocumentChunk, embedding_text, extract_text, split_document
+from .storage import (
+    DocumentChunk,
+    csv_data_rows,
+    embedding_text,
+    extract_and_split_document,
+    extract_docx_paragraphs,
+    extract_pdf_pages,
+    extract_text,
+    docx_heading_path,
+)
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 
@@ -539,19 +548,14 @@ class DocumentService:
                     )
                     if raw_bytes is None:
                         raise FileNotFoundError("Document content is missing")
-                    text = await self._run_blocking(
-                        extract_text,
+                    extraction = await self._run_blocking(
+                        extract_and_split_document,
                         raw_bytes,
                         document["extension"],
                     )
-                    chunks = await self._run_blocking(
-                        split_document,
-                        text,
-                        extension=document["extension"],
-                    )
             except Exception as exc:
                 return document, None, None, exc
-            return document, text, chunks, None
+            return document, extraction.text, extraction.chunks, None
 
         preparation_results = await asyncio.gather(
             *(prepare_document(document) for document in claimed)
@@ -696,6 +700,7 @@ class DocumentService:
         session_id: Optional[str] = None,
         document_id: Optional[str] = None,
         relative_path: Optional[str] = None,
+        page_number: Optional[int] = None,
         start_line: int = 1,
         end_line: Optional[int] = None,
     ) -> Dict:
@@ -716,6 +721,12 @@ class DocumentService:
             raise ValueError(
                 f"read_document is limited to {MAX_READ_LINES} lines"
             )
+        if page_number is not None and (
+            not isinstance(page_number, int)
+            or isinstance(page_number, bool)
+            or page_number < 1
+        ):
+            raise ValueError("page_number must be a positive integer")
 
         rows = await self._reader.fetch_documents_by_reference(
             document_id=document_id,
@@ -731,24 +742,74 @@ class DocumentService:
             )
 
         document_metadata = rows[0]
-        text = await self._reader.fetch_extracted_text(
-            document_id=str(document_metadata["document_id"]),
-            content_hash=document_metadata["content_hash"],
-            session_id=session_id,
-        )
-        if text is None:
+        extension = document_metadata["extension"].lower()
+        selected_page = None
+        docx_paragraphs = None
+        if extension == ".pdf":
             raw_bytes = await self._reader.fetch_document_content(
                 document_id=str(document_metadata["document_id"]),
                 session_id=session_id,
             )
             if raw_bytes is None:
                 raise FileNotFoundError("Document content is missing")
-            text = await self._run_blocking(
-                extract_text,
-                raw_bytes,
-                document_metadata["extension"],
+            pages = await self._run_blocking(extract_pdf_pages, raw_bytes)
+            selected_page = page_number or 1
+            if selected_page > len(pages):
+                raise ValueError(
+                    f"page_number {selected_page} exceeds document page count "
+                    f"{len(pages)}"
+                )
+            text = pages[selected_page - 1].text
+        elif extension == ".docx":
+            raw_bytes = await self._reader.fetch_document_content(
+                document_id=str(document_metadata["document_id"]),
+                session_id=session_id,
             )
-        lines = text.splitlines() or [text]
+            if raw_bytes is None:
+                raise FileNotFoundError("Document content is missing")
+            docx_paragraphs = await self._run_blocking(
+                extract_docx_paragraphs, raw_bytes
+            )
+            text = "\n".join(paragraph.text for paragraph in docx_paragraphs)
+        else:
+            text = await self._reader.fetch_extracted_text(
+                document_id=str(document_metadata["document_id"]),
+                content_hash=document_metadata["content_hash"],
+                session_id=session_id,
+            )
+            if text is None:
+                raw_bytes = await self._reader.fetch_document_content(
+                    document_id=str(document_metadata["document_id"]),
+                    session_id=session_id,
+                )
+                if raw_bytes is None:
+                    raise FileNotFoundError("Document content is missing")
+                text = await self._run_blocking(
+                    extract_text,
+                    raw_bytes,
+                    document_metadata["extension"],
+                )
+        if extension == ".csv":
+            lines = csv_data_rows(text)
+            locator = {
+                "kind": "csv_rows",
+                "start_row": start_line,
+                "end_row": end_line,
+            }
+        elif extension == ".docx":
+            lines = [paragraph.text for paragraph in docx_paragraphs]
+            locator = {
+                "kind": "docx_paragraphs",
+                "start_paragraph": start_line,
+                "end_paragraph": end_line,
+            }
+        else:
+            lines = text.splitlines() or [text]
+            locator = {
+                "kind": "text_lines",
+                "start_line": start_line,
+                "end_line": end_line,
+            }
         total_lines = len(lines)
         if start_line > total_lines:
             raise ValueError(
@@ -760,6 +821,15 @@ class DocumentService:
             start_line + MAX_READ_LINES - 1,
         )
         requested_end = min(requested_end, total_lines)
+        if extension == ".csv":
+            locator["end_row"] = requested_end
+        elif extension == ".docx":
+            locator["end_paragraph"] = requested_end
+            heading_path = docx_heading_path(docx_paragraphs, start_line)
+            if heading_path is not None:
+                locator["heading_path"] = list(heading_path)
+        else:
+            locator["end_line"] = requested_end
         selected = lines[start_line - 1 : requested_end]
         numbered_lines = [
             f"{line_number}: {line}"
@@ -774,14 +844,29 @@ class DocumentService:
         result.update(
             {
                 "document_name": result["original_name"],
-                "chunk_index": f"lines:{start_line}-{requested_end}",
+                "chunk_index": (
+                    f"page:{selected_page}:lines:{start_line}-{requested_end}"
+                    if selected_page is not None
+                    else f"rows:{start_line}-{requested_end}"
+                    if extension == ".csv"
+                    else f"paragraphs:{start_line}-{requested_end}"
+                    if extension == ".docx"
+                    else f"lines:{start_line}-{requested_end}"
+                ),
                 "content": content,
                 "start_line": start_line,
                 "end_line": requested_end,
                 "total_lines": total_lines,
                 "truncated": character_truncated or requested_end < total_lines,
+                "locator": (
+                    {"kind": "pdf_page", "page": selected_page}
+                    if selected_page is not None
+                    else locator
+                ),
             }
         )
+        if selected_page is not None:
+            result["page_number"] = selected_page
         return result
 
     async def delete_document(
@@ -931,16 +1016,13 @@ class DocumentService:
             content = entry_content[relative_path]
             preview_entry = included_by_path[relative_path]
             document_id = str(uuid.uuid4())
-            text = await self._run_blocking(
-                extract_text,
+            extraction = await self._run_blocking(
+                extract_and_split_document,
                 content,
                 preview_entry.extension,
             )
-            chunks = await self._run_blocking(
-                split_document,
-                text,
-                extension=preview_entry.extension,
-            )
+            text = extraction.text
+            chunks = extraction.chunks
             embeddings = await self._embedding.encode(
                 [embedding_text(chunk, relative_path) for chunk in chunks]
             )
@@ -1129,16 +1211,13 @@ class DocumentService:
             )
             if raw_bytes is None:
                 raise FileNotFoundError("Document content is missing")
-            text = await self._run_blocking(
-                extract_text,
+            extraction = await self._run_blocking(
+                extract_and_split_document,
                 raw_bytes,
                 document_metadata["extension"],
             )
-            chunks = await self._run_blocking(
-                split_document,
-                text,
-                extension=document_metadata["extension"],
-            )
+            text = extraction.text
+            chunks = extraction.chunks
             embeddings = await self._embedding.encode(
                 [
                     embedding_text(chunk, document_metadata["relative_path"])
@@ -1686,5 +1765,18 @@ class DocumentService:
             result["document_name"] = result.get("original_name")
             if result.get("score") is not None:
                 result["score"] = float(result["score"])
+            if (
+                result.get("extension", "").lower() == ".docx"
+                and isinstance(result.get("start_paragraph"), int)
+                and isinstance(result.get("end_paragraph"), int)
+            ):
+                locator = {
+                    "kind": "docx_paragraphs",
+                    "start_paragraph": result["start_paragraph"],
+                    "end_paragraph": result["end_paragraph"],
+                }
+                if result.get("section_path"):
+                    locator["heading_path"] = result["section_path"]
+                result["locator"] = locator
             results.append(result)
         return results

@@ -385,6 +385,21 @@ class GraphTools:
                 reverse=True,
             )
             returned_evidence_count += len(evidence)
+            source_reference_reader = getattr(
+                self.knowledge_store,
+                "get_episode_source_refs",
+                None,
+            )
+            sources_consulted = (
+                await source_reference_reader(
+                    episode.episode_id,
+                    user_name=self.user_name,
+                    project_id=self.project_id,
+                    session_id=self.session_id,
+                )
+                if callable(source_reference_reader)
+                else []
+            )
             serialized_episode = {
                 "episode_id": episode.episode_id,
                 "summary": episode.summary,
@@ -439,6 +454,12 @@ class GraphTools:
                     for version in episode.version_history
                 ],
                 "evidence": evidence,
+                "sources_consulted": [
+                    source.model_dump(mode="json")
+                    if hasattr(source, "model_dump")
+                    else source
+                    for source in sources_consulted
+                ],
             }
             if similarity_by_episode and episode.episode_id in similarity_by_episode:
                 serialized_episode["similarity"] = similarity_by_episode[
@@ -695,7 +716,7 @@ class GraphTools:
     ) -> Dict[str, Dict]:
         """
         Retrieve pre-cached context for frequently accessed topics.
-        Called automatically at start — you already have this data in hot_topic_context.
+        Called automatically at start; this data is already in hot_topic_context.
         Only call manually if hot topics changed mid-conversation.
 
         Args:

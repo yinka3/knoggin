@@ -123,7 +123,6 @@ def test_document_and_folder_handles_resolve_only_within_the_active_context():
     assert '"folder_root_id": "folder_ba78b2"' in prompt
     assert raw_document_id not in prompt
     assert raw_folder_id not in prompt
-
     tools = SimpleNamespace(short_uuid_references=ctx.state.short_uuid_references)
     assert resolve_agent_tool_arguments(
         tools,
@@ -150,6 +149,32 @@ def test_document_and_folder_handles_resolve_only_within_the_active_context():
             "read_document",
             {"document_id": "doc_a574d8"},
         )
+
+
+@pytest.mark.no_network
+def test_model_facing_document_result_omits_executor_only_source_context():
+    ctx = make_ctx()
+    raw_document_id = "a574d8f7-d997-4e8a-a557-6ec4c8451a55"
+    result = localize_agent_tool_result(
+        ctx,
+        "search_documents",
+        {
+            "data": [
+                {
+                    "document_id": raw_document_id,
+                    "content": "The stored document passage.",
+                    "source_context": {
+                        "document_id": raw_document_id,
+                        "excerpt": "The stored document passage.",
+                    },
+                }
+            ]
+        },
+    )
+
+    item = result["data"][0]
+    assert item["content"] == "The stored document passage."
+    assert "source_context" not in item
 
 
 @pytest.mark.no_network

@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 from common.schema.agent_stream import StreamUsage
+from common.schema.document import DocumentFocus
+from common.schema.source_reference import SourceReferenceCandidate
 from core.agent.tools.registry import get_default_tool_limits
 
 
@@ -74,6 +76,10 @@ class AgentState:
     # Compact UUID handles shown to the model during this execution only.
     # Values are never persisted and are cleared when the execution ends.
     short_uuid_references: Dict[str, str] = field(default_factory=dict)
+    # Source candidates are an answer-audit trail, not prompt evidence. They
+    # retain every eligible source in tool/result order until a final response
+    # receives its canonical assistant message ID.
+    source_candidates: List[SourceReferenceCandidate] = field(default_factory=list)
     usage: StreamUsage = field(
         default_factory=lambda: {
             "prompt_tokens": 0,
@@ -154,6 +160,10 @@ class AgentContext:
     current_participants: List[str] = field(default_factory=list)
     maintenance_candidates: List[MaintenanceCandidate] = field(default_factory=list)
     use_local_references: bool = True
+    document_focus: Optional[DocumentFocus] = None
+    initial_source_candidates: List[SourceReferenceCandidate] = field(
+        default_factory=list
+    )
 
 
 @dataclass
@@ -169,6 +179,7 @@ class FinalResponse:
     content: str
     usage: Optional[Dict] = None
     sources: Optional[List[Dict]] = None
+    sources_consulted: Optional[List[SourceReferenceCandidate]] = None
 
 
 @dataclass

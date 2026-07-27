@@ -9,8 +9,14 @@ from common.conf.manager import ConfigManager
 from common.schema.agent_stream import PublicAgentStreamEvent
 from common.schema.document import DocumentFocus
 from common.utils.json_utils import safe_json_loads
+from common.utils.time_utils import get_now_iso
+from core.agent.document_selection import (
+    DocumentSelectionError,
+    parse_document_path_command,
+)
 from core.agent.executor import AgentExecutor
 from core.agent.maintenance import build_maintenance_candidates
+from core.agent.source_adapters import build_pasted_text_candidates
 from core.agent.services.agent_manager import AgentManager
 from core.agent.tools.registry import Tools
 from core.agent.types import (
@@ -57,12 +63,25 @@ class Orchestrator:
         agent_persona_override: Optional[str] = None,
         agent_name_override: Optional[str] = None,
         client_tools: Optional[List[Dict]] = None,
+        user_message_id: Optional[int] = None,
+        pasted_text_spans: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
         """
         Main entry point for agent execution. Uses modular helpers for initialization.
         """
         tools = None
         try:
+            incoming_user_query = user_query
+            run_id = str(uuid.uuid4())
+            document_command = parse_document_path_command(user_query)
+            request_document_focus = None
+            if document_command is not None:
+                request_document_focus = await self._resolve_request_document_focus(
+                    context,
+                    document_command.relative_path,
+                )
+                user_query = document_command.remaining_query
+
             # Configuration
             config = ConfigManager.get().config
             limits = config.developer_settings.limits
@@ -101,6 +120,12 @@ class Orchestrator:
                 agent_cfg.id if agent_cfg else None,
             )
             tools = services["tools"]
+            if request_document_focus is not None:
+                # Request focus is ephemeral.  It overrides a persisted session
+                # focus for this run without writing to session state.
+                tools.document_focus = request_document_focus.model_dump(
+                    mode="json"
+                )
             topic_config = services["topic_config"]
 
             effective_enabled_tools = (
@@ -141,7 +166,7 @@ class Orchestrator:
                 session_id=session_id,
                 project_id=context.project_id or "",
                 user_query=user_query,
-                run_id=str(uuid.uuid4()),
+                run_id=run_id,
                 hot_topics=effective_hot_topics,
                 active_topics=topic_config.active_topics,
                 hot_topic_context=hot_topic_context,
@@ -153,6 +178,19 @@ class Orchestrator:
                     getattr(config.developer_settings, "local_references", None),
                     "enabled",
                     True,
+                ),
+                document_focus=request_document_focus,
+                initial_source_candidates=(
+                    build_pasted_text_candidates(
+                        project_id=context.project_id or "",
+                        session_id=session_id,
+                        source_message_id=user_message_id,
+                        message_content=incoming_user_query,
+                        agent_run_id=run_id,
+                        spans=pasted_text_spans,
+                    )
+                    if user_message_id is not None
+                    else []
                 ),
             )
 
@@ -174,6 +212,12 @@ class Orchestrator:
             ):
                 yield event
 
+        except DocumentSelectionError as exc:
+            logger.info("Document selection rejected: {}", exc)
+            yield {
+                "event": "error",
+                "data": {"message": str(exc)},
+            }
         except Exception as e:
             logger.exception(f"Orchestrator error: {e}")
             yield {
@@ -186,6 +230,39 @@ class Orchestrator:
                     await tools.close()
                 except Exception:
                     logger.exception("Failed to close agent tools")
+
+    async def _resolve_request_document_focus(
+        self,
+        context: Session,
+        relative_path: str,
+    ) -> DocumentFocus:
+        """Resolve one user-entered path through the current visibility scope."""
+        if context.document_service is None:
+            raise DocumentSelectionError(
+                "No project document service is available for this request"
+            )
+        try:
+            document = await context.document_service.get_document_info(
+                session_id=context.session_id,
+                relative_path=relative_path,
+            )
+            target = await context.document_service.resolve_focus_target(
+                session_id=context.session_id,
+                document_id=document["document_id"],
+            )
+        except FileNotFoundError as exc:
+            raise DocumentSelectionError(
+                f"Document path '/{relative_path}' is not visible in this project"
+            ) from exc
+        except ValueError as exc:
+            raise DocumentSelectionError(
+                f"Document path '/{relative_path}' is ambiguous; select one document"
+            ) from exc
+        return DocumentFocus(
+            mode="request",
+            created_at=get_now_iso(),
+            **target,
+        )
 
     async def _resolve_agent_identity(
         self,

@@ -737,7 +737,9 @@ context, with correct locators and labels, across the full persistence path.
 
 Add these only when the selected source-context flow is useful in production:
 
-1. DOCX paragraph/heading references.
+1. DOCX paragraph/heading references. **Implemented as an add-on:** DOCX body
+   chunks retain one-based paragraph ranges and built-in Word heading paths;
+   tables, headers/footers, comments, and text boxes remain out of scope.
 2. Explicit URL attachment: validate, safely fetch, and retain a bounded web
    snapshot before allowing it to become a `web_page` source reference.
 3. Images and OCR-derived source locations.

@@ -1,0 +1,624 @@
+from datetime import datetime, timezone
+
+import pytest
+from psycopg.errors import CheckViolation, ForeignKeyViolation
+
+from common.schema.source_reference import SourceReferenceCandidate
+from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
+from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from tests.fixtures.fakes import RecordingPostgresClient
+
+
+DOCUMENT_ID = "00000000-0000-0000-0000-000000000101"
+TEXT_DOCUMENT_ID = "00000000-0000-0000-0000-000000000102"
+SOURCE_REF_ID = "00000000-0000-0000-0000-000000000201"
+CONTENT_HASH = "b" * 64
+
+
+def document_candidate(**overrides) -> SourceReferenceCandidate:
+    payload = {
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "source_kind": "pdf_document",
+        "document_id": DOCUMENT_ID,
+        "content_hash": CONTENT_HASH,
+        "locator": {"kind": "pdf_page", "page": 2},
+        "excerpt": "The retrieved second-page passage.",
+        "metadata": {"document_name": "report.pdf"},
+        "encounter_kind": "document_search",
+        "agent_run_id": "run-1",
+        "tool_call_id": "call-1",
+        "result_position": 0,
+    }
+    payload.update(overrides)
+    return SourceReferenceCandidate.model_validate(payload)
+
+
+def pasted_text_candidate(**overrides) -> SourceReferenceCandidate:
+    payload = {
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "source_kind": "user_pasted_text",
+        "source_message_id": 102,
+        "content_hash": CONTENT_HASH,
+        "locator": {"kind": "character_span", "start_char": 4, "end_char": 22},
+        "excerpt": "pasted source text",
+        "encounter_kind": "user_pasted_text",
+        "agent_run_id": "run-pasted",
+        "result_position": 0,
+    }
+    payload.update(overrides)
+    return SourceReferenceCandidate.model_validate(payload)
+
+
+def text_document_candidate(**overrides) -> SourceReferenceCandidate:
+    payload = {
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "source_kind": "text_document",
+        "document_id": TEXT_DOCUMENT_ID,
+        "content_hash": "d" * 64,
+        "locator": {"kind": "text_lines", "start_line": 4, "end_line": 6},
+        "excerpt": "The exact Markdown passage.",
+        "metadata": {"document_name": "notes.md"},
+        "encounter_kind": "document_read",
+        "agent_run_id": "run-text",
+        "tool_call_id": "call-text",
+        "result_position": 0,
+    }
+    payload.update(overrides)
+    return SourceReferenceCandidate.model_validate(payload)
+
+
+def docx_document_candidate(**overrides) -> SourceReferenceCandidate:
+    return text_document_candidate(
+        locator={
+            "kind": "docx_paragraphs",
+            "start_paragraph": 4,
+            "end_paragraph": 6,
+            "heading_path": ["Overview"],
+        },
+        excerpt="Overview\nThe exact Word passage.",
+        metadata={"document_name": "overview.docx"},
+        agent_run_id="run-docx",
+        tool_call_id="call-docx",
+        **overrides,
+    )
+
+
+def web_candidate(**overrides) -> SourceReferenceCandidate:
+    payload = {
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "source_kind": "web_search_result",
+        "canonical_url": "https://example.test/release",
+        "content_hash": "c" * 64,
+        "locator": {
+            "kind": "search_result",
+            "provider": "serper",
+            "query": "release notes",
+            "rank": 1,
+        },
+        "excerpt": "Exact provider snippet.",
+        "metadata": {"title": "Release note", "discovery_snippet": True},
+        "encounter_kind": "web_search",
+        "agent_run_id": "run-web",
+        "tool_call_id": "call-web",
+        "result_position": 0,
+    }
+    payload.update(overrides)
+    return SourceReferenceCandidate.model_validate(payload)
+
+
+def news_candidate(**overrides) -> SourceReferenceCandidate:
+    payload = {
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "source_kind": "news_search_result",
+        "canonical_url": "https://news.example.test/release",
+        "content_hash": "e" * 64,
+        "locator": {
+            "kind": "search_result",
+            "provider": "newsapi",
+            "query": "release notes",
+            "rank": 1,
+        },
+        "excerpt": "Exact news-provider snippet.",
+        "metadata": {"title": "News release", "discovery_snippet": True},
+        "encounter_kind": "news_search",
+        "agent_run_id": "run-news",
+        "tool_call_id": "call-news",
+        "result_position": 0,
+    }
+    payload.update(overrides)
+    return SourceReferenceCandidate.model_validate(payload)
+
+
+def persisted_row(candidate: SourceReferenceCandidate, **overrides):
+    row = {
+        "source_ref_id": SOURCE_REF_ID,
+        "project_id": candidate.project_id,
+        "session_id": candidate.session_id,
+        "message_id": 101,
+        "source_kind": candidate.source_kind,
+        "document_id": candidate.document_id,
+        "canonical_url": candidate.canonical_url,
+        "source_message_id": candidate.source_message_id,
+        "content_hash": candidate.content_hash,
+        "locator": candidate.locator.model_dump(mode="json"),
+        "excerpt": candidate.excerpt,
+        "metadata": candidate.metadata,
+        "encounter_kind": candidate.encounter_kind,
+        "agent_run_id": candidate.agent_run_id,
+        "tool_call_id": candidate.tool_call_id,
+        "result_position": candidate.result_position,
+        "idempotency_key": SourceReferenceWriter.idempotency_key(candidate),
+        "created_at": datetime(2026, 7, 26, tzinfo=timezone.utc),
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_writer_inserts_typed_candidates_through_scoped_assistant_message():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(fetch_one_results=[persisted_row(candidate)])
+    writer = SourceReferenceWriter(client)
+
+    references = await writer.write_for_assistant_message(
+        101,
+        [candidate],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert [reference.source_ref_id for reference in references] == [SOURCE_REF_ID]
+    assert client.transaction_enters == 1
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "INSERT INTO public.message_source_refs" in query
+    assert "message.role = 'assistant'" in query
+    assert "document.visibility_scope = 'project'" in query
+    assert "ON CONFLICT (idempotency_key) DO UPDATE" in query
+    assert params[1:4] == ("project-1", "session-1", 101)
+    assert params[16] == SourceReferenceWriter.idempotency_key(candidate)
+    assert params[-8:] == (
+        101,
+        "project-1",
+        "session-1",
+        "ada",
+        DOCUMENT_ID,
+        DOCUMENT_ID,
+        "project-1",
+        "session-1",
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_writer_rejects_candidate_scope_mismatch_before_starting_a_transaction():
+    client = RecordingPostgresClient()
+    writer = SourceReferenceWriter(client)
+
+    with pytest.raises(ValueError, match="candidate scope"):
+        await writer.write_for_assistant_message(
+            101,
+            [document_candidate(session_id="other-session")],
+            user_name="ada",
+            project_id="project-1",
+            session_id="session-1",
+        )
+
+    assert client.calls == []
+    assert client.transaction_enters == 0
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_writer_uses_stable_idempotency_for_tool_and_pasted_origins():
+    document = document_candidate()
+    pasted = pasted_text_candidate()
+
+    assert SourceReferenceWriter.idempotency_key(document) == (
+        SourceReferenceWriter.idempotency_key(document)
+    )
+    assert SourceReferenceWriter.idempotency_key(document) != (
+        SourceReferenceWriter.idempotency_key(
+            document_candidate(result_position=1)
+        )
+    )
+    assert SourceReferenceWriter.idempotency_key(pasted) == (
+        SourceReferenceWriter.idempotency_key(pasted)
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reader_returns_only_message_scope_references_in_stable_order():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(fetch_all_results=[[persisted_row(candidate)]])
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].locator.page == 2
+    assert references[0].display_label == "report.pdf"
+    assert references[0].source_status == "available"
+    assert references[0].contributing_message_id == 101
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "JOIN public.sessions AS session" in query
+    assert "session.user_name = %s" in query
+    assert "ORDER BY ref.created_at ASC" in query
+    assert params == (101, "project-1", "session-1", "ada")
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reader_marks_web_results_as_search_result_snippets():
+    candidate = web_candidate()
+    client = RecordingPostgresClient(fetch_all_results=[[persisted_row(candidate)]])
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].display_label == "Release note"
+    assert references[0].source_status == "search_result_snippet"
+    assert references[0].canonical_url == "https://example.test/release"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_reader_traverses_only_episode_message_attachments():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(fetch_all_results=[[persisted_row(candidate)]])
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_episode_source_refs(
+        "episode-1",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].contributing_message_id == 101
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM public.episode_messages AS attachment" in query
+    assert "ref.message_id = attachment.message_id" in query
+    assert params == ("episode-1", "project-1", "session-1", "ada")
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reader_returns_one_assistant_answer_with_sources_consulted():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(
+        fetch_one_results=[{"message_id": 101, "content": "Answer"}],
+        fetch_all_results=[[persisted_row(candidate)]],
+    )
+    reader = SourceReferenceReader(client)
+
+    answer = await reader.get_assistant_message_with_sources(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert answer is not None
+    assert answer.content == "Answer"
+    assert answer.sources_consulted[0].display_label == "report.pdf"
+    assert answer.sources_consulted[0].contributing_message_id == 101
+    assert "message.role = 'assistant'" in client.calls[0][1]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reader_returns_an_empty_source_collection_for_an_answer_without_refs():
+    client = RecordingPostgresClient(
+        fetch_one_results=[{"message_id": 101, "content": "Answer"}],
+        fetch_all_results=[[]],
+    )
+    reader = SourceReferenceReader(client)
+
+    answer = await reader.get_assistant_message_with_sources(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert answer is not None
+    assert answer.sources_consulted == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_reader_deduplicates_retries_but_keeps_other_answers():
+    candidate = document_candidate()
+    duplicate = persisted_row(
+        candidate,
+        source_ref_id="00000000-0000-0000-0000-000000000202",
+    )
+    other_answer = persisted_row(
+        candidate,
+        source_ref_id="00000000-0000-0000-0000-000000000203",
+        message_id=102,
+    )
+    client = RecordingPostgresClient(
+        fetch_all_results=[[persisted_row(candidate), duplicate, other_answer]]
+    )
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_episode_source_refs(
+        "episode-1",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert [reference.contributing_message_id for reference in references] == [101, 102]
+
+
+async def _seed_scope(real_postgres_client):
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-1', 'ada', 'project-1')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content
+        )
+        VALUES
+            ('ada', 'session-1', 101, 'project-1', 'assistant', 'Answer'),
+            ('ada', 'session-1', 102, 'project-1', 'user', 'Pasted text')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id, visibility_scope, source_kind,
+            original_name, relative_path, extension, size_bytes, content_hash
+        )
+        VALUES (
+            %s, 'project-1', 'project', 'manual_upload',
+            'report.pdf', '/report.pdf', '.pdf', 10, %s
+        )
+        """,
+        (DOCUMENT_ID, CONTENT_HASH),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id, visibility_scope, source_kind,
+            original_name, relative_path, extension, size_bytes, content_hash
+        )
+        VALUES (
+            %s, 'project-1', 'project', 'manual_upload',
+            'notes.md', '/notes.md', '.md', 10, %s
+        )
+        """,
+        (TEXT_DOCUMENT_ID, "d" * 64),
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_persists_retries_and_cascades_document_and_message_refs(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    writer = SourceReferenceWriter(real_postgres_client)
+    reader = SourceReferenceReader(real_postgres_client)
+
+    document = document_candidate()
+    first = await writer.write_for_assistant_message(
+        101,
+        [document],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    retried = await writer.write_for_assistant_message(
+        101,
+        [document],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert first[0].source_ref_id == retried[0].source_ref_id
+    assert len(
+        await reader.get_message_source_refs(
+            101,
+            user_name="ada",
+            project_id="project-1",
+            session_id="session-1",
+        )
+    ) == 1
+
+    await real_postgres_client.execute(
+        "DELETE FROM public.project_documents WHERE document_id = %s",
+        (DOCUMENT_ID,),
+    )
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.message_source_refs"
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    writer = SourceReferenceWriter(real_postgres_client)
+    reader = SourceReferenceReader(real_postgres_client)
+    candidates = [
+        document_candidate(),
+        text_document_candidate(),
+        docx_document_candidate(),
+        pasted_text_candidate(),
+        web_candidate(),
+        news_candidate(),
+    ]
+
+    await writer.write_for_assistant_message(
+        101,
+        candidates,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.episodes (
+            episode_id, project_id, session_id, summary, source_message_count
+        )
+        VALUES ('episode-1', 'project-1', 'session-1', 'Summary', 1)
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.episode_messages (
+            episode_id, project_id, session_id, message_id, message_position
+        )
+        VALUES ('episode-1', 'project-1', 'session-1', 101, 0)
+        """
+    )
+
+    answer = await reader.get_assistant_message_with_sources(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    episode_sources = await reader.get_episode_source_refs(
+        "episode-1",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert answer is not None
+    assert [source.source_kind for source in answer.sources_consulted] == [
+        "pdf_document",
+        "text_document",
+        "text_document",
+        "user_pasted_text",
+        "web_search_result",
+        "news_search_result",
+    ]
+    assert [source.source_status for source in answer.sources_consulted[-2:]] == [
+        "search_result_snippet",
+        "search_result_snippet",
+    ]
+    assert [source.contributing_message_id for source in episode_sources] == [101] * 6
+
+    await real_postgres_client.execute(
+        "DELETE FROM public.messages "
+        "WHERE message_id = 101 AND project_id = 'project-1'"
+    )
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.message_source_refs"
+    ) == {"count": 0}
+    assert await reader.get_episode_source_refs(
+        "episode-1",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    ) == []
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_enforces_source_shape_and_project_scoped_document_fk(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-2', 'ada', 'project-2')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content
+        )
+        VALUES ('ada', 'session-2', 201, 'project-2', 'assistant', 'Answer')
+        """
+    )
+    valid_locator = '{"kind":"pdf_page","page":2}'
+    valid_metadata = '{"document_name":"report.pdf"}'
+
+    with pytest.raises(CheckViolation):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.message_source_refs (
+                source_ref_id, project_id, session_id, message_id, source_kind,
+                document_id, content_hash, locator, excerpt, metadata,
+                encounter_kind, agent_run_id, tool_call_id, result_position,
+                idempotency_key
+            )
+            VALUES (
+                '00000000-0000-0000-0000-000000000202',
+                'project-1', 'session-1', 101, 'pdf_document', %s, %s,
+                '{"kind":"search_result"}', 'excerpt', %s,
+                'document_search', 'run-invalid', 'call-invalid', 0,
+                'invalid-shape'
+            )
+            """,
+            (DOCUMENT_ID, CONTENT_HASH, valid_metadata),
+        )
+
+    with pytest.raises(ForeignKeyViolation):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.message_source_refs (
+                source_ref_id, project_id, session_id, message_id, source_kind,
+                document_id, content_hash, locator, excerpt, metadata,
+                encounter_kind, agent_run_id, tool_call_id, result_position,
+                idempotency_key
+            )
+            VALUES (
+                '00000000-0000-0000-0000-000000000203',
+                'project-2', 'session-2', 201, 'pdf_document', %s, %s, %s,
+                'excerpt', %s, 'document_search', 'run-cross-project',
+                'call-cross-project', 0, 'cross-project-document'
+            )
+            """,
+            (DOCUMENT_ID, CONTENT_HASH, valid_locator, valid_metadata),
+        )
+
+    await writer.write_for_assistant_message(
+        101,
+        [pasted_text_candidate()],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    await real_postgres_client.execute(
+        "DELETE FROM public.messages "
+        "WHERE message_id = 102 AND project_id = 'project-1'"
+    )
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.message_source_refs"
+    ) == {"count": 0}

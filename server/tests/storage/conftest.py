@@ -50,6 +50,7 @@ async def _reset_storage_db(client: PostgresClient):
             episodes,
             agent_brain_snapshots,
             agents,
+            message_source_refs,
             document_chunks,
             project_documents,
             document_folder_uploads,

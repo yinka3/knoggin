@@ -3,8 +3,33 @@ from contextlib import asynccontextmanager
 import pytest
 
 from core.knowledge.db.writers.document_writer import DocumentWriter
+from core.knowledge.documents.storage import DocumentChunk
 
 _MISMATCH_ERROR = "chunks and embeddings must have the same length"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_chunk_copy_row_preserves_all_source_locator_fields():
+    row = DocumentWriter._chunk_copy_row(
+        document_id="11111111-1111-4111-8111-111111111111",
+        relative_path="docs/report.md",
+        chunk_index=3,
+        chunk=DocumentChunk(
+            content="Revenue increased.",
+            page_number=2,
+            start_line=8,
+            end_line=9,
+            start_row=4,
+            end_row=5,
+            section_path=("Results", "Revenue"),
+            start_paragraph=11,
+            end_paragraph=13,
+        ),
+        embedding=[0.1] * 1024,
+    )
+
+    assert row[9:17] == (2, 8, 9, 4, 5, ["Results", "Revenue"], 11, 13)
 
 
 class RecordingCursor:

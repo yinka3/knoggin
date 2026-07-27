@@ -1,6 +1,7 @@
 import pytest
 
 from common.schema.agent_contracts import AgentConfig
+from core.agent.document_selection import DocumentSelectionError
 from core.agent.orchestrator import Orchestrator
 from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeResources
@@ -489,3 +490,150 @@ async def test_orchestrator_ignores_stale_document_focus():
     )
 
     assert await Orchestrator()._load_document_focus(context) is None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_uses_request_document_focus_without_persisting_it(
+    monkeypatch,
+):
+    context = FakeSession()
+    tools = FakeTools()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(
+            id="agent-1",
+            name="Researcher",
+            persona="Careful",
+            is_default=True,
+        )
+    )
+
+    class FocusDocumentService:
+        async def get_document_info(self, **kwargs):
+            assert kwargs == {
+                "session_id": "session-1",
+                "relative_path": "docs/Q2 notes.md",
+            }
+            return {
+                "document_id": "doc-1",
+                "relative_path": "docs/Q2 notes.md",
+            }
+
+        async def resolve_focus_target(self, **kwargs):
+            assert kwargs == {
+                "session_id": "session-1",
+                "document_id": "doc-1",
+            }
+            return {
+                "target_type": "document",
+                "document_id": "doc-1",
+                "relative_path": "docs/Q2 notes.md",
+                "folder_root_id": None,
+                "path_prefix": None,
+            }
+
+    context.document_service = FocusDocumentService()
+    monkeypatch.setattr(
+        "core.agent.orchestrator.ConfigManager.get",
+        staticmethod(lambda: FakeConfigManager()),
+    )
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
+
+    async def fake_bootstrap_services(self, context_arg, agent_id):
+        return {"topic_config": FakeTopicConfig(), "tools": tools}
+
+    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
+
+    events = [
+        event
+        async for event in Orchestrator().run_stream(
+            user_query='Summarize "/docs/Q2 notes.md", please.',
+            user_name="ada",
+            session_id="session-1",
+            context=context,
+        )
+    ]
+
+    assert events == [{"event": "final", "data": {"content": "done"}}]
+    assert FakeExecutor.instances[0].ctx.user_query == "Summarize, please."
+    assert FakeExecutor.instances[0].ctx.document_focus.document_id == "doc-1"
+    assert tools.document_focus["document_id"] == "doc-1"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("service_error", "expected"),
+    [
+        (FileNotFoundError("Document not found"), "not visible"),
+        (ValueError("Multiple visible uploads"), "ambiguous"),
+    ],
+)
+async def test_orchestrator_rejects_invisible_and_ambiguous_document_paths(
+    service_error,
+    expected,
+):
+    context = FakeSession()
+
+    class RejectingDocumentService:
+        async def get_document_info(self, **_kwargs):
+            raise service_error
+
+    context.document_service = RejectingDocumentService()
+
+    with pytest.raises(DocumentSelectionError, match=expected):
+        await Orchestrator()._resolve_request_document_focus(
+            context,
+            "docs/notes.md",
+        )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_seeds_pasted_text_candidates_from_canonical_turn(
+    monkeypatch,
+):
+    context = FakeSession()
+    tools = FakeTools()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(
+            id="agent-1",
+            name="Researcher",
+            persona="Careful",
+            is_default=True,
+        )
+    )
+    user_query = "Use this source: revenue increased 18%."
+    excerpt = "revenue increased 18%"
+    start_char = user_query.index(excerpt)
+
+    monkeypatch.setattr(
+        "core.agent.orchestrator.ConfigManager.get",
+        staticmethod(lambda: FakeConfigManager()),
+    )
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
+
+    async def fake_bootstrap_services(self, context_arg, agent_id):
+        return {"topic_config": FakeTopicConfig(), "tools": tools}
+
+    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
+
+    events = [
+        event
+        async for event in Orchestrator().run_stream(
+            user_query=user_query,
+            user_name="ada",
+            session_id="session-1",
+            context=context,
+            user_message_id=42,
+            pasted_text_spans=[
+                {"start_char": start_char, "end_char": start_char + len(excerpt)}
+            ],
+        )
+    ]
+
+    assert events == [{"event": "final", "data": {"content": "done"}}]
+    candidates = FakeExecutor.instances[0].ctx.initial_source_candidates
+    assert len(candidates) == 1
+    assert candidates[0].source_message_id == 42
+    assert candidates[0].excerpt == excerpt

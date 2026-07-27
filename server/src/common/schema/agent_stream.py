@@ -105,6 +105,7 @@ class ResponseData(TypedDict):
     content: str
     usage: StreamUsage
     sources: Optional[List[Dict[str, Any]]]
+    sources_consulted: NotRequired[List[Dict[str, Any]]]
     fallback: NotRequired[bool]
 
 

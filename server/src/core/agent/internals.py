@@ -192,6 +192,26 @@ def _localize_tool_data(
     return localized
 
 
+def model_safe_tool_result(result: Dict) -> Dict:
+    """Remove executor-only source payloads before a result enters prompt state."""
+    model_result = deepcopy(result)
+    if isinstance(model_result, dict) and "data" in model_result:
+        model_result["data"] = _remove_source_context(model_result["data"])
+    return model_result
+
+
+def _remove_source_context(value):
+    if isinstance(value, list):
+        return [_remove_source_context(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _remove_source_context(item)
+        for key, item in value.items()
+        if key != "source_context"
+    }
+
+
 def localize_agent_tool_result(
     ctx: AgentContext,
     tool_name: str,
@@ -203,7 +223,7 @@ def localize_agent_tool_result(
     The returned copy is what enters the agent's evidence and the next LLM turn.
     """
 
-    localized_result = deepcopy(result)
+    localized_result = model_safe_tool_result(result)
     if not isinstance(localized_result, dict) or "data" not in localized_result:
         return localized_result
 

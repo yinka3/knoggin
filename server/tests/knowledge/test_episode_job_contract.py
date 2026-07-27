@@ -323,6 +323,45 @@ async def test_episode_job_generates_a_grounded_episode_decision():
 
 
 @pytest.mark.no_network
+async def test_episode_generation_never_reads_response_source_context():
+    class SourceContextRejectingStore(CandidateEpisodeStore):
+        async def get_message_source_refs(self, *args, **kwargs):
+            raise AssertionError(
+                "response source context must not enter episode inputs"
+            )
+
+        async def get_episode_source_refs(self, *args, **kwargs):
+            raise AssertionError(
+                "response source context must not enter episode inputs"
+            )
+
+    decision = LLMEpisodeDecision(
+        action="create",
+        summary="The team agreed on the rollout.",
+        message_influences=[
+            {"message_id": "m1", "influence_weight": 0.8},
+            {"message_id": "m2", "influence_weight": 0.5},
+        ],
+    )
+    llm = FakeEpisodeLLM(decision)
+    job = EpisodeJob(
+        knowledge_store=SourceContextRejectingStore(),
+        settings=EpisodeSettings(batch_multiple=3, max_message_count=24),
+        ingestion_settings=IngestionSettings(batch_size=8),
+        llm=llm,
+    )
+
+    await job.generate_decision(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert "sources_consulted" not in llm.calls[0]["user"]
+    assert "search_result_snippet" not in llm.calls[0]["user"]
+
+
+@pytest.mark.no_network
 async def test_episode_job_rejects_unknown_local_decision_reference():
     llm = FakeEpisodeLLM(
         LLMEpisodeDecision(

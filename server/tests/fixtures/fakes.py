@@ -466,6 +466,10 @@ class FakeKnowledgeStore:
         self.saved_message_logs.append(messages)
         return True
 
+    async def save_assistant_message_with_source_refs(self, message, candidates):
+        self.saved_message_logs.append([message])
+        return list(candidates)
+
     async def save_candidate_suggestions(self, scope, suggestions):
         self.saved_candidate_suggestions.append((scope, list(suggestions)))
         return len(suggestions)

@@ -1546,8 +1546,14 @@ CREATE TABLE IF NOT EXISTS public.document_chunks (
     language TEXT,
     chunk_kind TEXT NOT NULL DEFAULT 'text',
     symbol_name TEXT,
+    page_number INTEGER,
     start_line INTEGER,
     end_line INTEGER,
+    start_row INTEGER,
+    end_row INTEGER,
+    section_path TEXT[],
+    start_paragraph INTEGER,
+    end_paragraph INTEGER,
     search_vector tsvector GENERATED ALWAYS AS (
         to_tsvector(
             'simple',
@@ -1564,6 +1570,18 @@ CREATE TABLE IF NOT EXISTS public.document_chunks (
         CHECK (
             (start_line IS NULL AND end_line IS NULL)
             OR (start_line >= 1 AND end_line >= start_line)
+        ),
+    CONSTRAINT document_chunks_page_number_check
+        CHECK (page_number IS NULL OR page_number >= 1),
+    CONSTRAINT document_chunks_row_range_check
+        CHECK (
+            (start_row IS NULL AND end_row IS NULL)
+            OR (start_row >= 1 AND end_row >= start_row)
+    ),
+    CONSTRAINT document_chunks_paragraph_range_check
+        CHECK (
+            (start_paragraph IS NULL AND end_paragraph IS NULL)
+            OR (start_paragraph >= 1 AND end_paragraph >= start_paragraph)
         )
 );
 
@@ -1579,8 +1597,14 @@ ALTER TABLE public.document_chunks
 ALTER TABLE public.document_chunks
     ADD COLUMN IF NOT EXISTS chunk_kind TEXT NOT NULL DEFAULT 'text';
 ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS symbol_name TEXT;
+ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS page_number INTEGER;
 ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS start_line INTEGER;
 ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS end_line INTEGER;
+ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS start_row INTEGER;
+ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS end_row INTEGER;
+ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS section_path TEXT[];
+ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS start_paragraph INTEGER;
+ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS end_paragraph INTEGER;
 ALTER TABLE public.document_chunks DROP COLUMN IF EXISTS search_vector;
 ALTER TABLE public.document_chunks
     ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
@@ -1599,6 +1623,53 @@ ALTER TABLE public.document_chunks
         (start_line IS NULL AND end_line IS NULL)
         OR (start_line >= 1 AND end_line >= start_line)
     );
+ALTER TABLE public.document_chunks
+    DROP CONSTRAINT IF EXISTS document_chunks_paragraph_range_check;
+ALTER TABLE public.document_chunks
+    ADD CONSTRAINT document_chunks_paragraph_range_check
+    CHECK (
+        (start_paragraph IS NULL AND end_paragraph IS NULL)
+        OR (start_paragraph >= 1 AND end_paragraph >= start_paragraph)
+    );
+ALTER TABLE public.document_chunks
+    DROP CONSTRAINT IF EXISTS document_chunks_page_number_check;
+ALTER TABLE public.document_chunks
+    ADD CONSTRAINT document_chunks_page_number_check
+    CHECK (page_number IS NULL OR page_number >= 1);
+ALTER TABLE public.document_chunks
+    DROP CONSTRAINT IF EXISTS document_chunks_row_range_check;
+ALTER TABLE public.document_chunks
+    ADD CONSTRAINT document_chunks_row_range_check
+    CHECK (
+        (start_row IS NULL AND end_row IS NULL)
+        OR (start_row >= 1 AND end_row >= start_row)
+    );
+
+-- Clean unreleased-system migration: indexed chunks created before locator
+-- support must be rebuilt rather than served through a page-less/locator-less
+-- compatibility path. New chunks satisfy the corresponding condition and are
+-- therefore not requeued on subsequent schema applications.
+UPDATE public.project_documents AS pd
+SET
+    status = 'queued',
+    indexed_at = NULL,
+    error_message = NULL,
+    updated_at = NOW()
+WHERE pd.status = 'indexed'
+  AND EXISTS (
+      SELECT 1
+      FROM public.document_chunks AS dc
+      WHERE dc.document_id = pd.document_id
+        AND (
+            (pd.extension = '.pdf' AND dc.page_number IS NULL)
+            OR (pd.extension = '.csv' AND dc.start_row IS NULL)
+            OR (pd.extension = '.docx' AND dc.start_paragraph IS NULL)
+            OR (
+                pd.extension NOT IN ('.pdf', '.csv', '.docx')
+                AND dc.start_line IS NULL
+            )
+        )
+  );
 
 CREATE INDEX IF NOT EXISTS document_chunks_document_idx
 ON public.document_chunks(document_id);
@@ -1608,3 +1679,158 @@ ON public.document_chunks USING hnsw (embedding vector_cosine_ops);
 
 CREATE INDEX IF NOT EXISTS document_chunks_search_vector_idx
 ON public.document_chunks USING gin (search_vector);
+
+-- Source context supplied to an assistant response. These rows record what a
+-- completed run received; they are not claim-level citations or a general
+-- source/revision ledger.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'project_documents_id_project_key'
+          AND conrelid = 'public.project_documents'::regclass
+    ) THEN
+        ALTER TABLE public.project_documents
+        ADD CONSTRAINT project_documents_id_project_key
+        UNIQUE (document_id, project_id);
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.message_source_refs (
+    source_ref_id UUID PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    message_id BIGINT NOT NULL,
+    source_kind TEXT NOT NULL,
+    document_id UUID,
+    canonical_url TEXT,
+    source_message_id BIGINT,
+    content_hash TEXT NOT NULL,
+    locator JSONB NOT NULL,
+    excerpt TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    encounter_kind TEXT NOT NULL,
+    agent_run_id TEXT NOT NULL,
+    tool_call_id TEXT,
+    result_position INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT message_source_refs_message_scope_fk
+        FOREIGN KEY (message_id, project_id, session_id)
+        REFERENCES public.messages(message_id, project_id, session_id)
+        ON DELETE CASCADE,
+    CONSTRAINT message_source_refs_source_message_scope_fk
+        FOREIGN KEY (source_message_id, project_id, session_id)
+        REFERENCES public.messages(message_id, project_id, session_id)
+        ON DELETE CASCADE,
+    CONSTRAINT message_source_refs_document_project_fk
+        FOREIGN KEY (document_id, project_id)
+        REFERENCES public.project_documents(document_id, project_id)
+        ON DELETE CASCADE,
+    CONSTRAINT message_source_refs_kind_check
+        CHECK (source_kind IN (
+            'pdf_document',
+            'text_document',
+            'user_pasted_text',
+            'web_search_result',
+            'news_search_result'
+        )),
+    CONSTRAINT message_source_refs_encounter_check
+        CHECK (encounter_kind IN (
+            'document_search',
+            'document_read',
+            'user_pasted_text',
+            'web_search',
+            'news_search'
+        )),
+    CONSTRAINT message_source_refs_position_check
+        CHECK (result_position >= 0),
+    CONSTRAINT message_source_refs_hash_check
+        CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT message_source_refs_excerpt_check
+        CHECK (length(btrim(excerpt)) > 0),
+    CONSTRAINT message_source_refs_source_shape_check
+        CHECK (
+            (
+                source_kind = 'pdf_document'
+                AND document_id IS NOT NULL
+                AND canonical_url IS NULL
+                AND source_message_id IS NULL
+                AND tool_call_id IS NOT NULL
+                AND encounter_kind IN ('document_search', 'document_read')
+                AND locator ->> 'kind' = 'pdf_page'
+                AND jsonb_typeof(locator -> 'page') = 'number'
+                AND locator ->> 'page' ~ '^[1-9][0-9]*$'
+                AND COALESCE(metadata ->> 'document_name', '') <> ''
+            )
+            OR (
+                source_kind = 'text_document'
+                AND document_id IS NOT NULL
+                AND canonical_url IS NULL
+                AND source_message_id IS NULL
+                AND tool_call_id IS NOT NULL
+                AND encounter_kind IN ('document_search', 'document_read')
+                AND (
+                    (
+                        locator ->> 'kind' IN ('text_lines', 'code_lines')
+                        AND jsonb_typeof(locator -> 'start_line') = 'number'
+                        AND jsonb_typeof(locator -> 'end_line') = 'number'
+                        AND locator ->> 'start_line' ~ '^[1-9][0-9]*$'
+                        AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
+                    )
+                    OR (
+                        locator ->> 'kind' = 'csv_rows'
+                        AND jsonb_typeof(locator -> 'start_row') = 'number'
+                        AND jsonb_typeof(locator -> 'end_row') = 'number'
+                        AND locator ->> 'start_row' ~ '^[1-9][0-9]*$'
+                        AND locator ->> 'end_row' ~ '^[1-9][0-9]*$'
+                    )
+                    OR (
+                        locator ->> 'kind' = 'docx_paragraphs'
+                        AND jsonb_typeof(locator -> 'start_paragraph') = 'number'
+                        AND jsonb_typeof(locator -> 'end_paragraph') = 'number'
+                        AND locator ->> 'start_paragraph' ~ '^[1-9][0-9]*$'
+                        AND locator ->> 'end_paragraph' ~ '^[1-9][0-9]*$'
+                    )
+                )
+                AND COALESCE(metadata ->> 'document_name', '') <> ''
+            )
+            OR (
+                source_kind = 'user_pasted_text'
+                AND document_id IS NULL
+                AND canonical_url IS NULL
+                AND source_message_id IS NOT NULL
+                AND tool_call_id IS NULL
+                AND encounter_kind = 'user_pasted_text'
+                AND locator ->> 'kind' = 'character_span'
+                AND jsonb_typeof(locator -> 'start_char') = 'number'
+                AND jsonb_typeof(locator -> 'end_char') = 'number'
+                AND locator ->> 'start_char' ~ '^[0-9]+$'
+                AND locator ->> 'end_char' ~ '^[1-9][0-9]*$'
+            )
+            OR (
+                source_kind IN ('web_search_result', 'news_search_result')
+                AND document_id IS NULL
+                AND source_message_id IS NULL
+                AND canonical_url ~ '^https?://[^[:space:]#]+$'
+                AND tool_call_id IS NOT NULL
+                AND locator ->> 'kind' = 'search_result'
+                AND COALESCE(locator ->> 'provider', '') <> ''
+                AND COALESCE(locator ->> 'query', '') <> ''
+                AND jsonb_typeof(locator -> 'rank') = 'number'
+                AND locator ->> 'rank' ~ '^[1-9][0-9]*$'
+                AND COALESCE(metadata ->> 'title', '') <> ''
+                AND metadata -> 'discovery_snippet' = 'true'::jsonb
+                AND (
+                    (source_kind = 'web_search_result' AND encounter_kind = 'web_search')
+                    OR (source_kind = 'news_search_result' AND encounter_kind = 'news_search')
+                )
+            )
+        )
+);
+
+CREATE INDEX IF NOT EXISTS message_source_refs_message_scope_idx
+ON public.message_source_refs(message_id, project_id, session_id);
+
+CREATE INDEX IF NOT EXISTS message_source_refs_episode_lookup_idx
+ON public.message_source_refs(project_id, session_id, message_id, created_at);

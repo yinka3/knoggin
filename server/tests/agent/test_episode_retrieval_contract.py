@@ -127,6 +127,66 @@ async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
 
 
 @pytest.mark.no_network
+async def test_episode_serialization_includes_separate_sources_consulted():
+    class FakeKnowledgeStore:
+        async def get_episodes_for_entity(self, entity_id, **scope):
+            return [episode("episode-1", entity_id)]
+
+        async def get_episode_source_messages(self, episode_id, **scope):
+            return [source_message()]
+
+        async def get_episode_source_refs(self, episode_id, **scope):
+            assert episode_id == "episode-1"
+            return [
+                {
+                    "source_kind": "web_search_result",
+                    "display_label": "Release note",
+                    "locator": {
+                        "kind": "search_result",
+                        "provider": "serper",
+                        "query": "release",
+                        "rank": 1,
+                    },
+                    "excerpt": "Provider snippet.",
+                    "canonical_url": "https://example.test/release",
+                    "source_status": "search_result_snippet",
+                    "contributing_message_id": 7,
+                }
+            ]
+
+    class FakeEntities:
+        async def get_id(self, name):
+            return 2
+
+        async def get_profile(self, entity_id):
+            return EntityProfile(canonical_name="Ada")
+
+    tool = EpisodeTool()
+    tool.entities = FakeEntities()
+    tool.knowledge_store = FakeKnowledgeStore()
+
+    result = await tool.episode_check("What did Ada decide?", entity_name="Ada")
+
+    consulted = result["results"][0]["episodes"][0]["sources_consulted"]
+    assert consulted == [
+        {
+            "source_kind": "web_search_result",
+            "display_label": "Release note",
+            "locator": {
+                "kind": "search_result",
+                "provider": "serper",
+                "query": "release",
+                "rank": 1,
+            },
+            "excerpt": "Provider snippet.",
+            "canonical_url": "https://example.test/release",
+            "source_status": "search_result_snippet",
+            "contributing_message_id": 7,
+        }
+    ]
+
+
+@pytest.mark.no_network
 async def test_episode_check_emits_retrieval_and_expansion_metrics(monkeypatch):
     events = []
 

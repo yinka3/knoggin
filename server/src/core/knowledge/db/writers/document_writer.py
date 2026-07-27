@@ -45,8 +45,14 @@ class DocumentWriter:
                 language,
                 chunk_kind,
                 symbol_name,
+                page_number,
                 start_line,
-                end_line
+                end_line,
+                start_row,
+                end_row,
+                section_path,
+                start_paragraph,
+                end_paragraph
             ) FROM STDIN
             """
         ) as copy:
@@ -76,8 +82,14 @@ class DocumentWriter:
             chunk.language,
             chunk.chunk_kind,
             chunk.symbol_name,
+            chunk.page_number,
             chunk.start_line,
             chunk.end_line,
+            chunk.start_row,
+            chunk.end_row,
+            list(chunk.section_path) if chunk.section_path is not None else None,
+            chunk.start_paragraph,
+            chunk.end_paragraph,
         )
 
     async def insert_workspace_source(

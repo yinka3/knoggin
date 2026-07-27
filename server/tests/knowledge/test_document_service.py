@@ -412,8 +412,14 @@ class MemoryCopy:
             language,
             chunk_kind,
             symbol_name,
+            page_number,
             start_line,
             end_line,
+            start_row,
+            end_row,
+            section_path,
+            start_paragraph,
+            end_paragraph,
         ) = row
         self.postgres.chunks.append(
             {
@@ -426,8 +432,14 @@ class MemoryCopy:
                 "language": language,
                 "chunk_kind": chunk_kind,
                 "symbol_name": symbol_name,
+                "page_number": page_number,
                 "start_line": start_line,
                 "end_line": end_line,
+                "start_row": start_row,
+                "end_row": end_row,
+                "section_path": section_path,
+                "start_paragraph": start_paragraph,
+                "end_paragraph": end_paragraph,
             }
         )
 
@@ -1204,6 +1216,87 @@ def test_tree_sitter_falls_back_to_regex_for_incomplete_python():
 
     assert len(chunks) == 1
     assert chunks[0].symbol_name == "unfinished"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_pdf_extraction_splits_each_page_without_cross_page_chunks(monkeypatch):
+    from types import SimpleNamespace
+
+    pages = [
+        SimpleNamespace(extract_text=lambda: "Page one only."),
+        SimpleNamespace(extract_text=lambda: "Page two only."),
+    ]
+    monkeypatch.setattr(
+        storage_module,
+        "PdfReader",
+        lambda _: SimpleNamespace(pages=pages),
+    )
+
+    extraction = storage_module.extract_and_split_document(b"pdf", ".pdf")
+
+    assert extraction.text == "Page one only.\n\nPage two only."
+    assert [(chunk.page_number, chunk.content) for chunk in extraction.chunks] == [
+        (1, "Page one only."),
+        (2, "Page two only."),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_text_markdown_and_csv_chunks_have_reliable_locators():
+    text_chunks = storage_module.split_document(
+        "\nFirst line\nSecond line\n",
+        extension=".txt",
+    )
+    markdown_chunks = storage_module.split_document(
+        "# Overview\nIntroduction\n\n## Risks\nMitigation\n",
+        extension=".md",
+    )
+    csv_chunks = storage_module.split_document(
+        "name,value\nalpha,1\nbeta,2\n",
+        extension=".csv",
+    )
+
+    assert [(chunk.start_line, chunk.end_line) for chunk in text_chunks] == [(2, 3)]
+    assert [chunk.section_path for chunk in markdown_chunks] == [
+        ("Overview",),
+        ("Overview", "Risks"),
+    ]
+    assert [(chunk.start_line, chunk.end_line) for chunk in markdown_chunks] == [
+        (1, 2),
+        (4, 5),
+    ]
+    assert [(chunk.start_row, chunk.end_row) for chunk in csv_chunks] == [(1, 2)]
+    assert csv_chunks[0].content == "name,value\nalpha,1\nbeta,2"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_docx_chunks_preserve_paragraph_ranges_and_heading_paths(monkeypatch):
+    from types import SimpleNamespace
+
+    paragraphs = [
+        SimpleNamespace(text="Overview", style=SimpleNamespace(name="Heading 1")),
+        SimpleNamespace(text="The introduction.", style=SimpleNamespace(name="Normal")),
+        SimpleNamespace(text="Risks", style=SimpleNamespace(name="Heading 2")),
+        SimpleNamespace(text="Mitigate dependency risk.", style=SimpleNamespace(name="Normal")),
+    ]
+    monkeypatch.setattr(
+        storage_module,
+        "DocxDocument",
+        lambda _: SimpleNamespace(paragraphs=paragraphs),
+    )
+
+    extraction = storage_module.extract_and_split_document(b"docx", ".docx")
+
+    assert [
+        (chunk.start_paragraph, chunk.end_paragraph, chunk.section_path)
+        for chunk in extraction.chunks
+    ] == [
+        (1, 2, ("Overview",)),
+        (3, 4, ("Overview", "Risks")),
+    ]
 
 
 @pytest.mark.unit
@@ -2368,14 +2461,14 @@ async def test_index_document_records_text_extraction_failures(
 @pytest.mark.storage
 @pytest.mark.no_network
 @pytest.mark.parametrize(
-    ("extension", "expected"),
+    ("extension", "expected_chunks"),
     [
-        (".pdf", "First page\n\nSecond page"),
-        (".docx", "Document text"),
+        (".pdf", ["First page", "Second page"]),
+        (".docx", ["Document text"]),
     ],
 )
 async def test_index_document_extracts_supported_documents(
-    monkeypatch, document_harness, extension, expected
+    monkeypatch, document_harness, extension, expected_chunks
 ):
     from types import SimpleNamespace
 
@@ -2391,10 +2484,13 @@ async def test_index_document_extracts_supported_documents(
             lambda buf: SimpleNamespace(pages=pages),
         )
     else:
+        paragraphs = [
+            SimpleNamespace(text="Document text", style=SimpleNamespace(name="Normal"))
+        ]
         monkeypatch.setattr(
-            storage_module.docx2txt,
-            "process",
-            lambda buf: "Document text",
+            storage_module,
+            "DocxDocument",
+            lambda buf: SimpleNamespace(paragraphs=paragraphs),
         )
 
     uploaded = await service.add_document(
@@ -2403,7 +2499,70 @@ async def test_index_document_extracts_supported_documents(
     )
     await service.index_document(document_id=uploaded["document_id"])
 
-    assert postgres.chunks[0]["content"] == expected
+    assert [chunk["content"] for chunk in postgres.chunks] == expected_chunks
+    if extension == ".pdf":
+        assert [chunk["page_number"] for chunk in postgres.chunks] == [1, 2]
+    else:
+        assert postgres.chunks[0]["start_paragraph"] == 1
+        assert postgres.chunks[0]["end_paragraph"] == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_read_document_keeps_pdf_line_ranges_page_local(
+    monkeypatch, document_harness
+):
+    from types import SimpleNamespace
+
+    pages = [
+        SimpleNamespace(extract_text=lambda: "First page line"),
+        SimpleNamespace(extract_text=lambda: "Second page first\nSecond page last"),
+    ]
+    monkeypatch.setattr(
+        storage_module,
+        "PdfReader",
+        lambda _: SimpleNamespace(pages=pages),
+    )
+    service, _ = document_harness
+    uploaded = await service.add_document(content=b"pdf", original_name="report.pdf")
+    await service.index_document(document_id=uploaded["document_id"])
+
+    result = await service.read_document(
+        document_id=uploaded["document_id"],
+        page_number=2,
+        start_line=2,
+    )
+
+    assert result["page_number"] == 2
+    assert result["locator"] == {"kind": "pdf_page", "page": 2}
+    assert result["start_line"] == result["end_line"] == 2
+    assert result["content"] == "2: Second page last"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_read_document_reports_csv_data_rows_not_physical_file_lines(
+    document_harness,
+):
+    service, _ = document_harness
+    uploaded = await service.add_document(
+        content=b"name,value\nalpha,1\nbeta,2\n",
+        original_name="metrics.csv",
+    )
+    await service.index_document(document_id=uploaded["document_id"])
+
+    result = await service.read_document(
+        document_id=uploaded["document_id"],
+        start_line=2,
+    )
+
+    assert result["locator"] == {
+        "kind": "csv_rows",
+        "start_row": 2,
+        "end_row": 2,
+    }
+    assert result["chunk_index"] == "rows:2-2"
+    assert result["content"] == "2: beta,2"
 
 
 @pytest.mark.storage

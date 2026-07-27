@@ -616,6 +616,13 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "The exact path shown by list_documents.",
                     },
+                    "page_number": {
+                        "type": "integer",
+                        "description": (
+                            "One-based PDF page to read. PDF line ranges are "
+                            "local to this page (default 1)."
+                        ),
+                    },
                     "start_line": {
                         "type": "integer",
                         "description": "First one-based line to read (default 1).",

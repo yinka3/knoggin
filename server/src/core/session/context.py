@@ -15,6 +15,7 @@ from common.schema.contracts import (
     MessageUserConnections,
 )
 from common.schema.primitives import Message
+from common.schema.source_reference import SourceReferenceCandidate
 from common.schema.settings import RootConfig
 from common.utils.core_utils import (
     fetch_conversation_turns,
@@ -318,6 +319,7 @@ class Session:
         timestamp: datetime,
         metadata: Optional[dict] = None,
         user_msg_id: Optional[int] = None,
+        source_candidates: Optional[List[SourceReferenceCandidate]] = None,
     ):
         """Add assistant turn to conversation log."""
         if metadata is None:
@@ -341,6 +343,7 @@ class Session:
                 timestamp,
                 metadata=metadata,
                 user_msg_id=user_msg_id,
+                source_candidates=source_candidates,
             )
         except Exception:
             try:
@@ -356,7 +359,10 @@ class Session:
     async def _delete_conversation_message(self, message_id: int) -> None:
         """Remove all staged Postgres and Redis state for one canonical message."""
         # Delete from Postgres
-        query = "DELETE FROM public.messages WHERE user_name = %(user_name)s AND session_id = %(session_id)s AND message_id = %(message_id)s"
+        query = (
+            "DELETE FROM public.messages WHERE user_name = %(user_name)s "
+            "AND session_id = %(session_id)s AND message_id = %(message_id)s"
+        )
         await self.resources.postgres.execute(
             query,
             {
@@ -389,6 +395,7 @@ class Session:
         timestamp: datetime,
         metadata: Optional[dict] = None,
         user_msg_id: Optional[int] = None,
+        source_candidates: Optional[List[SourceReferenceCandidate]] = None,
     ):
         """Write an assistant message log, raising after bounded retries."""
         max_retries = 3
@@ -409,7 +416,13 @@ class Session:
                     }
                 ]
 
-                await self.knowledge_store.save_message_logs(agent_msg_batch)
+                if source_candidates:
+                    await self.knowledge_store.save_assistant_message_with_source_refs(
+                        agent_msg_batch[0],
+                        source_candidates,
+                    )
+                else:
+                    await self.knowledge_store.save_message_logs(agent_msg_batch)
                 return
 
             except Exception as e:

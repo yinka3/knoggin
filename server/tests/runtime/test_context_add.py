@@ -4,10 +4,27 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from common.schema.primitives import Message
+from common.schema.source_reference import SourceReferenceCandidate
 from core.session.context import Session
 from infrastructure.redis_client import RedisKeys
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer, FakeResources
+
+
+def _pasted_source_candidate():
+    return SourceReferenceCandidate(
+        project_id="project-1",
+        session_id="session-1",
+        source_kind="user_pasted_text",
+        source_message_id=7,
+        content_hash="a" * 64,
+        locator={"kind": "character_span", "start_char": 0, "end_char": 6},
+        excerpt="pasted",
+        metadata={"pasted_text": True},
+        encounter_kind="user_pasted_text",
+        agent_run_id="run-1",
+        result_position=0,
+    )
 
 
 @pytest.fixture
@@ -279,6 +296,117 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
             }
         ]
     ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_context_assistant_turn_persists_source_candidates_with_message(context):
+    ctx, resources = context
+    timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
+    candidate = _pasted_source_candidate()
+    calls = []
+
+    async def save_atomically(message, candidates):
+        calls.append((message, candidates))
+        return []
+
+    resources.knowledge_store.save_assistant_message_with_source_refs = (
+        save_atomically
+    )
+
+    await ctx.add_assistant_turn(
+        "hello from assistant",
+        timestamp,
+        source_candidates=[candidate],
+    )
+
+    assert calls == [
+        (
+            {
+                "id": 1,
+                "content": "hello from assistant",
+                "role": "assistant",
+                "user_name": "ada",
+                "session_id": "session-1",
+                "project_id": "project-1",
+                "timestamp": timestamp.timestamp() * 1000,
+                "metadata": {},
+                "user_msg_id": None,
+            },
+            [candidate],
+        )
+    ]
+    assert resources.knowledge_store.saved_message_logs == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
+    context,
+    monkeypatch,
+):
+    ctx, resources = context
+    timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
+    candidate = _pasted_source_candidate()
+    calls = []
+
+    async def fail_once_then_save(message, candidates):
+        calls.append((message, candidates))
+        if len(calls) == 1:
+            raise ConnectionError("temporary transaction failure")
+        return []
+
+    async def skip_retry_delay(_delay):
+        return None
+
+    resources.knowledge_store.save_assistant_message_with_source_refs = (
+        fail_once_then_save
+    )
+    monkeypatch.setattr("core.session.context.asyncio.sleep", skip_retry_delay)
+
+    await ctx.add_assistant_turn(
+        "hello from assistant",
+        timestamp,
+        source_candidates=[candidate],
+    )
+
+    assert len(calls) == 2
+    assert calls[0][0]["id"] == calls[1][0]["id"] == 1
+    assert calls[0][1] == calls[1][1] == [candidate]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_abandoned_source_handoff_leaves_no_staged_assistant_turn(
+    context,
+    monkeypatch,
+):
+    ctx, resources = context
+    timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
+    attempts = 0
+
+    async def fail_atomically(_message, _candidates):
+        nonlocal attempts
+        attempts += 1
+        raise ConnectionError("source reference write failed")
+
+    async def skip_retry_delay(_delay):
+        return None
+
+    resources.knowledge_store.save_assistant_message_with_source_refs = fail_atomically
+    monkeypatch.setattr("core.session.context.asyncio.sleep", skip_retry_delay)
+
+    with pytest.raises(ConnectionError, match="source reference write failed"):
+        await ctx.add_assistant_turn(
+            "failed assistant response",
+            timestamp,
+            source_candidates=[_pasted_source_candidate()],
+        )
+
+    conv_key = RedisKeys.conversation("ada", "session-1")
+    assert resources.redis.hashes[conv_key] == {}
+    assert resources.knowledge_store.saved_message_logs == []
+    assert attempts == 3
 
 
 @pytest.mark.runtime

@@ -32,9 +32,11 @@ from core.agent.internals import (
     build_user_message,
     execute_tool,
     localize_agent_tool_result,
+    model_safe_tool_result,
     summarize_result,
     update_accumulators,
 )
+from core.agent.source_adapters import capture_tool_source_candidates
 from core.agent.system_prompt import (
     get_agent_prompt,
     get_fallback_summary_prompt,
@@ -93,6 +95,7 @@ class AgentExecutor:
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
+        self.ctx.state.source_candidates.extend(ctx.initial_source_candidates)
 
     async def execute(
         self,
@@ -265,7 +268,10 @@ class AgentExecutor:
                     )
                     if submit:
                         content = submit.args.get("content", "")
-                        response = FinalResponse(content=content)
+                        response = FinalResponse(
+                            content=content,
+                            sources_consulted=list(self.ctx.state.source_candidates),
+                        )
 
                         if current_mode_name == "Librarian":
                             logger.info(
@@ -640,11 +646,15 @@ class AgentExecutor:
                     result,
                 )
 
+                self.ctx.state.source_candidates.extend(
+                    capture_tool_source_candidates(self.ctx, call, result)
+                )
+
                 summary, _ = summarize_result(call.name, result)
                 model_result = (
                     localize_agent_tool_result(self.ctx, call.name, result)
                     if self.ctx.use_local_references
-                    else result
+                    else model_safe_tool_result(result)
                 )
                 update_accumulators(self.ctx, call.name, model_result)
 
@@ -739,7 +749,12 @@ class AgentExecutor:
         self, response: Union[FinalResponse, ClarificationRequest]
     ) -> Dict:
         if isinstance(response, FinalResponse):
-            return {
+            sources_consulted = (
+                response.sources_consulted
+                if response.sources_consulted is not None
+                else self.ctx.state.source_candidates
+            )
+            event = {
                 "event": "response",
                 "data": {
                     "content": response.content,
@@ -749,6 +764,12 @@ class AgentExecutor:
                     else None,
                 },
             }
+            if sources_consulted:
+                event["data"]["sources_consulted"] = [
+                    candidate.model_dump(mode="json")
+                    for candidate in sources_consulted
+                ]
+            return event
         else:
             return {
                 "event": "clarification",
@@ -765,7 +786,7 @@ class AgentExecutor:
         )
         if self.ctx.evidence.has_any():
             summary = await self._generate_fallback_summary()
-            return {
+            event = {
                 "event": "response",
                 "data": {
                     "content": summary
@@ -777,6 +798,12 @@ class AgentExecutor:
                     "fallback": True,
                 },
             }
+            if self.ctx.state.source_candidates:
+                event["data"]["sources_consulted"] = [
+                    candidate.model_dump(mode="json")
+                    for candidate in self.ctx.state.source_candidates
+                ]
+            return event
         else:
             return {
                 "event": "clarification",

@@ -318,7 +318,12 @@ def format_document_focus_context(focus: Optional[Dict]) -> str:
     """Format a compact, content-free document focus hint."""
     if not focus:
         return ""
-    lines = ["Active document focus:", "- mode: pinned", "- expires: this session"]
+    is_request_focus = focus.get("mode") == "request"
+    lines = [
+        "Active document focus:",
+        f"- mode: {'request' if is_request_focus else 'pinned'}",
+        f"- expires: {'this request' if is_request_focus else 'this session'}",
+    ]
     target_type = focus.get("target_type")
     if target_type == "document":
         lines.append(f"- relative_path: {focus.get('relative_path', '')}")
