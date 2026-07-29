@@ -7,7 +7,7 @@ from core.agent.document_selection import (
 
 
 @pytest.mark.parametrize(
-    ("request", "path", "remaining"),
+    ("user_query", "path", "remaining"),
     [
         ("/docs/notes.md summarize this", "docs/notes.md", "summarize this"),
         (
@@ -25,18 +25,18 @@ from core.agent.document_selection import (
     ],
 )
 def test_parse_document_path_command_preserves_remaining_request(
-    request,
+    user_query,
     path,
     remaining,
 ):
-    command = parse_document_path_command(request)
+    command = parse_document_path_command(user_query)
 
     assert command.relative_path == path
     assert command.remaining_query == remaining
 
 
 @pytest.mark.parametrize(
-    "request",
+    "user_query",
     [
         "/docs/a.md and /docs/b.md",
         '"/docs/a.md" and "/docs/b.md"',
@@ -46,9 +46,9 @@ def test_parse_document_path_command_preserves_remaining_request(
         "/",
     ],
 )
-def test_parse_document_path_command_rejects_malformed_or_multiple_paths(request):
+def test_parse_document_path_command_rejects_malformed_or_multiple_paths(user_query):
     with pytest.raises(DocumentSelectionError):
-        parse_document_path_command(request)
+        parse_document_path_command(user_query)
 
 
 def test_parse_document_path_command_does_not_treat_url_as_document_selector():

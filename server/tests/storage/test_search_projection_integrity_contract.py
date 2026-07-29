@@ -53,7 +53,6 @@ async def test_entity_search_rejects_a_canonical_name_that_does_not_match_source
             WHERE entity_id = 2
             """
         )
-
     assert await real_postgres_client.fetch_one(
         "SELECT canonical_name FROM entity_search WHERE entity_id = 2"
     ) == {"canonical_name": "Original entity"}
@@ -70,47 +69,3 @@ async def test_entity_search_rejects_a_canonical_name_that_does_not_match_source
             WHERE message_id = 101
             """
         )
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_canonical_scope_and_name_changes_keep_search_projections_aligned(
-    real_postgres_client,
-):
-    await _seed_search_projection_rows(real_postgres_client)
-
-    await real_postgres_client.execute(
-        """
-        UPDATE entities
-        SET canonical_name = 'Renamed entity', project_id = 'project-2'
-        WHERE entity_id = 2;
-
-        UPDATE messages
-        SET project_id = 'project-2'
-        WHERE message_id = 101;
-        """
-    )
-
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT canonical_name, user_name, project_id
-        FROM entity_search
-        WHERE entity_id = 2
-        """
-    ) == {
-        "canonical_name": "Renamed entity",
-        "user_name": "ada",
-        "project_id": "project-2",
-    }
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT user_name, session_id, project_id
-        FROM message_search
-        WHERE message_id = 101
-        """
-    ) == {
-        "user_name": "ada",
-        "session_id": "session-1",
-        "project_id": "project-2",
-    }

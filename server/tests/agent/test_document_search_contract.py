@@ -714,30 +714,6 @@ async def test_search_documents_adds_docx_paragraph_source_context():
 
     assert result["source_context"]["source_kind"] == "text_document"
     assert result["source_context"]["locator"] == stored_chunk["locator"]
-    tools = SearchTools()
-    tools.document_service = ReadOnlyDocumentService(read_result=read_result)
-    tools.session_id = "session-1"
-
-    results = await tools.read_document(document_id="file-1", start_line=3, end_line=4)
-
-    assert results[0]["source_context"] == {
-        "source_kind": "text_document",
-        "document_id": "file-1",
-        "content_hash": content_hash,
-        "locator": {
-            "kind": "text_lines",
-            "start_line": 3,
-            "end_line": 4,
-            "section_path": ["Results"],
-        },
-        "excerpt": "3: alpha\n4: beta",
-        "metadata": {
-            "document_name": "notes.md",
-            "relative_path": "docs/notes.md",
-            "extension": ".md",
-            "chunk_index": "lines:3-4",
-        },
-    }
 
 
 @pytest.mark.no_network

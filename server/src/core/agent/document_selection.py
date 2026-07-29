@@ -28,7 +28,7 @@ _PATH_COMMAND_RE = re.compile(
     (?:
         [\"'](?P<quoted_path>/[^\"'\r\n]+)[\"']
         |
-        (?P<bare_path>/[^\s\"'`,;:!?()]+)
+        (?P<bare_path>/[^\s\"'`,;:!?()]*[^\s\"'`,;:!?().])
     )
     """,
     re.VERBOSE,
@@ -36,7 +36,7 @@ _PATH_COMMAND_RE = re.compile(
 _UNTERMINATED_QUOTED_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:/])[\"']/(?=[^\"'\r\n]*(?:\r?\n|$))"
 )
-_BARE_SLASH_RE = re.compile(r"(?<![A-Za-z0-9_:/])/(?=$|\s|[.,;:!?)]")
+_BARE_SLASH_RE = re.compile(r"(?<![A-Za-z0-9_:/])/(?=$|\s|[.,;:!?)])")
 
 
 def parse_document_path_command(

@@ -380,6 +380,8 @@ class SearchTools:
 
         if extension == ".pdf" and _positive_int(result.get("page_number")):
             return {"kind": "pdf_page", "page": result["page_number"]}
+        if extension == ".docx":
+            return None
         if _valid_range(result.get("start_row"), result.get("end_row")):
             return {
                 "kind": "csv_rows",

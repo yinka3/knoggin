@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from common.schema.agent_contracts import AgentConfig
@@ -90,6 +92,11 @@ class FakeSession:
         self.user_name = "ada"
         self.session_id = "session-1"
         self.project_id = "project-1"
+        self.project = SimpleNamespace(
+            entities=object(),
+            topic_config=FakeTopicConfig(),
+            refresh_topic_mappings=None,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -118,9 +125,9 @@ async def test_orchestrator_resolves_agent_identity_from_redis():
         persona_override=None,
     )
 
-    assert identity["config"].id == "agent-1"
-    assert identity["name"] == "Researcher"
-    assert "Careful" in identity["persona"]
+    assert identity.config.id == "agent-1"
+    assert identity.name == "Researcher"
+    assert "Careful" in identity.persona
 
 
 @pytest.mark.runtime
@@ -143,9 +150,9 @@ async def test_orchestrator_identity_overrides_take_precedence():
         persona_override="Direct",
     )
 
-    assert identity["config"].id == "agent-1"
-    assert identity["name"] == "Custom"
-    assert identity["persona"] == "Direct"
+    assert identity.config.id == "agent-1"
+    assert identity.name == "Custom"
+    assert identity.persona == "Direct"
 
 
 @pytest.mark.runtime
@@ -177,13 +184,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     async def fake_bootstrap_services(self, context_arg, agent_id):
         assert context_arg is context
         assert agent_id == "agent-1"
-        return {
-            "topic_config": FakeTopicConfig(),
-            "memory": object(),
-            "entities": object(),
-            "document_service": None,
-            "tools": tools,
-        }
+        return tools
 
     monkeypatch.setattr(
         Orchestrator, "_bootstrap_services", fake_bootstrap_services
@@ -288,10 +289,7 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
     async def fake_bootstrap_services(self, context_arg, agent_id):
         assert context_arg is context
         assert agent_id == "agent-1"
-        return {
-            "topic_config": FakeTopicConfig(),
-            "tools": tools,
-        }
+        return tools
 
     monkeypatch.setattr(
         Orchestrator, "_bootstrap_services", fake_bootstrap_services
@@ -340,10 +338,7 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
     )
 
     async def fake_bootstrap_services(self, context_arg, agent_id):
-        return {
-            "topic_config": FakeTopicConfig(),
-            "tools": tools,
-        }
+        return tools
 
     monkeypatch.setattr(
         Orchestrator, "_bootstrap_services", fake_bootstrap_services
@@ -392,13 +387,7 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
     )
 
     async def fake_bootstrap_services(self, context_arg, agent_id):
-        return {
-            "topic_config": FakeTopicConfig(),
-            "memory": object(),
-            "entities": object(),
-            "document_service": None,
-            "tools": tools,
-        }
+        return tools
 
     monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
 
@@ -540,7 +529,7 @@ async def test_orchestrator_uses_request_document_focus_without_persisting_it(
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id):
-        return {"topic_config": FakeTopicConfig(), "tools": tools}
+        return tools
 
     monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
 
@@ -614,7 +603,7 @@ async def test_orchestrator_seeds_pasted_text_candidates_from_canonical_turn(
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id):
-        return {"topic_config": FakeTopicConfig(), "tools": tools}
+        return tools
 
     monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
 

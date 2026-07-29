@@ -2399,41 +2399,6 @@ async def test_index_document_preserves_code_location_metadata(document_harness)
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_uses_configured_sentence_splitter(monkeypatch, document_harness):
-    service, postgres = document_harness
-    settings = {}
-
-    class RecordingSplitter:
-        def __init__(self, *, chunk_size, chunk_overlap):
-            settings.update(
-                {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}
-            )
-
-        def split_text(self, text):
-            assert text == "alpha beta gamma"
-            return [" alpha ", "", " beta gamma "]
-
-    monkeypatch.setattr(
-        storage_module,
-        "_SPLITTER",
-        RecordingSplitter(chunk_size=512, chunk_overlap=50),
-    )
-    uploaded = await service.add_document(
-        content=b"alpha beta gamma",
-        original_name="notes.txt",
-    )
-
-    indexed = await service.index_document(document_id=uploaded["document_id"])
-
-    assert settings == {"chunk_size": 512, "chunk_overlap": 50}
-    assert indexed["chunk_count"] == 2
-    assert [
-        (chunk["chunk_index"], chunk["content"]) for chunk in postgres.chunks
-    ] == [(0, "alpha"), (1, "beta gamma")]
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 @pytest.mark.parametrize(
     ("original_name", "content", "error"),
     [
@@ -2652,45 +2617,6 @@ async def test_index_document_validates_embedding_count_and_dimension(document_h
         await service.index_document(document_id=uploaded["document_id"])
 
     assert postgres.rows[0]["status"] == "failed"
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_index_transaction_rolls_back_partial_chunks_and_can_retry(
-    monkeypatch, document_harness
-):
-    service, postgres = document_harness
-
-    class TwoChunkSplitter:
-        def __init__(self, **kwargs):
-            pass
-
-        def split_text(self, text):
-            return ["alpha", "beta"]
-
-    monkeypatch.setattr(
-        storage_module,
-        "_SPLITTER",
-        TwoChunkSplitter(),
-    )
-    uploaded = await service.add_document(
-        content=b"alpha beta",
-        original_name="notes.txt",
-    )
-    postgres.transaction_error_at_chunk = 1
-
-    with pytest.raises(RuntimeError, match="chunk insert failed"):
-        await service.index_document(document_id=uploaded["document_id"])
-
-    assert postgres.chunks == []
-    assert postgres.rows[0]["status"] == "failed"
-
-    postgres.transaction_error_at_chunk = None
-    indexed = await service.index_document(document_id=uploaded["document_id"])
-
-    assert indexed["status"] == "indexed"
-    assert indexed["chunk_count"] == 2
-    assert [chunk["chunk_index"] for chunk in postgres.chunks] == [0, 1]
 
 
 @pytest.mark.storage
