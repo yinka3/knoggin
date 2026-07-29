@@ -2,7 +2,8 @@ import json
 import math
 from typing import Dict, List
 
-from common.schema.primitives import (
+from common.schema.episode import (
+    EPISODE_EMBEDDING_DIMENSION,
     EntityEpisode,
     Episode,
     EpisodeCheckpoint,
@@ -1032,8 +1033,11 @@ class EpisodeReader:
     @staticmethod
     def _normalize_embedding(embedding: List[float]) -> List[float]:
         normalized = [float(value) for value in embedding]
-        if len(normalized) != 1024:
-            raise ValueError("episode embedding must contain exactly 1024 dimensions")
+        if len(normalized) != EPISODE_EMBEDDING_DIMENSION:
+            raise ValueError(
+                "episode embedding must contain exactly "
+                f"{EPISODE_EMBEDDING_DIMENSION} dimensions"
+            )
         if not all(math.isfinite(value) for value in normalized):
             raise ValueError("episode embedding must contain only finite values")
         return normalized

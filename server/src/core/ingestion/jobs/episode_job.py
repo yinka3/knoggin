@@ -12,7 +12,7 @@ from common.schema.contracts import (
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,
 )
-from common.schema.primitives import (
+from common.schema.episode import (
     EntityEpisode,
     Episode,
     MessageEpisode,
@@ -21,7 +21,6 @@ from common.schema.primitives import (
 from common.schema.settings import (
     EpisodeSettings,
     IngestionSettings,
-    LocalReferenceSettings,
 )
 from common.utils.events import emit
 from common.utils.local_references import build_local_id_maps, resolve_local_id
@@ -92,17 +91,11 @@ class EpisodeJob(BaseJob):
         llm: LLMService | None = None,
         embedding_service: EmbeddingService | None = None,
         session_ids_provider: Optional[Callable[[], Awaitable[list[str]]]] = None,
-        local_reference_settings: LocalReferenceSettings | None = None,
     ) -> None:
         self.knowledge_store = knowledge_store
         self.llm = llm
         self.embedding_service = embedding_service
         self.session_ids_provider = session_ids_provider
-        self.local_references_enabled = (
-            local_reference_settings.enabled
-            if local_reference_settings is not None
-            else True
-        )
         self.update_settings(settings, ingestion_settings)
 
     @property
@@ -134,12 +127,6 @@ class EpisodeJob(BaseJob):
             f"max_messages={self.max_message_count}, "
             f"max_sessions={self.max_sessions_per_run}"
         )
-
-    def update_local_reference_settings(
-        self,
-        config: LocalReferenceSettings,
-    ) -> None:
-        self.local_references_enabled = config.enabled
 
     async def should_run(self, ctx: JobContext) -> bool:
         """Run when any durable project session has one ready episode window."""
@@ -365,29 +352,20 @@ class EpisodeJob(BaseJob):
         message_local_ids, message_ids_by_local = build_local_id_maps(
             (int(message["message_id"]) for message in context.messages),
             "m",
-            use_local_references=self.local_references_enabled,
         )
         entity_local_ids, entity_ids_by_local = build_local_id_maps(
             context.entity_ids,
             "e",
-            use_local_references=self.local_references_enabled,
         )
         relationship_local_ids, relationship_ids_by_local = build_local_id_maps(
             context.relationship_ids,
             "r",
-            use_local_references=self.local_references_enabled,
         )
         episode_local_ids, episode_ids_by_local = build_local_id_maps(
             (episode.episode_id for episode in context.prior_episodes),
             "ep",
-            use_local_references=self.local_references_enabled,
         )
         system_prompt = get_episode_generation_prompt(user_name)
-        if not self.local_references_enabled:
-            system_prompt += (
-                "\n\nLegacy ID mode is active. Return only IDs supplied in this "
-                "call; ignore local-reference examples."
-            )
         output = await self.llm.generate_structured(
             response_model=LLMEpisodeDecision,
             system=system_prompt,
@@ -611,22 +589,18 @@ class EpisodeJob(BaseJob):
         message_local_ids, message_ids_by_local = build_local_id_maps(
             (int(message["message_id"]) for message in context.messages),
             "m",
-            use_local_references=self.local_references_enabled,
         )
         entity_local_ids, entity_ids_by_local = build_local_id_maps(
             context.entity_ids,
             "e",
-            use_local_references=self.local_references_enabled,
         )
         relationship_local_ids, relationship_ids_by_local = build_local_id_maps(
             context.relationship_ids,
             "r",
-            use_local_references=self.local_references_enabled,
         )
         episode_local_ids, _ = build_local_id_maps(
             (episode.episode_id for episode in context.prior_episodes),
             "ep",
-            use_local_references=self.local_references_enabled,
         )
         try:
             target_episode_local_id = episode_local_ids[target_episode_id]
@@ -635,11 +609,6 @@ class EpisodeJob(BaseJob):
                 "Episode consolidation target is not in the supplied context"
             ) from exc
         system_prompt = get_episode_consolidation_prompt(user_name)
-        if not self.local_references_enabled:
-            system_prompt += (
-                "\n\nLegacy ID mode is active. Return only IDs supplied in this "
-                "call; ignore local-reference examples."
-            )
         output = await self.llm.generate_structured(
             response_model=LLMEpisodeConsolidation,
             system=system_prompt,

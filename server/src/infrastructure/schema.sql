@@ -196,18 +196,32 @@ CREATE TABLE IF NOT EXISTS public.relationships (
         ON DELETE CASCADE,
     entity_b_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
         ON DELETE CASCADE,
-    relationship_type TEXT,
+    relationship_type TEXT NOT NULL CHECK (btrim(relationship_type) <> ''),
     weight INTEGER NOT NULL DEFAULT 1,
     confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     context TEXT,
     last_seen_ms BIGINT,
     CONSTRAINT relationships_distinct_entities
         CHECK (entity_a_id <> entity_b_id),
+    CONSTRAINT relationships_ordered_endpoints
+        CHECK (entity_a_id < entity_b_id),
+    CONSTRAINT relationships_identity_matches_fields
+        CHECK (
+            relationship_id = format(
+                '%s:%s:%s:%s',
+                project_id,
+                entity_a_id,
+                entity_b_id,
+                lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
+            )
+        ),
+    CONSTRAINT relationships_project_pair_type_key
+        UNIQUE (project_id, entity_a_id, entity_b_id, relationship_type),
     CONSTRAINT relationships_id_project_key UNIQUE (relationship_id, project_id)
 );
 
-CREATE INDEX IF NOT EXISTS relationships_pair_idx
-ON public.relationships(project_id, entity_a_id, entity_b_id);
+CREATE INDEX IF NOT EXISTS relationships_pair_type_idx
+ON public.relationships(project_id, entity_a_id, entity_b_id, relationship_type);
 
 CREATE INDEX IF NOT EXISTS relationships_entity_a_idx
 ON public.relationships(entity_a_id);
@@ -335,6 +349,68 @@ CREATE TABLE IF NOT EXISTS public.episodes (
 
 ALTER TABLE public.relationships
 ADD COLUMN IF NOT EXISTS relationship_type TEXT;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.relationships
+        WHERE relationship_type IS NULL
+           OR btrim(relationship_type) = ''
+           OR entity_a_id >= entity_b_id
+           OR relationship_id <> format(
+               '%s:%s:%s:%s',
+               project_id,
+               entity_a_id,
+               entity_b_id,
+               lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
+           )
+    ) THEN
+        RAISE EXCEPTION
+            'Relationships use the retired pair-only identity. Reinitialize and reindex this unreleased database before applying the typed relationship schema.';
+    END IF;
+
+    ALTER TABLE public.relationships
+    ALTER COLUMN relationship_type SET NOT NULL;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'relationships_ordered_endpoints'
+          AND conrelid = 'public.relationships'::regclass
+    ) THEN
+        ALTER TABLE public.relationships
+        ADD CONSTRAINT relationships_ordered_endpoints
+        CHECK (entity_a_id < entity_b_id);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'relationships_identity_matches_fields'
+          AND conrelid = 'public.relationships'::regclass
+    ) THEN
+        ALTER TABLE public.relationships
+        ADD CONSTRAINT relationships_identity_matches_fields
+        CHECK (
+            relationship_id = format(
+                '%s:%s:%s:%s',
+                project_id,
+                entity_a_id,
+                entity_b_id,
+                lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
+            )
+        );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'relationships_project_pair_type_key'
+          AND conrelid = 'public.relationships'::regclass
+    ) THEN
+        ALTER TABLE public.relationships
+        ADD CONSTRAINT relationships_project_pair_type_key
+        UNIQUE (project_id, entity_a_id, entity_b_id, relationship_type);
+    END IF;
+END $$;
 
 ALTER TABLE public.episodes
 ADD COLUMN IF NOT EXISTS embedding vector(1024);

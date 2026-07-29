@@ -7,6 +7,7 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.schema.agent_stream import PublicAgentStreamEvent
+from common.schema.contracts import EngineScope
 from common.schema.document import DocumentFocus
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
@@ -21,6 +22,7 @@ from core.agent.services.agent_manager import AgentManager
 from core.agent.tools.registry import Tools
 from core.agent.types import (
     AgentContext,
+    AgentRunIdentity,
     AgentRunConfig,
     AgentState,
     RetrievedEvidence,
@@ -85,15 +87,7 @@ class Orchestrator:
             # Configuration
             config = ConfigManager.get().config
             limits = config.developer_settings.limits
-            run_config = AgentRunConfig(
-                max_calls=limits.max_tool_calls,
-                tool_timeout=limits.tool_timeout,
-                max_attempts=limits.max_attempts,
-                max_history_turns=limits.agent_history_turns,
-                max_accumulated_messages=limits.max_accumulated_messages,
-                max_consecutive_errors=limits.max_consecutive_errors,
-                tool_limits=tuple(limits.tool_limits.items()),
-            )
+            run_config = AgentRunConfig.from_settings(limits)
 
             # Identity & Persona
             identity = await self._resolve_agent_identity(
@@ -102,7 +96,7 @@ class Orchestrator:
                 agent_name_override,
                 agent_persona_override,
             )
-            agent_cfg = identity["config"]
+            agent_cfg = identity.config
             effective_model = model or (agent_cfg.model if agent_cfg else None)
             effective_temperature = (
                 agent_temperature
@@ -115,18 +109,17 @@ class Orchestrator:
             )
 
             # Services (Session-Aware)
-            services = await self._bootstrap_services(
+            tools = await self._bootstrap_services(
                 context,
                 agent_cfg.id if agent_cfg else None,
             )
-            tools = services["tools"]
             if request_document_focus is not None:
                 # Request focus is ephemeral.  It overrides a persisted session
                 # focus for this run without writing to session state.
                 tools.document_focus = request_document_focus.model_dump(
                     mode="json"
                 )
-            topic_config = services["topic_config"]
+            topic_config = context.project.topic_config
 
             effective_enabled_tools = (
                 enabled_tools
@@ -162,23 +155,19 @@ class Orchestrator:
                 config=run_config,
                 state=AgentState(),
                 evidence=RetrievedEvidence(),
-                user_name=user_name,
-                session_id=session_id,
-                project_id=context.project_id or "",
+                scope=EngineScope(
+                    user_name=user_name,
+                    session_id=session_id,
+                    project_id=context.project_id or "",
+                ),
+                agent=identity,
                 user_query=user_query,
                 run_id=run_id,
                 hot_topics=effective_hot_topics,
                 active_topics=topic_config.active_topics,
                 hot_topic_context=hot_topic_context,
-                agent_name=identity["name"],
-                agent_persona=identity["persona"],
                 history=conversation_history or [],
                 maintenance_candidates=maintenance_candidates,
-                use_local_references=getattr(
-                    getattr(config.developer_settings, "local_references", None),
-                    "enabled",
-                    True,
-                ),
                 document_focus=request_document_focus,
                 initial_source_candidates=(
                     build_pasted_text_candidates(
@@ -270,7 +259,7 @@ class Orchestrator:
         agent_id: Optional[str],
         name_override: Optional[str],
         persona_override: Optional[str],
-    ) -> Dict:
+    ) -> AgentRunIdentity:
         """Resolve the durable Postgres agent used for this run."""
         manager = AgentManager(context.resources, context.user_name, {})
         resolved_id = agent_id or await manager.get_default_agent_id()
@@ -278,20 +267,21 @@ class Orchestrator:
         if agent_cfg is None:
             raise ValueError(f"Agent identity not found: {resolved_id}")
 
-        return {
-            "config": agent_cfg,
-            "name": name_override
-            or agent_cfg.name,
-            "persona": persona_override
-            or agent_cfg.persona_markdown
-            or "A helpful and thorough personal intelligence assistant.",
-        }
+        return AgentRunIdentity(
+            config=agent_cfg,
+            name=name_override or agent_cfg.name,
+            persona=(
+                persona_override
+                or agent_cfg.persona_markdown
+                or "A helpful and thorough personal intelligence assistant."
+            ),
+        )
 
     async def _bootstrap_services(
         self,
         context: Session,
         agent_id: Optional[str] = None,
-    ) -> Dict:
+    ) -> Tools:
         """Retrieve context services and instantiate the agent tool suite."""
         config = ConfigManager.get().config
         search_cfg = {
@@ -321,12 +311,7 @@ class Orchestrator:
             ),
         )
 
-        return {
-            "topic_config": context.project.topic_config,
-            "entities": context.project.entities,
-            "document_service": context.document_service,
-            "tools": tools,
-        }
+        return tools
 
     async def _load_document_focus(
         self,

@@ -4,9 +4,11 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import ToolExecutionError
+from common.schema.contracts import EngineScope
 from core.agent.executor import AgentExecutor
 from core.agent.types import (
     AgentContext,
+    AgentRunIdentity,
     AgentRunConfig,
     AgentState,
     MaintenanceCandidate,
@@ -23,10 +25,13 @@ def make_executor(*, config=None, state=None, redis=None):
         or AgentRunConfig(max_calls=4, tool_limits=(("search_messages", 2),)),
         state=state or AgentState(),
         evidence=RetrievedEvidence(),
-        user_name="ada",
+        scope=EngineScope(
+            user_name="ada", session_id="session-1", project_id="project-1"
+        ),
+        agent=AgentRunIdentity(
+            config=SimpleNamespace(id="agent-1"), name="STELLA", persona=""
+        ),
         user_query="Find profile evidence",
-        session_id="session-1",
-        project_id="project-1",
         run_id="run-1",
     )
     return AgentExecutor(

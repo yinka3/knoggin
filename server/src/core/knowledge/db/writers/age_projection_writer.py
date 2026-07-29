@@ -195,8 +195,9 @@ class AgeProjectionWriter:
         MATCH (b:Entity {id: rel.entity_b_id})
         WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
           AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
-        MERGE (a)-[r:RELATED_TO]->(b)
+        MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
+            r.relationship_type = rel.relationship_type,
             r.weight = coalesce(r.weight, 0) + 1,
             r.confidence = CASE
                 WHEN r.confidence IS NULL THEN rel.confidence
@@ -272,8 +273,9 @@ class AgeProjectionWriter:
         MATCH (b:Entity {id: rel.entity_b_id})
         WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
           AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
-        MERGE (a)-[r:RELATED_TO]->(b)
+        MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
+            r.relationship_type = rel.relationship_type,
             r.weight = rel.weight,
             r.confidence = rel.confidence,
             r.last_seen = rel.last_seen,
@@ -451,15 +453,12 @@ class AgeProjectionWriter:
     async def delete_relationship(
         self,
         cur,
-        entity_a_id: int,
-        entity_b_id: int,
+        relationship_id: str,
         project_id: str,
     ) -> bool:
         cypher = """
-        MATCH (a:Entity {id: $a_id})-[r:RELATED_TO]-(b:Entity {id: $b_id})
-        WHERE (a.project_id = $project_id OR a.id = $identity_entity_id)
-          AND (b.project_id = $project_id OR b.id = $identity_entity_id)
-          AND r.project_id = $project_id
+        MATCH ()-[r:RELATED_TO {relationship_id: $relationship_id}]-()
+        WHERE r.project_id = $project_id
         DELETE r
         RETURN count(r) AS deleted
         """
@@ -468,10 +467,8 @@ class AgeProjectionWriter:
             (
                 json.dumps(
                     {
-                        "a_id": entity_a_id,
-                        "b_id": entity_b_id,
+                        "relationship_id": relationship_id,
                         "project_id": project_id,
-                        "identity_entity_id": IDENTITY_ENTITY_ID,
                     }
                 ),
             ),

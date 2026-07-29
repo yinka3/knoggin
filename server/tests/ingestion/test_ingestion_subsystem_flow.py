@@ -353,8 +353,7 @@ async def test_ingestion_subsystem_happy_path_drains_buffer_to_graph_write():
     assert set(result.entity_ids) == {1001, 102, 1002}
     assert result.new_entity_ids == {1001, 1002}
     assert result.relationship_observations[0].message_id == 1
-    assert result.relationship_observations[0].entity_pairs[0].msg_id == 1
-    assert result.user_relationship_observations == []
+    assert result.relationship_observations[0].entity_a_name == "Alice"
 
 
 @pytest.mark.ingestion
@@ -372,7 +371,7 @@ async def test_ingestion_subsystem_alias_resolution_survives_connection_validati
 
     result = write_to_graph.calls[0]
     assert (
-        result.relationship_observations[0].entity_pairs[0].entity_b
+        result.relationship_observations[0].entity_b_name
         == "Robert Chen"
     )
     assert not any(issue.code == "invalid_entity_name" for issue in result.issues)

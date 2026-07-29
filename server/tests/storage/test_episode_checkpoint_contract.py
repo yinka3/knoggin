@@ -1,6 +1,6 @@
 import pytest
 
-from common.schema.primitives import EpisodeCheckpoint
+from common.schema.episode import EpisodeCheckpoint
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 

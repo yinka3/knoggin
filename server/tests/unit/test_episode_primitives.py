@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from common.schema.primitives import (
+from common.schema.episode import (
     EntityEpisode,
     Episode,
     MessageEpisode,

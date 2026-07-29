@@ -6,13 +6,12 @@ from common.schema.contracts import (
     BatchResult,
     EngineScope,
     EngineWorkUnit,
+    EntityWrite,
     EpisodeEligibility,
     GraphMutationPlan,
-    MessageConnections,
-    MessageUserConnections,
-    UserConnectionRecord,
+    RelationshipObservation,
+    ResolutionResult,
 )
-from common.schema.primitives import ConnectionRecord
 from common.scoping import IDENTITY_ENTITY_ID
 from core.knowledge.db import write_graph_db
 from core.knowledge.db.write_graph_db import (
@@ -135,29 +134,45 @@ class FakeEntityResolverForPlan:
 
 
 def scoped_batch(**kwargs):
+    resolution = kwargs.pop("resolution", ResolutionResult())
+    if "entity_ids" in kwargs:
+        resolution.entity_ids = kwargs.pop("entity_ids")
+    if "new_entity_ids" in kwargs:
+        resolution.new_ids = kwargs.pop("new_entity_ids")
+    if "alias_updated_ids" in kwargs:
+        resolution.alias_ids = kwargs.pop("alias_updated_ids")
+    if "entity_message_map" in kwargs:
+        resolution.entity_msg_map = kwargs.pop("entity_message_map")
+    if "alias_updates" in kwargs:
+        resolution.alias_updates = kwargs.pop("alias_updates")
+    if "candidate_suggestions" in kwargs:
+        resolution.candidate_suggestions = kwargs.pop("candidate_suggestions")
+    kwargs["resolution"] = resolution
     batch = BatchResult(**kwargs)
     batch.set_scope("ada", "session-1", "project-1")
     return batch
 
 
 def connection(entity_a, entity_b, msg_id=7, confidence=0.8, context="related"):
-    return ConnectionRecord(
-        msg_id=msg_id,
-        entity_a=entity_a,
-        entity_b=entity_b,
-        relationship="related_to",
+    return RelationshipObservation(
+        message_id=msg_id,
+        entity_a_name=entity_a,
+        entity_b_name=entity_b,
+        relationship_type="related_to",
         confidence=confidence,
         context=context,
     )
 
 
 def user_connection(entity_name, msg_id=8, confidence=0.7, context="user link"):
-    return UserConnectionRecord(
-        msg_id=msg_id,
-        entity_name=entity_name,
-        relationship="cares_about",
+    return RelationshipObservation(
+        message_id=msg_id,
+        entity_a_name="ada",
+        entity_b_name=entity_name,
+        relationship_type="cares_about",
         confidence=confidence,
         context=context,
+        identity_rooted=True,
     )
 
 
@@ -180,13 +195,13 @@ async def test_graph_mutation_plan_uses_batch_scope_over_fallback_scope():
     assert plan.scope.user_name == "ada"
     assert plan.scope.session_id == "session-1"
     assert plan.scope.project_id == "project-1"
-    assert plan.entity_writes[0].user_name == "ada"
+    assert plan.entity_writes[0].entity_id == 2
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_mutation_plan_uses_fallback_scope_when_batch_scope_absent():
-    batch = BatchResult(new_entity_ids={2})
+    batch = BatchResult(resolution=ResolutionResult(new_ids={2}))
     entities = FakeEntityResolverForPlan(project_id=None)
     knowledge_store = FakeKnowledgeStore()
 
@@ -204,13 +219,13 @@ async def test_graph_mutation_plan_uses_fallback_scope_when_batch_scope_absent()
         session_id="fallback-session",
         project_id="fallback-project",
     )
-    assert plan.entity_writes[0].project_id == "profile-project"
+    assert plan.entity_writes[0].entity_id == 2
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_graph_mutation_plan_requires_complete_scope():
-    batch = BatchResult(new_entity_ids={2})
+    batch = BatchResult(resolution=ResolutionResult(new_ids={2}))
 
     with pytest.raises(ValueError, match="Graph batch write missing required scope"):
         await build_graph_mutation_plan(
@@ -228,27 +243,15 @@ async def test_graph_mutation_plan_requires_complete_scope():
 async def test_graph_mutation_plan_builds_writes_and_filters_zombies():
     batch = scoped_batch(
         entity_ids=[2, 3, 4, 5],
-        new_entity_ids={2},
+        resolution=ResolutionResult(new_ids={2}),
         alias_updated_ids={3, 5},
         alias_updates={3: ["Rear Admiral"], 5: ["Do Not Persist"]},
         relationship_observations=[
-            MessageConnections(
-                message_id=7,
-                entity_pairs=[
-                    connection("analyst", "GRACE HOPPER"),
-                    connection("Ada Lovelace", "Zombie", context="skip zombie"),
-                    connection("Unknown", "Compiler", context="skip missing"),
-                ],
-            )
-        ],
-        user_relationship_observations=[
-            MessageUserConnections(
-                message_id=8,
-                user_connections=[
-                    user_connection("target alias"),
-                    user_connection("Missing Target", context="skip user missing"),
-                ],
-            )
+            connection("analyst", "GRACE HOPPER"),
+            connection("Ada Lovelace", "Zombie", context="skip zombie"),
+            connection("Unknown", "Compiler", context="skip missing"),
+            user_connection("target alias"),
+            user_connection("Missing Target", context="skip user missing"),
         ],
     )
     entities = FakeEntityResolverForPlan()
@@ -268,50 +271,38 @@ async def test_graph_mutation_plan_builds_writes_and_filters_zombies():
     assert plan.zombie_entity_ids == {5}
     assert entities.removed_entities == [[5]]
 
-    writes_by_id = {write.id: write for write in plan.entity_writes}
+    writes_by_id = {write.entity_id: write for write in plan.entity_writes}
     assert set(writes_by_id) == {2, 3}
     assert writes_by_id[2].canonical_name == "Ada Lovelace"
-    assert writes_by_id[2].aliases == ["Ada", "Analyst"]
+    assert writes_by_id[2].aliases == ("Ada", "Analyst")
     assert writes_by_id[2].embedding == [0.2, 0.1]
     assert writes_by_id[2].is_new is True
-    assert writes_by_id[2].session_id == "profile-session"
-    assert writes_by_id[2].project_id == "profile-project"
     assert writes_by_id[3].is_new is False
-    assert writes_by_id[3].session_id == "session-1"
-    assert writes_by_id[3].project_id == "project-1"
 
     assert [(update.entity_id, update.aliases) for update in plan.alias_updates] == [
         (3, ["Rear Admiral"])
     ]
 
-    assert len(plan.relationship_writes) == 1
+    assert len(plan.relationship_writes) == 2
     rel = plan.relationship_writes[0]
-    assert rel.entity_a == "Ada Lovelace"
-    assert rel.entity_b == "Grace Hopper"
     assert rel.entity_a_id == 2
     assert rel.entity_b_id == 3
-    assert rel.message_id == "msg_7"
-    assert rel.evidence_ref == {
-        "user_name": "ada",
-        "session_id": "session-1",
-        "message_id": 7,
-    }
+    assert rel.relationship_type == "related_to"
+    assert rel.message_id == 7
     assert rel.confidence == 0.8
     assert rel.context == "related"
 
-    assert len(plan.user_relationship_writes) == 1
-    user_rel = plan.user_relationship_writes[0]
-    assert user_rel.user_entity_id == IDENTITY_ENTITY_ID
-    assert user_rel.entity_name == "Compiler"
-    assert user_rel.entity_id == 4
-    assert user_rel.message_id == "msg_8"
-    assert user_rel.evidence_ref["message_id"] == 8
+    user_rel = plan.relationship_writes[1]
+    assert user_rel.entity_a_id == IDENTITY_ENTITY_ID
+    assert user_rel.entity_b_id == 4
+    assert user_rel.relationship_type == "cares_about"
+    assert user_rel.message_id == 8
 
     assert len(plan.skipped_relationships) == 3
     assert [skip.reason for skip in plan.skipped_relationships] == [
         "entity_missing_or_zombie",
         "entity_missing_or_zombie",
-        "user_target_missing_or_zombie",
+        "entity_missing_or_zombie",
     ]
     assert plan.skipped_relationships[0].metadata == {
         "entity_a_found": True,
@@ -397,7 +388,7 @@ async def test_graph_mutation_plan_treats_unknown_validation_as_valid():
     assert plan.safe_entity_ids == {3}
     assert plan.zombie_entity_ids == set()
     assert entities.removed_entities == []
-    assert [write.id for write in plan.entity_writes] == [3]
+    assert [write.entity_id for write in plan.entity_writes] == [3]
 
 
 @pytest.mark.storage
@@ -417,16 +408,8 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
         alias_updated_ids={3},
         alias_updates={3: ["Rear Admiral"]},
         relationship_observations=[
-            MessageConnections(
-                message_id=7,
-                entity_pairs=[connection("Ada", "Grace Hopper")],
-            )
-        ],
-        user_relationship_observations=[
-            MessageUserConnections(
-                message_id=8,
-                user_connections=[user_connection("Compiler")],
-            )
+            connection("Ada", "Grace Hopper"),
+            user_connection("Compiler"),
         ],
     )
     knowledge_store = FakeKnowledgeStore()
@@ -448,18 +431,18 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
     assert knowledge_store.call_order == ["update_entity_aliases", "write_batch"]
     assert knowledge_store.update_alias_calls == [({3: ["Rear Admiral"]}, "project-1")]
     (
-        entity_payloads,
-        relationship_payloads,
-        message_entity_payloads,
+        entity_writes,
+        relationship_writes,
+        message_entity_refs,
         eligible_messages,
         write_scope,
     ) = knowledge_store.write_batch_calls[0]
-    assert [payload["id"] for payload in entity_payloads] == [2, 3]
-    assert len(relationship_payloads) == 2
-    assert relationship_payloads[0]["entity_a"] == "Ada Lovelace"
-    assert relationship_payloads[1]["entity_a"] == "ada"
-    assert relationship_payloads[1]["entity_a_id"] == IDENTITY_ENTITY_ID
-    assert message_entity_payloads == []
+    assert [write.entity_id for write in entity_writes] == [2, 3]
+    assert len(relationship_writes) == 2
+    assert relationship_writes[0].relationship_type == "related_to"
+    assert relationship_writes[1].entity_a_id == IDENTITY_ENTITY_ID
+    assert relationship_writes[1].relationship_type == "cares_about"
+    assert message_entity_refs == []
     assert eligible_messages == []
     assert write_scope == plan.scope
 
@@ -487,7 +470,6 @@ async def test_execute_graph_mutation_plan_orders_calls_and_marks_dirty_entities
     assert asdict(summary) == {
         "entities_written": 2,
         "relationships_written": 2,
-        "user_relationships_written": 1,
         "aliases_updated": 1,
         "dirty_entities_marked": 3,
         "zombies_filtered": 0,
@@ -513,7 +495,6 @@ async def test_write_batch_to_graph_marks_skipped_work_unit_metadata():
     assert asdict(summary) == {
         "entities_written": 0,
         "relationships_written": 0,
-        "user_relationships_written": 0,
         "aliases_updated": 0,
         "dirty_entities_marked": 0,
         "zombies_filtered": 0,
@@ -533,7 +514,7 @@ async def test_write_batch_to_graph_marks_success_and_attaches_summary_metadata(
     batch = BatchResult(
         work_unit=EngineWorkUnit.for_message_batch(scope, [7]),
         scope=scope,
-        new_entity_ids={2},
+        resolution=ResolutionResult(new_ids={2}),
     )
     knowledge_store = FakeKnowledgeStore()
 
@@ -560,24 +541,21 @@ async def test_write_batch_to_graph_marks_failed_plan_when_execution_raises(
     monkeypatch,
 ):
     scope = EngineScope(user_name="ada", session_id="session-1", project_id="project-1")
-    batch = BatchResult(scope=scope, new_entity_ids={2})
+    batch = BatchResult(scope=scope, resolution=ResolutionResult(new_ids={2}))
     observed_plan = GraphMutationPlan(
         work_unit=EngineWorkUnit.for_graph_write(scope),
         scope=scope,
         entity_writes=[
-            {
-                "id": 2,
-                "is_new": True,
-                "canonical_name": "Ada Lovelace",
-                "type": "person",
-                "confidence": 1.0,
-                "topic": "Identity",
-                "embedding": [0.2, 0.1],
-                "aliases": ["Ada"],
-                "user_name": "ada",
-                "session_id": "session-1",
-                "project_id": "project-1",
-            }
+            EntityWrite(
+                entity_id=2,
+                is_new=True,
+                canonical_name="Ada Lovelace",
+                entity_type="person",
+                confidence=1.0,
+                topic="Identity",
+                embedding=[0.2, 0.1],
+                aliases=("Ada",),
+            )
         ],
     )
 

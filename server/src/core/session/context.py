@@ -11,8 +11,8 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.schema.contracts import (
     BatchResult,
-    MessageConnections,
-    MessageUserConnections,
+    RelationshipObservation,
+    ResolutionResult,
 )
 from common.schema.primitives import Message
 from common.schema.source_reference import SourceReferenceCandidate
@@ -473,18 +473,18 @@ class Session:
         entity_ids: list[int],
         new_entity_ids: set[int],
         alias_updated_ids: set[int],
-        relationship_observations: list[MessageConnections],
-        user_relationship_observations: list[MessageUserConnections] = None,
+        relationship_observations: list[RelationshipObservation],
         alias_updates=None,
     ):
         """Delegate to shared graph write logic."""
         batch = BatchResult(
-            entity_ids=entity_ids,
-            new_entity_ids=new_entity_ids,
-            alias_updated_ids=alias_updated_ids,
+            resolution=ResolutionResult(
+                entity_ids=entity_ids,
+                new_ids=new_entity_ids,
+                alias_ids=alias_updated_ids,
+                alias_updates=alias_updates or {},
+            ),
             relationship_observations=relationship_observations,
-            user_relationship_observations=user_relationship_observations or [],
-            alias_updates=alias_updates or {},
         )
         batch.set_scope(self.user_name, self.session_id, self.project_id)
         await write_batch_to_graph(

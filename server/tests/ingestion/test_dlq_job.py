@@ -2,10 +2,11 @@ import json
 
 import pytest
 
-from common.schema.contracts import BatchResult
+from common.schema.contracts import BatchResult, ResolutionResult
 from common.schema.settings import DLQSettings
 from common.utils.time_utils import frozen_time
 from core.ingestion.dlq_state import ensure_dlq_id, serialize_dlq_entry
+from core.ingestion.dlq_payload import DLQPayload
 from core.ingestion.jobs.dlq_job import DLQReplayJob
 from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
@@ -247,9 +248,14 @@ async def test_dlq_graph_write_retry_preserves_callback_error(monkeypatch):
         write_to_graph=graph_write_fails,
     )
     ctx = JobContext(user_name="ada", project_id="project-1")
-    result = BatchResult(entity_ids=[2], new_entity_ids={2})
+    result = BatchResult(
+        resolution=ResolutionResult(entity_ids=[2], new_ids={2})
+    )
     result.set_scope("ada", "session-1", "project-1")
-    entry = dlq_entry(stage="graph_write", batch_result=result.to_dict())
+    entry = dlq_entry(
+        stage="graph_write",
+        batch_result=DLQPayload.from_batch(result).model_dump(mode="json"),
+    )
 
     assert await job._retry_graph_write(entry, ctx) is False
 

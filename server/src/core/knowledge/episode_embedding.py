@@ -1,6 +1,6 @@
 """Canonical text used to embed episodic-memory records."""
 
-from common.schema.primitives import Episode
+from common.schema.episode import Episode
 
 
 def build_episode_embedding_text_from_fields(

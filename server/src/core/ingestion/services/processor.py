@@ -14,7 +14,7 @@ from common.schema.contracts import (
     NERResult,
     ValidationIssue,
 )
-from common.schema.settings import LocalReferenceSettings, TextProcessorSettings
+from common.schema.settings import TextProcessorSettings
 from common.utils.core_utils import (
     PRONOUNS,
     format_vp01_input,
@@ -54,7 +54,6 @@ class TextProcessor:
         spacy: spacy.Language,
         settings: TextProcessorSettings,
         model_work: Optional[ModelWorkCoordinator] = None,
-        local_reference_settings: Optional[LocalReferenceSettings] = None,
     ):
         self.llm_client = llm
         self.topic_config = topic_config
@@ -70,11 +69,6 @@ class TextProcessor:
         self._phrase_matcher_cache: Optional[
             Tuple[PhraseMatcher, Dict[str, int]]
         ] = None
-        self.local_references_enabled = (
-            local_reference_settings.enabled
-            if local_reference_settings is not None
-            else True
-        )
         self.update_settings(settings)
 
     def update_settings(self, config: TextProcessorSettings):
@@ -82,12 +76,6 @@ class TextProcessor:
         self.gliner_threshold = config.gliner_threshold
         self.vp01_min_confidence = config.vp01_min_confidence
         self.llm_ner = config.llm_ner
-
-    def update_local_reference_settings(
-        self,
-        config: LocalReferenceSettings,
-    ) -> None:
-        self.local_references_enabled = config.enabled
 
     def _build_label_to_topics(self) -> Dict[str, List[str]]:
         """Invert topic_config: label -> [topics that include it]"""
@@ -399,7 +387,6 @@ class TextProcessor:
         message_local_ids, message_ids_by_local = build_local_id_maps(
             (message["id"] for message in messages),
             "m",
-            use_local_references=self.local_references_enabled,
         )
         user_content = format_vp01_input(
             messages,
@@ -412,12 +399,6 @@ class TextProcessor:
         )
 
         system_prompt = ner_prompt(user_name)
-        if not self.local_references_enabled:
-            system_prompt += (
-                "\n\nLegacy ID mode is active. Return only the exact message IDs "
-                "shown in this call's input; ignore local-reference examples."
-            )
-
         await emit(
             session_id,
             "pipeline",

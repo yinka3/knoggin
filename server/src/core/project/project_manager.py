@@ -669,7 +669,6 @@ class ProjectManager:
                 gliner=self.resources.gliner,
                 spacy=self.resources.spacy,
                 settings=nlp_cfg,
-                local_reference_settings=self.dev_settings.local_references,
                 model_work=getattr(self.resources, "model_work", None),
             ),
         )
@@ -688,7 +687,6 @@ class ProjectManager:
             resolution_threshold=er_cfg.resolution_threshold,
             common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
             sparse_context_verbs=er_cfg.sparse_context_verbs,
-            local_reference_settings=self.dev_settings.local_references,
         )
 
         await self._verify_user_entity(entities)
@@ -804,7 +802,6 @@ class ProjectManager:
             llm=self.resources.llm_service,
             embedding_service=self.resources.embedding,
             session_ids_provider=lambda: self.get_session_ids(project_id),
-            local_reference_settings=self.dev_settings.local_references,
         )
 
     def _register_background_jobs(
@@ -846,18 +843,6 @@ class ProjectManager:
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(
                 processor.update_settings, "developer_settings.nlp_pipeline"
-            )
-        )
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                processor.update_local_reference_settings,
-                "developer_settings.local_references",
-            )
-        )
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                episode_job.update_local_reference_settings,
-                "developer_settings.local_references",
             )
         )
         scheduler.register(episode_job)

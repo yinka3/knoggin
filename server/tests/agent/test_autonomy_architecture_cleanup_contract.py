@@ -1,5 +1,9 @@
+import inspect
+from types import SimpleNamespace
+
 import pytest
 
+from common.conf.model_catalog import CURATED_MODEL_CATALOG, ModelCatalogEntry
 from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
 from common.schema.tool_schema import (
     DESTRUCTIVE_WRITE_CAPABILITY,
@@ -9,9 +13,22 @@ from common.schema.tool_schema import (
     get_filtered_schemas,
     get_schema_capability,
 )
+from common.schema import primitives
+from common.schema.contracts import (
+    BatchResult,
+    EngineScope,
+    GraphMutationPlan,
+    RelationshipObservation,
+)
+from common.schema.events import InternalEvent
+from common.schema.settings import RootConfig
+from common.utils.event_persistence_policy import normalize_coordination_event
+from common.utils.local_references import build_local_id_maps
+from core.knowledge.db.write_graph_db import build_graph_mutation_plan
 from core.agent.tools.registry import (
     DEFAULT_TOOL_LIMITS,
     TOOL_DISPATCH,
+    TOOL_DEFINITIONS,
     TOOL_LAYER_BY_NAME,
     TOOL_LAYERS,
     TOOL_MODULES,
@@ -29,6 +46,7 @@ from core.agent.tools.registry import (
 )
 from core.agent.types import (
     AgentContext,
+    AgentRunIdentity,
     AgentRunConfig,
     AgentState,
     MaintenanceCandidate,
@@ -172,6 +190,96 @@ def test_agent_tool_modules_match_layer_ownership():
 
 
 @pytest.mark.no_network
+def test_tool_definitions_are_the_complete_runtime_catalog():
+    assert set(TOOL_DEFINITIONS) == _schema_names()
+    for name, definition in TOOL_DEFINITIONS.items():
+        assert definition.name == name
+        assert definition.schema["function"]["name"] == name
+        assert definition.layer == get_tool_layer(name)
+        assert definition.module == get_tool_module(name)
+
+
+@pytest.mark.no_network
+def test_removed_compatibility_inputs_cannot_reenter_runtime_contracts():
+    batch_parameters = inspect.signature(BatchResult.__init__).parameters
+    assert not {
+        "entity_ids",
+        "entity_message_map",
+        "new_entity_ids",
+        "alias_updated_ids",
+        "alias_updates",
+        "candidate_suggestions",
+    } & set(batch_parameters)
+
+    local_reference_parameters = inspect.signature(build_local_id_maps).parameters
+    assert "use_local_references" not in local_reference_parameters
+
+
+@pytest.mark.no_network
+def test_relationship_observations_are_flat_and_old_record_types_are_absent():
+    fields = RelationshipObservation.model_fields
+
+    assert set(fields) == {
+        "message_id",
+        "entity_a_name",
+        "entity_b_name",
+        "relationship_type",
+        "confidence",
+        "context",
+        "identity_rooted",
+    }
+    assert not any(
+        hasattr(primitives, name)
+        for name in ("ConnectionRecord", "MessageConnections", "MessageUserConnections")
+    )
+
+    plan_fields = GraphMutationPlan.__dataclass_fields__
+    assert "relationship_writes" in plan_fields
+    assert "user_relationship_writes" not in plan_fields
+    assert not hasattr(GraphMutationPlan, "to_graph_payloads")
+
+    graph_plan_source = inspect.getsource(build_graph_mutation_plan)
+    assert ".entity_pairs" not in graph_plan_source
+    assert ".user_connections" not in graph_plan_source
+
+
+@pytest.mark.no_network
+def test_static_model_catalog_is_not_runtime_configuration():
+    assert "curated_models" not in RootConfig.model_fields
+    assert len(CURATED_MODEL_CATALOG) >= 1
+    assert all(isinstance(item, ModelCatalogEntry) for item in CURATED_MODEL_CATALOG)
+    assert all(item.id and item.name for item in CURATED_MODEL_CATALOG)
+
+
+@pytest.mark.no_network
+def test_episode_and_event_contracts_have_explicit_owners():
+    assert not any(
+        hasattr(primitives, name)
+        for name in (
+            "Episode",
+            "EpisodeVersion",
+            "MessageEpisode",
+            "EntityEpisode",
+            "RelationshipEpisode",
+            "EpisodeCheckpoint",
+        )
+    )
+
+    event_parameters = inspect.signature(normalize_coordination_event).parameters
+    assert tuple(event_parameters) == ("internal_event",)
+    event = InternalEvent(
+        ts="2026-01-01T00:00:00Z",
+        scope_id="project-1",
+        component="job",
+        event="timeout",
+        data={"job": "episode"},
+    )
+    fields = normalize_coordination_event(event)
+    assert isinstance(fields, dict)
+    assert fields["event"] == "job.timeout"
+
+
+@pytest.mark.no_network
 def test_agent_tool_modules_own_known_schema_names():
     schema_names = _schema_names()
 
@@ -267,6 +375,10 @@ def test_runtime_instructions_are_empty_without_active_maintenance_candidate():
         config=AgentRunConfig(),
         state=AgentState(),
         evidence=RetrievedEvidence(),
+        scope=EngineScope(user_name="ada", session_id="session-1"),
+        agent=AgentRunIdentity(
+            config=SimpleNamespace(id="agent-1"), name="STELLA", persona=""
+        ),
     )
     ctx.maintenance_candidates = [
         MaintenanceCandidate(

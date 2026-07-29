@@ -47,8 +47,11 @@ def _entity_ids(entry: Dict[str, Any]) -> Iterable[Any]:
     batch_result = entry.get("batch_result")
     if not isinstance(batch_result, dict):
         return
-    for key in ("entity_ids", "new_entity_ids", "alias_updated_ids"):
-        value = batch_result.get(key)
+    resolution = batch_result.get("resolution")
+    if not isinstance(resolution, dict):
+        return
+    for key in ("entity_ids", "new_ids", "alias_ids"):
+        value = resolution.get(key)
         if isinstance(value, (list, tuple, set)):
             yield from value
 

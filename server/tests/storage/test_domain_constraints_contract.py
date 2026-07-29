@@ -38,9 +38,9 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
             """
             INSERT INTO relationships (
                 relationship_id, user_name, project_id,
-                entity_a_id, entity_b_id, weight
+                entity_a_id, entity_b_id, relationship_type, weight
             )
-            VALUES ('project-1:2:3:zero', 'ada', 'project-1', 2, 3, 0)
+            VALUES ('project-1:2:3:zero', 'ada', 'project-1', 2, 3, 'zero', 0)
             """
         )
     with pytest.raises(CheckViolation, match="relationships_confidence_range_check"):
@@ -48,32 +48,51 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
             """
             INSERT INTO relationships (
                 relationship_id, user_name, project_id,
-                entity_a_id, entity_b_id, confidence
+                entity_a_id, entity_b_id, relationship_type, confidence
             )
-            VALUES ('project-1:2:3:confidence', 'ada', 'project-1', 2, 3, 1.1)
+            VALUES (
+                'project-1:2:3:confidence', 'ada', 'project-1', 2, 3,
+                'confidence', 1.1
+            )
             """
         )
     with pytest.raises(CheckViolation, match="relationship endpoints"):
         await real_postgres_client.execute(
             """
             INSERT INTO relationships (
-                relationship_id, user_name, project_id, entity_a_id, entity_b_id
+                relationship_id, user_name, project_id,
+                entity_a_id, entity_b_id, relationship_type
             )
-            VALUES ('project-1:2:4', 'ada', 'project-1', 2, 4)
+            VALUES ('project-1:2:4:scope', 'ada', 'project-1', 2, 4, 'scope')
             """
         )
 
     await real_postgres_client.execute(
         """
         INSERT INTO relationships (
-            relationship_id, user_name, project_id, entity_a_id, entity_b_id
+            relationship_id, user_name, project_id,
+            entity_a_id, entity_b_id, relationship_type
         )
-        VALUES ('project-1:1:2', 'ada', 'project-1', 1, 2)
+        VALUES ('project-1:1:2:knows', 'ada', 'project-1', 1, 2, 'knows')
         """
     )
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM relationships"
     ) == {"count": 1}
+
+    with pytest.raises(
+        CheckViolation,
+        match="relationships_identity_matches_fields",
+    ):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO relationships (
+                relationship_id, user_name, project_id,
+                entity_a_id, entity_b_id, relationship_type
+            )
+            VALUES ('project-1:1:2:knows', 'ada', 'project-1', 2, 3, 'mentors')
+            """
+        )
 
 
 @pytest.mark.storage

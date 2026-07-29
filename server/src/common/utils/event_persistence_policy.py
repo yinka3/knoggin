@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+from common.schema.events import InternalEvent
 
 MAX_TEXT_LENGTH = 200
 MAX_LIST_ITEMS = 25
@@ -131,20 +132,17 @@ LOCAL_REFERENCE_FAILURE_FIELDS = frozenset(
 )
 
 
-@dataclass(frozen=True)
-class CoordinationEventRecord:
-    fields: Dict[str, Any]
-
-
 def normalize_coordination_event(
-    *,
-    ts: str,
-    scope_id: str,
-    component: str,
-    event: str,
-    data: Optional[Dict[str, Any]],
-    verbose_only: bool = False,
-) -> Optional[CoordinationEventRecord]:
+    internal_event: InternalEvent,
+) -> Optional[Dict[str, Any]]:
+    """Return scrubbed coordination fields for an internal event, if retained."""
+
+    ts = internal_event.ts
+    scope_id = internal_event.scope_id
+    component = internal_event.component
+    event = internal_event.event
+    data = internal_event.data
+    verbose_only = internal_event.verbose_only
     if verbose_only or (component, event) not in APPROVED_EVENTS:
         return None
 
@@ -180,7 +178,7 @@ def normalize_coordination_event(
         if safe_value is not None:
             fields[normalized_key] = safe_value
 
-    return CoordinationEventRecord(fields=fields)
+    return fields
 
 
 def _normalize_field_name(key: str) -> str:

@@ -5,7 +5,7 @@ from common.schema.contracts import (
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,
 )
-from common.schema.primitives import Episode, EpisodeCheckpoint, MessageEpisode
+from common.schema.episode import Episode, EpisodeCheckpoint, MessageEpisode
 from common.schema.settings import EpisodeSettings, IngestionSettings
 from core.ingestion.jobs.episode_job import EpisodeJob
 from infrastructure.job.base import JobContext

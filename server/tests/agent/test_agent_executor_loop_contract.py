@@ -3,9 +3,11 @@ import json
 import pytest
 
 from common.exceptions import LLMProviderError, ToolExecutionError
+from common.schema.contracts import EngineScope
 from core.agent.executor import AgentExecutor
 from core.agent.types import (
     AgentContext,
+    AgentRunIdentity,
     AgentRunConfig,
     AgentState,
     MaintenanceCandidate,
@@ -141,15 +143,18 @@ def make_ctx(*, config=None, evidence=None):
         config=config or AgentRunConfig(max_attempts=5, max_consecutive_errors=2),
         state=AgentState(),
         evidence=evidence or RetrievedEvidence(),
-        user_name="ada",
+        scope=EngineScope(
+            user_name="ada", session_id="session-1", project_id="project-1"
+        ),
+        agent=AgentRunIdentity(
+            config=SimpleNamespace(id="agent-1"),
+            name="STELLA",
+            persona="Careful memory assistant",
+        ),
         user_query="What changed in profile behavior?",
-        session_id="session-1",
-        project_id="project-1",
         run_id="run-1",
         hot_topics=["Identity"],
         active_topics=["Identity", "Testing"],
-        agent_name="STELLA",
-        agent_persona="Careful memory assistant",
     )
 
 

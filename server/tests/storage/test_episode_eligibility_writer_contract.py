@@ -1,6 +1,6 @@
 import pytest
 
-from common.schema.contracts import EpisodeEligibility
+from common.schema.contracts import EngineScope, EpisodeEligibility
 from core.knowledge.db.writers.entity_writer import EntityWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -12,6 +12,11 @@ async def test_episode_eligibility_marks_message_and_persists_optional_type():
         fetch_all_results=[[{"message_id": 7}, {"message_id": 8}]]
     )
     writer = EntityWriter(client)
+    scope = EngineScope(
+        user_name="ada",
+        session_id="session-1",
+        project_id="project-1",
+    )
 
     async with client.transaction() as cur:
         await writer._mark_episode_eligible_messages(
@@ -20,11 +25,7 @@ async def test_episode_eligibility_marks_message_and_persists_optional_type():
                 EpisodeEligibility(message_id=8),
                 EpisodeEligibility(message_id=7, episode_type="decision"),
             ],
-            {
-                "user_name": "ada",
-                "session_id": "session-1",
-                "project_id": "project-1",
-            },
+            scope,
         )
 
     updates = [call for call in client.calls if "UPDATE messages" in call[1]]

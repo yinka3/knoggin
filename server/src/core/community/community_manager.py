@@ -10,6 +10,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.schema.aac_schema import AAC_READ_TOOL_NAMES, AAC_SPECIFIC_SCHEMAS
 from common.schema.agent_contracts import AgentConfig
+from common.schema.contracts import EngineScope
 from common.scoping import IDENTITY_SCOPE
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
@@ -21,6 +22,7 @@ from core.agent.system_prompt import get_agent_prompt
 from core.agent.tools.community_tools import CommunityTools
 from core.agent.types import (
     AgentContext,
+    AgentRunIdentity,
     AgentRunConfig,
     AgentState,
     RetrievedEvidence,
@@ -402,19 +404,21 @@ class CommunityManager:
             config=COMMUNITY_RUN_CONFIG,
             state=agent_state,
             evidence=evidence,
-            user_name=self.user_name,
+            scope=EngineScope(
+                user_name=self.user_name,
+                session_id=ctx.session_id,
+                project_id=ctx.project.project_id,
+            ),
+            agent=AgentRunIdentity(
+                config=agent,
+                name=agent.name,
+                persona=agent.persona_markdown,
+            ),
             user_query=f"Community Discussion Topic: {topic}",
-            session_id=ctx.session_id,
             run_id=f"run_{uuid.uuid4().hex[:8]}",
-            agent_id=agent.id,
-            agent_name=agent.name,
-            agent_persona=agent.persona_markdown,
             history=history,
             is_community=True,
             current_participants=participants,
-            use_local_references=(
-                ConfigManager.get().config.developer_settings.local_references.enabled
-            ),
         )
 
         executor = AgentExecutor(
@@ -541,11 +545,6 @@ class CommunityManager:
             required_agent=seeding_agent,
         )
         system_prompt = base_prompt + seeding_instructions
-        if not ConfigManager.get().config.developer_settings.local_references.enabled:
-            system_prompt += (
-                "\nLegacy ID mode is active. Return only exact agent IDs listed "
-                "in this call."
-            )
 
         user_prompt = f"""
     {graph_context}
@@ -746,13 +745,9 @@ class CommunityManager:
         if required_agent and all(agent.id != required_agent.id for agent in agents):
             agents.append(required_agent)
         agents = sorted(agents, key=lambda agent: agent.id)
-        use_local_references = (
-            ConfigManager.get().config.developer_settings.local_references.enabled
-        )
         agent_local_ids, agent_ids_by_local = build_local_id_maps(
             (agent.id for agent in agents),
             "a",
-            use_local_references=use_local_references,
         )
         descriptions = []
         for agent in agents:

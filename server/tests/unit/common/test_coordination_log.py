@@ -1,17 +1,42 @@
 import pytest
 
 from common.schema.settings import CoordinationLogSettings
+from common.schema.events import InternalEvent
 from common.utils.coordination_log import CoordinationLog, format_logfmt
 from common.utils.event_persistence_policy import normalize_coordination_event
 from common.utils.events import EventEmitter
 
 
-def test_policy_normalizes_approved_event_and_drops_raw_content():
-    record = normalize_coordination_event(
-        ts="2026-06-29T12:00:00Z",
+def make_event(**overrides) -> InternalEvent:
+    data = {
+        "ts": "2026-06-29T12:00:00Z",
+        "scope_id": "project-1",
+        "component": "pipeline",
+        "event": "dlq_enqueued",
+        "data": {},
+    }
+    data.update(overrides)
+    return InternalEvent(**data)
+
+
+def test_internal_event_adapts_to_coordination_log_record():
+    event = InternalEvent(
+        ts="2026-01-01T00:00:00Z",
         scope_id="project-1",
-        component="pipeline",
-        event="dlq_enqueued",
+        component="job",
+        event="timeout",
+        data={"job": "episode"},
+    )
+
+    record = normalize_coordination_event(event)
+
+    assert record is not None
+    assert record["event"] == "job.timeout"
+    assert record["project_id"] == "project-1"
+
+
+def test_policy_normalizes_approved_event_and_drops_raw_content():
+    record = normalize_coordination_event(make_event(
         data={
             "user_name": "ada",
             "project_id": "project-1",
@@ -23,46 +48,40 @@ def test_policy_normalizes_approved_event_and_drops_raw_content():
             "prompt": "raw prompt must not be logged",
             "messages": [{"content": "raw message must not be logged"}],
         },
-    )
+    ))
 
     assert record is not None
-    assert record.fields["label"] == "RECOVERY"
-    assert record.fields["event"] == "pipeline.dlq_enqueued"
-    assert record.fields["user"] == "ada"
-    assert record.fields["message_ids"] == "1,2"
-    assert record.fields["error"].endswith("...")
-    assert "prompt" not in record.fields
-    assert "messages" not in record.fields
+    assert record["label"] == "RECOVERY"
+    assert record["event"] == "pipeline.dlq_enqueued"
+    assert record["user"] == "ada"
+    assert record["message_ids"] == "1,2"
+    assert record["error"].endswith("...")
+    assert "prompt" not in record
+    assert "messages" not in record
 
 
 def test_policy_rejects_disallowed_and_verbose_events():
     assert (
-        normalize_coordination_event(
-            ts="2026-06-29T12:00:00Z",
-            scope_id="project-1",
+        normalize_coordination_event(make_event(
             component="job",
             event="started",
             data={},
-        )
+        ))
         is None
     )
     assert (
-        normalize_coordination_event(
-            ts="2026-06-29T12:00:00Z",
-            scope_id="project-1",
+        normalize_coordination_event(make_event(
             component="job",
             event="dlq_retry_failed",
             data={},
             verbose_only=True,
-        )
+        ))
         is None
     )
 
 
 def test_policy_allows_candidate_failure_events_with_safe_fields_only():
-    record = normalize_coordination_event(
-        ts="2026-06-29T12:00:00Z",
-        scope_id="project-1",
+    record = normalize_coordination_event(make_event(
         component="job",
         event="episodes_write_failed",
         data={
@@ -72,21 +91,19 @@ def test_policy_allows_candidate_failure_events_with_safe_fields_only():
             "error": "write failed",
             "content": "raw episode text must not be logged",
         },
-    )
+    ))
 
     assert record is not None
-    assert record.fields["event"] == "job.episodes_write_failed"
-    assert record.fields["entity_id"] == 42
-    assert record.fields["episode_count"] == 3
-    assert record.fields["failed_episode_ids"] == "episode-1,episode-2"
-    assert record.fields["error"] == "write failed"
-    assert "content" not in record.fields
+    assert record["event"] == "job.episodes_write_failed"
+    assert record["entity_id"] == 42
+    assert record["episode_count"] == 3
+    assert record["failed_episode_ids"] == "episode-1,episode-2"
+    assert record["error"] == "write failed"
+    assert "content" not in record
 
 
 def test_policy_persists_episode_metrics_without_episode_content():
-    record = normalize_coordination_event(
-        ts="2026-06-29T12:00:00Z",
-        scope_id="project-1",
+    record = normalize_coordination_event(make_event(
         component="agent",
         event="episode_retrieval_completed",
         data={
@@ -100,22 +117,20 @@ def test_policy_persists_episode_metrics_without_episode_content():
             "summary": "episode summary must not be logged",
             "content": "raw evidence must not be logged",
         },
-    )
+    ))
 
     assert record is not None
-    assert record.fields["event"] == "agent.episode_retrieval_completed"
-    assert record.fields["strategy"] == "semantic"
-    assert record.fields["episode_count"] == 3
-    assert record.fields["retrieval_latency_ms"] == 12.5
-    assert record.fields["used_raw_message_fallback"] is False
-    assert "summary" not in record.fields
-    assert "content" not in record.fields
+    assert record["event"] == "agent.episode_retrieval_completed"
+    assert record["strategy"] == "semantic"
+    assert record["episode_count"] == 3
+    assert record["retrieval_latency_ms"] == 12.5
+    assert record["used_raw_message_fallback"] is False
+    assert "summary" not in record
+    assert "content" not in record
 
 
 def test_policy_persists_local_reference_failure_metrics_without_ids():
-    record = normalize_coordination_event(
-        ts="2026-06-29T12:00:00Z",
-        scope_id="project-1",
+    record = normalize_coordination_event(make_event(
         component="agent",
         event="local_reference_resolution_failed",
         data={
@@ -125,30 +140,28 @@ def test_policy_persists_local_reference_failure_metrics_without_ids():
             "episode_id": "must-not-be-persisted",
             "content": "raw model context must not be logged",
         },
-    )
+    ))
 
     assert record is not None
-    assert record.fields["event"] == "agent.local_reference_resolution_failed"
-    assert record.fields["pipeline"] == "agent_tool_loop"
-    assert record.fields["reference_type"] == "episode"
-    assert record.fields["reason"] == "unknown_or_wrong_type"
-    assert "episode_id" not in record.fields
-    assert "content" not in record.fields
+    assert record["event"] == "agent.local_reference_resolution_failed"
+    assert record["pipeline"] == "agent_tool_loop"
+    assert record["reference_type"] == "episode"
+    assert record["reason"] == "unknown_or_wrong_type"
+    assert "episode_id" not in record
+    assert "content" not in record
 
 
 def test_policy_normalizes_scheduler_failure_name_to_job_field():
-    record = normalize_coordination_event(
-        ts="2026-06-29T12:00:00Z",
-        scope_id="project-1",
+    record = normalize_coordination_event(make_event(
         component="job",
         event="timeout",
         data={"name": "profile_refinement", "summary": "ignored"},
-    )
+    ))
 
     assert record is not None
-    assert record.fields["event"] == "job.timeout"
-    assert record.fields["job"] == "profile_refinement"
-    assert "summary" not in record.fields
+    assert record["event"] == "job.timeout"
+    assert record["job"] == "profile_refinement"
+    assert "summary" not in record
 
 
 def test_logfmt_quotes_values_without_breaking_searchable_keys():

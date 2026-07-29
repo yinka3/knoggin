@@ -52,9 +52,11 @@ class GraphBuilder:
             ]
             params.append(
                 {
+                    "relationship_id": row["relationship_id"],
                     "project_id": row["project_id"],
                     "entity_a_id": int(row["entity_a_id"]),
                     "entity_b_id": int(row["entity_b_id"]),
+                    "relationship_type": row["relationship_type"],
                     "weight": int(row.get("weight") or 1),
                     "confidence": float(row.get("confidence") or 0),
                     "context": row.get("context"),

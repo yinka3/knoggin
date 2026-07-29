@@ -3,8 +3,15 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from common.schema.contracts import CandidateSuggestion, EngineScope, EpisodeEligibility
-from common.schema.primitives import Episode, EpisodeCheckpoint
+from common.schema.contracts import (
+    CandidateSuggestion,
+    EngineScope,
+    EntityWrite,
+    EpisodeEligibility,
+    MessageEntityRef,
+    RelationshipWrite,
+)
+from common.schema.episode import Episode, EpisodeCheckpoint
 from common.schema.source_reference import (
     AssistantMessageWithSources,
     SourceConsulted,
@@ -185,19 +192,19 @@ class KnowledgeStore:
 
     async def write_batch(
         self,
-        entities: List[Dict],
-        relationships: List[Dict],
+        entities: List[EntityWrite],
+        relationships: List[RelationshipWrite],
         *,
-        message_entity_refs: Optional[List[Dict]] = None,
+        message_entity_refs: Optional[List[MessageEntityRef]] = None,
         eligible_messages: Optional[List[EpisodeEligibility]] = None,
-        scope: Optional[EngineScope] = None,
+        scope: EngineScope,
     ) -> bool:
         return await self._entity_writer.write_batch(
             entities,
             relationships,
-            message_entity_refs=message_entity_refs,
-            eligible_messages=eligible_messages,
-            message_entity_scope=scope.model_dump() if scope else None,
+            message_entity_refs=message_entity_refs or (),
+            eligible_messages=eligible_messages or (),
+            scope=scope,
         )
 
     async def create_episode(self, episode: Episode, *, user_name: str) -> None:
@@ -524,10 +531,18 @@ class KnowledgeStore:
         )
 
     async def delete_relationship(
-        self, entity_a_id: int, entity_b_id: int, *, project_id: str
+        self,
+        entity_a_id: int,
+        entity_b_id: int,
+        *,
+        relationship_type: str,
+        project_id: str,
     ) -> bool:
         return await self._graph_writer.delete_relationship(
-            entity_a_id, entity_b_id, project_id=project_id
+            entity_a_id,
+            entity_b_id,
+            relationship_type=relationship_type,
+            project_id=project_id,
         )
 
     async def rebuild_project_projection(

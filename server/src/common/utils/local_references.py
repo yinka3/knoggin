@@ -9,8 +9,6 @@ SystemIdentifier: TypeAlias = int | str
 def build_local_id_maps(
     identifiers: Iterable[SystemIdentifier],
     prefix: str,
-    *,
-    use_local_references: bool = True,
 ) -> tuple[dict[SystemIdentifier, str], dict[str, SystemIdentifier]]:
     """Assign ascending local IDs to one complete set of real identifiers.
 
@@ -18,22 +16,10 @@ def build_local_id_maps(
     LLM prompt. The second translates the LLM's returned value back to its real
     ID. `prefix` identifies the item kind in the prompt, for example `"m"` for
     messages or `"e"` for entities. Callers create separate maps for messages,
-    entities, relationships, and any other item kind in the same prompt. Set
-    ``use_local_references=False`` only for the temporary raw-ID rollout mode.
+    entities, relationships, and any other item kind in the same prompt.
     """
 
     unique_identifiers = sorted(set(identifiers), key=_identifier_sort_key)
-    if not use_local_references:
-        actual_to_local = {
-            identifier: str(identifier) for identifier in unique_identifiers
-        }
-        local_to_actual = {
-            local_id: identifier for identifier, local_id in actual_to_local.items()
-        }
-        if len(local_to_actual) != len(actual_to_local):
-            raise ValueError("Raw identifier mode requires unambiguous string IDs.")
-        return actual_to_local, local_to_actual
-
     actual_to_local = {
         identifier: f"{prefix}{position}"
         for position, identifier in enumerate(unique_identifiers, start=1)

@@ -32,7 +32,6 @@ from core.agent.internals import (
     build_user_message,
     execute_tool,
     localize_agent_tool_result,
-    model_safe_tool_result,
     summarize_result,
     update_accumulators,
 )
@@ -408,10 +407,10 @@ class AgentExecutor:
         )
 
         system_prompt = get_agent_prompt(
-            user_name=self.ctx.user_name,
+            user_name=self.ctx.scope.user_name,
             current_time=date,
-            persona=self.ctx.agent_persona,
-            agent_name=self.ctx.agent_name,
+            persona=self.ctx.agent.persona,
+            agent_name=self.ctx.agent.name,
             documents_context=documents_context,
             document_focus_context=document_focus_context,
             agent_directives=directives,
@@ -428,12 +427,13 @@ class AgentExecutor:
         configure_tool_authorization(
             self.tools,
             active_schemas,
-            user_name=self.ctx.user_name,
-            agent_id=self.ctx.agent_id or getattr(self.tools, "agent_id", ""),
+            user_name=self.ctx.scope.user_name,
+            agent_id=self.ctx.agent.config.id or getattr(self.tools, "agent_id", ""),
             project_id=(
-                self.ctx.project_id or str(getattr(self.tools, "project_id", ""))
+                self.ctx.scope.project_id
+                or str(getattr(self.tools, "project_id", ""))
             ),
-            session_id=self.ctx.session_id,
+            session_id=self.ctx.scope.session_id,
             run_id=self.ctx.run_id,
         )
 
@@ -619,10 +619,7 @@ class AgentExecutor:
                 previous_short_uuid_references = getattr(
                     self.tools, "short_uuid_references", missing
                 )
-                if self.ctx.use_local_references:
-                    self.tools.short_uuid_references = (
-                        self.ctx.state.short_uuid_references
-                    )
+                self.tools.short_uuid_references = self.ctx.state.short_uuid_references
                 try:
                     async with asyncio.timeout(self.ctx.config.tool_timeout):
                         result = await execute_tool(
@@ -631,13 +628,10 @@ class AgentExecutor:
                             call.args,
                         )
                 finally:
-                    if self.ctx.use_local_references:
-                        if previous_short_uuid_references is missing:
-                            delattr(self.tools, "short_uuid_references")
-                        else:
-                            self.tools.short_uuid_references = (
-                                previous_short_uuid_references
-                            )
+                    if previous_short_uuid_references is missing:
+                        delattr(self.tools, "short_uuid_references")
+                    else:
+                        self.tools.short_uuid_references = previous_short_uuid_references
 
                 await apply_tool_result_hooks(
                     self.ctx,
@@ -651,11 +645,7 @@ class AgentExecutor:
                 )
 
                 summary, _ = summarize_result(call.name, result)
-                model_result = (
-                    localize_agent_tool_result(self.ctx, call.name, result)
-                    if self.ctx.use_local_references
-                    else model_safe_tool_result(result)
-                )
+                model_result = localize_agent_tool_result(self.ctx, call.name, result)
                 update_accumulators(self.ctx, call.name, model_result)
 
                 self.ctx.state.consecutive_errors = 0
@@ -693,7 +683,7 @@ class AgentExecutor:
             except ToolExecutionError as e:
                 if _is_local_reference_resolution_error(e.message):
                     await emit(
-                        self.ctx.session_id,
+                        self.ctx.scope.session_id,
                         "agent",
                         "local_reference_resolution_failed",
                         {
@@ -833,7 +823,7 @@ class AgentExecutor:
             )
 
         prompt = get_fallback_summary_prompt(
-            self.ctx.user_name, self.ctx.user_query, evidence_ctx
+            self.ctx.scope.user_name, self.ctx.user_query, evidence_ctx
         )
 
         return await self.llm.generate_text(
@@ -906,7 +896,7 @@ class AgentExecutor:
 
     async def _emit_llm_call(self, model: Optional[str], reasoning: str):
         await emit(
-            self.ctx.session_id,
+            self.ctx.scope.session_id,
             "agent",
             "llm_call",
             {

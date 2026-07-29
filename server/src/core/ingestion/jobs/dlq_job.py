@@ -8,6 +8,7 @@ from loguru import logger
 from common.schema.contracts import BatchResult, EngineScope, EngineWorkUnit
 from common.schema.settings import DLQSettings
 from common.utils.events import emit
+from core.ingestion.dlq_payload import DLQPayload
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_unix
 from core.ingestion.dlq_state import (
@@ -409,7 +410,7 @@ class DLQReplayJob(BaseJob):
         result = None
 
         try:
-            result = BatchResult.from_dict(entry["batch_result"])
+            result = DLQPayload.model_validate(entry["batch_result"]).to_batch()
             self._refresh_replay_scope(replay_unit, entry, ctx, result)
             if result.work_unit:
                 result.work_unit.trace.attempt = entry.get("attempt", 1)
@@ -486,7 +487,7 @@ class DLQReplayJob(BaseJob):
                 )
                 return await self._retry_processing(entry, ctx)
 
-            result = BatchResult.from_dict(batch_result_dict)
+            result = DLQPayload.model_validate(batch_result_dict).to_batch()
             self._refresh_replay_scope(replay_unit, entry, ctx, result)
             if result.work_unit:
                 result.work_unit.trace.attempt = entry.get("attempt", 1)

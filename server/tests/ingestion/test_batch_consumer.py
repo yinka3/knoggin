@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from common.schema.contracts import BatchResult, CandidateSuggestion
+from common.schema.contracts import BatchResult, CandidateSuggestion, ResolutionResult
 from common.schema.settings import IngestionSettings
 from core.ingestion.services.batch_consumer import IngestionWorker
 from infrastructure.redis_client import RedisKeys
@@ -115,12 +115,12 @@ async def push_messages(redis, key, *messages):
 
 
 def graph_write_result():
-    return BatchResult(new_entity_ids={101})
+    return BatchResult(resolution=ResolutionResult(new_ids={101}))
 
 
 def suggestion_result(*, graph_writes=False):
     result = BatchResult(
-        candidate_suggestions=[
+        resolution=ResolutionResult(candidate_suggestions=[
             CandidateSuggestion(
                 msg_id=1,
                 mention="workspace notes tool",
@@ -132,7 +132,7 @@ def suggestion_result(*, graph_writes=False):
                 reasons=["candidate_rejected"],
                 created_entity_id=1001,
             )
-        ]
+        ])
     )
     if graph_writes:
         result.new_entity_ids.add(1001)

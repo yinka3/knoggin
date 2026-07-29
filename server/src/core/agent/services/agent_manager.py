@@ -12,6 +12,28 @@ from common.utils.agent_identity import (
 )
 
 
+def agent_from_row(row: Mapping[str, object]) -> AgentConfig:
+    """Translate the agents-table row once at the repository boundary."""
+
+    return AgentConfig(
+        id=str(row["agent_id"]),
+        name=str(row["name"]),
+        persona=row["persona"] or "",
+        brain=normalize_agent_brain(
+            row["brain"] or "",
+            row["persona"] or "",
+        ),
+        model=row["model"],
+        temperature=row["temperature"],
+        enabled_tools=row["enabled_tools"],
+        is_default=bool(row["is_default"]),
+        is_spawned=bool(row["is_spawned"]),
+        spawned_by=row["spawned_by"],
+        brain_revision=int(row.get("brain_revision", 1)),
+        created_at=row["created_at"],
+    )
+
+
 class AgentManager:
     def __init__(self, resources, user_name, active_sessions):
         self.resources = resources
@@ -34,27 +56,7 @@ class AgentManager:
             await self._seed_default_agents()
             rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
 
-        agents = []
-        for row in rows:
-            tools = row["enabled_tools"]
-            agents.append(AgentConfig(
-                id=row["agent_id"],
-                name=row["name"],
-                persona=row["persona"],
-                brain=normalize_agent_brain(
-                    row["brain"] or "",
-                    row["persona"] or "",
-                ),
-                model=row["model"],
-                temperature=row["temperature"],
-                enabled_tools=tools,
-                is_default=row["is_default"],
-                is_spawned=row["is_spawned"],
-                spawned_by=row["spawned_by"],
-                brain_revision=row.get("brain_revision", 1),
-                created_at=row["created_at"]
-            ))
-        return agents
+        return [agent_from_row(row) for row in rows]
 
     async def get_agent(self, agent_id: str) -> Optional[AgentConfig]:
         """Get agent by ID."""
@@ -72,25 +74,7 @@ class AgentManager:
         if not rows:
             return None
 
-        row = rows[0]
-        tools = row["enabled_tools"]
-        return AgentConfig(
-            id=row["agent_id"],
-            name=row["name"],
-            persona=row["persona"],
-            brain=normalize_agent_brain(
-                row["brain"] or "",
-                row["persona"] or "",
-            ),
-            model=row["model"],
-            temperature=row["temperature"],
-            enabled_tools=tools,
-            is_default=row["is_default"],
-            is_spawned=row["is_spawned"],
-            spawned_by=row["spawned_by"],
-            brain_revision=row.get("brain_revision", 1),
-            created_at=row["created_at"]
-        )
+        return agent_from_row(rows[0])
 
     async def get_agent_by_name(self, name: str) -> Optional[AgentConfig]:
         """Get agent by name (case-insensitive)."""
@@ -109,25 +93,7 @@ class AgentManager:
         if not rows:
             return None
 
-        row = rows[0]
-        tools = row["enabled_tools"]
-        return AgentConfig(
-            id=row["agent_id"],
-            name=row["name"],
-            persona=row["persona"],
-            brain=normalize_agent_brain(
-                row["brain"] or "",
-                row["persona"] or "",
-            ),
-            model=row["model"],
-            temperature=row["temperature"],
-            enabled_tools=tools,
-            is_default=row["is_default"],
-            is_spawned=row["is_spawned"],
-            spawned_by=row["spawned_by"],
-            brain_revision=row.get("brain_revision", 1),
-            created_at=row["created_at"]
-        )
+        return agent_from_row(rows[0])
 
     async def get_default_agent_id(self) -> str:
         """Get default agent ID. Seeds defaults if none exist."""

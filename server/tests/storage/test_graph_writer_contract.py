@@ -32,9 +32,11 @@ MESSAGE_SQL_PARAMS = (
 )
 
 MERGE_RELATIONSHIP_PROJECTION_FIELDS = {
+    "relationship_id",
     "project_id",
     "entity_a_id",
     "entity_b_id",
+    "relationship_type",
     "weight",
     "confidence",
     "context",
@@ -73,6 +75,17 @@ def test_graph_writer_requires_project_scope_for_scoped_operations():
         GraphWriter._require_project_id(None, "create_hierarchy_edge")
 
     assert GraphWriter._require_project_id("project-1", "op") == "project-1"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_graph_writer_relationship_identity_normalizes_type_and_endpoint_order():
+    assert GraphWriter._relationship_id(
+        "project-1",
+        3,
+        2,
+        " Works   With ",
+    ) == "project-1:2:3:works with"
 
 
 @pytest.mark.storage
@@ -364,7 +377,7 @@ async def test_graph_writer_create_hierarchy_edge_returns_false_on_db_failure():
 async def test_graph_writer_delete_relationship_uses_project_and_identity_scope():
     client = RecordingPostgresClient(
         fetch_one_results=[
-            {"relationship_id": "project-1:2:3"},
+            {"relationship_id": "project-1:2:3:works_with"},
             {"deleted": "1"},
         ],
     )
@@ -373,6 +386,7 @@ async def test_graph_writer_delete_relationship_uses_project_and_identity_scope(
     assert await writer.delete_relationship(
         2,
         3,
+        relationship_type="works_with",
         project_id="project-1",
     ) is True
 
@@ -380,17 +394,15 @@ async def test_graph_writer_delete_relationship_uses_project_and_identity_scope(
     evidence_call, canonical_call, projection_call = client.calls
     assert evidence_call[0] == "execute"
     assert "DELETE FROM relationship_evidence_refs" in evidence_call[1]
-    assert evidence_call[2] == ("project-1:2:3",)
+    assert evidence_call[2] == ("project-1:2:3:works_with",)
     assert canonical_call[0] == "execute"
     assert "DELETE FROM relationships" in canonical_call[1]
-    assert canonical_call[2] == ("project-1:2:3",)
+    assert canonical_call[2] == ("project-1:2:3:works_with",)
     assert projection_call[0] == "execute"
     assert "DELETE r" in projection_call[1]
     assert json.loads(projection_call[2][0]) == {
-        "a_id": 2,
-        "b_id": 3,
+        "relationship_id": "project-1:2:3:works_with",
         "project_id": "project-1",
-        "identity_entity_id": IDENTITY_ENTITY_ID,
     }
 
 
@@ -408,6 +420,7 @@ async def test_graph_writer_delete_relationship_returns_false_on_zero_rows():
     assert await writer.delete_relationship(
         2,
         3,
+        relationship_type="works_with",
         project_id="project-1",
     ) is False
 
@@ -415,22 +428,23 @@ async def test_graph_writer_delete_relationship_returns_false_on_zero_rows():
 @pytest.mark.storage
 @pytest.mark.no_network
 @pytest.mark.parametrize(
-    ("method_name", "args"),
+    ("method_name", "args", "kwargs"),
     [
-        ("create_hierarchy_edge", (2, 3)),
-        ("delete_relationship", (2, 3)),
-        ("merge_entities", (2, 3)),
+        ("create_hierarchy_edge", (2, 3), {}),
+        ("delete_relationship", (2, 3), {"relationship_type": "works_with"}),
+        ("merge_entities", (2, 3), {}),
     ],
 )
 async def test_graph_writer_scoped_operations_require_project_without_db_access(
     method_name,
     args,
+    kwargs,
 ):
     client = RecordingPostgresClient()
     writer = GraphWriter(client)
 
     with pytest.raises(ValueError, match=f"{method_name} requires project_id scope"):
-        await getattr(writer, method_name)(*args, project_id="")
+        await getattr(writer, method_name)(*args, project_id="", **kwargs)
 
     assert client.calls == []
 
@@ -525,11 +539,12 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         fetch_all_results=[
             [
                 {
-                    "relationship_id": "project-1:3:9",
+                    "relationship_id": "project-1:3:9:works with",
                     "user_name": "ada",
                     "project_id": "project-1",
                     "entity_a_id": 3,
                     "entity_b_id": 9,
+                    "relationship_type": "works with",
                     "weight": 3,
                     "confidence": 0.9,
                     "context": "works with",
@@ -538,11 +553,12 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
             ],
             [
                 {
-                    "relationship_id": "project-1:2:9",
+                    "relationship_id": "project-1:2:9:works with",
                     "user_name": "ada",
                     "project_id": "project-1",
                     "entity_a_id": 2,
                     "entity_b_id": 9,
+                    "relationship_type": "works with",
                     "weight": 5,
                     "confidence": 0.9,
                     "context": "works with",
@@ -655,9 +671,11 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     assert set(rel_params["batch"][0]) == MERGE_RELATIONSHIP_PROJECTION_FIELDS
     assert rel_params["batch"] == [
         {
+            "relationship_id": "project-1:2:9:works with",
             "project_id": "project-1",
             "entity_a_id": 2,
             "entity_b_id": 9,
+            "relationship_type": "works with",
             "weight": 5,
             "confidence": 0.9,
             "context": "works with",
@@ -694,7 +712,8 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     assert any(
         call[0] == "execute"
         and "INSERT INTO relationships" in call[1]
-        and call[2][:5] == ("project-1:2:9", "ada", "project-1", 2, 9)
+        and call[2][:5]
+        == ("project-1:2:9:works with", "ada", "project-1", 2, 9)
         for call in client.calls
     )
     assert any(
@@ -719,14 +738,24 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     assert any(
         call[0] == "execute"
         and "INSERT INTO episode_relationships" in call[1]
-        and call[2] == ("project-1:2:9", "project-1:3:9", "project-1")
+        and call[2]
+        == (
+            "project-1:2:9:works with",
+            "project-1:3:9:works with",
+            "project-1",
+        )
         for call in client.calls
     )
     assert any(
         call[0] == "execute"
         and "UPDATE episode_relationships" in call[1]
         and "COUNT(DISTINCT em.message_id)" in call[1]
-        and call[2] == ("project-1:2:9", "project-1", "project-1:2:9")
+        and call[2]
+        == (
+            "project-1:2:9:works with",
+            "project-1",
+            "project-1:2:9:works with",
+        )
         for call in client.calls
     )
     hierarchy_rewrite_call = next(

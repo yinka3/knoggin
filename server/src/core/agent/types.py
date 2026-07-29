@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 from common.schema.agent_stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.agent_contracts import AgentConfig
+from common.schema.contracts import EngineScope
 from core.agent.tools.registry import get_default_tool_limits
 
 
@@ -24,6 +26,15 @@ class MaintenanceCandidate:
     metadata: Dict = field(default_factory=dict)
     attempts: int = 0
     cooldown_until: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class AgentRunIdentity:
+    """Durable agent configuration plus the resolved per-run presentation."""
+
+    config: AgentConfig
+    name: str
+    persona: str
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,36 @@ class AgentRunConfig:
 
     def __post_init__(self):
         object.__setattr__(self, "_limits_dict", dict(self.tool_limits))
+
+    @classmethod
+    def from_settings(cls, settings) -> "AgentRunConfig":
+        """Compile mutable application settings into one immutable run snapshot."""
+
+        defaults = get_default_tool_limits()
+        overrides = dict(getattr(settings, "tool_limit_overrides", {}))
+        unknown_overrides = set(overrides) - set(defaults)
+        if unknown_overrides:
+            raise ValueError(
+                "Unknown tool limit overrides: "
+                + ", ".join(sorted(unknown_overrides))
+            )
+        invalid_overrides = {
+            name: limit for name, limit in overrides.items() if limit < 1
+        }
+        if invalid_overrides:
+            raise ValueError(
+                "Tool limit overrides must be positive: "
+                + ", ".join(sorted(invalid_overrides))
+            )
+        return cls(
+            max_calls=settings.max_tool_calls,
+            tool_timeout=settings.tool_timeout,
+            max_attempts=settings.max_attempts,
+            max_history_turns=settings.agent_history_turns,
+            max_accumulated_messages=settings.max_accumulated_messages,
+            max_consecutive_errors=settings.max_consecutive_errors,
+            tool_limits=tuple((defaults | overrides).items()),
+        )
 
     def get_tool_limit(self, tool_name: str, default: int = 6) -> int:
         if tool_name in self._limits_dict:
@@ -144,14 +185,10 @@ class AgentContext:
     config: AgentRunConfig
     state: AgentState
     evidence: RetrievedEvidence
-    user_name: str = ""
+    scope: EngineScope
+    agent: AgentRunIdentity
     user_query: str = ""
-    session_id: str = ""
-    project_id: str = ""
     run_id: str = ""
-    agent_id: str = ""
-    agent_name: str = "STELLA"
-    agent_persona: str = ""
     history: List[Dict] = field(default_factory=list)
     hot_topics: List[str] = field(default_factory=list)
     active_topics: List[str] = field(default_factory=list)
@@ -159,7 +196,6 @@ class AgentContext:
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
     maintenance_candidates: List[MaintenanceCandidate] = field(default_factory=list)
-    use_local_references: bool = True
     document_focus: Optional[DocumentFocus] = None
     initial_source_candidates: List[SourceReferenceCandidate] = field(
         default_factory=list

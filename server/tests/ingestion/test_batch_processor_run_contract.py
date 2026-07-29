@@ -3,13 +3,10 @@ import json
 import pytest
 
 from common.schema.contracts import (
-    MessageConnections,
-    MessageUserConnections,
+    RelationshipObservation,
     ResolutionResult,
-    UserConnectionRecord,
     ValidationIssue,
 )
-from common.schema.primitives import ConnectionRecord
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.redis_client import RedisKeys
@@ -109,49 +106,31 @@ def fake_resolution_result():
 
 def fake_relationships():
     return [
-        MessageConnections(
+        RelationshipObservation(
             message_id=1,
-            entity_pairs=[
-                ConnectionRecord(
-                    msg_id=1,
-                    entity_a="Alice",
-                    entity_b="Bob",
-                    relationship="works_with",
-                    confidence=0.9,
-                    context="Alice is working with Bob.",
-                )
-            ],
+            entity_a_name="Alice",
+            entity_b_name="Bob",
+            relationship_type="works_with",
+            confidence=0.9,
+            context="Alice is working with Bob.",
         ),
-        MessageConnections(
+        RelationshipObservation(
             message_id=2,
-            entity_pairs=[
-                ConnectionRecord(
-                    msg_id=2,
-                    entity_a="Bob",
-                    entity_b="Notion",
-                    relationship="uses",
-                    confidence=0.85,
-                    context="Bob uses Notion.",
-                )
-            ],
+            entity_a_name="Bob",
+            entity_b_name="Notion",
+            relationship_type="uses",
+            confidence=0.85,
+            context="Bob uses Notion.",
         ),
-    ]
-
-
-def fake_user_relationships():
-    return [
-        MessageUserConnections(
+        RelationshipObservation(
             message_id=1,
-            user_connections=[
-                UserConnectionRecord(
-                    msg_id=1,
-                    entity_name="Knoggin",
-                    relationship="works_on",
-                    confidence=0.9,
-                    context="User is working on Knoggin.",
-                )
-            ],
-        )
+            entity_a_name="ada",
+            entity_b_name="Knoggin",
+            relationship_type="works_on",
+            confidence=0.9,
+            context="User is working on Knoggin.",
+            identity_rooted=True,
+        ),
     ]
 
 
@@ -207,7 +186,7 @@ async def test_batch_processor_run_happy_path_builds_graph_write_result():
         trace=None,
         issues=None,
     ):
-        return fake_relationships(), fake_user_relationships()
+        return fake_relationships()
 
     processor._extract_mentions = extract_mentions
     processor._resolve_mentions = resolve_mentions
@@ -231,16 +210,11 @@ async def test_batch_processor_run_happy_path_builds_graph_write_result():
     assert result.new_entity_ids == {101, 103, 104}
     assert result.alias_updated_ids == {102}
     assert result.alias_updates == {102: ["Bob"]}
-    assert [item.message_id for item in result.relationship_observations] == [1, 2]
-    assert result.relationship_observations[0].entity_pairs[0].relationship == (
-        "works_with"
-    )
-    assert result.relationship_observations[1].entity_pairs[0].relationship == "uses"
-    assert [item.message_id for item in result.user_relationship_observations] == [1]
-    assert (
-        result.user_relationship_observations[0].user_connections[0].relationship
-        == "works_on"
-    )
+    assert [item.message_id for item in result.relationship_observations] == [1, 2, 1]
+    assert result.relationship_observations[0].relationship_type == "works_with"
+    assert result.relationship_observations[1].relationship_type == "uses"
+    assert result.relationship_observations[2].identity_rooted is True
+    assert result.relationship_observations[2].relationship_type == "works_on"
     assert result.has_graph_writes() is True
 
 
@@ -264,7 +238,7 @@ async def test_batch_processor_run_with_real_resolution_builds_graph_write_resul
         issues=None,
     ):
         seen_entity_msg_map.update(entity_msg_map)
-        return fake_relationships(), fake_user_relationships()
+        return fake_relationships()
 
     processor._extract_mentions = extract_mentions
     processor._extract_connections = extract_connections
@@ -311,7 +285,6 @@ async def test_batch_processor_run_empty_batch_marks_work_unit_skipped():
     assert result.success is True
     assert result.entity_ids == []
     assert result.relationship_observations == []
-    assert result.user_relationship_observations == []
     assert result.trace.batch_size == 0
     assert result.trace.message_ids == []
     assert result.work_unit.status == "skipped"
@@ -337,7 +310,6 @@ async def test_batch_processor_run_no_mentions_skips_resolution():
     assert result.success is True
     assert result.entity_ids == []
     assert result.relationship_observations == []
-    assert result.user_relationship_observations == []
     # A batch with no mentions is still durably eligible for episodic processing.
     assert result.has_graph_writes() is True
     assert result.trace.batch_size == 2
@@ -377,7 +349,7 @@ async def test_batch_processor_run_filters_blank_mentions_before_resolution():
         trace=None,
         issues=None,
     ):
-        return [], []
+        return []
 
     processor._extract_mentions = extract_mentions
     processor._resolve_mentions = resolve_mentions
@@ -412,7 +384,7 @@ async def test_batch_processor_run_accepts_empty_connections():
         trace=None,
         issues=None,
     ):
-        return [], []
+        return []
 
     processor._extract_mentions = extract_mentions
     processor._resolve_mentions = resolve_mentions
@@ -427,7 +399,6 @@ async def test_batch_processor_run_accepts_empty_connections():
     assert result.work_unit.status == "succeeded"
     assert result.entity_ids == [101, 102, 103, 104]
     assert result.relationship_observations == []
-    assert result.user_relationship_observations == []
 
 
 @pytest.mark.ingestion
@@ -523,7 +494,7 @@ async def test_batch_processor_run_preserves_trace_fields():
         trace.relationship_prompt = "VEGAPUNK-02"
         trace.relationships_seen = 2
         trace.relationships_accepted = 2
-        return [], []
+        return []
 
     processor._extract_mentions = extract_mentions
     processor._resolve_mentions = resolve_mentions

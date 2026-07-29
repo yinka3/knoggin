@@ -2,10 +2,12 @@ import json
 
 import pytest
 
+from common.schema.contracts import EngineScope
 from core.agent.executor import AgentExecutor
 from core.agent.tools.search import SearchTools
 from core.agent.types import (
     AgentContext,
+    AgentRunIdentity,
     AgentRunConfig,
     AgentState,
     RetrievedEvidence,
@@ -191,17 +193,21 @@ def make_agent_context():
         config=AgentRunConfig(max_attempts=4, max_calls=4),
         state=AgentState(),
         evidence=RetrievedEvidence(),
-        user_name="ada",
+        scope=EngineScope(
+            user_name="ada", session_id="session-agent", project_id="project-1"
+        ),
+        agent=AgentRunIdentity(
+            config=SimpleNamespace(id="agent-1"),
+            name="STELLA",
+            persona="Careful test assistant",
+        ),
         user_query=(
             "What did we decide about AgentExecutor tool behavior and prompt "
             "context testing?"
         ),
-        session_id="session-agent",
         run_id="run-agent-smoke",
         hot_topics=["Testing"],
         active_topics=["Testing"],
-        agent_name="STELLA",
-        agent_persona="Careful test assistant",
     )
 
 

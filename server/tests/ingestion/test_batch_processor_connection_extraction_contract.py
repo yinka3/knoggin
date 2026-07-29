@@ -109,15 +109,14 @@ async def test_extract_connections_no_entity_ids_skips_llm():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         entity_ids=[],
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert processor.llm.calls == []
     assert trace.relationship_model is None
     assert trace.relationship_prompt is None
@@ -138,19 +137,20 @@ async def test_extract_connections_happy_path_returns_graph_write_observations()
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships[0].message_id == 1
-    assert relationships[0].entity_pairs[0].relationship == "works_with"
-    assert relationships[0].entity_pairs[0].confidence == 0.91
-    assert relationships[0].entity_pairs[0].msg_id == 1
-    assert user_relationships[0].message_id == 1
-    assert user_relationships[0].user_connections[0].relationship == "works_on"
-    assert user_relationships[0].user_connections[0].entity_name == "Knoggin"
+    assert observations[0].message_id == 1
+    assert observations[0].relationship_type == "works_with"
+    assert observations[0].confidence == 0.91
+    assert observations[0].identity_rooted is False
+    assert observations[1].message_id == 1
+    assert observations[1].relationship_type == "works_on"
+    assert observations[1].entity_b_name == "Knoggin"
+    assert observations[1].identity_rooted is True
     assert trace.relationship_model == "fake-connection-model"
     assert trace.relationship_prompt == "VEGAPUNK-02"
     assert trace.relationships_seen == 1
@@ -171,7 +171,7 @@ async def test_extract_connections_resolves_local_msg_id_to_real_message_id():
         {**MESSAGES[1], "id": 99},
     ]
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         entity_msg_map={101: [99], 102: [99], 103: [99]},
         messages=messages,
@@ -179,9 +179,8 @@ async def test_extract_connections_resolves_local_msg_id_to_real_message_id():
         issues=[],
     )
 
-    assert relationships[0].message_id == 99
-    assert relationships[0].entity_pairs[0].msg_id == 99
-    assert user_relationships == []
+    assert observations[0].message_id == 99
+    assert observations[0].identity_rooted is False
     prompt = processor.llm.calls[0]["user"]
     assert "[MSG m1]" in prompt
     assert "[MSG m2]" in prompt
@@ -200,14 +199,13 @@ async def test_extract_connections_accepts_known_alias_names_from_llm():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships[0].entity_pairs[0].entity_b == "Robert Chen"
-    assert user_relationships == []
+    assert observations[0].entity_b_name == "Robert Chen"
     assert trace.relationships_accepted == 1
     assert trace.relationships_rejected == 0
     assert issues == []
@@ -221,14 +219,13 @@ async def test_extract_connections_llm_failure_records_fallback_and_issue():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.fallbacks == [
         {"stage": "connections", "fallback": "empty_connections"}
     ]
@@ -243,14 +240,13 @@ async def test_extract_connections_empty_llm_result_returns_empty_without_fallba
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.fallbacks == []
     assert trace.relationships_seen == 0
     assert trace.user_relationships_seen == 0
@@ -264,7 +260,7 @@ async def test_extract_connections_missing_profile_records_issue_and_skips_llm()
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         entity_ids=[999],
         entity_msg_map={999: [1]},
@@ -272,8 +268,7 @@ async def test_extract_connections_missing_profile_records_issue_and_skips_llm()
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert processor.llm.calls == []
     assert [issue.code for issue in issues] == [
         "connection_candidate_profile_missing"
@@ -289,14 +284,13 @@ async def test_extract_connections_rejects_invalid_relationship_msg_id():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.relationships_seen == 1
     assert trace.relationships_rejected == 1
     assert [issue.code for issue in issues] == ["invalid_msg_id"]
@@ -313,14 +307,13 @@ async def test_extract_connections_rejects_unknown_relationship_entity():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.relationships_seen == 1
     assert trace.relationships_rejected == 1
     assert [issue.code for issue in issues] == ["invalid_entity_name"]
@@ -335,15 +328,14 @@ async def test_extract_connections_rejects_relationship_msg_id_without_entity_so
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         entity_msg_map={101: [1], 102: [1], 103: [2]},
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.relationships_seen == 1
     assert trace.relationships_rejected == 1
     assert [issue.code for issue in issues] == [
@@ -362,14 +354,13 @@ async def test_extract_connections_rejects_self_relationship():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.relationships_seen == 1
     assert trace.relationships_rejected == 1
     assert [issue.code for issue in issues] == ["self_relationship"]
@@ -389,15 +380,14 @@ async def test_extract_connections_rejects_duplicate_relationship():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships[0].entity_pairs[0].entity_a == "Alice"
-    assert relationships[0].entity_pairs[0].entity_b == "Robert Chen"
-    assert user_relationships == []
+    assert observations[0].entity_a_name == "Alice"
+    assert observations[0].entity_b_name == "Robert Chen"
     assert trace.relationships_seen == 2
     assert trace.relationships_accepted == 1
     assert trace.relationships_rejected == 1
@@ -413,14 +403,13 @@ async def test_extract_connections_rejects_invalid_user_connection_msg_id():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.user_relationships_seen == 1
     assert trace.user_relationships_rejected == 1
     assert [issue.code for issue in issues] == ["invalid_user_connection_msg_id"]
@@ -437,14 +426,13 @@ async def test_extract_connections_rejects_unknown_user_connection_entity():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.user_relationships_seen == 1
     assert trace.user_relationships_rejected == 1
     assert [issue.code for issue in issues] == ["invalid_user_connection_entity"]
@@ -459,15 +447,14 @@ async def test_extract_connections_rejects_user_connection_without_entity_source
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         entity_msg_map={101: [1], 102: [1], 103: [1]},
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.user_relationships_seen == 1
     assert trace.user_relationships_rejected == 1
     assert [issue.code for issue in issues] == [
@@ -486,7 +473,7 @@ async def test_extract_connections_rejects_user_connected_to_self():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         entity_ids=[101, 102, 103, 104],
         entity_msg_map={101: [1], 102: [1], 103: [1], 104: [1]},
@@ -494,8 +481,7 @@ async def test_extract_connections_rejects_user_connected_to_self():
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships == []
+    assert observations == []
     assert trace.user_relationships_seen == 1
     assert trace.user_relationships_rejected == 1
     assert [issue.code for issue in issues] == ["self_user_connection"]
@@ -515,14 +501,14 @@ async def test_extract_connections_rejects_duplicate_user_connection():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert relationships == []
-    assert user_relationships[0].user_connections[0].entity_name == "Knoggin"
+    assert observations[0].entity_b_name == "Knoggin"
+    assert observations[0].identity_rooted is True
     assert trace.user_relationships_seen == 2
     assert trace.user_relationships_accepted == 1
     assert trace.user_relationships_rejected == 1
@@ -549,18 +535,17 @@ async def test_extract_connections_keeps_valid_items_when_response_is_mixed():
     trace = ExtractionTrace()
     issues = []
 
-    relationships, user_relationships = await extract(
+    observations = await extract(
         processor,
         trace=trace,
         issues=issues,
     )
 
-    assert [pair.relationship for pair in relationships[0].entity_pairs] == [
-        "works_with"
+    assert [item.relationship_type for item in observations] == [
+        "works_with",
+        "works_on",
     ]
-    assert [
-        pair.relationship for pair in user_relationships[0].user_connections
-    ] == ["works_on"]
+    assert [item.identity_rooted for item in observations] == [False, True]
     assert trace.relationships_seen == 3
     assert trace.relationships_accepted == 1
     assert trace.relationships_rejected == 2

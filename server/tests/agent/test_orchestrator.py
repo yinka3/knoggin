@@ -14,7 +14,7 @@ class FakeLimits:
     agent_history_turns = 3
     max_accumulated_messages = 12
     max_consecutive_errors = 2
-    tool_limits = {"search_entity": 4}
+    tool_limit_overrides = {"search_entity": 4}
 
 
 class FakeConfig:

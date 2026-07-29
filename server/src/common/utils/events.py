@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Set
 import redis.asyncio as aioredis
 from loguru import logger
 
+from common.schema.events import InternalEvent
 from common.utils.coordination_log import write_coordination_event
 from common.utils.event_persistence_policy import normalize_coordination_event
 from common.utils.time_utils import get_now, get_now_iso, parse_iso_time
@@ -21,6 +22,17 @@ class DebugEvent:
     event: str
     data: Dict[str, Any]
     verbose_only: bool = False
+
+    @classmethod
+    def from_internal(cls, event: InternalEvent, *, session_id: str) -> "DebugEvent":
+        return cls(
+            ts=event.ts,
+            session_id=session_id,
+            component=event.component,
+            event=event.event,
+            data=event.data,
+            verbose_only=event.verbose_only,
+        )
 
 
 @dataclass
@@ -196,36 +208,23 @@ class EventEmitter(BaseEventEmitter):
         verbose_only: bool = False,
     ):
         ts = get_now_iso()
-        self._persist_coordination_event(
+        internal_event = InternalEvent(
             ts=ts,
             scope_id=session_id,
             component=component,
             event=event,
-            data=data,
+            data=data or {},
             verbose_only=verbose_only,
         )
+        self._persist_coordination_event(internal_event)
         # If session_id is a registered project_id, fan out to all its active sessions
         if session_id in self.project_sessions:
             active_sess_list = list(self.project_sessions[session_id])
             for active_sess in active_sess_list:
-                evt = DebugEvent(
-                    ts=ts,
-                    session_id=active_sess,
-                    component=component,
-                    event=event,
-                    data=data or {},
-                    verbose_only=verbose_only,
-                )
+                evt = DebugEvent.from_internal(internal_event, session_id=active_sess)
                 await self._emit_to_subs(active_sess, evt)
         else:
-            evt = DebugEvent(
-                ts=ts,
-                session_id=session_id,
-                component=component,
-                event=event,
-                data=data or {},
-                verbose_only=verbose_only,
-            )
+            evt = DebugEvent.from_internal(internal_event, session_id=session_id)
             await self._emit_to_subs(session_id, evt)
 
         self._emit_count += 1
@@ -234,25 +233,12 @@ class EventEmitter(BaseEventEmitter):
 
     def _persist_coordination_event(
         self,
-        *,
-        ts: str,
-        scope_id: str,
-        component: str,
-        event: str,
-        data: Dict[str, Any] = None,
-        verbose_only: bool = False,
+        internal_event: InternalEvent,
     ) -> None:
-        record = normalize_coordination_event(
-            ts=ts,
-            scope_id=scope_id,
-            component=component,
-            event=event,
-            data=data,
-            verbose_only=verbose_only,
-        )
-        if record is None:
+        fields = normalize_coordination_event(internal_event)
+        if fields is None:
             return
-        write_coordination_event(record.fields)
+        write_coordination_event(fields)
 
     async def cleanup_stale_sessions(self, max_age_hours: int = 24):
         stale = await self._base_cleanup(max_age_hours)

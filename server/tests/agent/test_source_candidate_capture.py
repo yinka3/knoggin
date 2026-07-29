@@ -3,10 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import ToolExecutionError
+from common.schema.contracts import EngineScope
 from common.schema.source_reference import SourceReferenceCandidate
 from core.agent.executor import AgentExecutor
 from core.agent.types import (
     AgentContext,
+    AgentRunIdentity,
     AgentRunConfig,
     AgentState,
     FinalResponse,
@@ -17,8 +19,12 @@ from core.agent.types import (
 
 def _pasted_candidate():
     return SourceReferenceCandidate(
-        project_id="project-1",
-        session_id="session-1",
+        scope=EngineScope(
+            user_name="ada", session_id="session-1", project_id="project-1"
+        ),
+        agent=AgentRunIdentity(
+            config=SimpleNamespace(id="agent-1"), name="STELLA", persona=""
+        ),
         source_kind="user_pasted_text",
         source_message_id=41,
         content_hash="a" * 64,

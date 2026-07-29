@@ -16,7 +16,6 @@ from common.schema.contracts import (
     MessageEntityRef,
     RelationshipWrite,
     SkippedRelationship,
-    UserRelationshipWrite,
 )
 from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.events import emit
@@ -115,17 +114,14 @@ async def build_graph_mutation_plan(
 
         embedding = await entities.get_embedding_for_id(entity_id)
         return EntityWrite(
-            id=entity_id,
+            entity_id=entity_id,
             is_new=entity_id in new_entity_ids,
             canonical_name=profile.canonical_name,
-            type=profile.entity_type,
+            entity_type=profile.entity_type,
             confidence=1.0,
             topic=profile.topic,
             embedding=_normalize_embedding(embedding),
-            aliases=list(entities.get_mentions_for_id(entity_id)),
-            user_name=scope.user_name,
-            session_id=profile.session_id or scope.session_id,
-            project_id=profile.project_id or entities.project_id or scope.project_id,
+            aliases=tuple(entities.get_mentions_for_id(entity_id)),
         )
 
     for entity_id in new_entity_ids:
@@ -163,105 +159,49 @@ async def build_graph_mutation_plan(
                 entity_lookup[mention.lower()] = entry
 
     relationship_writes = []
-    user_relationship_writes = []
     skipped_relationships = []
-    for msg_result in batch.relationship_observations:
-        msg_id = msg_result.message_id
+    for observation in batch.relationship_observations:
+        msg_id = observation.message_id
+        pair_entity_a = observation.entity_a_name
+        pair_entity_b = observation.entity_b_name
+        ent_a_name = pair_entity_a.lower() if pair_entity_a else None
+        ent_b_name = pair_entity_b.lower() if pair_entity_b else None
 
-        for pair in msg_result.entity_pairs:
-            pair_entity_a = pair.entity_a
-            pair_entity_b = pair.entity_b
-            ent_a_name = pair_entity_a.lower() if pair_entity_a else None
-            ent_b_name = pair_entity_b.lower() if pair_entity_b else None
+        ent_a = entity_lookup.get(ent_a_name) if ent_a_name else None
+        ent_b = entity_lookup.get(ent_b_name) if ent_b_name else None
 
-            ent_a = entity_lookup.get(ent_a_name) if ent_a_name else None
-            ent_b = entity_lookup.get(ent_b_name) if ent_b_name else None
+        if observation.identity_rooted:
+            ent_a = {"id": IDENTITY_ENTITY_ID}
 
-            if not (ent_a and ent_b):
-                logger.warning(
-                    f"Skipping pair: {pair_entity_a} - {pair_entity_b} "
-                    "(Entity missing or Zombie)"
-                )
-                skipped_relationships.append(
-                    SkippedRelationship(
-                        entity_a=pair_entity_a,
-                        entity_b=pair_entity_b,
-                        message_id=msg_id,
-                        reason="entity_missing_or_zombie",
-                        metadata={
-                            "entity_a_found": ent_a is not None,
-                            "entity_b_found": ent_b is not None,
-                        },
-                    )
-                )
-                continue
-
-            evidence_ref = {
-                "user_name": scope.user_name,
-                "session_id": scope.session_id,
-                "message_id": int(str(msg_id).removeprefix("msg_")),
-            }
-            relationship_writes.append(
-                RelationshipWrite(
-                    entity_a=ent_a["canonical_name"],
-                    entity_b=ent_b["canonical_name"],
-                    entity_a_id=ent_a["id"],
-                    entity_b_id=ent_b["id"],
-                    message_id=f"msg_{msg_id}",
-                    evidence_ref=evidence_ref,
-                    user_name=scope.user_name,
-                    session_id=scope.session_id,
-                    project_id=scope.project_id,
-                    confidence=pair.confidence,
-                    context=pair.context,
+        if not (ent_a and ent_b):
+            logger.warning(
+                f"Skipping pair: {pair_entity_a} - {pair_entity_b} "
+                "(Entity missing or Zombie)"
+            )
+            skipped_relationships.append(
+                SkippedRelationship(
+                    entity_a=pair_entity_a,
+                    entity_b=pair_entity_b,
+                    message_id=msg_id,
+                    reason="entity_missing_or_zombie",
+                    metadata={
+                        "entity_a_found": ent_a is not None,
+                        "entity_b_found": ent_b is not None,
+                    },
                 )
             )
+            continue
 
-    for msg_result in batch.user_relationship_observations:
-        msg_id = msg_result.message_id
-
-        for pair in msg_result.user_connections:
-            target_name = pair.entity_name
-            target_lookup_name = target_name.lower() if target_name else None
-            target = (
-                entity_lookup.get(target_lookup_name) if target_lookup_name else None
+        relationship_writes.append(
+            RelationshipWrite(
+                entity_a_id=ent_a["id"],
+                entity_b_id=ent_b["id"],
+                relationship_type=observation.relationship_type,
+                message_id=msg_id,
+                confidence=observation.confidence,
+                context=observation.context,
             )
-
-            if not target:
-                logger.warning(
-                    f"Skipping user relationship: {scope.user_name} - {target_name} "
-                    "(target entity missing or Zombie)"
-                )
-                skipped_relationships.append(
-                    SkippedRelationship(
-                        entity_a=scope.user_name,
-                        entity_b=target_name,
-                        message_id=msg_id,
-                        reason="user_target_missing_or_zombie",
-                        metadata={"entity_found": target is not None},
-                    )
-                )
-                continue
-
-            evidence_ref = {
-                "user_name": scope.user_name,
-                "session_id": scope.session_id,
-                "message_id": int(str(msg_id).removeprefix("msg_")),
-            }
-            user_relationship_writes.append(
-                UserRelationshipWrite(
-                    user_entity_id=IDENTITY_ENTITY_ID,
-                    entity_name=target["canonical_name"],
-                    entity_id=target["id"],
-                    message_id=f"msg_{msg_id}",
-                    evidence_ref=evidence_ref,
-                    user_name=scope.user_name,
-                    session_id=scope.session_id,
-                    project_id=scope.project_id,
-                    confidence=pair.confidence,
-                    context=pair.context,
-                )
-            )
+        )
 
     batch_work_unit_id = batch.work_unit.id if batch.work_unit else None
     graph_work_unit = EngineWorkUnit.for_graph_write(
@@ -290,7 +230,6 @@ async def build_graph_mutation_plan(
         message_entity_refs=message_entity_refs,
         eligible_messages=eligible_messages,
         relationship_writes=relationship_writes,
-        user_relationship_writes=user_relationship_writes,
         skipped_relationships=skipped_relationships,
         zombie_entity_ids=zombie_entity_ids,
         dirty_entity_ids=set(safe_entity_ids),
@@ -333,18 +272,16 @@ async def execute_graph_mutation_plan(
             alias_update_map, project_id=plan.scope.project_id
         )
 
-    entity_payloads, relationship_payloads = plan.to_graph_payloads()
-    message_entity_payloads = plan.to_message_entity_payloads()
     if (
-        entity_payloads
-        or relationship_payloads
-        or message_entity_payloads
+        plan.entity_writes
+        or plan.relationship_writes
+        or plan.message_entity_refs
         or plan.eligible_messages
     ):
         await knowledge_store.write_batch(
-            entity_payloads,
-            relationship_payloads,
-            message_entity_refs=message_entity_payloads,
+            plan.entity_writes,
+            plan.relationship_writes,
+            message_entity_refs=plan.message_entity_refs,
             eligible_messages=plan.eligible_messages,
             scope=plan.scope,
         )
@@ -380,9 +317,8 @@ async def execute_graph_mutation_plan(
         )
 
     return GraphWriteSummary(
-        entities_written=len(entity_payloads),
-        relationships_written=len(relationship_payloads),
-        user_relationships_written=len(plan.user_relationship_writes),
+        entities_written=len(plan.entity_writes),
+        relationships_written=len(plan.relationship_writes),
         aliases_updated=len(alias_update_map),
         dirty_entities_marked=dirty_entities_marked,
         zombies_filtered=len(plan.zombie_entity_ids),
@@ -432,7 +368,6 @@ async def write_batch_to_graph(
     logger.info(
         f"Graph write: {summary.entities_written} entities, "
         f"{summary.relationships_written} relationships "
-        f"({summary.user_relationships_written} user-root), "
         f"(Filtered {summary.zombies_filtered} zombies, "
         f"skipped {summary.relationships_skipped} relationships)"
     )

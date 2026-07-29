@@ -4,9 +4,8 @@ from pydantic import ValidationError
 from common.schema.contracts import (
     ConnectionMention,
     ConnectionsResult,
-    MessageConnections,
+    RelationshipObservation,
 )
-from common.schema.primitives import ConnectionRecord
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.profile import EntityProfile
 
@@ -99,7 +98,7 @@ async def test_connection_extraction_falls_back_to_empty_on_llm_failure():
         session_id="session-1",
     )
 
-    assert result == ([], [])
+    assert result == []
 
 
 @pytest.mark.ingestion
@@ -128,18 +127,13 @@ async def test_connection_extraction_keeps_valid_connections():
         session_id="session-1",
     )
 
-    assert result == ([
-        MessageConnections(
+    assert result == [
+        RelationshipObservation(
             message_id=7,
-            entity_pairs=[
-                ConnectionRecord(
-                    entity_a="Alice",
-                    entity_b="Bob",
-                    relationship="met",
-                    confidence=0.9,
-                    context="Alice met Bob.",
-                    msg_id=7,
-                )
-            ],
+            entity_a_name="Alice",
+            entity_b_name="Bob",
+            relationship_type="met",
+            confidence=0.9,
+            context="Alice met Bob.",
         )
-    ], [])
+    ]

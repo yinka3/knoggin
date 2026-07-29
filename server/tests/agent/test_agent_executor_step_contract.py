@@ -3,9 +3,11 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import LLMProviderError
+from common.schema.contracts import EngineScope
 from core.agent.executor import AgentExecutor
 from core.agent.types import (
     AgentContext,
+    AgentRunIdentity,
     AgentRunConfig,
     AgentState,
     MaintenanceCandidate,
@@ -35,13 +37,16 @@ def make_executor(llm):
         config=AgentRunConfig(),
         state=AgentState(),
         evidence=RetrievedEvidence(),
-        user_name="ada",
+        scope=EngineScope(
+            user_name="ada", session_id="session-1", project_id="project-1"
+        ),
+        agent=AgentRunIdentity(
+            config=SimpleNamespace(id="agent-1"),
+            name="STELLA",
+            persona="Careful memory assistant",
+        ),
         user_query="What changed in profile behavior?",
-        session_id="session-1",
-        project_id="project-1",
         run_id="run-1",
-        agent_name="STELLA",
-        agent_persona="Careful memory assistant",
         active_topics=["Identity", "Testing"],
     )
     tools = SimpleNamespace(document_service=None)

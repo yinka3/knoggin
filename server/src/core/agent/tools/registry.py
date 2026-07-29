@@ -21,107 +21,6 @@ from core.agent.tools.topic_tools import TopicTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 
-TOOL_DISPATCH = {
-    "search_messages": ("search_messages", ["query", "limit"]),
-    "search_entity": ("search_entity", ["query", "limit"]),
-    "get_connections": ("get_connections", ["entity_name"]),
-    "get_recent_activity": ("get_recent_activity", ["entity_name", "hours"]),
-    "episode_check": ("episode_check", ["query", "entity_name"]),
-    "read_episode": ("read_episode", ["episode_id"]),
-    "read_recent_episodes": ("read_recent_episodes", ["limit"]),
-    "find_path": ("find_path", ["entity_a", "entity_b"]),
-    "get_hierarchy": ("get_hierarchy", ["entity_name", "direction"]),
-    "read_brain": ("read_brain", []),
-    "list_brain_snapshots": ("list_brain_snapshots", []),
-    "read_brain_snapshot": ("read_brain_snapshot", ["revision"]),
-    "edit_brain": (
-        "edit_brain",
-        ["section", "content", "expected_revision", "change_note"],
-    ),
-    "restore_brain_section": (
-        "restore_brain_section",
-        [
-            "section",
-            "from_snapshot_revision",
-            "expected_current_revision",
-            "change_note",
-        ],
-    ),
-    "list_documents": (
-        "list_documents",
-        [
-            "folder_root_id",
-            "path_prefix",
-            "visibility_scope",
-            "limit",
-            "use_focus",
-        ],
-    ),
-    "list_folder_uploads": (
-        "list_folder_uploads",
-        ["visibility_scope", "limit"],
-    ),
-    "get_folder_upload_summary": (
-        "get_folder_upload_summary",
-        ["folder_root_id", "use_focus"],
-    ),
-    "list_folder_tree": (
-        "list_folder_tree",
-        ["folder_root_id", "path_prefix", "max_depth", "use_focus"],
-    ),
-    "get_document_info": (
-        "get_document_info",
-        ["document_id", "relative_path", "use_focus"],
-    ),
-    "read_document": (
-        "read_document",
-        [
-            "document_id",
-            "relative_path",
-            "start_line",
-            "end_line",
-            "use_focus",
-        ],
-    ),
-    "search_documents": (
-        "search_documents",
-        [
-            "query",
-            "document_name",
-            "relative_path",
-            "path_prefix",
-            "folder_root_id",
-            "limit",
-            "use_focus",
-        ],
-    ),
-    "web_search": ("web_search", ["query", "limit", "freshness"]),
-    "news_search": ("news_search", ["query", "limit", "freshness"]),
-    "request_clarification": None,  # handled specially
-    "request_replanning": None,  # handled specially
-    "save_insight": ("save_insight", ["content"]),
-    "spawn_specialist": (
-        "spawn_specialist",
-        ["name", "persona", "initial_directives"],
-    ),
-    "update_topics": (
-        "update_topics",
-        ["add_topics", "deactivate_topics", "reasoning"],
-    ),
-    "check_graph_health": ("check_graph_health", []),
-    "propose_entity_merge": (
-        "propose_entity_merge",
-        [
-            "primary_id",
-            "duplicate_id",
-            "evidence_message_ids",
-            "evidence_episode_ids",
-            "reasoning",
-            "confidence",
-        ],
-    ),
-}
-
 SPECIAL_TOOL_NAMES = frozenset(
     {"request_clarification", "request_replanning", "submit_answer"}
 )
@@ -138,53 +37,6 @@ FEATURE_TOOL_LAYERS = frozenset(
 RUNTIME_TOOL_LAYERS = frozenset({"runtime_special"})
 VALID_TOOL_LAYERS = CORE_TOOL_LAYERS | FEATURE_TOOL_LAYERS | RUNTIME_TOOL_LAYERS
 
-TOOL_LAYERS = {
-    "core_memory": frozenset(
-        {
-            "search_messages",
-            "search_entity",
-            "get_connections",
-            "get_recent_activity",
-            "episode_check",
-            "read_episode",
-            "read_recent_episodes",
-            "find_path",
-            "get_hierarchy",
-            "list_documents",
-            "list_folder_uploads",
-            "get_folder_upload_summary",
-            "list_folder_tree",
-            "get_document_info",
-            "read_document",
-            "search_documents",
-        }
-    ),
-    "core_brain": frozenset(
-        {
-            "read_brain",
-            "list_brain_snapshots",
-            "read_brain_snapshot",
-            "edit_brain",
-            "restore_brain_section",
-        }
-    ),
-    "feature_external": frozenset({"web_search", "news_search"}),
-    "feature_project_admin": frozenset({"update_topics"}),
-    "feature_maintenance": frozenset(
-        {
-            "check_graph_health",
-            "propose_entity_merge",
-        }
-    ),
-    "feature_community": frozenset({"save_insight", "spawn_specialist"}),
-    "runtime_special": SPECIAL_TOOL_NAMES,
-}
-
-TOOL_LAYER_BY_NAME = {
-    tool_name: layer
-    for layer, tool_names in TOOL_LAYERS.items()
-    for tool_name in tool_names
-}
 BASE_TOOL_SCHEMA_BY_NAME = {
     schema["function"]["name"]: schema for schema in TOOL_SCHEMAS
 }
@@ -199,11 +51,34 @@ class ToolModule:
     name: str
     layer: str
     tools: frozenset[str]
-    schema_names: frozenset[str]
     default_limits: tuple[tuple[str, int], ...] = ()
     after_tool_result: Optional[ToolResultHook] = None
     after_tool_error: Optional[ToolErrorHook] = None
     runtime_instructions: Optional[RuntimeInstructionHook] = None
+
+    @property
+    def schema_names(self) -> frozenset[str]:
+        """Every owned tool has exactly one schema in this catalog."""
+
+        return self.tools
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    """Canonical runtime description of one callable agent tool.
+
+    The public maps below are derived indexes retained for callers that need a
+    lookup by name, layer, or module. New runtime behavior should be added to
+    this definition rather than consulting parallel maps.
+    """
+
+    name: str
+    schema: dict
+    dispatch: tuple[str, tuple[str, ...]] | None
+    layer: str
+    module: ToolModule
+    capability: str
+    default_limit: Optional[int] = None
 
 
 async def _project_admin_after_tool_result(
@@ -291,13 +166,13 @@ async def _mark_maintenance_handled(ctx, tools, candidate) -> None:
     from core.agent.maintenance import mark_maintenance_handled
 
     redis = getattr(tools, "redis", None)
-    project_id = ctx.project_id or str(getattr(tools, "project_id", ""))
+    project_id = ctx.scope.project_id or str(getattr(tools, "project_id", ""))
     if redis is not None and project_id:
         try:
             await mark_maintenance_handled(
                 redis,
                 candidate,
-                user_name=ctx.user_name,
+                user_name=ctx.scope.user_name,
                 project_id=project_id,
             )
         except Exception as exc:
@@ -314,13 +189,13 @@ async def _record_maintenance_failure(ctx, tools, candidate) -> None:
     from core.agent.maintenance import record_maintenance_failure
 
     redis = getattr(tools, "redis", None)
-    project_id = ctx.project_id or str(getattr(tools, "project_id", ""))
+    project_id = ctx.scope.project_id or str(getattr(tools, "project_id", ""))
     if redis is not None and project_id:
         try:
             await record_maintenance_failure(
                 redis,
                 candidate,
-                user_name=ctx.user_name,
+                user_name=ctx.scope.user_name,
                 project_id=project_id,
             )
         except Exception as exc:
@@ -341,8 +216,26 @@ TOOL_MODULES = {
     "core_memory": ToolModule(
         name="core_memory",
         layer="core_memory",
-        tools=TOOL_LAYERS["core_memory"],
-        schema_names=TOOL_LAYERS["core_memory"],
+        tools=frozenset(
+            {
+                "search_messages",
+                "search_entity",
+                "get_connections",
+                "get_recent_activity",
+                "episode_check",
+                "read_episode",
+                "read_recent_episodes",
+                "find_path",
+                "get_hierarchy",
+                "list_documents",
+                "list_folder_uploads",
+                "get_folder_upload_summary",
+                "list_folder_tree",
+                "get_document_info",
+                "read_document",
+                "search_documents",
+            }
+        ),
         default_limits=(
             ("search_messages", 6),
             ("get_connections", 8),
@@ -365,23 +258,28 @@ TOOL_MODULES = {
     "feature_external": ToolModule(
         name="feature_external",
         layer="feature_external",
-        tools=TOOL_LAYERS["feature_external"],
-        schema_names=TOOL_LAYERS["feature_external"],
+        tools=frozenset({"web_search", "news_search"}),
         default_limits=(("web_search", 8), ("news_search", 8)),
     ),
     "feature_project_admin": ToolModule(
         name="feature_project_admin",
         layer="feature_project_admin",
-        tools=TOOL_LAYERS["feature_project_admin"],
-        schema_names=TOOL_LAYERS["feature_project_admin"],
+        tools=frozenset({"update_topics"}),
         default_limits=(("update_topics", 1),),
         after_tool_result=_project_admin_after_tool_result,
     ),
     "core_brain": ToolModule(
         name="core_brain",
         layer="core_brain",
-        tools=TOOL_LAYERS["core_brain"],
-        schema_names=TOOL_LAYERS["core_brain"],
+        tools=frozenset(
+            {
+                "read_brain",
+                "list_brain_snapshots",
+                "read_brain_snapshot",
+                "edit_brain",
+                "restore_brain_section",
+            }
+        ),
         default_limits=(
             ("read_brain", 4),
             ("list_brain_snapshots", 4),
@@ -393,15 +291,13 @@ TOOL_MODULES = {
     "feature_community": ToolModule(
         name="feature_community",
         layer="feature_community",
-        tools=TOOL_LAYERS["feature_community"],
-        schema_names=TOOL_LAYERS["feature_community"],
+        tools=frozenset({"save_insight", "spawn_specialist"}),
         default_limits=(("save_insight", 4), ("spawn_specialist", 2)),
     ),
     "feature_maintenance": ToolModule(
         name="feature_maintenance",
         layer="feature_maintenance",
-        tools=TOOL_LAYERS["feature_maintenance"],
-        schema_names=TOOL_LAYERS["feature_maintenance"],
+        tools=frozenset({"check_graph_health", "propose_entity_merge"}),
         after_tool_result=_maintenance_after_tool_result,
         after_tool_error=_maintenance_after_tool_error,
         runtime_instructions=_maintenance_runtime_instructions,
@@ -409,27 +305,78 @@ TOOL_MODULES = {
     "runtime_special": ToolModule(
         name="runtime_special",
         layer="runtime_special",
-        tools=TOOL_LAYERS["runtime_special"],
-        schema_names=TOOL_LAYERS["runtime_special"],
+        tools=SPECIAL_TOOL_NAMES,
         default_limits=(("request_replanning", 2),),
     ),
 }
 
-TOOL_MODULE_BY_NAME = {
+_SCHEMA_BY_NAME = {
+    schema["function"]["name"]: schema
+    for schema in [*TOOL_SCHEMAS, *AAC_SPECIFIC_SCHEMAS]
+}
+
+
+def _dispatch_from_schema(
+    name: str,
+    schema: dict,
+) -> tuple[str, tuple[str, ...]] | None:
+    """Derive direct method dispatch from the public tool schema.
+
+    Runtime-special tools are interpreted by the executor rather than a Tools
+    method. Every other callable tool deliberately uses the schema name as its
+    method name, so parameter keys cannot drift from the schema contract.
+    """
+
+    if name in SPECIAL_TOOL_NAMES:
+        return None
+    parameters = schema["function"].get("parameters", {}).get("properties", {})
+    return name, tuple(parameters)
+
+
+_DECLARED_MODULE_BY_TOOL = {
     tool_name: module
     for module in TOOL_MODULES.values()
     for tool_name in module.tools
 }
-
-DEFAULT_TOOL_LIMITS = {
-    tool_name: limit
-    for module in TOOL_MODULES.values()
-    for tool_name, limit in module.default_limits
+TOOL_DEFINITIONS = {
+    name: ToolDefinition(
+        name=name,
+        schema=schema,
+        dispatch=_dispatch_from_schema(name, schema),
+        layer=_DECLARED_MODULE_BY_TOOL[name].layer,
+        module=_DECLARED_MODULE_BY_TOOL[name],
+        capability=get_schema_capability(schema),
+        default_limit=dict(_DECLARED_MODULE_BY_TOOL[name].default_limits).get(name),
+    )
+    for name, schema in _SCHEMA_BY_NAME.items()
+    if name in _DECLARED_MODULE_BY_TOOL
 }
-TOOL_SCHEMA_MODULE_BY_NAME = {
-    schema_name: module
-    for module in TOOL_MODULES.values()
-    for schema_name in module.schema_names
+
+# Derived compatibility indexes. ToolDefinition is the runtime authority.
+TOOL_DISPATCH = {
+    name: definition.dispatch
+    for name, definition in TOOL_DEFINITIONS.items()
+    if definition.dispatch is not None
+}
+TOOL_LAYERS = {
+    layer: frozenset(
+        definition.name
+        for definition in TOOL_DEFINITIONS.values()
+        if definition.layer == layer
+    )
+    for layer in VALID_TOOL_LAYERS
+}
+TOOL_LAYER_BY_NAME = {
+    definition.name: definition.layer for definition in TOOL_DEFINITIONS.values()
+}
+TOOL_MODULE_BY_NAME = {
+    definition.name: definition.module for definition in TOOL_DEFINITIONS.values()
+}
+TOOL_SCHEMA_MODULE_BY_NAME = dict(TOOL_MODULE_BY_NAME)
+DEFAULT_TOOL_LIMITS = {
+    definition.name: definition.default_limit
+    for definition in TOOL_DEFINITIONS.values()
+    if definition.default_limit is not None
 }
 
 
@@ -616,6 +563,23 @@ def validate_registry_contract() -> None:
         raise RuntimeError(
             f"Duplicate tool schemas: {sorted(duplicate_names)}"
         )
+
+    definition_names = set(TOOL_DEFINITIONS)
+    missing_definitions = schema_names - definition_names
+    extra_definitions = definition_names - schema_names
+    if missing_definitions or extra_definitions:
+        raise RuntimeError(
+            "Tool definition contract mismatch: "
+            f"missing={sorted(missing_definitions)}, "
+            f"extra={sorted(extra_definitions)}"
+        )
+    for name, definition in TOOL_DEFINITIONS.items():
+        if definition.name != name:
+            raise RuntimeError(f"Tool definition key/name mismatch: {name}")
+        if definition.schema["function"]["name"] != name:
+            raise RuntimeError(f"Tool definition '{name}' schema mismatch")
+        if definition.capability != get_schema_capability(definition.schema):
+            raise RuntimeError(f"Tool definition '{name}' capability mismatch")
 
     dispatch_names = set(TOOL_DISPATCH)
     missing_dispatch = schema_names - SPECIAL_TOOL_NAMES - dispatch_names

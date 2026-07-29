@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.schema.contracts import normalize_relationship_type, relationship_identity
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from common.utils.time_utils import get_now_ms
 from core.knowledge.db.writers.age_projection_writer import (
@@ -60,9 +61,18 @@ class GraphWriter:
         return merged
 
     @staticmethod
-    def _relationship_id(project_id: str, entity_a_id: int, entity_b_id: int) -> str:
-        a_id, b_id = sorted((entity_a_id, entity_b_id))
-        return f"{project_id}:{a_id}:{b_id}"
+    def _relationship_id(
+        project_id: str,
+        entity_a_id: int,
+        entity_b_id: int,
+        relationship_type: str,
+    ) -> str:
+        return relationship_identity(
+            project_id,
+            entity_a_id,
+            entity_b_id,
+            relationship_type,
+        )
 
     @staticmethod
     def _clean_string(value):
@@ -105,9 +115,13 @@ class GraphWriter:
             ]
             params.append(
                 {
+                    "relationship_id": row["relationship_id"],
                     "project_id": row["project_id"],
                     "entity_a_id": int(row["entity_a_id"]),
                     "entity_b_id": int(row["entity_b_id"]),
+                    "relationship_type": normalize_relationship_type(
+                        row["relationship_type"]
+                    ),
                     "weight": int(row.get("weight") or 1),
                     "confidence": float(row.get("confidence") or 0),
                     "context": row.get("context"),
@@ -341,7 +355,12 @@ class GraphWriter:
             return False
 
     async def delete_relationship(
-        self, entity_a_id: int, entity_b_id: int, *, project_id: str
+        self,
+        entity_a_id: int,
+        entity_b_id: int,
+        *,
+        relationship_type: str,
+        project_id: str,
     ) -> bool:
         project_id = self._require_project_id(project_id, "delete_relationship")
         try:
@@ -349,6 +368,7 @@ class GraphWriter:
                 project_id,
                 entity_a_id,
                 entity_b_id,
+                relationship_type,
             )
             async with self.client.transaction() as cur:
                 await cur.execute(
@@ -369,15 +389,15 @@ class GraphWriter:
                 canonical_record = await cur.fetchone()
                 projected_deleted = await self.projection.delete_relationship(
                     cur,
-                    entity_a_id,
-                    entity_b_id,
+                    relationship_id,
                     project_id,
                 )
 
             return bool(canonical_record or projected_deleted)
         except Exception as e:
             logger.error(
-                f"Failed to delete relationship ({entity_a_id}, {entity_b_id}): {e}"
+                "Failed to delete relationship "
+                f"({entity_a_id}, {entity_b_id}, {relationship_type}): {e}"
             )
             return False
 
@@ -748,6 +768,7 @@ class GraphWriter:
                         project_id,
                         new_a,
                         new_b,
+                        rel["relationship_type"],
                     )
                     await cur.execute(
                         """

@@ -39,14 +39,9 @@ class RecordingJob:
         self.name = name
         self.kwargs = kwargs
         self.updates = []
-        self.local_reference_updates = []
 
     def update_settings(self, *settings):
         self.updates.append(settings if len(settings) > 1 else settings[0])
-
-    def update_local_reference_settings(self, settings):
-        self.local_reference_updates.append(settings)
-
 
 class RecordingProjectState:
     def __init__(self):
@@ -62,14 +57,9 @@ class RecordingProjectState:
 class RecordingProcessor:
     def __init__(self):
         self.updates = []
-        self.local_reference_updates = []
 
     def update_settings(self, settings):
         self.updates.append(settings)
-
-    def update_local_reference_settings(self, settings):
-        self.local_reference_updates.append(settings)
-
 
 class RecordingEntities:
     def __init__(self):
@@ -151,8 +141,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
-        "developer_settings.local_references",
-        "developer_settings.local_references",
         "developer_settings.jobs.episode",
         "developer_settings.ingestion",
         "developer_settings.jobs.document_indexing",
@@ -161,7 +149,7 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "developer_settings.jobs.merge_rollback",
         "developer_settings.jobs.audit_retention",
     ]
-    assert len(project_state.unsubscribers) == 11
+    assert len(project_state.unsubscribers) == 9
 
 
 @pytest.mark.runtime
@@ -217,7 +205,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     marker = object()
     config_manager.emit("developer_settings.entity_resolution", marker)
     config_manager.emit("developer_settings.nlp_pipeline", marker)
-    config_manager.emit("developer_settings.local_references", marker)
     config_manager.emit("developer_settings.jobs.episode", marker)
     config_manager.emit("developer_settings.jobs.document_indexing", marker)
     config_manager.emit("developer_settings.jobs.dlq", marker)
@@ -227,8 +214,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
 
     assert entities.updates[-1] is marker
     assert processor.updates[-2:] == [marker, marker]
-    assert processor.local_reference_updates[-1] is marker
-    assert episode.local_reference_updates[-1] is marker
     assert episode.updates[-1][0] is marker
     assert state.scheduler._jobs["document_index_recovery"].updates[-1] is marker
     assert state.scheduler._jobs["dlq_auto_replay"].updates[-1] is marker

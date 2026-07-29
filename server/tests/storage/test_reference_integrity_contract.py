@@ -46,9 +46,10 @@ async def test_relationship_evidence_requires_a_scoped_message_and_cascades(
     await real_postgres_client.execute(
         """
         INSERT INTO relationships (
-            relationship_id, user_name, project_id, entity_a_id, entity_b_id
+            relationship_id, user_name, project_id,
+            entity_a_id, entity_b_id, relationship_type
         )
-        VALUES ('project-1:2:3', 'ada', 'project-1', 2, 3)
+        VALUES ('project-1:2:3:related', 'ada', 'project-1', 2, 3, 'related')
         """
     )
 
@@ -57,7 +58,7 @@ async def test_relationship_evidence_requires_a_scoped_message_and_cascades(
         INSERT INTO relationship_evidence_refs (
             relationship_id, project_id, user_name, session_id, message_id
         )
-        VALUES ('project-1:2:3', 'project-1', 'ada', 'session-1', 101)
+        VALUES ('project-1:2:3:related', 'project-1', 'ada', 'session-1', 101)
         """
     )
     await real_postgres_client.execute(
@@ -73,7 +74,9 @@ async def test_relationship_evidence_requires_a_scoped_message_and_cascades(
             INSERT INTO relationship_evidence_refs (
                 relationship_id, project_id, user_name, session_id, message_id
             )
-            VALUES ('project-1:2:3', 'project-1', 'ada', 'session-1', 999)
+            VALUES (
+                'project-1:2:3:related', 'project-1', 'ada', 'session-1', 999
+            )
             """
         )
 
@@ -83,6 +86,8 @@ async def test_relationship_evidence_requires_a_scoped_message_and_cascades(
             INSERT INTO relationship_evidence_refs (
                 relationship_id, project_id, user_name, session_id, message_id
             )
-            VALUES ('project-1:2:3', 'project-2', 'ada', 'session-2', 102)
+            VALUES (
+                'project-1:2:3:related', 'project-2', 'ada', 'session-2', 102
+            )
             """
         )

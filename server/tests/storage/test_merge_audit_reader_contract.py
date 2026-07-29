@@ -64,9 +64,13 @@ class MutatingMergeAuditReader(MergeAuditReader):
                     user_name,
                     project_id,
                     entity_a_id,
-                    entity_b_id
+                    entity_b_id,
+                    relationship_type
                 )
-                VALUES ('project-1:2:3', 'ada', 'project-1', 2, 3)
+                VALUES (
+                    'project-1:2:3:related', 'ada', 'project-1', 2, 3,
+                    'related'
+                )
                 """
             )
         return rows

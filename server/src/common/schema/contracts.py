@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field, model_validator
 
 from common.schema.primitives import (
     Connection,
-    ConnectionRecord,
     Entity,
 )
+from common.schema.episode import EpisodeNarrative
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now, get_now_unix
 
@@ -33,17 +33,6 @@ class ConnectionMention(Connection):
     """One model-returned relationship with a local message reference."""
 
     msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
-
-
-class UserConnectionRecord(BaseModel):
-    """Connection between the identity root and a candidate entity."""
-
-    entity_name: str
-    relationship: str
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
-    context: Optional[str] = None
-    msg_id: int
-    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class UserConnectionMention(BaseModel):
@@ -118,16 +107,11 @@ def _validate_episode_decision_shape(decision: Any) -> None:
         raise ValueError("non-skip decisions must not include skip_reason")
 
 
-class EpisodeDecision(BaseModel):
+class EpisodeDecision(EpisodeNarrative):
     """Resolved internal decision for one bounded episodic-memory window."""
 
     action: Literal["create", "consolidate", "skip"]
     target_episode_id: Optional[str] = Field(None, min_length=1)
-    summary: Optional[str] = Field(None, min_length=1)
-    new_developments: List[str] = Field(default_factory=list)
-    updates: List[str] = Field(default_factory=list)
-    unresolved: List[str] = Field(default_factory=list)
-    importance: float = Field(0.0, ge=0.0, le=1.0)
     message_influences: List[EpisodeMessageInfluence] = Field(default_factory=list)
     focus_entities: List[EpisodeFocusEntitySelection] = Field(default_factory=list)
     central_relationships: List[EpisodeCentralRelationshipSelection] = Field(
@@ -141,14 +125,10 @@ class EpisodeDecision(BaseModel):
         return self
 
 
-class EpisodeConsolidation(BaseModel):
+class EpisodeConsolidation(EpisodeNarrative):
     """Resolved internal regeneration for one selected episode."""
 
     summary: str = Field(..., min_length=1)
-    new_developments: List[str] = Field(default_factory=list)
-    updates: List[str] = Field(default_factory=list)
-    unresolved: List[str] = Field(default_factory=list)
-    importance: float = Field(0.0, ge=0.0, le=1.0)
     message_influences: List[EpisodeMessageInfluence] = Field(
         ..., min_length=1
     )
@@ -181,16 +161,11 @@ class LLMEpisodeCentralRelationshipSelection(BaseModel):
     prominence_weight: float = Field(..., ge=0.0)
 
 
-class LLMEpisodeDecision(BaseModel):
+class LLMEpisodeDecision(EpisodeNarrative):
     """Model-facing episode decision that contains only local references."""
 
     action: Literal["create", "consolidate", "skip"]
     target_episode_id: Optional[str] = Field(None, pattern=r"^ep[1-9]\d*$")
-    summary: Optional[str] = Field(None, min_length=1)
-    new_developments: List[str] = Field(default_factory=list)
-    updates: List[str] = Field(default_factory=list)
-    unresolved: List[str] = Field(default_factory=list)
-    importance: float = Field(0.0, ge=0.0, le=1.0)
     message_influences: List[LLMEpisodeMessageInfluence] = Field(default_factory=list)
     focus_entities: List[LLMEpisodeFocusEntitySelection] = Field(
         default_factory=list
@@ -206,14 +181,10 @@ class LLMEpisodeDecision(BaseModel):
         return self
 
 
-class LLMEpisodeConsolidation(BaseModel):
+class LLMEpisodeConsolidation(EpisodeNarrative):
     """Model-facing episode regeneration output with local references."""
 
     summary: str = Field(..., min_length=1)
-    new_developments: List[str] = Field(default_factory=list)
-    updates: List[str] = Field(default_factory=list)
-    unresolved: List[str] = Field(default_factory=list)
-    importance: float = Field(0.0, ge=0.0, le=1.0)
     message_influences: List[LLMEpisodeMessageInfluence] = Field(
         ..., min_length=1
     )
@@ -508,83 +479,104 @@ class EngineWorkUnit(BaseModel):
             self.trace.duration_ms = int(delta.total_seconds() * 1000)
 
 
-class MessageConnections(BaseModel):
-    """Relationship observations grounded to a single source message."""
+class RelationshipObservation(BaseModel):
+    """One validated relationship observation before durable endpoint resolution."""
 
-    message_id: int
-    entity_pairs: List[ConnectionRecord] = Field(default_factory=list)
-
-
-class MessageUserConnections(BaseModel):
-    """User-root relationship observations grounded to a single source message."""
-
-    message_id: int
-    user_connections: List[UserConnectionRecord] = Field(default_factory=list)
+    message_id: int = Field(..., gt=0)
+    entity_a_name: str = Field(..., min_length=1)
+    entity_b_name: str = Field(..., min_length=1)
+    relationship_type: str = Field(..., min_length=1)
+    confidence: float = Field(1.0, ge=0.0, le=1.0)
+    context: Optional[str] = None
+    identity_rooted: bool = False
 
 
-@dataclass(slots=True, kw_only=True)
+def normalize_relationship_type(value: object) -> str:
+    """Return the canonical storage identity for an observed relationship."""
+
+    if not isinstance(value, str):
+        raise ValueError("relationship_type must be text")
+    normalized = " ".join(value.split()).casefold()
+    if not normalized:
+        raise ValueError("relationship_type must not be blank")
+    return normalized
+
+
+def relationship_identity(
+    project_id: str,
+    entity_a_id: int,
+    entity_b_id: int,
+    relationship_type: object,
+) -> str:
+    """Build the durable identity for one typed relationship observation."""
+
+    if not isinstance(project_id, str) or not project_id.strip():
+        raise ValueError("relationship identity requires a project_id")
+    if (
+        not isinstance(entity_a_id, int)
+        or isinstance(entity_a_id, bool)
+        or not isinstance(entity_b_id, int)
+        or isinstance(entity_b_id, bool)
+        or entity_a_id <= 0
+        or entity_b_id <= 0
+        or entity_a_id == entity_b_id
+    ):
+        raise ValueError("relationship identity requires distinct positive entity IDs")
+    a_id, b_id = sorted((entity_a_id, entity_b_id))
+    relationship_key = normalize_relationship_type(relationship_type)
+    return f"{project_id}:{a_id}:{b_id}:{relationship_key}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class EntityWrite:
     """Typed entity payload intended for graph persistence."""
 
-    id: int
+    entity_id: int
     is_new: bool
     canonical_name: str
-    type: str
-    confidence: float = 1.0
-    topic: str = "General"
-    embedding: Optional[List[float]] = None
-    aliases: List[str] = field(default_factory=list)
-    user_name: str
-    session_id: str
-    project_id: str
+    entity_type: str
+    confidence: float
+    topic: str
+    embedding: Optional[List[float]]
+    aliases: tuple[str, ...] = ()
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RelationshipWrite:
     """Typed relationship payload intended for graph persistence."""
 
-    entity_a: str
-    entity_b: str
     entity_a_id: int
     entity_b_id: int
-    message_id: str
-    evidence_ref: Dict[str, Any]
-    user_name: str
-    session_id: str
-    project_id: str
+    relationship_type: str
+    message_id: int
     confidence: float
     context: Optional[str] = None
 
-
-@dataclass(slots=True, kw_only=True)
-class UserRelationshipWrite:
-    """Typed user-root relationship payload intended for graph persistence."""
-
-    user_entity_id: int
-    entity_name: str
-    entity_id: int
-    message_id: str
-    evidence_ref: Dict[str, Any]
-    user_name: str
-    session_id: str
-    project_id: str
-    confidence: float
-    context: Optional[str] = None
-
-    def to_relationship_payload(self) -> dict:
-        return {
-            "entity_a": self.user_name,
-            "entity_b": self.entity_name,
-            "entity_a_id": self.user_entity_id,
-            "entity_b_id": self.entity_id,
-            "message_id": self.message_id,
-            "evidence_ref": self.evidence_ref,
-            "user_name": self.user_name,
-            "session_id": self.session_id,
-            "project_id": self.project_id,
-            "confidence": self.confidence,
-            "context": self.context,
-        }
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.entity_a_id, int)
+            or isinstance(self.entity_a_id, bool)
+            or not isinstance(self.entity_b_id, int)
+            or isinstance(self.entity_b_id, bool)
+            or self.entity_a_id <= 0
+            or self.entity_b_id <= 0
+            or self.entity_a_id == self.entity_b_id
+        ):
+            raise ValueError("RelationshipWrite requires distinct positive entity IDs")
+        if (
+            not isinstance(self.message_id, int)
+            or isinstance(self.message_id, bool)
+            or self.message_id <= 0
+        ):
+            raise ValueError("RelationshipWrite requires a positive message_id")
+        entity_a_id, entity_b_id = sorted((self.entity_a_id, self.entity_b_id))
+        object.__setattr__(self, "entity_a_id", entity_a_id)
+        object.__setattr__(self, "entity_b_id", entity_b_id)
+        object.__setattr__(
+            self,
+            "relationship_type",
+            normalize_relationship_type(self.relationship_type),
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -636,7 +628,6 @@ class GraphMutationPlan:
     message_entity_refs: List[MessageEntityRef] = field(default_factory=list)
     eligible_messages: List[EpisodeEligibility] = field(default_factory=list)
     relationship_writes: List[RelationshipWrite] = field(default_factory=list)
-    user_relationship_writes: List[UserRelationshipWrite] = field(default_factory=list)
     skipped_relationships: List[SkippedRelationship] = field(default_factory=list)
     zombie_entity_ids: Set[int] = field(default_factory=set)
     dirty_entity_ids: Set[int] = field(default_factory=set)
@@ -647,22 +638,8 @@ class GraphMutationPlan:
             or self.message_entity_refs
             or self.eligible_messages
             or self.relationship_writes
-            or self.user_relationship_writes
             or self.alias_updates
         )
-
-    def to_graph_payloads(self) -> tuple[List[dict], List[dict]]:
-        return (
-            [asdict(entity) for entity in self.entity_writes],
-            [asdict(relationship) for relationship in self.relationship_writes]
-            + [
-                relationship.to_relationship_payload()
-                for relationship in self.user_relationship_writes
-            ],
-        )
-
-    def to_message_entity_payloads(self) -> List[dict]:
-        return [asdict(reference) for reference in self.message_entity_refs]
 
 
 @dataclass(slots=True)
@@ -671,7 +648,6 @@ class GraphWriteSummary:
 
     entities_written: int = 0
     relationships_written: int = 0
-    user_relationships_written: int = 0
     aliases_updated: int = 0
     dirty_entities_marked: int = 0
     zombies_filtered: int = 0
@@ -718,34 +694,95 @@ class CandidateSuggestion:
 class ResolutionResult:
     """Result from EntityResolver batch resolution."""
 
-    entity_ids: List[int]
-    new_ids: Set[int]
-    alias_ids: Set[int]
-    entity_msg_map: Dict[int, List[int]]
-    alias_updates: Dict[int, List[str]]
+    entity_ids: List[int] = field(default_factory=list)
+    new_ids: Set[int] = field(default_factory=set)
+    alias_ids: Set[int] = field(default_factory=set)
+    entity_msg_map: Dict[int, List[int]] = field(default_factory=dict)
+    alias_updates: Dict[int, List[str]] = field(default_factory=dict)
     candidate_suggestions: List[CandidateSuggestion] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(init=False)
 class BatchResult:
     """Result of processing a batch of messages."""
 
-    scope: Optional[EngineScope] = None
-    work_unit: Optional[EngineWorkUnit] = None
-    trace: ExtractionTrace = field(default_factory=ExtractionTrace)
-    issues: List[ValidationIssue] = field(default_factory=list)
-    entity_ids: List[int] = field(default_factory=list)
-    entity_message_map: Dict[int, List[int]] = field(default_factory=dict)
-    new_entity_ids: Set[int] = field(default_factory=set)
-    alias_updated_ids: Set[int] = field(default_factory=set)
-    alias_updates: Dict[int, List[str]] = field(default_factory=dict)
-    candidate_suggestions: List[CandidateSuggestion] = field(default_factory=list)
-    relationship_observations: List[MessageConnections] = field(default_factory=list)
-    user_relationship_observations: List[MessageUserConnections] = field(
-        default_factory=list
-    )
-    success: bool = True
-    error: Optional[str] = None
+    scope: Optional[EngineScope]
+    work_unit: Optional[EngineWorkUnit]
+    trace: ExtractionTrace
+    issues: List[ValidationIssue]
+    resolution: ResolutionResult
+    relationship_observations: List[RelationshipObservation]
+    success: bool
+    error: Optional[str]
+
+    def __init__(
+        self,
+        *,
+        scope: Optional[EngineScope] = None,
+        work_unit: Optional[EngineWorkUnit] = None,
+        trace: Optional[ExtractionTrace] = None,
+        issues: Optional[List[ValidationIssue]] = None,
+        resolution: Optional[ResolutionResult] = None,
+        relationship_observations: Optional[List[RelationshipObservation]] = None,
+        success: bool = True,
+        error: Optional[str] = None,
+    ) -> None:
+        self.scope = scope
+        self.work_unit = work_unit
+        self.trace = trace if trace is not None else ExtractionTrace()
+        self.issues = list(issues or [])
+        self.resolution = resolution or ResolutionResult()
+        self.relationship_observations = list(relationship_observations or [])
+        self.success = success
+        self.error = error
+
+    @property
+    def entity_ids(self) -> List[int]:
+        return self.resolution.entity_ids
+
+    @entity_ids.setter
+    def entity_ids(self, value: List[int]) -> None:
+        self.resolution.entity_ids = value
+
+    @property
+    def entity_message_map(self) -> Dict[int, List[int]]:
+        return self.resolution.entity_msg_map
+
+    @entity_message_map.setter
+    def entity_message_map(self, value: Dict[int, List[int]]) -> None:
+        self.resolution.entity_msg_map = value
+
+    @property
+    def new_entity_ids(self) -> Set[int]:
+        return self.resolution.new_ids
+
+    @new_entity_ids.setter
+    def new_entity_ids(self, value: Set[int]) -> None:
+        self.resolution.new_ids = value
+
+    @property
+    def alias_updated_ids(self) -> Set[int]:
+        return self.resolution.alias_ids
+
+    @alias_updated_ids.setter
+    def alias_updated_ids(self, value: Set[int]) -> None:
+        self.resolution.alias_ids = value
+
+    @property
+    def alias_updates(self) -> Dict[int, List[str]]:
+        return self.resolution.alias_updates
+
+    @alias_updates.setter
+    def alias_updates(self, value: Dict[int, List[str]]) -> None:
+        self.resolution.alias_updates = value
+
+    @property
+    def candidate_suggestions(self) -> List[CandidateSuggestion]:
+        return self.resolution.candidate_suggestions
+
+    @candidate_suggestions.setter
+    def candidate_suggestions(self, value: List[CandidateSuggestion]) -> None:
+        self.resolution.candidate_suggestions = value
 
     def set_scope(
         self, user_name: str, session_id: str, project_id: Optional[str] = None
@@ -778,112 +815,17 @@ class BatchResult:
         self.trace.fallbacks.append({"stage": stage, "fallback": fallback})
 
     def has_graph_writes(self) -> bool:
-        legacy_trace_message_ids = (
-            self.trace.get("message_ids", [])
-            if isinstance(self.trace, dict)
-            else []
-        )
-        trace_message_ids = (
-            self.trace.message_ids
-            if hasattr(self.trace, "message_ids")
-            else legacy_trace_message_ids
-        )
-        return self.has_graph_mutations() or bool(trace_message_ids)
+        return self.has_graph_mutations() or bool(self.trace.message_ids)
 
     def has_graph_mutations(self) -> bool:
         """Return whether entity, alias, or relationship state needs writing."""
         return bool(
             self.relationship_observations
-            or self.user_relationship_observations
             or self.entity_message_map
             or self.new_entity_ids
             or self.alias_updated_ids
             or self.alias_updates
         )
-
-    def to_dict(self) -> dict:
-        """Serialize for DLQ storage."""
-
-        return {
-            "scope": self.scope.model_dump(mode="json") if self.scope else None,
-            "work_unit": (
-                self.work_unit.model_dump(mode="json") if self.work_unit else None
-            ),
-            "trace": self.trace.model_dump(mode="json"),
-            "issues": [issue.model_dump(mode="json") for issue in self.issues],
-            "entity_ids": self.entity_ids,
-            "entity_message_map": {
-                str(entity_id): message_ids
-                for entity_id, message_ids in self.entity_message_map.items()
-            },
-            "new_entity_ids": list(self.new_entity_ids),
-            "alias_updated_ids": list(self.alias_updated_ids),
-            "alias_updates": {str(k): v for k, v in self.alias_updates.items()},
-            "candidate_suggestions": [
-                suggestion.to_dict() for suggestion in self.candidate_suggestions
-            ],
-            "relationship_observations": [
-                item.model_dump(mode="json") for item in self.relationship_observations
-            ],
-            "user_relationship_observations": [
-                item.model_dump(mode="json")
-                for item in self.user_relationship_observations
-            ],
-            "success": self.success,
-            "error": self.error,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "BatchResult":
-        """Deserialize from DLQ storage."""
-
-        return cls(
-            scope=(
-                EngineScope.model_validate(data["scope"])
-                if data.get("scope")
-                else None
-            ),
-            work_unit=(
-                EngineWorkUnit.model_validate(data["work_unit"])
-                if data.get("work_unit")
-                else None
-            ),
-            trace=ExtractionTrace.model_validate(data.get("trace", {})),
-            issues=[
-                ValidationIssue.model_validate(item)
-                for item in data.get("issues", [])
-            ],
-            entity_ids=data.get("entity_ids", []),
-            entity_message_map={
-                int(entity_id): [int(message_id) for message_id in message_ids]
-                for entity_id, message_ids in data.get(
-                    "entity_message_map", {}
-                ).items()
-                if str(entity_id).isdigit()
-            },
-            new_entity_ids=set(data.get("new_entity_ids", [])),
-            alias_updated_ids=set(data.get("alias_updated_ids", [])),
-            alias_updates={
-                int(k): v
-                for k, v in data.get("alias_updates", {}).items()
-                if str(k).isdigit()
-            },
-            candidate_suggestions=[
-                CandidateSuggestion.from_dict(item)
-                for item in data.get("candidate_suggestions", [])
-            ],
-            relationship_observations=[
-                MessageConnections.model_validate(item)
-                for item in data.get("relationship_observations", [])
-            ],
-            user_relationship_observations=[
-                MessageUserConnections.model_validate(item)
-                for item in data.get("user_relationship_observations", [])
-            ],
-            success=data.get("success", True),
-            error=data.get("error"),
-        )
-
 
 @dataclass
 class DLQEntry:

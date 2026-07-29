@@ -17,14 +17,11 @@ from common.schema.contracts import (
     ConnectionsResult,
     EngineWorkUnit,
     ExtractionTrace,
-    MessageConnections,
-    MessageUserConnections,
+    RelationshipObservation,
     ResolutionResult,
-    UserConnectionRecord,
     ValidationIssue,
 )
-from common.schema.primitives import ConnectionRecord
-from common.schema.settings import EntityResolutionSettings, LocalReferenceSettings
+from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
 from common.utils.local_references import build_local_id_maps, resolve_local_id
@@ -36,6 +33,7 @@ from core.ingestion.dlq_state import (
     ensure_dlq_id,
     serialize_dlq_entry,
 )
+from core.ingestion.dlq_payload import DLQPayload
 from core.ingestion.prompts import get_connection_reasoning_prompt
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.profile import EntityProfile
@@ -74,7 +72,6 @@ class IngestionPipeline:
         common_word_frequency_threshold: Optional[float] = None,
         sparse_context_verbs: Optional[List[str]] = None,
         knowledge_store=None,
-        local_reference_settings: Optional[LocalReferenceSettings] = None,
     ):
         if not project_id:
             raise ValueError("IngestionPipeline requires project_id")
@@ -108,11 +105,6 @@ class IngestionPipeline:
             )
             if verb and verb.strip()
         }
-        self.local_references_enabled = (
-            local_reference_settings.enabled
-            if local_reference_settings is not None
-            else True
-        )
         self._work_unit_context: ContextVar[Optional[EngineWorkUnit]] = ContextVar(
             "ingestion_work_unit",
             default=None,
@@ -147,14 +139,6 @@ class IngestionPipeline:
 
         if hasattr(self.processor, "update_settings"):
             self.processor.update_settings(config)
-
-    def update_local_reference_settings(
-        self,
-        config: LocalReferenceSettings,
-    ) -> None:
-        self.local_references_enabled = config.enabled
-        if hasattr(self.processor, "update_local_reference_settings"):
-            self.processor.update_local_reference_settings(config)
 
     async def _run_with_work_unit(self, work_unit, operation, *args):
         token = self._work_unit_context.set(work_unit)
@@ -266,13 +250,8 @@ class IngestionPipeline:
                     },
                 )
 
-                result.entity_ids = resolution.entity_ids
-                result.entity_message_map = resolution.entity_msg_map
-                result.new_entity_ids = resolution.new_ids
-                result.alias_updated_ids = resolution.alias_ids
-                result.alias_updates = resolution.alias_updates
-                result.candidate_suggestions = resolution.candidate_suggestions
-                connections, user_connections = await self._extract_connections(
+                result.resolution = resolution
+                observations = await self._extract_connections(
                     resolution.entity_ids,
                     resolution.entity_msg_map,
                     messages,
@@ -281,42 +260,47 @@ class IngestionPipeline:
                     result.trace,
                     result.issues,
                 )
-                total_pairs = sum(len(item.entity_pairs) for item in connections)
+                total_pairs = sum(
+                    not item.identity_rooted for item in observations
+                )
                 total_user_pairs = sum(
-                    len(item.user_connections) for item in user_connections
+                    item.identity_rooted for item in observations
                 )
                 await emit(
                     session_id,
                     "pipeline",
                     "connections_extracted",
                     {
-                        "messages_with_connections": len(connections),
-                        "messages_with_user_connections": len(user_connections),
+                        "messages_with_connections": len(
+                            {item.message_id for item in observations if not item.identity_rooted}
+                        ),
+                        "messages_with_user_connections": len(
+                            {item.message_id for item in observations if item.identity_rooted}
+                        ),
                         "total_pairs": total_pairs,
                         "total_user_pairs": total_user_pairs,
                         "pairs": [
                             {
-                                "a": pair.entity_a,
-                                "b": pair.entity_b,
-                                "confidence": pair.confidence,
+                                "a": item.entity_a_name,
+                                "b": item.entity_b_name,
+                                "confidence": item.confidence,
                             }
-                            for item in connections
-                            for pair in item.entity_pairs
+                            for item in observations
+                            if not item.identity_rooted
                         ],
                         "user_pairs": [
                             {
-                                "entity": pair.entity_name,
-                                "confidence": pair.confidence,
+                                "entity": item.entity_b_name,
+                                "confidence": item.confidence,
                             }
-                            for item in user_connections
-                            for pair in item.user_connections
+                            for item in observations
+                            if item.identity_rooted
                         ],
                     },
                     verbose_only=True,
                 )
 
-                result.relationship_observations = connections
-                result.user_relationship_observations = user_connections
+                result.relationship_observations = observations
                 if result.work_unit:
                     result.work_unit.issues = list(result.issues)
 
@@ -1021,11 +1005,11 @@ class IngestionPipeline:
         session_id: str,
         trace: Optional[ExtractionTrace] = None,
         issues: Optional[List[ValidationIssue]] = None,
-    ) -> Tuple[List[MessageConnections], List[MessageUserConnections]]:
+    ) -> List[RelationshipObservation]:
         """Extract connections between entities."""
 
         if not entity_ids:
-            return [], []
+            return []
 
         if trace is not None:
             trace.relationship_model = getattr(self.llm, "extraction_model", None)
@@ -1039,19 +1023,12 @@ class IngestionPipeline:
         ) = await self._build_connection_candidates(entity_ids, entity_msg_map, issues)
 
         if not candidates:
-            return [], []
+            return []
 
         system_03 = get_connection_reasoning_prompt(self.user_name)
-        if not self.local_references_enabled:
-            system_03 += (
-                "\n\nLegacy ID mode is active. Return only the exact message IDs "
-                "shown in this call's input; ignore local-reference examples."
-            )
-
         message_local_ids, message_ids_by_local = build_local_id_maps(
             (message["id"] for message in messages),
             "m",
-            use_local_references=self.local_references_enabled,
         )
         user_03 = format_vp02_input(
             candidates,
@@ -1088,7 +1065,7 @@ class IngestionPipeline:
                 message=f"VP-02 connection extraction failed: {e}",
                 severity="warning",
             )
-            return [], []
+            return []
 
         if conn_result is None:
             if trace is not None:
@@ -1102,20 +1079,20 @@ class IngestionPipeline:
                 message="VP-02 connection extraction returned no result",
                 severity="warning",
             )
-            return [], []
+            return []
 
         if not conn_result.connections and not conn_result.user_connections:
             if trace is not None:
                 trace.relationships_seen = 0
                 trace.user_relationships_seen = 0
-            return [], []
+            return []
 
         valid_msg_ids = {m["id"] for m in messages}
         if trace is not None:
             trace.relationships_seen = len(conn_result.connections)
             trace.user_relationships_seen = len(conn_result.user_connections)
 
-        msg_map: Dict[int, List[ConnectionRecord]] = {}
+        observations: List[RelationshipObservation] = []
         seen_relationships = set()
         for conn in conn_result.connections:
             entity_a_key = self._normalize_name(conn.entity_a)
@@ -1255,22 +1232,19 @@ class IngestionPipeline:
                 )
                 continue
             seen_relationships.add(relationship_key)
-            if actual_msg_id not in msg_map:
-                msg_map[actual_msg_id] = []
-            msg_map[actual_msg_id].append(
-                ConnectionRecord(
-                    entity_a=canonical_a,
-                    entity_b=canonical_b,
+            observations.append(
+                RelationshipObservation(
+                    message_id=actual_msg_id,
+                    entity_a_name=canonical_a,
+                    entity_b_name=canonical_b,
+                    relationship_type=conn.relationship,
                     confidence=conn.confidence,
                     context=conn.context or conn.relationship,
-                    relationship=conn.relationship,
-                    msg_id=actual_msg_id,
                 )
             )
             if trace is not None:
                 trace.relationships_accepted += 1
 
-        user_msg_map: Dict[int, List[UserConnectionRecord]] = {}
         seen_user_connections = set()
         user_name_key = self._normalize_name(self.user_name)
         for conn in conn_result.user_connections:
@@ -1394,27 +1368,21 @@ class IngestionPipeline:
                 )
                 continue
             seen_user_connections.add(user_relationship_key)
-            if actual_msg_id not in user_msg_map:
-                user_msg_map[actual_msg_id] = []
-            user_msg_map[actual_msg_id].append(
-                UserConnectionRecord(
-                    entity_name=canonical_entity_name,
+            observations.append(
+                RelationshipObservation(
+                    message_id=actual_msg_id,
+                    entity_a_name=self.user_name,
+                    entity_b_name=canonical_entity_name,
+                    relationship_type=conn.relationship,
                     confidence=conn.confidence,
                     context=conn.context or conn.relationship,
-                    relationship=conn.relationship,
-                    msg_id=actual_msg_id,
+                    identity_rooted=True,
                 )
             )
             if trace is not None:
                 trace.user_relationships_accepted += 1
 
-        return [
-            MessageConnections(message_id=mid, entity_pairs=pairs)
-            for mid, pairs in msg_map.items()
-        ], [
-            MessageUserConnections(message_id=mid, user_connections=pairs)
-            for mid, pairs in user_msg_map.items()
-        ]
+        return observations
 
     async def move_to_dead_letter(
         self,
@@ -1449,7 +1417,9 @@ class IngestionPipeline:
             entry["session_text"] = session_text
 
         if stage in ["graph_write", "message_log"] and batch_result is not None:
-            entry["batch_result"] = batch_result.to_dict()
+            entry["batch_result"] = DLQPayload.from_batch(batch_result).model_dump(
+                mode="json"
+            )
 
         try:
             dlq_id = ensure_dlq_id(entry)
