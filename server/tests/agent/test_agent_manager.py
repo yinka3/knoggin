@@ -62,6 +62,21 @@ async def test_agent_manager_create_update_and_lookup_preserves_config(manager):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_agent_manager_preserves_explicit_empty_tool_allowlist(manager):
+    agent_manager, resources = manager
+
+    created = await agent_manager.create_agent(
+        name="No Tools",
+        persona="Careful",
+        enabled_tools=[],
+    )
+
+    assert created.enabled_tools == []
+    assert resources.postgres.agents[created.id]["enabled_tools"] == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_agent_manager_default_agent_cannot_be_deleted(manager):
     agent_manager, _ = manager
     default_id = await agent_manager.get_default_agent_id()

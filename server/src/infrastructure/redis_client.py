@@ -321,6 +321,10 @@ class RedisKeys:
         return f"checkpoint_count:{user}:{session}"
 
     @staticmethod
+    def checkpoint_commit(user: str, session: str, batch_id: str) -> str:
+        return f"checkpoint_commit:{user}:{session}:{batch_id}"
+
+    @staticmethod
     def message_content(user: str, session: str) -> str:
         return f"message_content:{user}:{session}"
 

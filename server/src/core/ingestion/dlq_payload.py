@@ -44,6 +44,8 @@ class DLQPayload(BaseModel):
     relationship_observations: List[RelationshipObservation] = Field(
         default_factory=list
     )
+    checkpoint_interval: Optional[int] = None
+    checkpoint_count: Optional[int] = None
     success: bool = True
     error: Optional[str] = None
 
@@ -79,6 +81,8 @@ class DLQPayload(BaseModel):
                 suggestion.to_dict() for suggestion in batch.candidate_suggestions
             ],
             relationship_observations=list(batch.relationship_observations),
+            checkpoint_interval=batch.checkpoint_interval,
+            checkpoint_count=batch.checkpoint_count,
             success=batch.success,
             error=batch.error,
         )
@@ -111,6 +115,8 @@ class DLQPayload(BaseModel):
             CandidateSuggestion.from_dict(item) for item in self.candidate_suggestions
         ]
         batch.relationship_observations = list(self.relationship_observations)
+        batch.checkpoint_interval = self.checkpoint_interval
+        batch.checkpoint_count = self.checkpoint_count
         batch.success = self.success
         batch.error = self.error
         batch.milestones = set(self.milestones)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import AbstractSet, Any, Dict, Iterable, List, Optional, Sequence, Set
 from uuid import uuid4
 
 from common.schema.contracts import (
@@ -120,15 +120,17 @@ class IngestionBatch:
         default_factory=list
     )
     graph_work_unit: Optional[WorkRecord] = None
-    safe_entity_ids: Set[int] = field(default_factory=set)
-    graph_alias_updates: List[AliasUpdate] = field(default_factory=list)
-    entity_writes: List[EntityWrite] = field(default_factory=list)
-    relationship_writes: List[RelationshipWrite] = field(default_factory=list)
-    message_entity_refs: List[MessageEntityRef] = field(default_factory=list)
-    eligible_messages: List[EpisodeEligibility] = field(default_factory=list)
-    skipped_relationships: List[SkippedRelationship] = field(default_factory=list)
-    zombie_entity_ids: Set[int] = field(default_factory=set)
-    dirty_entity_ids: Set[int] = field(default_factory=set)
+    safe_entity_ids: AbstractSet[int] = field(default_factory=set)
+    graph_alias_updates: Sequence[AliasUpdate] = field(default_factory=list)
+    entity_writes: Sequence[EntityWrite] = field(default_factory=list)
+    relationship_writes: Sequence[RelationshipWrite] = field(default_factory=list)
+    message_entity_refs: Sequence[MessageEntityRef] = field(default_factory=list)
+    eligible_messages: Sequence[EpisodeEligibility] = field(default_factory=list)
+    skipped_relationships: Sequence[SkippedRelationship] = field(default_factory=list)
+    zombie_entity_ids: AbstractSet[int] = field(default_factory=set)
+    dirty_entity_ids: AbstractSet[int] = field(default_factory=set)
+    checkpoint_interval: Optional[int] = None
+    checkpoint_count: Optional[int] = None
     success: bool = True
     error: Optional[str] = None
 
@@ -270,15 +272,15 @@ class IngestionBatch:
         self,
         *,
         graph_work_unit: WorkRecord,
-        safe_entity_ids: Set[int],
-        graph_alias_updates: List[AliasUpdate],
-        entity_writes: List[EntityWrite],
-        relationship_writes: List[RelationshipWrite],
-        message_entity_refs: List[MessageEntityRef],
-        eligible_messages: List[EpisodeEligibility],
-        skipped_relationships: List[SkippedRelationship],
-        zombie_entity_ids: Set[int],
-        dirty_entity_ids: Set[int],
+        safe_entity_ids: Iterable[int],
+        graph_alias_updates: Iterable[AliasUpdate],
+        entity_writes: Iterable[EntityWrite],
+        relationship_writes: Iterable[RelationshipWrite],
+        message_entity_refs: Iterable[MessageEntityRef],
+        eligible_messages: Iterable[EpisodeEligibility],
+        skipped_relationships: Iterable[SkippedRelationship],
+        zombie_entity_ids: Iterable[int],
+        dirty_entity_ids: Iterable[int],
     ) -> None:
         """Attach prepared persistence commands without opening a transaction."""
 
@@ -286,15 +288,15 @@ class IngestionBatch:
         if self.stage is not IngestionStage.COMPLETED:
             raise ValueError("Graph writes can only be prepared after completion")
         self.graph_work_unit = graph_work_unit
-        self.safe_entity_ids = safe_entity_ids
-        self.graph_alias_updates = graph_alias_updates
-        self.entity_writes = entity_writes
-        self.relationship_writes = relationship_writes
-        self.message_entity_refs = message_entity_refs
-        self.eligible_messages = eligible_messages
-        self.skipped_relationships = skipped_relationships
-        self.zombie_entity_ids = zombie_entity_ids
-        self.dirty_entity_ids = dirty_entity_ids
+        self.safe_entity_ids = set(safe_entity_ids)
+        self.graph_alias_updates = list(graph_alias_updates)
+        self.entity_writes = list(entity_writes)
+        self.relationship_writes = list(relationship_writes)
+        self.message_entity_refs = list(message_entity_refs)
+        self.eligible_messages = list(eligible_messages)
+        self.skipped_relationships = list(skipped_relationships)
+        self.zombie_entity_ids = set(zombie_entity_ids)
+        self.dirty_entity_ids = set(dirty_entity_ids)
         self.advance_to(IngestionStage.GRAPH_PREPARED)
 
     def validate_graph_writes(self) -> None:
@@ -359,6 +361,36 @@ class IngestionBatch:
             raise ValueError("Candidate suggestions can only be handled after completion")
         self._mark_milestone(IngestionMilestone.CANDIDATE_SUGGESTIONS_HANDLED)
 
+    def set_checkpoint_policy(self, checkpoint_interval: int) -> None:
+        """Freeze the checkpoint threshold used for this batch and its replay."""
+
+        self._require_mutable()
+        if self.stage is not IngestionStage.COMPLETED:
+            raise ValueError("Checkpoint policy can only be set after completion")
+        if not isinstance(checkpoint_interval, int) or checkpoint_interval <= 0:
+            raise ValueError("checkpoint_interval must be a positive integer")
+        self.checkpoint_interval = checkpoint_interval
+        self._mark_changed()
+
+    def record_checkpoint_progress(
+        self,
+        *,
+        checkpoint_interval: int,
+        current_count: int,
+    ) -> None:
+        """Record committed counter state without reopening sealed graph data."""
+
+        if self.released:
+            raise RuntimeError("IngestionBatch has been released")
+        if self.stage is not IngestionStage.GRAPH_COMMITTED:
+            raise ValueError("Checkpoint progress requires a graph-committed batch")
+        if not isinstance(checkpoint_interval, int) or checkpoint_interval <= 0:
+            raise ValueError("checkpoint_interval must be a positive integer")
+        if not isinstance(current_count, int) or current_count < 0:
+            raise ValueError("checkpoint current_count must be a non-negative integer")
+        self.checkpoint_interval = checkpoint_interval
+        self.checkpoint_count = current_count
+
     def complete(self) -> None:
         """Mark successful pipeline completion before the persistence boundary."""
 
@@ -391,6 +423,15 @@ class IngestionBatch:
         if self.stage is not IngestionStage.GRAPH_PREPARED:
             raise ValueError("Only a graph-prepared IngestionBatch can be sealed")
         self.validate_graph_writes()
+        self.safe_entity_ids = frozenset(self.safe_entity_ids)
+        self.graph_alias_updates = tuple(self.graph_alias_updates)
+        self.entity_writes = tuple(self.entity_writes)
+        self.relationship_writes = tuple(self.relationship_writes)
+        self.message_entity_refs = tuple(self.message_entity_refs)
+        self.eligible_messages = tuple(self.eligible_messages)
+        self.skipped_relationships = tuple(self.skipped_relationships)
+        self.zombie_entity_ids = frozenset(self.zombie_entity_ids)
+        self.dirty_entity_ids = frozenset(self.dirty_entity_ids)
         self.validated_revision = self.revision
         self.sealed = True
         self._advance_durable(IngestionStage.SEALED)

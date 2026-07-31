@@ -144,4 +144,17 @@ async def test_executor_finalizes_an_agent_run():
     assert events[0]["data"]["content"] == "Done"
     assert run.final_content == "Done"
     assert run.sealed is True
+    assert run.released is True
     assert run.usage["total_tokens"] == 5
+
+
+@pytest.mark.no_network
+def test_agent_run_can_finish_without_a_final_response():
+    run = make_run()
+
+    run.finish_without_response()
+
+    assert run.sealed is True
+    assert run.final_content is None
+    with pytest.raises(RuntimeError, match="finalized"):
+        run.record_error("too late")

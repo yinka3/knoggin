@@ -291,6 +291,30 @@ class FakeRedis:
 
     async def eval(self, script, numkeys, *args):
         self.evals.append((script, args))
+        if numkeys == 4 and len(args) >= 8:
+            (
+                checkpoint_key,
+                session_last_processed_key,
+                project_last_processed_key,
+                commit_key,
+                batch_size,
+                checkpoint_interval,
+                last_id,
+                ttl,
+            ) = args[:8]
+            self._purge_expired(commit_key)
+            previous = self.strings.get(commit_key)
+            if previous:
+                count, reached = previous.split(":", 1)
+                return [int(count), int(reached)]
+            count = int(self.strings.get(checkpoint_key, 0)) + int(batch_size)
+            reached = int(count >= int(checkpoint_interval))
+            self.strings[checkpoint_key] = "0" if reached else str(count)
+            self.strings[session_last_processed_key] = str(last_id)
+            self.strings[project_last_processed_key] = str(last_id)
+            self.strings[commit_key] = f"{count}:{reached}"
+            await self.expire(commit_key, int(ttl))
+            return [count, reached]
         if numkeys == 1 and len(args) >= 3:
             key, expected_value, ttl = args[0], str(args[1]), args[2]
             self._purge_expired(key)

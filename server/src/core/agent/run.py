@@ -227,8 +227,23 @@ class AgentRun:
 
     def record_error(self, message: str) -> None:
         self._require_active()
-        self.last_error = message
+        self.last_error = str(message)
         self.consecutive_errors += 1
+
+    def note_nonfatal_error(self, message: str) -> None:
+        """Expose a rejected action to the next model turn without ending it."""
+
+        self._require_active()
+        self.last_error = str(message)
+
+    def clear_last_error(self) -> None:
+        self._require_active()
+        self.last_error = None
+
+    def record_tool_success(self) -> None:
+        self._require_active()
+        self.consecutive_errors = 0
+        self.last_error = None
 
     def record_tool_result(self, result: Dict) -> None:
         self._require_active()
@@ -241,6 +256,33 @@ class AgentRun:
     def record_source(self, candidate: SourceReferenceCandidate) -> None:
         self._require_active()
         self.source_candidates.append(candidate)
+
+    def record_sources(self, candidates: List[SourceReferenceCandidate]) -> None:
+        self._require_active()
+        self.source_candidates.extend(candidates)
+
+    def accumulate_tool_result(self, tool_name: str, result: Dict) -> None:
+        """Apply one tool result to the aggregate's owned evidence buffers."""
+
+        self._require_active()
+        # Kept as a local import to avoid the run/internals import cycle.
+        from core.agent.internals import update_accumulators
+
+        update_accumulators(self, tool_name, result)
+
+    def record_empty_result(self) -> bool:
+        """Record an empty tool turn and report whether replanning is due."""
+
+        self._require_active()
+        self.consecutive_empty_results += 1
+        return (
+            self.consecutive_empty_results
+            >= self.limits.empty_result_replan_threshold
+        )
+
+    def clear_empty_results(self) -> None:
+        self._require_active()
+        self.consecutive_empty_results = 0
 
     def has_any(self) -> bool:
         """Whether this run has accumulated any model-visible evidence."""
@@ -269,11 +311,37 @@ class AgentRun:
     def clear_short_uuid_references(self) -> None:
         self.short_uuid_references.clear()
 
+    def set_evidence_token_count(self, token_count: int) -> None:
+        self._require_active()
+        if not isinstance(token_count, int) or token_count < 0:
+            raise ValueError("evidence token count must be a non-negative integer")
+        self.evidence_token_count = token_count
+
+    def compact_evidence(self, summary: Optional[str]) -> None:
+        """Keep only the bounded evidence needed after summarization."""
+
+        self._require_active()
+        if summary:
+            self.evidence_summary = summary
+        self.messages = self.messages[-5:]
+        self.profiles = self.profiles[-5:]
+        self.graph = self.graph[-15:]
+        self.episodes = []
+        self.paths = []
+        self.hierarchy = []
+
     def finalize(self, content: str) -> None:
         self._require_active()
         if not isinstance(content, str) or not content.strip():
             raise ValueError("AgentRun final content must be a non-empty string")
         self.final_content = content
+        self.sealed = True
+
+    def finish_without_response(self) -> None:
+        """Seal an execution that ended in clarification or terminal error."""
+
+        if self.released:
+            raise RuntimeError("AgentRun has been released")
         self.sealed = True
 
     def release(self) -> None:
@@ -284,6 +352,7 @@ class AgentRun:
         self.short_uuid_references.clear()
         self.history.clear()
         self.initial_source_candidates.clear()
+        self.maintenance_candidates.clear()
         self.messages.clear()
         self.profiles.clear()
         self.graph.clear()
@@ -291,4 +360,6 @@ class AgentRun:
         self.hierarchy.clear()
         self.episodes.clear()
         self.sources.clear()
+        self.source_candidates.clear()
+        self.evidence_summary = None
         self.released = True

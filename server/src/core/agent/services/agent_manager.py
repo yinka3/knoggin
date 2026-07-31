@@ -145,7 +145,9 @@ class AgentManager:
         persona_markdown = persona_profile.to_markdown()
         brain = normalize_agent_brain(brain or "", persona_markdown)
         tools_json = (
-            json.dumps(candidate.enabled_tools) if candidate.enabled_tools else None
+            json.dumps(candidate.enabled_tools)
+            if candidate.enabled_tools is not None
+            else None
         )
 
         query = '''
@@ -385,7 +387,8 @@ class AgentManager:
         temperature = default_config.temperature if default_config else 0.7
         tools_json = (
             json.dumps(default_config.enabled_tools)
-            if default_config and default_config.enabled_tools
+            if default_config is not None
+            and default_config.enabled_tools is not None
             else None
         )
 

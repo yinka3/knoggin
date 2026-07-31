@@ -77,7 +77,7 @@ async def prepare_ingestion_batch_graph_writes(
 
     safe_entity_ids = valid_existing_ids.union(new_entity_ids)
     alias_updates = [
-        AliasUpdate(entity_id=entity_id, aliases=list(aliases))
+        AliasUpdate(entity_id=entity_id, aliases=tuple(aliases))
         for entity_id, aliases in batch.alias_updates.items()
         if aliases and entity_id in safe_entity_ids
     ]
@@ -239,7 +239,9 @@ async def _execute_graph_write_buffers(
     """Persist one already-prepared set of graph write buffers."""
 
     alias_update_map = {
-        update.entity_id: update.aliases for update in alias_updates if update.aliases
+        update.entity_id: list(update.aliases)
+        for update in alias_updates
+        if update.aliases
     }
     if alias_update_map:
         await knowledge_store.update_entity_aliases(

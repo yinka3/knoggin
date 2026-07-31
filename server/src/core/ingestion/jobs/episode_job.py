@@ -5,7 +5,6 @@ from loguru import logger
 
 from common.schema.episode import Episode
 from common.schema.episode_output import (
-    EpisodeConsolidation,
     EpisodeDecision,
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,

@@ -8,6 +8,7 @@ from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
 from common.utils.json_utils import safe_json_loads
 from core.ingestion.batch import IngestionBatch
+from core.ingestion.checkpoint import commit_ingestion_checkpoint
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
@@ -293,6 +294,7 @@ class IngestionWorker:
                         break
                     dlq_count += len(messages)
                 else:
+                    batch.set_checkpoint_policy(self.checkpoint_interval)
                     can_continue, dlq_written = await self._save_message_logs_or_dlq(batch)
                     if dlq_written:
                         dlq_count += len(messages)
@@ -305,7 +307,19 @@ class IngestionWorker:
                         await self.redis.ltrim(self._buffer_key, len(raw), -1)
                         continue
 
-                    await self._save_candidate_suggestions(batch)
+                    can_continue, dlq_written = (
+                        await self._save_candidate_suggestions_or_dlq(batch)
+                    )
+                    if dlq_written:
+                        dlq_count += len(messages)
+                    if not can_continue:
+                        break
+                    if dlq_written:
+                        batches_count += 1
+                        total_processed += len(messages)
+                        all_msg_ids.extend([m["id"] for m in messages])
+                        await self.redis.ltrim(self._buffer_key, len(raw), -1)
+                        continue
 
                     can_continue, dlq_written = await self._write_graph_or_dlq(batch)
                     if dlq_written:
@@ -424,12 +438,14 @@ class IngestionWorker:
                 return False, False
             return True, True
 
-    async def _save_candidate_suggestions(
+    async def _save_candidate_suggestions_or_dlq(
         self, batch: IngestionBatch
-    ) -> None:
+    ) -> tuple[bool, bool]:
+        """Persist suggestions or preserve the batch for stage-aware replay."""
+
         if not batch.candidate_suggestions:
             batch.mark_candidate_suggestions_handled()
-            return
+            return True, False
 
         try:
             await asyncio.wait_for(
@@ -439,6 +455,8 @@ class IngestionWorker:
                 ),
                 timeout=30.0,
             )
+            batch.mark_candidate_suggestions_handled()
+            return True, False
         except Exception as e:
             await emit(
                 self.session_id,
@@ -449,8 +467,22 @@ class IngestionWorker:
                     "suggestion_count": len(batch.candidate_suggestions),
                 },
             )
-        finally:
-            batch.mark_candidate_suggestions_handled()
+            dlq_success = await self.processor.move_to_dead_letter(
+                batch.messages,
+                "CANDIDATE_SUGGESTION_SAVE_FAILED: "
+                f"{type(e).__name__}: {e}",
+                stage="candidate_suggestions",
+                session_text=batch.session_text,
+                batch=batch,
+                session_id=self.session_id,
+            )
+            if not dlq_success:
+                logger.critical(
+                    "DLQ write failed after candidate suggestion failure. "
+                    "Leaving messages in buffer."
+                )
+                return False, False
+            return True, True
 
     async def _write_graph_or_dlq(
         self,
@@ -508,25 +540,19 @@ class IngestionWorker:
         return batch
 
     async def _mark_batch_processed(self, batch: IngestionBatch) -> None:
-        messages = batch.messages
-        count = await self.redis.incrby(self._checkpoint_key, len(messages))
-        if count >= self.checkpoint_interval:
-            await emit(
-                self.session_id,
-                "pipeline",
-                "checkpoint_reached",
-                {"message_count": count},
-            )
-
-            await self.redis.set(self._checkpoint_key, 0)
-
-        last_id = max(m["id"] for m in messages)
-        await self.redis.set(
-            RedisKeys.last_processed(self.user_name, self.session_id),
-            last_id,
+        commit = await commit_ingestion_checkpoint(
+            self.redis,
+            batch,
+            checkpoint_interval=self.checkpoint_interval,
         )
-        await self.redis.set(
-            RedisKeys.project_last_processed(self.user_name, self.processor.project_id),
-            last_id,
-        )
+        if commit.threshold_reached:
+            try:
+                await emit(
+                    self.session_id,
+                    "pipeline",
+                    "checkpoint_reached",
+                    {"message_count": commit.count_before_reset},
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit checkpoint event: {}", exc)
         batch.mark_checkpoint_committed()

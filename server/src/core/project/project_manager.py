@@ -883,10 +883,19 @@ class ProjectManager:
             write_to_graph=_dlq_write_callback,
             redis_client=self.resources.redis,
             settings=dlq_cfg,
+            checkpoint_interval=self.dev_settings.ingestion.checkpoint_interval,
         )
         scheduler.register(dlq_job)
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
+        )
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                lambda config: dlq_job.update_checkpoint_interval(
+                    config.checkpoint_interval
+                ),
+                "developer_settings.ingestion",
+            )
         )
 
         cleaner_job = EntityCleanupJob(

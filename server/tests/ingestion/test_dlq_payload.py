@@ -1,8 +1,15 @@
+import json
+
 import pytest
 
 from core.ingestion.batch import IngestionBatch, IngestionMilestone, IngestionStage
+from core.ingestion.checkpoint import commit_ingestion_checkpoint
 from core.ingestion.dlq_payload import DLQPayload
+from core.ingestion.services import pipeline_service
+from core.ingestion.services.pipeline_service import IngestionPipeline
 from infrastructure.work_record import WorkRecord
+from infrastructure.redis_client import RedisKeys
+from tests.fixtures.fakes import FakeRedis
 
 
 def _graph_committed_batch() -> IngestionBatch:
@@ -61,3 +68,60 @@ def test_dlq_payload_restores_checkpoint_only_replay_state():
 
     assert replay.stage is IngestionStage.COMMITTED
     assert IngestionMilestone.CHECKPOINT_COMMITTED in replay.milestones
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_checkpoint_dlq_entry_contains_an_aggregate_snapshot(monkeypatch):
+    async def emit_nothing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(pipeline_service, "emit", emit_nothing)
+    redis = FakeRedis()
+    pipeline = object.__new__(IngestionPipeline)
+    pipeline.user_name = "ada"
+    pipeline.project_id = "project-1"
+    pipeline.redis = redis
+    batch = _graph_committed_batch()
+
+    success = await pipeline.move_to_dead_letter(
+        batch.messages,
+        "CHECKPOINT_COMMIT_FAILED: ConnectionError",
+        stage="checkpoint",
+        batch=batch,
+        session_id="session-1",
+    )
+
+    assert success is True
+    entry = json.loads(redis.lists[RedisKeys.dlq("ada", "project-1")][0])
+    assert entry["stage"] == "checkpoint"
+    payload = DLQPayload.model_validate(entry["batch_result"])
+    assert payload.batch_id == batch.batch_id
+    assert IngestionMilestone.GRAPH_COMMITTED in payload.milestones
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_checkpoint_commit_is_idempotent_and_retains_counter_progress():
+    batch = _graph_committed_batch()
+    redis = FakeRedis()
+
+    first = await commit_ingestion_checkpoint(
+        redis,
+        batch,
+        checkpoint_interval=4,
+    )
+    replay = DLQPayload.from_ingestion_batch(batch).to_ingestion_batch()
+    second = await commit_ingestion_checkpoint(
+        redis,
+        replay,
+        checkpoint_interval=4,
+    )
+
+    assert first.count_before_reset == 1
+    assert first.current_count == 1
+    assert second == first
+    assert replay.checkpoint_interval == 4
+    assert replay.checkpoint_count == 1
+    assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
+    assert redis.strings[RedisKeys.last_processed("ada", "session-1")] == "7"

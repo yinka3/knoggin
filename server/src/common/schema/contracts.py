@@ -2,13 +2,15 @@
 
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
 )
+
+from common.schema.immutable import FrozenDict
 
 
 class ExecutionScope(BaseModel):
@@ -142,7 +144,7 @@ class EntityWrite:
     entity_type: str
     confidence: float
     topic: str
-    embedding: Optional[List[float]]
+    embedding: Optional[tuple[float, ...]]
     aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -181,7 +183,7 @@ class EntityWrite:
                         f"(invalid index {index})"
                     )
                 normalized_embedding.append(float(value))
-            object.__setattr__(self, "embedding", normalized_embedding)
+            object.__setattr__(self, "embedding", tuple(normalized_embedding))
 
         if not isinstance(self.aliases, tuple):
             raise ValueError("EntityWrite.aliases must be a tuple of strings")
@@ -193,6 +195,8 @@ class EntityWrite:
                 for alias in self.aliases
             ),
         )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RelationshipWrite:
     """Typed relationship payload intended for graph persistence."""
@@ -256,24 +260,28 @@ class EpisodeEligibility:
             )
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AliasUpdate:
     """Aliases to persist for a canonical entity."""
 
     entity_id: int
-    aliases: List[str] = field(default_factory=list)
+    aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_positive_id(self.entity_id, "AliasUpdate.entity_id")
-        if not isinstance(self.aliases, list):
-            raise ValueError("AliasUpdate.aliases must be a list of strings")
-        self.aliases = [
-            _require_nonblank_text(alias, "AliasUpdate.aliases entry")
-            for alias in self.aliases
-        ]
+        if not isinstance(self.aliases, tuple):
+            raise ValueError("AliasUpdate.aliases must be a tuple of strings")
+        object.__setattr__(
+            self,
+            "aliases",
+            tuple(
+                _require_nonblank_text(alias, "AliasUpdate.aliases entry")
+                for alias in self.aliases
+            ),
+        )
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SkippedRelationship:
     """Relationship observation skipped before graph persistence."""
 
@@ -282,6 +290,15 @@ class SkippedRelationship:
     message_id: int
     reason: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_positive_id(self.message_id, "SkippedRelationship.message_id")
+        object.__setattr__(
+            self,
+            "reason",
+            _require_nonblank_text(self.reason, "SkippedRelationship.reason"),
+        )
+        object.__setattr__(self, "metadata", FrozenDict(self.metadata))
 
 
 @dataclass(slots=True)

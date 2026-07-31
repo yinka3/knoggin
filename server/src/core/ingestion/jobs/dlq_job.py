@@ -6,11 +6,12 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.schema.contracts import ExecutionScope
-from common.schema.settings import DLQSettings
+from common.schema.settings import DLQSettings, IngestionSettings
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_unix
 from core.ingestion.batch import IngestionBatch, IngestionMilestone
+from core.ingestion.checkpoint import commit_ingestion_checkpoint
 from core.ingestion.dlq_payload import DLQPayload
 from core.ingestion.dlq_state import (
     DLQ_STATUS_COMPLETED,
@@ -39,6 +40,8 @@ class DLQReplayJob(BaseJob):
     complete, or park DLQ entries. Replay is stage-aware:
     - graph_write: retry graph persistence only, avoiding LLM work.
     - message_log: retry message-log persistence, then graph persistence.
+    - candidate_suggestions: retry suggestions, then graph persistence.
+    - checkpoint: retry only the final durable checkpoint.
     - processing: rerun the ingestion pipeline with stored messages/context.
 
     Failed transient retries are requeued until max attempts is reached; malformed
@@ -83,6 +86,7 @@ class DLQReplayJob(BaseJob):
         ],
         redis_client: aioredis.Redis,
         settings: DLQSettings,
+        checkpoint_interval: int = IngestionSettings().checkpoint_interval,
     ):
         self.entities = entities
         self.processor = processor
@@ -92,7 +96,13 @@ class DLQReplayJob(BaseJob):
             )
         self.write_to_graph = write_to_graph
         self.redis = redis_client
+        self.update_checkpoint_interval(checkpoint_interval)
         self.update_settings(settings)
+
+    def update_checkpoint_interval(self, checkpoint_interval: int) -> None:
+        if not isinstance(checkpoint_interval, int) or checkpoint_interval <= 0:
+            raise ValueError("checkpoint_interval must be a positive integer")
+        self.checkpoint_interval = checkpoint_interval
 
     @property
     def name(self) -> str:
@@ -423,21 +433,10 @@ class DLQReplayJob(BaseJob):
             raise ValueError("Checkpoint replay requires a graph-committed batch")
         if not batch.messages:
             raise ValueError("Checkpoint replay requires batch messages")
-        last_id = max(int(message["id"]) for message in batch.messages)
-        await self.redis.set(
-            RedisKeys.last_processed(batch.scope.user_name, batch.scope.session_id),
-            last_id,
-        )
-        await self.redis.set(
-            RedisKeys.project_last_processed(
-                batch.scope.user_name,
-                batch.scope.project_id,
-            ),
-            last_id,
-        )
-        await self.redis.set(
-            RedisKeys.checkpoint(batch.scope.user_name, batch.scope.session_id),
-            0,
+        await commit_ingestion_checkpoint(
+            self.redis,
+            batch,
+            checkpoint_interval=batch.checkpoint_interval or self.checkpoint_interval,
         )
         batch.mark_checkpoint_committed()
 
@@ -561,6 +560,37 @@ class DLQReplayJob(BaseJob):
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
 
+    async def _retry_candidate_suggestions(
+        self, entry: dict, ctx: JobContext
+    ) -> bool:
+        """Retry suggestions, then finish the remaining durable lifecycle."""
+
+        replay_unit = self._replay_work_unit(entry, ctx)
+        replay_unit.mark_running()
+        result = None
+        try:
+            result = self._hydrate_replay_batch(entry["batch_result"])
+            self._refresh_replay_scope(replay_unit, entry, ctx, result)
+            self._set_replay_attempt(result, entry.get("attempt", 1))
+            result = self._validate_replay_batch(result)
+
+            await self._save_candidate_suggestions_for_replay(result)
+            graph_error = await self._write_replay_graph_if_needed(result)
+            if graph_error:
+                raise RuntimeError(graph_error)
+            await self._commit_replay_checkpoint(result)
+
+            replay_unit.mark_succeeded("Candidate suggestion retry succeeded")
+            self._attach_replay_unit(result, replay_unit)
+            await self._emit_replay_unit_finished(ctx, replay_unit)
+            return True
+        except Exception as exc:
+            logger.error(f"DLQ candidate suggestion retry failed: {exc}")
+            replay_unit.mark_failed(str(exc))
+            self._attach_replay_unit(result, replay_unit)
+            await self._emit_replay_unit_finished(ctx, replay_unit)
+            return False
+
     async def _save_candidate_suggestions_for_replay(
         self, result: IngestionBatch
     ) -> None:
@@ -592,8 +622,8 @@ class DLQReplayJob(BaseJob):
                     "source": "dlq_replay",
                 },
             )
-        finally:
-            result.mark_candidate_suggestions_handled()
+            raise
+        result.mark_candidate_suggestions_handled()
 
     async def _save_message_logs_for_replay(
         self, result: IngestionBatch, messages: list[dict]
@@ -649,6 +679,7 @@ class DLQReplayJob(BaseJob):
                 session_id=replay_unit.scope.session_id,
             )
             await self.processor.process(result)
+            result.set_checkpoint_policy(self.checkpoint_interval)
             self._refresh_replay_scope(replay_unit, entry, ctx, result)
             self._set_replay_attempt(result, entry.get("attempt", 1))
 
@@ -817,6 +848,8 @@ class DLQReplayJob(BaseJob):
                         success = await self._retry_graph_write(entry, ctx)
                     elif stage == "message_log":
                         success = await self._retry_message_log(entry, ctx)
+                    elif stage == "candidate_suggestions":
+                        success = await self._retry_candidate_suggestions(entry, ctx)
                     elif stage == "checkpoint":
                         success = await self._retry_checkpoint(entry, ctx)
                     else:

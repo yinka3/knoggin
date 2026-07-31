@@ -266,4 +266,9 @@ def create_document_focus(
 def dump_document_focus(value: DocumentFocus) -> dict:
     """Serialize a validated focus using only its variant's selector fields."""
 
-    return parse_document_focus(value).model_dump(mode="json")
+    focus = parse_document_focus(value)
+    payload = focus.model_dump(mode="json")
+    # Keep the application's stable ISO-8601 UTC form (+00:00) rather than
+    # inheriting Pydantic's version-dependent `Z` JSON rendering.
+    payload["created_at"] = focus.created_at.isoformat()
+    return payload

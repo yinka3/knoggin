@@ -540,7 +540,7 @@ class IngestionPipeline:
                 entity_ids=entity_ids,
                 new_entity_ids=new_ids,
                 alias_updated_ids=alias_ids,
-                entity_msg_map=entity_msg_map,
+                entity_message_map=entity_msg_map,
                 alias_updates=alias_updates,
                 candidate_suggestions=candidate_suggestions,
             )
@@ -1381,7 +1381,13 @@ class IngestionPipeline:
         if stage in ["processing", "message_log"] and session_text is not None:
             entry["session_text"] = session_text
 
-        if stage in ["graph_write", "message_log", "processing"] and batch is not None:
+        if stage in [
+            "graph_write",
+            "message_log",
+            "candidate_suggestions",
+            "checkpoint",
+            "processing",
+        ] and batch is not None:
             payload = DLQPayload.from_ingestion_batch(batch)
             entry["batch_result"] = payload.model_dump(mode="json")
 

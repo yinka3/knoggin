@@ -32,7 +32,6 @@ from core.agent.internals import (
     execute_tool,
     localize_agent_tool_result,
     summarize_result,
-    update_accumulators,
 )
 from core.agent.run import AgentRun
 from core.agent.source_adapters import capture_tool_source_candidates
@@ -122,7 +121,7 @@ class AgentExecutor:
             ):
                 yield event
         finally:
-            self.ctx.clear_short_uuid_references()
+            self.ctx.release()
 
     async def _execute_run(
         self,
@@ -168,11 +167,8 @@ class AgentExecutor:
                 yield self._terminal_error()
                 return
 
-            if isinstance(self.ctx, AgentRun):
-                if not self.ctx.begin_attempt():
-                    break
-            else:
-                self.ctx.attempt_count += 1
+            if not self.ctx.begin_attempt():
+                break
 
             current_model = None
             current_reasoning = None
@@ -271,6 +267,13 @@ class AgentExecutor:
                     )
                     if submit:
                         content = submit.args.get("content", "")
+                        if not isinstance(content, str) or not content.strip():
+                            self._record_step_error(
+                                "submit_answer requires non-empty content",
+                                "formatting",
+                            )
+                            step_failed = True
+                            break
                         response = FinalResponse(
                             content=content,
                             usage=dict(self.ctx.usage),
@@ -286,8 +289,7 @@ class AgentExecutor:
                             needs_final_synthesis = True
                             break
 
-                        if isinstance(self.ctx, AgentRun) and content.strip():
-                            self.ctx.finalize(content)
+                        self.ctx.finalize(content)
                         yield self._wrap_final_response(response)
                         return
 
@@ -303,6 +305,7 @@ class AgentExecutor:
                         question = clarification.args.get(
                             "question", "Could you clarify?"
                         )
+                        self.ctx.finish_without_response()
                         yield {
                             "event": "clarification",
                             "data": {
@@ -349,20 +352,16 @@ class AgentExecutor:
                     )
 
                     if all_empty:
-                        self.ctx.consecutive_empty_results += 1
-                        if (
-                            self.ctx.consecutive_empty_results
-                            >= self.ctx.limits.empty_result_replan_threshold
-                        ):
+                        if self.ctx.record_empty_result():
                             logger.info(
                                 f"AgentExecutor: "
                                 f"{self.ctx.consecutive_empty_results} "
                                 "consecutive empty results. Forcing replan."
                             )
                             needs_replanning = True
-                            self.ctx.consecutive_empty_results = 0
+                            self.ctx.clear_empty_results()
                     else:
-                        self.ctx.consecutive_empty_results = 0
+                        self.ctx.clear_empty_results()
 
                     break
 
@@ -428,7 +427,7 @@ class AgentExecutor:
         )
 
         user_message = build_user_message(self.ctx, last_result)
-        self.ctx.last_error = None
+        self.ctx.clear_last_error()
         configure_tool_authorization(
             self.tools,
             active_schemas,
@@ -496,11 +495,7 @@ class AgentExecutor:
         ]
 
     def _record_step_error(self, message: str, kind: str) -> None:
-        if isinstance(self.ctx, AgentRun):
-            self.ctx.record_error(message)
-        else:
-            self.ctx.last_error = message
-            self.ctx.consecutive_errors += 1
+        self.ctx.record_error(message)
         logger.warning(
             f"AgentExecutor: {kind} step failure "
             f"({self.ctx.consecutive_errors}/"
@@ -509,6 +504,7 @@ class AgentExecutor:
 
     def _terminal_error(self) -> ErrorEvent:
         message = self.ctx.last_error or "Agent execution failed"
+        self.ctx.finish_without_response()
         return {
             "event": "error",
             "data": {
@@ -583,11 +579,10 @@ class AgentExecutor:
 
             try:
                 if self.ctx.tool_limit_reached(call.name, self.ctx.limits):
-                    self.ctx.last_error = (
-                        f"Tool '{call.name}' has reached its call limit"
-                    )
+                    error_message = f"Tool '{call.name}' has reached its call limit"
+                    self.ctx.note_nonfatal_error(error_message)
                     results_out.append(
-                        {"tool": call.name, "error": self.ctx.last_error}
+                        {"tool": call.name, "error": error_message}
                     )
                     yield {
                         "event": "tool_error",
@@ -600,11 +595,12 @@ class AgentExecutor:
                     continue
 
                 if self.ctx.is_duplicate(call.name, call.args):
-                    self.ctx.last_error = (
+                    error_message = (
                         f"Duplicate call to '{call.name}' with same arguments"
                     )
+                    self.ctx.note_nonfatal_error(error_message)
                     results_out.append(
-                        {"tool": call.name, "error": self.ctx.last_error}
+                        {"tool": call.name, "error": error_message}
                     )
                     yield {
                         "event": "tool_error",
@@ -620,15 +616,15 @@ class AgentExecutor:
 
                 if call.name == "request_clarification":
                     question = call.args.get("question", "Could you clarify?")
+                    self.ctx.finish_without_response()
                     yield {"event": "clarification", "data": {"question": question}}
                     return
 
                 if call.args.get("_parse_error"):
-                    self.ctx.last_error = (
-                        f"Failed to parse arguments for '{call.name}'"
-                    )
+                    error_message = f"Failed to parse arguments for '{call.name}'"
+                    self.ctx.note_nonfatal_error(error_message)
                     results_out.append(
-                        {"tool": call.name, "error": self.ctx.last_error}
+                        {"tool": call.name, "error": error_message}
                     )
                     yield {
                         "event": "tool_error",
@@ -667,16 +663,14 @@ class AgentExecutor:
                     result,
                 )
 
-                self.ctx.source_candidates.extend(
+                self.ctx.record_sources(
                     capture_tool_source_candidates(self.ctx, call, result)
                 )
 
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
-                update_accumulators(self.ctx, call.name, model_result)
-
-                self.ctx.consecutive_errors = 0
-                self.ctx.last_error = None
+                self.ctx.accumulate_tool_result(call.name, model_result)
+                self.ctx.record_tool_success()
                 results_out.append({"tool": call.name, "result": model_result})
 
                 yield {
@@ -700,8 +694,7 @@ class AgentExecutor:
                     call.name,
                 )
                 if not handled_as_maintenance:
-                    self.ctx.last_error = message
-                    self.ctx.consecutive_errors += 1
+                    self.ctx.record_error(message)
                 results_out.append({"tool": call.name, "error": message})
                 yield {
                     "event": "tool_error",
@@ -727,8 +720,7 @@ class AgentExecutor:
                     self.ctx, self.tools, call.name
                 )
                 if not handled_as_maintenance:
-                    self.ctx.last_error = e.message
-                    self.ctx.consecutive_errors += 1
+                    self.ctx.record_error(e.message)
                 results_out.append({"tool": call.name, "error": e.message})
                 yield {
                     "event": "tool_error",
@@ -744,8 +736,7 @@ class AgentExecutor:
                     self.ctx, self.tools, call.name
                 )
                 if not handled_as_maintenance:
-                    self.ctx.last_error = "Internal tool failure"
-                    self.ctx.consecutive_errors += 1
+                    self.ctx.record_error("Internal tool failure")
                 results_out.append(
                     {"tool": call.name, "error": "Internal tool failure"}
                 )
@@ -764,18 +755,7 @@ class AgentExecutor:
         return f"{self.ctx.run_id or 'agent'}:global-call-limit"
 
     def _accumulate_usage(self, usage: Optional[StreamUsage]):
-        if isinstance(self.ctx, AgentRun):
-            self.ctx.record_usage(usage)
-            return
-        if usage:
-            self.ctx.usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
-            self.ctx.usage["completion_tokens"] += usage.get(
-                "completion_tokens", 0
-            )
-            self.ctx.usage["total_tokens"] += usage.get("total_tokens", 0)
-            self.ctx.usage["approximate"] = self.ctx.usage[
-                "approximate"
-            ] or usage.get("approximate", False)
+        self.ctx.record_usage(usage)
 
     def _wrap_final_response(self, response: FinalResponse) -> Dict:
         sources_consulted = (
@@ -815,15 +795,14 @@ class AgentExecutor:
         )
         if self.ctx.has_any():
             summary = await self._generate_fallback_summary()
+            content = summary or "I found information but couldn't summarize it."
+            self.ctx.finalize(content)
             event = {
                 "event": "response",
                 "data": {
-                    "content": summary
-                    or "I found information but couldn't summarize it.",
-                    "usage": self.ctx.usage,
-                    "sources": self.ctx.sources
-                    if self.ctx.sources
-                    else None,
+                    "content": content,
+                    "usage": dict(self.ctx.usage),
+                    "sources": list(self.ctx.sources) or None,
                     "fallback": True,
                 },
             }
@@ -834,6 +813,7 @@ class AgentExecutor:
                 ]
             return event
         else:
+            self.ctx.finish_without_response()
             return {
                 "event": "clarification",
                 "data": {
@@ -876,7 +856,7 @@ class AgentExecutor:
     async def _manage_context_size(self):
         """Monitor accumulated evidence and summarize if it approaches token limits."""
         evidence_str = build_evidence_context(self.ctx)
-        self.ctx.evidence_token_count = self.llm.count_tokens(evidence_str)
+        self.ctx.set_evidence_token_count(self.llm.count_tokens(evidence_str))
 
         if self.ctx.evidence_token_count > MAX_TOKEN_CHUNK_SIZE:
             logger.info(
@@ -887,26 +867,24 @@ class AgentExecutor:
             summary = await self._generate_evidence_summary(evidence_str)
 
             if summary:
-                self.ctx.evidence_summary = summary
+                self.ctx.compact_evidence(summary)
             else:
                 logger.warning(
                     "Evidence summarization failed. Truncating raw evidence as "
                     "fallback."
                 )
 
-            self.ctx.messages = self.ctx.messages[-5:]
-            self.ctx.profiles = self.ctx.profiles[-5:]
-            self.ctx.graph = self.ctx.graph[-15:]
-            self.ctx.episodes = []
-            self.ctx.paths = []
-            self.ctx.hierarchy = []
+            if not summary:
+                self.ctx.compact_evidence(None)
 
             # Re-calculate token count
             if summary:
-                self.ctx.evidence_token_count = self.llm.count_tokens(summary)
+                self.ctx.set_evidence_token_count(self.llm.count_tokens(summary))
             else:
                 new_evidence_str = build_evidence_context(self.ctx)
-                self.ctx.evidence_token_count = self.llm.count_tokens(new_evidence_str)
+                self.ctx.set_evidence_token_count(
+                    self.llm.count_tokens(new_evidence_str)
+                )
 
     async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
         """Call LLM to condense existing evidence into a core summary."""
