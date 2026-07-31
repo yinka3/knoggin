@@ -1,5 +1,6 @@
 """Agent-facing contract models."""
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Mapping, Optional, Union
@@ -69,7 +70,60 @@ class AgentConfig:
     created_at: datetime = field(default_factory=get_now)
 
     def __post_init__(self):
+        self.id = self._require_text(self.id, "id")
         self.persona = PersonaProfile.from_value(self.persona)
+        self.name = self._require_text(self.name, "name")
+        self.temperature = self._validate_temperature(self.temperature)
+        self.brain_revision = self._validate_brain_revision(self.brain_revision)
+        self.enabled_tools = self._normalize_enabled_tools(self.enabled_tools)
+
+    @staticmethod
+    def _require_text(value: object, field_name: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"AgentConfig {field_name} must not be blank")
+        return value.strip()
+
+    @staticmethod
+    def _validate_temperature(value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("AgentConfig temperature must be a finite number")
+        temperature = float(value)
+        if not math.isfinite(temperature) or not 0.0 <= temperature <= 2.0:
+            raise ValueError(
+                "AgentConfig temperature must be finite and between 0.0 and 2.0"
+            )
+        return temperature
+
+    @staticmethod
+    def _validate_brain_revision(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("AgentConfig brain_revision must be an integer >= 1")
+        return value
+
+    @staticmethod
+    def _normalize_enabled_tools(
+        tools: Optional[List[str]],
+    ) -> Optional[List[str]]:
+        if tools is None:
+            return None
+        if not isinstance(tools, list):
+            raise ValueError("AgentConfig enabled_tools must be a list or None")
+
+        normalized = []
+        seen = set()
+        for tool in tools:
+            if not isinstance(tool, str) or not tool.strip():
+                raise ValueError(
+                    "AgentConfig enabled_tools must contain nonblank names"
+                )
+            name = tool.strip().lower()
+            if name in seen:
+                raise ValueError(
+                    f"AgentConfig enabled_tools contains duplicate tool: {name}"
+                )
+            seen.add(name)
+            normalized.append(name)
+        return normalized
 
     def to_dict(self) -> Dict:
         return {

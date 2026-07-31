@@ -1,17 +1,8 @@
-import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional
+from uuid import uuid4
 
-from common.schema.agent_stream import StreamUsage
-from common.schema.document import DocumentFocus
 from common.schema.source_reference import SourceReferenceCandidate
-from common.schema.agent_contracts import AgentConfig
-from common.schema.contracts import EngineScope
-from core.agent.tools.registry import get_default_tool_limits
-
-
-def _default_tool_limits() -> Tuple[Tuple[str, int], ...]:
-    return tuple(get_default_tool_limits().items())
 
 
 @dataclass(frozen=True)
@@ -28,186 +19,12 @@ class MaintenanceCandidate:
     cooldown_until: Optional[float] = None
 
 
-@dataclass(frozen=True)
-class AgentRunIdentity:
-    """Durable agent configuration plus the resolved per-run presentation."""
-
-    config: AgentConfig
-    name: str
-    persona: str
-
-
-@dataclass(frozen=True)
-class AgentRunConfig:
-    """Immutable settings governing limits and timeouts for an agent run."""
-
-    max_calls: int = 12
-    max_attempts: int = 15
-    max_history_turns: int = 7
-    max_accumulated_messages: int = 30
-    max_accumulated_profiles: int = 20
-    max_accumulated_graph: int = 40
-    max_accumulated_paths: int = 8
-    max_accumulated_hierarchy: int = 8
-    max_accumulated_episodes: int = 8
-    max_accumulated_sources: int = 12
-    max_consecutive_errors: int = 3
-    empty_result_replan_threshold: int = 3
-    tool_timeout: float = 30.0
-    tool_limits: Tuple[Tuple[str, int], ...] = field(
-        default_factory=_default_tool_limits
-    )
-    _limits_dict: Dict[str, int] = field(init=False, repr=False, compare=False)
-
-    def __post_init__(self):
-        object.__setattr__(self, "_limits_dict", dict(self.tool_limits))
-
-    @classmethod
-    def from_settings(cls, settings) -> "AgentRunConfig":
-        """Compile mutable application settings into one immutable run snapshot."""
-
-        defaults = get_default_tool_limits()
-        overrides = dict(getattr(settings, "tool_limit_overrides", {}))
-        unknown_overrides = set(overrides) - set(defaults)
-        if unknown_overrides:
-            raise ValueError(
-                "Unknown tool limit overrides: "
-                + ", ".join(sorted(unknown_overrides))
-            )
-        invalid_overrides = {
-            name: limit for name, limit in overrides.items() if limit < 1
-        }
-        if invalid_overrides:
-            raise ValueError(
-                "Tool limit overrides must be positive: "
-                + ", ".join(sorted(invalid_overrides))
-            )
-        return cls(
-            max_calls=settings.max_tool_calls,
-            tool_timeout=settings.tool_timeout,
-            max_attempts=settings.max_attempts,
-            max_history_turns=settings.agent_history_turns,
-            max_accumulated_messages=settings.max_accumulated_messages,
-            max_consecutive_errors=settings.max_consecutive_errors,
-            tool_limits=tuple((defaults | overrides).items()),
-        )
-
-    def get_tool_limit(self, tool_name: str, default: int = 6) -> int:
-        if tool_name in self._limits_dict:
-            return self._limits_dict[tool_name]
-
-        for key, limit in self._limits_dict.items():
-            if key.endswith("*") and tool_name.startswith(key[:-1]):
-                return limit
-        return default
-
-
-@dataclass
-class AgentState:
-    """Mutable tracking state maintained during a single agent reasoning loop."""
-
-    call_count: int = 0
-    attempt_count: int = 0
-    consecutive_errors: int = 0
-    consecutive_empty_results: int = 0
-    tools_used: List[str] = field(default_factory=list)
-    previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
-    last_error: Optional[str] = None
-    tool_call_counts: Dict[str, int] = field(default_factory=dict)
-    # Compact UUID handles shown to the model during this execution only.
-    # Values are never persisted and are cleared when the execution ends.
-    short_uuid_references: Dict[str, str] = field(default_factory=dict)
-    # Source candidates are an answer-audit trail, not prompt evidence. They
-    # retain every eligible source in tool/result order until a final response
-    # receives its canonical assistant message ID.
-    source_candidates: List[SourceReferenceCandidate] = field(default_factory=list)
-    usage: StreamUsage = field(
-        default_factory=lambda: {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "approximate": False,
-        }
-    )
-
-    def is_duplicate(self, tool_name: str, args: Dict) -> bool:
-        call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
-        return call_sig in self.previous_calls
-
-    def tool_limit_reached(self, tool_name: str, config: AgentRunConfig) -> bool:
-        limit = config.get_tool_limit(tool_name, config.max_calls)
-        return self.tool_call_counts.get(tool_name, 0) >= limit
-
-    def record_call(self, tool_name: str, args: Dict):
-        call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
-        self.previous_calls.add(call_sig)
-        self.call_count += 1
-        self.tools_used.append(tool_name)
-        self.tool_call_counts[tool_name] = self.tool_call_counts.get(tool_name, 0) + 1
-
-    def clear_short_uuid_references(self) -> None:
-        """Discard model-only UUID handles when this run is finished."""
-
-        self.short_uuid_references.clear()
-
-
-@dataclass
-class RetrievedEvidence:
-    """Accumulated contextual results gathered from tool executions."""
-
-    messages: List[Dict] = field(default_factory=list)
-    profiles: List[Dict] = field(default_factory=list)
-    graph: List[Dict] = field(default_factory=list)
-    paths: List[Dict] = field(default_factory=list)
-    hierarchy: List[Dict] = field(default_factory=list)
-    episodes: List[Dict] = field(default_factory=list)
-    sources: List[Dict] = field(default_factory=list)
-    summary: Optional[str] = None
-    token_count: int = 0
-
-    def has_any(self) -> bool:
-        return bool(
-            self.profiles
-            or self.messages
-            or self.graph
-            or self.paths
-            or self.hierarchy
-            or self.episodes
-            or self.sources
-            or self.summary
-        )
-
-
-@dataclass
-class AgentContext:
-    """Configuration, state, and evidence for one agent execution."""
-
-    config: AgentRunConfig
-    state: AgentState
-    evidence: RetrievedEvidence
-    scope: EngineScope
-    agent: AgentRunIdentity
-    user_query: str = ""
-    run_id: str = ""
-    history: List[Dict] = field(default_factory=list)
-    hot_topics: List[str] = field(default_factory=list)
-    active_topics: List[str] = field(default_factory=list)
-    hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
-    is_community: bool = False
-    current_participants: List[str] = field(default_factory=list)
-    maintenance_candidates: List[MaintenanceCandidate] = field(default_factory=list)
-    document_focus: Optional[DocumentFocus] = None
-    initial_source_candidates: List[SourceReferenceCandidate] = field(
-        default_factory=list
-    )
-
-
 @dataclass
 class ToolCall:
     name: str
     args: Dict = field(default_factory=dict)
     thinking: Optional[str] = None
-    call_id: Optional[str] = None
+    call_id: str = field(default_factory=lambda: str(uuid4()))
 
 
 @dataclass
@@ -216,12 +33,3 @@ class FinalResponse:
     usage: Optional[Dict] = None
     sources: Optional[List[Dict]] = None
     sources_consulted: Optional[List[SourceReferenceCandidate]] = None
-
-
-@dataclass
-class ClarificationRequest:
-    question: str
-    usage: Optional[Dict] = None
-
-
-AgentResponse = Union[ToolCall, List[ToolCall], FinalResponse, ClarificationRequest]

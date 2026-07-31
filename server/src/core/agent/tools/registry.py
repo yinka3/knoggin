@@ -400,6 +400,12 @@ def get_default_tool_limits() -> Dict[str, int]:
     return dict(DEFAULT_TOOL_LIMITS)
 
 
+def get_registered_tool_names() -> frozenset[str]:
+    """Return every callable tool name owned by the runtime registry."""
+
+    return frozenset(TOOL_DEFINITIONS)
+
+
 def get_tool_module(tool_name: str) -> Optional[ToolModule]:
     return TOOL_MODULE_BY_NAME.get(tool_name)
 

@@ -12,7 +12,8 @@ from loguru import logger
 from common.schema.source_reference import SourceReferenceCandidate
 
 if TYPE_CHECKING:
-    from core.agent.types import AgentContext, ToolCall
+    from core.agent.run import AgentRun
+    from core.agent.types import ToolCall
 
 
 @dataclass(frozen=True)
@@ -148,7 +149,7 @@ _TOOL_SOURCE_ENCOUNTERS = {
 
 
 def capture_tool_source_candidates(
-    ctx: AgentContext,
+    ctx: AgentRun,
     call: ToolCall,
     result: Mapping,
 ) -> list[SourceReferenceCandidate]:

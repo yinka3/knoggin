@@ -3,8 +3,10 @@ from pydantic import ValidationError
 
 from common.conf.topics_config import TopicConfig
 from common.exceptions import LLMProviderError
-from common.schema.contracts import ExtractionTrace, NERMention, NERResult
+from common.schema.contracts import ExtractionTrace
+from common.schema.extraction_output import NERMention, NERResult
 from common.schema.settings import TextProcessorSettings, TopicSchema
+from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.profile import EntityProfile
 from tests.fixtures.factories import make_topic_config
@@ -96,7 +98,6 @@ def make_topic_config_with_tools():
             "Tools": TopicSchema(
                 active=True,
                 labels=["tool"],
-                hierarchy={},
                 aliases=["apps"],
             ),
         }
@@ -165,13 +166,18 @@ def make_processor(
 
 
 async def extract(processor, *, messages=None, trace=None, issues=None):
-    return await processor.extract_mentions(
-        "ada",
-        MESSAGES if messages is None else messages,
-        "session-1",
-        trace=trace,
-        issues=issues,
+    batch = IngestionBatch.open(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        messages=MESSAGES if messages is None else messages,
+        session_text="",
     )
+    if trace is not None:
+        batch.trace = trace
+    if issues is not None:
+        batch.issues = issues
+    return await processor.extract_mentions(batch)
 
 
 @pytest.mark.ingestion
@@ -374,8 +380,15 @@ async def test_extract_mentions_llm_failure_falls_back_and_records_issue():
     result = await extract(processor, trace=trace, issues=issues)
 
     assert result == [(1, "Linear", "tool", "Tools")]
-    assert trace.fallbacks == []
+    assert trace.fallbacks == [
+        {
+            "stage": "ner",
+            "fallback": "empty_mentions",
+            "error_code": "llm_provider_error",
+        }
+    ]
     assert [issue.code for issue in issues] == ["llm_extraction_failed"]
+    assert issues[0].metadata["error_code"] == "llm_provider_error"
 
 
 @pytest.mark.ingestion

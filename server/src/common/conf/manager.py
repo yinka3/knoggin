@@ -7,8 +7,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from common.schema.agent_settings import validate_tool_limit_overrides
 from common.schema.settings import RootConfig
 from common.utils.core_utils import safe_update
 
@@ -63,23 +64,45 @@ class ConfigManager:
         validate_prompt_library()
         load_topic_seed()
         data = None
-        if CONFIG_FILE_YAML.exists():
+        load_failed = False
+        config_exists = CONFIG_FILE_YAML.exists()
+        if config_exists:
             try:
                 with open(CONFIG_FILE_YAML, "r") as f:
                     data = yaml.safe_load(f)
-            except Exception as e:
-                logger.error(f"Failed to load knoggin.yml: {e}")
+            except Exception as exc:
+                load_failed = True
+                logger.error(
+                    "Failed to load knoggin.yml; keeping the active "
+                    f"configuration: {exc}"
+                )
 
+        if load_failed:
+            return
         if data:
             try:
-                self.config = RootConfig(**data)
-            except Exception as e:
-                logger.error(f"Configuration validation failed: {e}")
-                self.config = RootConfig()
+                new_config = RootConfig(**data)
+                self._validate_runtime_config(new_config)
+                self.config = new_config
+            except ValidationError as exc:
+                errors = "; ".join(
+                    f"{'.'.join(str(part) for part in error['loc'])}: "
+                    f"{error['msg']}"
+                    for error in exc.errors(include_url=False)
+                )
+                logger.error(
+                    "Configuration validation failed; keeping the active "
+                    f"configuration: {errors}"
+                )
+            except Exception as exc:
+                logger.error(
+                    "Configuration load failed; keeping the active "
+                    f"configuration: {exc}"
+                )
         else:
             self.config = RootConfig()
 
-        if not CONFIG_FILE_YAML.exists():
+        if not config_exists:
             self.save()
 
     def save(self) -> bool:
@@ -116,10 +139,10 @@ class ConfigManager:
     def subscribe(self, callback: Callable, path: Optional[str] = None) -> Callable[[], None]:
         """
         Subscribe a service callback to configuration updates.
-        
+
         Args:
             callback: Method to call when config changes (e.g. `self.update_settings`).
-            path: Pydantic attribute path (e.g. 'developer_settings.jobs.cleaner'). 
+            path: Pydantic attribute path (e.g. 'developer_settings.jobs.cleaner').
                   If provided, the callback is only triggered if this specific subtree changes.
         """
         subscription = {
@@ -161,6 +184,7 @@ class ConfigManager:
 
         try:
             new_config = RootConfig(**updated_data)
+            self._validate_runtime_config(new_config)
         except Exception as e:
             logger.error(f"Failed to validate configuration updates: {e}")
             return False
@@ -187,3 +211,14 @@ class ConfigManager:
                     logger.error(f"Error calling configuration subscriber {cb.__name__}: {e}")
 
         return True
+
+    @staticmethod
+    def _validate_runtime_config(config: RootConfig) -> None:
+        """Validate configuration against runtime-owned registries."""
+
+        from core.agent.tools.registry import get_registered_tool_names
+
+        validate_tool_limit_overrides(
+            config.developer_settings.limits,
+            get_registered_tool_names(),
+        )

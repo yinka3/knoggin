@@ -198,7 +198,11 @@ class AgeProjectionWriter:
         MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
             r.relationship_type = rel.relationship_type,
-            r.weight = coalesce(r.weight, 0) + 1,
+            r.weight = CASE
+                WHEN rel.evidence_ref IN coalesce(r.message_ids, [])
+                    THEN coalesce(r.weight, 0)
+                ELSE coalesce(r.weight, 0) + 1
+            END,
             r.confidence = CASE
                 WHEN r.confidence IS NULL THEN rel.confidence
                 WHEN rel.confidence > r.confidence THEN rel.confidence

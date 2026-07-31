@@ -9,11 +9,9 @@ from spacy.matcher import PhraseMatcher
 from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
 from common.schema.contracts import (
-    EngineWorkUnit,
-    ExtractionTrace,
-    NERResult,
     ValidationIssue,
 )
+from common.schema.extraction_output import NERResult
 from common.schema.settings import TextProcessorSettings
 from common.utils.core_utils import (
     PRONOUNS,
@@ -24,10 +22,12 @@ from common.utils.core_utils import (
 )
 from common.utils.events import emit
 from common.utils.local_references import build_local_id_maps, resolve_local_id
+from core.ingestion.batch import IngestionBatch
 from core.ingestion.prompts import ner_prompt
 from core.knowledge.entity.profile import EntityProfile
 from infrastructure.llm_client import LLMService
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
+from infrastructure.work_record import WorkRecord
 
 
 class TextProcessor:
@@ -43,6 +43,7 @@ class TextProcessor:
     mention candidates with enough structured context for IngestionPipeline to
     decide whether to reuse an existing entity or create a new one.
     """
+
     def __init__(
         self,
         llm: LLMService,
@@ -66,9 +67,9 @@ class TextProcessor:
         self._model_work = model_work
         self._spacy_lock = threading.Lock()
         self._phrase_matcher_cache_version: Optional[int] = None
-        self._phrase_matcher_cache: Optional[
-            Tuple[PhraseMatcher, Dict[str, int]]
-        ] = None
+        self._phrase_matcher_cache: Optional[Tuple[PhraseMatcher, Dict[str, int]]] = (
+            None
+        )
         self.update_settings(settings)
 
     def update_settings(self, config: TextProcessorSettings):
@@ -98,23 +99,27 @@ class TextProcessor:
         *,
         name: str,
         work_kind: str,
-        parent_work_unit: Optional[EngineWorkUnit] = None,
+        parent_work_record: Optional[WorkRecord] = None,
     ):
+        if parent_work_record is not None and not isinstance(
+            parent_work_record, WorkRecord
+        ):
+            raise TypeError("parent_work_record must be a WorkRecord")
         if self._model_work is not None:
-            work_unit = None
-            if parent_work_unit is not None:
-                work_unit = EngineWorkUnit.for_model_operation(
-                    kind=work_kind,
-                    scope=parent_work_unit.scope,
-                    parent_work_unit_id=parent_work_unit.id,
-                    priority=parent_work_unit.priority,
+            work_record = None
+            if parent_work_record is not None:
+                work_record = WorkRecord.for_model_operation(
+                    work_kind,
+                    parent_work_record.scope,
+                    parent_id=parent_work_record.id,
+                    priority=parent_work_record.priority,
                 )
             return await self._model_work.run_blocking(
                 operation,
                 priority=ModelWorkPriority.BACKGROUND,
                 name=name,
-                work_unit=work_unit,
-                parent_work_unit=parent_work_unit,
+                work_record=work_record,
+                parent_work_record=parent_work_record,
             )
         return await asyncio.to_thread(operation)
 
@@ -207,23 +212,23 @@ class TextProcessor:
 
     async def extract_mentions(
         self,
-        user_name: str,
-        messages: List[Dict],
-        session_id: str,
-        trace: Optional[ExtractionTrace] = None,
-        issues: Optional[List[ValidationIssue]] = None,
-        work_unit: Optional[EngineWorkUnit] = None,
+        batch: IngestionBatch,
     ) -> List[Tuple[int, str, str, str]]:
-        """
-        Extracts entities via known aliases, GLiNER, and VP-01.
-        Returns: List[(msg_id, name, type, topic)]
-        """
+        """Extract mentions directly into the supplied ingestion workflow."""
+
+        if not isinstance(batch, IngestionBatch):
+            raise TypeError("extract_mentions requires an IngestionBatch")
+        messages = batch.messages
         if not messages:
             return []
+        user_name = batch.scope.user_name
+        session_id = batch.scope.session_id
+        trace = batch.trace
+        issues = batch.issues
+        work_record = batch.work_unit
 
-        if trace is not None:
-            trace.entity_model = getattr(self.llm_client, "extraction_model", None)
-            trace.entity_prompt = "VEGAPUNK-01"
+        trace.entity_model = getattr(self.llm_client, "extraction_model", None)
+        trace.entity_prompt = "VEGAPUNK-01"
 
         def record_issue(
             code: str,
@@ -232,17 +237,16 @@ class TextProcessor:
             item_ref: Optional[str] = None,
             metadata: Optional[Dict] = None,
         ) -> None:
-            if issues is not None:
-                issues.append(
-                    ValidationIssue(
-                        stage="ner",
-                        code=code,
-                        message=message,
-                        severity=severity,
-                        item_ref=item_ref,
-                        metadata=metadata or {},
-                    )
+            issues.append(
+                ValidationIssue(
+                    stage="ner",
+                    code=code,
+                    message=message,
+                    severity=severity,
+                    item_ref=item_ref,
+                    metadata=metadata or {},
                 )
+            )
 
         matcher, aliases = self._build_phrase_matcher()
 
@@ -264,10 +268,9 @@ class TextProcessor:
             _run_spacy_matcher,
             name="spacy-known-aliases",
             work_kind="spacy",
-            parent_work_unit=work_unit,
+            parent_work_record=work_record,
         )
-        if trace is not None:
-            trace.known_mentions = len(known_ents)
+        trace.known_mentions = len(known_ents)
 
         await emit(
             session_id,
@@ -290,10 +293,9 @@ class TextProcessor:
             _run_gliner_batch,
             name="gliner-mentions",
             work_kind="gliner",
-            parent_work_unit=work_unit,
+            parent_work_record=work_record,
         )
-        if trace is not None:
-            trace.gliner_raw_mentions = len(gliner_ents)
+        trace.gliner_raw_mentions = len(gliner_ents)
 
         covered_texts: Dict[int, set] = {m["id"]: set() for m in messages}
         resolved: List[Tuple[int, str, str, str]] = []
@@ -357,8 +359,7 @@ class TextProcessor:
                 gliner_accepted_count += 1
                 resolved.append((msg_id, span_text, label, topic))
 
-        if trace is not None:
-            trace.gliner_accepted_mentions = gliner_accepted_count
+        trace.gliner_accepted_mentions = gliner_accepted_count
 
         await emit(
             session_id,
@@ -415,26 +416,32 @@ class TextProcessor:
                 temperature=0.0,
             )
         except (ConfigurationError, LLMError) as e:
+            trace.fallbacks.append(
+                {
+                    "stage": "ner",
+                    "fallback": "empty_mentions",
+                    "error_code": e.code,
+                }
+            )
             record_issue(
                 code="llm_extraction_failed",
                 message=f"VP-01 extraction failed: {e}",
                 severity="warning",
+                metadata={"error_code": e.code, **e.details},
             )
             ner_result = None
 
         vp01_count = 0
         valid_msg_ids = covered_texts.keys()
         if ner_result and ner_result.mentions:
-            if trace is not None:
-                trace.llm_mentions_seen = len(ner_result.mentions)
+            trace.llm_mentions_seen = len(ner_result.mentions)
             for entity in ner_result.mentions:
                 try:
                     actual_msg_id = int(
                         resolve_local_id(entity.msg_id, message_ids_by_local)
                     )
                 except ValueError:
-                    if trace is not None:
-                        trace.llm_mentions_rejected += 1
+                    trace.llm_mentions_rejected += 1
                     await emit(
                         session_id,
                         "pipeline",
@@ -448,8 +455,7 @@ class TextProcessor:
                     record_issue(
                         code="invalid_msg_id",
                         message=(
-                            "VP-01 returned an invalid local msg_id "
-                            f"{entity.msg_id}"
+                            f"VP-01 returned an invalid local msg_id {entity.msg_id}"
                         ),
                         item_ref=entity.name,
                         metadata={"msg_id": entity.msg_id},
@@ -457,8 +463,7 @@ class TextProcessor:
                     continue
 
                 if actual_msg_id not in valid_msg_ids:
-                    if trace is not None:
-                        trace.llm_mentions_rejected += 1
+                    trace.llm_mentions_rejected += 1
                     record_issue(
                         code="invalid_msg_id",
                         message=(
@@ -471,8 +476,7 @@ class TextProcessor:
                     continue
 
                 if entity.confidence < self.vp01_min_confidence:
-                    if trace is not None:
-                        trace.llm_mentions_rejected += 1
+                    trace.llm_mentions_rejected += 1
                     record_issue(
                         code="low_confidence",
                         message=(
@@ -493,8 +497,7 @@ class TextProcessor:
                     entity.name, entity.topic, self.topic_config, label=entity.type
                 ):
                     if is_covered(entity.name, covered_texts.get(actual_msg_id, set())):
-                        if trace is not None:
-                            trace.llm_mentions_rejected += 1
+                        trace.llm_mentions_rejected += 1
                         record_issue(
                             code="duplicate_mention",
                             message=(
@@ -509,11 +512,9 @@ class TextProcessor:
                         (actual_msg_id, entity.name, entity.type, entity.topic)
                     )
                     vp01_count += 1
-                    if trace is not None:
-                        trace.llm_mentions_accepted += 1
+                    trace.llm_mentions_accepted += 1
                 else:
-                    if trace is not None:
-                        trace.llm_mentions_rejected += 1
+                    trace.llm_mentions_rejected += 1
                     record_issue(
                         code="invalid_entity",
                         message=f"VP-01 entity '{entity.name}' failed validation",

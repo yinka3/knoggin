@@ -20,11 +20,11 @@ from core.knowledge.db.write_graph_db import write_batch_callback
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
 from core.knowledge.entity.resolver import EntityResolver
-from core.knowledge.jobs.merge_rollback_cleanup_job import (
-    MergeCleanupJob,
-)
 from core.knowledge.jobs.audit_retention_cleanup_job import (
     AuditRetentionCleanupJob,
+)
+from core.knowledge.jobs.merge_rollback_cleanup_job import (
+    MergeCleanupJob,
 )
 from core.project.state import ProjectState
 from infrastructure.job.scheduler import Scheduler
@@ -647,7 +647,6 @@ class ProjectManager:
             readable_project_ids=readable_project_ids,
             knowledge_store=self.resources.knowledge_store,
             embedding_service=self.resources.embedding,
-            hierarchy_config=t_config.hierarchy,
             fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
             fuzzy_non_substring_threshold=er_cfg.fuzzy_non_substring_threshold,
             generic_token_freq=er_cfg.generic_token_freq,

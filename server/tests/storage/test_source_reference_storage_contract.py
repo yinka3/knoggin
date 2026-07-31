@@ -8,7 +8,6 @@ from core.knowledge.db.readers.source_reference_reader import SourceReferenceRea
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
-
 DOCUMENT_ID = "00000000-0000-0000-0000-000000000101"
 TEXT_DOCUMENT_ID = "00000000-0000-0000-0000-000000000102"
 SOURCE_REF_ID = "00000000-0000-0000-0000-000000000201"
@@ -224,9 +223,7 @@ async def test_writer_uses_stable_idempotency_for_tool_and_pasted_origins():
         SourceReferenceWriter.idempotency_key(document)
     )
     assert SourceReferenceWriter.idempotency_key(document) != (
-        SourceReferenceWriter.idempotency_key(
-            document_candidate(result_position=1)
-        )
+        SourceReferenceWriter.idempotency_key(document_candidate(result_position=1))
     )
     assert SourceReferenceWriter.idempotency_key(pasted) == (
         SourceReferenceWriter.idempotency_key(pasted)
@@ -339,7 +336,7 @@ async def test_reader_returns_an_empty_source_collection_for_an_answer_without_r
     )
 
     assert answer is not None
-    assert answer.sources_consulted == []
+    assert answer.sources_consulted == ()
 
 
 @pytest.mark.storage
@@ -442,14 +439,17 @@ async def test_real_postgres_persists_retries_and_cascades_document_and_message_
     )
 
     assert first[0].source_ref_id == retried[0].source_ref_id
-    assert len(
-        await reader.get_message_source_refs(
-            101,
-            user_name="ada",
-            project_id="project-1",
-            session_id="session-1",
+    assert (
+        len(
+            await reader.get_message_source_refs(
+                101,
+                user_name="ada",
+                project_id="project-1",
+                session_id="session-1",
+            )
         )
-    ) == 1
+        == 1
+    )
 
     await real_postgres_client.execute(
         "DELETE FROM public.project_documents WHERE document_id = %s",
@@ -537,12 +537,15 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.message_source_refs"
     ) == {"count": 0}
-    assert await reader.get_episode_source_refs(
-        "episode-1",
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-    ) == []
+    assert (
+        await reader.get_episode_source_refs(
+            "episode-1",
+            user_name="ada",
+            project_id="project-1",
+            session_id="session-1",
+        )
+        == []
+    )
 
 
 @pytest.mark.storage
@@ -608,6 +611,7 @@ async def test_real_postgres_enforces_source_shape_and_project_scoped_document_f
             (DOCUMENT_ID, CONTENT_HASH, valid_locator, valid_metadata),
         )
 
+    writer = SourceReferenceWriter(real_postgres_client)
     await writer.write_for_assistant_message(
         101,
         [pasted_text_candidate()],

@@ -1,16 +1,17 @@
 import os
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ConfigDict, Field, ValidationError, field_validator
 
 from common.exceptions import ConfigurationError
 from common.schema.agent_settings import AgentLimitSettings
+from common.schema.config import ConfigModel
 
 
-class RedisConnectionSettings(BaseModel):
+class RedisConnectionSettings(ConfigModel):
     """Startup-only Redis connection and pool settings."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     url: str = "redis://localhost:6379/0"
     max_connections: int = Field(10, ge=1)
@@ -51,12 +52,28 @@ class RedisConnectionSettings(BaseModel):
             ) from exc
 
 
-class TopicSchema(BaseModel):
+class TopicSchema(ConfigModel):
     active: bool = Field(True)
     hot: bool = Field(False)
     labels: List[str] = Field(default_factory=list)
-    hierarchy: Dict[str, Any] = Field(default_factory=dict)
     aliases: List[str] = Field(default_factory=list)
+
+    @field_validator("labels", "aliases")
+    @classmethod
+    def _normalize_unique_topic_terms(cls, values: List[str]) -> List[str]:
+        normalized = []
+        seen = set()
+        for raw_value in values:
+            if not isinstance(raw_value, str):
+                raise ValueError("topic labels and aliases must be strings")
+            value = " ".join(raw_value.split()).casefold()
+            if not value:
+                raise ValueError("topic labels and aliases must not be blank")
+            if value in seen:
+                raise ValueError("topic labels and aliases must not contain duplicates")
+            seen.add(value)
+            normalized.append(value)
+        return normalized
 
 
 DEFAULT_SPARSE_CONTEXT_VERBS = [
@@ -95,9 +112,7 @@ DEFAULT_SPARSE_CONTEXT_VERBS = [
 ]
 
 
-
-
-class IngestionSettings(BaseModel):
+class IngestionSettings(ConfigModel):
     batch_size: int = Field(8, ge=1, le=100)
     batch_debounce_seconds: float = Field(0.75, ge=0.0, le=10.0)
     batch_timeout: float = Field(300.0, ge=10.0)
@@ -105,19 +120,19 @@ class IngestionSettings(BaseModel):
     session_window: int = Field(24, ge=1)
 
 
-class DocumentIndexingSettings(BaseModel):
+class DocumentIndexingSettings(ConfigModel):
     recovery_interval_seconds: int = Field(60, ge=10)
     recovery_batch_size: int = Field(16, ge=1, le=100)
 
 
-class CleanerSettings(BaseModel):
+class CleanerSettings(ConfigModel):
     enabled: bool = Field(True)
     interval_hours: int = Field(24, ge=1)
     orphan_age_hours: int = Field(24, ge=1)
     stale_junk_days: int = Field(30, ge=1)
 
 
-class EpisodeSettings(BaseModel):
+class EpisodeSettings(ConfigModel):
     """Configuration for bounded episodic-memory generation windows."""
 
     enabled: bool = Field(True)
@@ -129,20 +144,20 @@ class EpisodeSettings(BaseModel):
     retrieval_episode_limit: int = Field(5, ge=1)
 
 
-class DLQSettings(BaseModel):
+class DLQSettings(ConfigModel):
     interval_seconds: int = Field(60, ge=10)
     batch_size: int = Field(50, ge=1)
     max_attempts: int = Field(2, ge=1)
     completed_state_retention_hours: float = Field(24.0, ge=0.25)
 
 
-class MergeRollbackSettings(BaseModel):
+class MergeRollbackSettings(ConfigModel):
     enabled: bool = Field(True)
     retention_hours: float = Field(5.0, ge=0.5)
     fallback_interval_hours: float = Field(1.0, ge=0.25)
 
 
-class AuditRetentionSettings(BaseModel):
+class AuditRetentionSettings(ConfigModel):
     """Retention windows for completed, non-canonical operational records."""
 
     enabled: bool = Field(True)
@@ -152,13 +167,11 @@ class AuditRetentionSettings(BaseModel):
     merge_history_days: int = Field(180, ge=1)
 
 
-class JobSettings(BaseModel):
+class JobSettings(ConfigModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     dlq: DLQSettings = Field(default_factory=DLQSettings)
-    merge_rollback: MergeRollbackSettings = Field(
-        default_factory=MergeRollbackSettings
-    )
+    merge_rollback: MergeRollbackSettings = Field(default_factory=MergeRollbackSettings)
     audit_retention: AuditRetentionSettings = Field(
         default_factory=AuditRetentionSettings
     )
@@ -167,18 +180,18 @@ class JobSettings(BaseModel):
     )
 
 
-class TopicEvaluationSettings(BaseModel):
+class TopicEvaluationSettings(ConfigModel):
     enabled: bool = Field(True)
     interval_msgs: int = Field(40, ge=1)
 
 
-class TextProcessorSettings(BaseModel):
+class TextProcessorSettings(ConfigModel):
     gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
     vp01_min_confidence: float = Field(0.8, ge=0.0, le=1.0)
     llm_ner: bool = Field(False)
 
 
-class SearchSettings(BaseModel):
+class SearchSettings(ConfigModel):
     fts_limit: int = Field(50, ge=1)
     rerank_candidates: int = Field(25, ge=1)
     default_message_limit: int = Field(8, ge=1)
@@ -186,7 +199,7 @@ class SearchSettings(BaseModel):
     default_activity_hours: int = Field(24, ge=1)
 
 
-class EntityResolutionSettings(BaseModel):
+class EntityResolutionSettings(ConfigModel):
     fuzzy_substring_threshold: int = Field(75, ge=50, le=100)
     fuzzy_non_substring_threshold: int = Field(91, ge=50, le=100)
     generic_token_freq: int = Field(10, ge=1)
@@ -199,7 +212,7 @@ class EntityResolutionSettings(BaseModel):
     )
 
 
-class LLMSettings(BaseModel):
+class LLMSettings(ConfigModel):
     api_key: str = Field("")
     base_url: Optional[str] = None
     agent_model: str = Field("google/gemini-3-flash-preview")
@@ -207,13 +220,13 @@ class LLMSettings(BaseModel):
     merge_model: str = Field("google/gemini-2.5-pro")
 
 
-class SearchAPIKeySettings(BaseModel):
+class SearchAPIKeySettings(ConfigModel):
     provider: str = Field("auto")
     brave_api_key: str = Field("")
     tavily_api_key: str = Field("")
 
 
-class CommunitySettings(BaseModel):
+class CommunitySettings(ConfigModel):
     enabled: bool = Field(False)
     interval_minutes: int = Field(30, ge=1)
     max_turns: int = Field(10, ge=1)
@@ -223,14 +236,14 @@ class CommunitySettings(BaseModel):
     project_ids: List[str] = Field(default_factory=list)
 
 
-class CoordinationLogSettings(BaseModel):
+class CoordinationLogSettings(ConfigModel):
     enabled: bool = Field(True)
     path: str = Field("logs/coordination.log", min_length=1)
     retention_days: int = Field(14, ge=1)
     rotation_mb: int = Field(10, ge=1)
 
 
-class DeveloperSettings(BaseModel):
+class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
     topic_evaluation: TopicEvaluationSettings = Field(
@@ -248,7 +261,7 @@ class DeveloperSettings(BaseModel):
     )
 
 
-class RootConfig(BaseModel):
+class RootConfig(ConfigModel):
     user_name: str = Field("")
     user_aliases: List[str] = Field(default_factory=list)
     configured_at: Optional[str] = None

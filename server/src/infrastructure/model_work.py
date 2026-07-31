@@ -8,7 +8,7 @@ from enum import IntEnum
 from time import perf_counter
 from typing import Awaitable, Callable, Optional, TypeVar
 
-from common.schema.contracts import EngineWorkUnit
+from infrastructure.work_record import WorkRecord
 
 ResultT = TypeVar("ResultT")
 
@@ -22,14 +22,14 @@ class ModelWorkPriority(IntEnum):
 
 @dataclass
 class QueuedModelTask:
-    """Runtime-only queue payload; never serialized into an EngineWorkUnit."""
+    """Runtime-only queue payload owned by workflow telemetry."""
 
     future: asyncio.Future
     operation: Optional[Callable[[], Awaitable]]
     queued_at: float
     name: str
-    work_unit: Optional[EngineWorkUnit] = None
-    parent_work_unit: Optional[EngineWorkUnit] = None
+    work_record: Optional[WorkRecord] = None
+    parent_work_record: Optional[WorkRecord] = None
     cancellation_summary: str = "Caller cancelled before execution"
 
 
@@ -105,8 +105,8 @@ class ModelWorkCoordinator:
         *,
         priority: ModelWorkPriority,
         name: str,
-        work_unit: Optional[EngineWorkUnit] = None,
-        parent_work_unit: Optional[EngineWorkUnit] = None,
+        work_record: Optional[WorkRecord] = None,
+        parent_work_record: Optional[WorkRecord] = None,
         timeout_seconds: float | None = None,
     ) -> ResultT:
         loop = asyncio.get_running_loop()
@@ -114,8 +114,8 @@ class ModelWorkCoordinator:
             lambda: loop.run_in_executor(self._executor, operation),
             priority=priority,
             name=name,
-            work_unit=work_unit,
-            parent_work_unit=parent_work_unit,
+            work_record=work_record,
+            parent_work_record=parent_work_record,
             timeout_seconds=timeout_seconds,
         )
 
@@ -125,12 +125,14 @@ class ModelWorkCoordinator:
         *,
         priority: ModelWorkPriority,
         name: str,
-        work_unit: Optional[EngineWorkUnit] = None,
-        parent_work_unit: Optional[EngineWorkUnit] = None,
+        work_record: Optional[WorkRecord] = None,
+        parent_work_record: Optional[WorkRecord] = None,
         timeout_seconds: float | None = None,
     ) -> ResultT:
         if self._closed:
             raise RuntimeError("ModelWorkCoordinator is closed")
+        self._require_work_record("work_record", work_record)
+        self._require_work_record("parent_work_record", parent_work_record)
         await self.start()
 
         loop = asyncio.get_running_loop()
@@ -157,11 +159,11 @@ class ModelWorkCoordinator:
             operation=operation,
             queued_at=queued_at,
             name=name,
-            work_unit=work_unit,
-            parent_work_unit=parent_work_unit,
+            work_record=work_record,
+            parent_work_record=parent_work_record,
         )
-        if work_unit is not None:
-            work_unit.mark_queued()
+        if work_record is not None:
+            work_record.mark_queued()
         await self._queues[priority].put((int(priority), next(self._sequence), task))
         deadline = timeout_seconds
         if deadline is None and priority is ModelWorkPriority.FOREGROUND:
@@ -198,8 +200,8 @@ class ModelWorkCoordinator:
             wait_seconds = perf_counter() - task.queued_at
             self._wait_seconds_total += wait_seconds
             metrics["wait_seconds_total"] += wait_seconds
-            if task.work_unit is not None:
-                task.work_unit.mark_running()
+            if task.work_record is not None:
+                task.work_record.mark_running()
             started_at = perf_counter()
             try:
                 result = await task.operation()
@@ -208,16 +210,16 @@ class ModelWorkCoordinator:
                 metrics["failed"] += 1
                 if isinstance(exc, asyncio.CancelledError):
                     self._mark_cancelled(task, "Model work cancelled during execution")
-                elif task.work_unit is not None:
-                    task.work_unit.mark_failed(str(exc))
+                elif task.work_record is not None:
+                    task.work_record.mark_failed(str(exc))
                     self._attach_child_summary(task)
                 if not task.future.done():
                     task.future.set_exception(exc)
             else:
                 self._completed += 1
                 metrics["completed"] += 1
-                if task.work_unit is not None:
-                    task.work_unit.mark_succeeded()
+                if task.work_record is not None:
+                    task.work_record.mark_succeeded()
                     self._attach_child_summary(task)
                 if not task.future.done():
                     task.future.set_result(result)
@@ -230,13 +232,18 @@ class ModelWorkCoordinator:
 
     @staticmethod
     def _attach_child_summary(task: QueuedModelTask) -> None:
-        if task.work_unit is not None and task.parent_work_unit is not None:
-            task.parent_work_unit.add_model_work_summary(task.work_unit)
+        if task.work_record is not None and task.parent_work_record is not None:
+            task.parent_work_record.add_model_work_summary(task.work_record)
 
     def _mark_cancelled(self, task: QueuedModelTask, summary: str) -> None:
-        if task.work_unit is not None:
-            task.work_unit.mark_cancelled(summary)
+        if task.work_record is not None:
+            task.work_record.mark_cancelled(summary)
             self._attach_child_summary(task)
+
+    @staticmethod
+    def _require_work_record(name: str, value: Optional[WorkRecord]) -> None:
+        if value is not None and not isinstance(value, WorkRecord):
+            raise TypeError(f"{name} must be a WorkRecord")
 
     def snapshot(self) -> dict[str, object]:
         """Return cheap in-memory metrics suitable for future API instrumentation."""

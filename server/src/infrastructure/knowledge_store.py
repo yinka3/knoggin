@@ -5,9 +5,9 @@ from loguru import logger
 
 from common.schema.contracts import (
     CandidateSuggestion,
-    EngineScope,
     EntityWrite,
     EpisodeEligibility,
+    ExecutionScope,
     MessageEntityRef,
     RelationshipWrite,
 )
@@ -115,7 +115,7 @@ class KnowledgeStore:
 
     async def save_candidate_suggestions(
         self,
-        scope: EngineScope,
+        scope: ExecutionScope,
         suggestions: List[CandidateSuggestion],
     ) -> int:
         return await self._candidate_suggestion_writer.save_candidate_suggestions(
@@ -197,7 +197,7 @@ class KnowledgeStore:
         *,
         message_entity_refs: Optional[List[MessageEntityRef]] = None,
         eligible_messages: Optional[List[EpisodeEligibility]] = None,
-        scope: EngineScope,
+        scope: ExecutionScope,
     ) -> bool:
         return await self._entity_writer.write_batch(
             entities,

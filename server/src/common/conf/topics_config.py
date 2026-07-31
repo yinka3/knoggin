@@ -1,6 +1,7 @@
 import copy
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -10,12 +11,11 @@ from loguru import logger
 from common.schema.settings import TopicSchema
 from common.utils.json_utils import safe_json_loads
 
-_TOPICS_SEED_FILE = (
-    Path(__file__).parent.parent / "templates" / "topics.yaml"
-)
+_TOPICS_SEED_FILE = Path(__file__).parent.parent / "templates" / "topics.yaml"
 _TOPIC_NAME = re.compile(r"^[A-Z][A-Za-z0-9 _-]{1,39}$")
 _LABEL = re.compile(r"^[a-z][a-z0-9 _-]{0,29}$")
 _ALIAS = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,39}$")
+_OBSOLETE_TOPIC_SCHEMA_KEYS = frozenset({"hierarchy"})
 PROTECTED_TOPICS = frozenset({"Identity"})
 MAX_NEW_TOPICS_PER_UPDATE = 3
 MAX_LABELS_PER_TOPIC = 20
@@ -29,14 +29,87 @@ def load_topic_seed() -> Dict[str, TopicSchema]:
     raw = yaml.safe_load(_TOPICS_SEED_FILE.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError("topics.yaml must contain a mapping of topic names")
-    config = {name: TopicSchema.model_validate(value) for name, value in raw.items()}
+    config = _validate_topic_mapping(raw)
     missing = PROTECTED_TOPICS - set(config)
     if missing:
-        raise ValueError(
-            f"topics.yaml is missing protected topics: {sorted(missing)}"
-        )
+        raise ValueError(f"topics.yaml is missing protected topics: {sorted(missing)}")
     config["Identity"].active = True
     return config
+
+
+def _validate_topic_name(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Topic names must be strings")
+    name = " ".join(value.split())
+    if not _TOPIC_NAME.fullmatch(name):
+        raise ValueError(f"Invalid topic name: {value!r}")
+    return name
+
+
+def _validate_topic_mapping(
+    config: Mapping[str, TopicSchema | dict],
+) -> Dict[str, TopicSchema]:
+    """Validate one complete topic configuration, including cross-topic rules."""
+
+    if not isinstance(config, Mapping):
+        raise ValueError("Topic configuration must be a mapping")
+
+    validated: Dict[str, TopicSchema] = {}
+    topic_keys = set()
+    for raw_name, raw_schema in config.items():
+        name = _validate_topic_name(raw_name)
+        key = name.casefold()
+        if key in topic_keys:
+            raise ValueError(f"Duplicate topic name after normalization: {name}")
+        topic_keys.add(key)
+        schema = TopicSchema.model_validate(_migrate_topic_schema(raw_schema))
+        schema.labels = _clean_unique_strings(
+            schema.labels,
+            field="labels",
+            limit=MAX_LABELS_PER_TOPIC,
+            pattern=_LABEL,
+        )
+        schema.aliases = _clean_unique_strings(
+            schema.aliases,
+            field="aliases",
+            limit=MAX_ALIASES_PER_TOPIC,
+            pattern=_ALIAS,
+        )
+        validated[name] = schema
+
+    alias_owners = {}
+    for name, schema in validated.items():
+        for alias in schema.aliases:
+            alias_key = alias.casefold()
+            if alias_key in topic_keys:
+                raise ValueError(
+                    f"Topic alias collides with a canonical topic name: {alias}"
+                )
+            if owner := alias_owners.get(alias_key):
+                raise ValueError(
+                    "Topic alias collides with another topic alias: "
+                    f"{alias} ({owner} and {name})"
+                )
+            alias_owners[alias_key] = name
+    return validated
+
+
+def _migrate_topic_schema(raw_schema: TopicSchema | dict) -> TopicSchema | dict:
+    """Drop recognized obsolete topic-config fields before strict validation.
+
+    Hierarchy is stored as `PART_OF` edges in the knowledge graph.  It was
+    previously duplicated as an unused topic-config object, so persisted
+    project configurations may still contain the obsolete key.
+    """
+
+    if isinstance(raw_schema, TopicSchema):
+        return raw_schema
+    if not isinstance(raw_schema, Mapping):
+        return raw_schema
+    migrated = dict(raw_schema)
+    for key in _OBSOLETE_TOPIC_SCHEMA_KEYS:
+        migrated.pop(key, None)
+    return migrated
 
 
 def build_label_block(topics_config: Dict[str, TopicSchema]) -> str:
@@ -98,13 +171,9 @@ class TopicConfig:
     """Project-scoped topic configuration backed by Postgres."""
 
     def __init__(self, config: Dict[str, TopicSchema]):
-        self._config = {
-            name: TopicSchema.model_validate(value)
-            for name, value in copy.deepcopy(config).items()
-        }
+        self._config = _validate_topic_mapping(copy.deepcopy(config))
         self._alias_lookup: Optional[Dict[str, str]] = None
         self._label_block: Optional[str] = None
-        self._hierarchy: Optional[Dict[str, dict]] = None
         self._active_topics: Optional[List[str]] = None
         self._hot_topics: Optional[List[str]] = None
         self._enforce_protected_topics()
@@ -137,12 +206,7 @@ class TopicConfig:
         if not raw:
             return cls.seed()
         try:
-            return cls(
-                {
-                    name: TopicSchema.model_validate(value)
-                    for name, value in raw.items()
-                }
-            )
+            return cls(raw)
         except Exception as exc:
             raise ValueError(
                 f"Invalid persisted topic config for project {project_id}: {exc}"
@@ -173,10 +237,7 @@ class TopicConfig:
         return copy.deepcopy(self._config)
 
     def replace(self, config: Dict[str, TopicSchema]) -> None:
-        self._config = {
-            name: TopicSchema.model_validate(value)
-            for name, value in copy.deepcopy(config).items()
-        }
+        self._config = _validate_topic_mapping(copy.deepcopy(config))
         self._enforce_protected_topics()
         self._clear_cache()
 
@@ -219,11 +280,7 @@ class TopicConfig:
             )
             if name.lower() in aliases:
                 aliases.remove(name.lower())
-            collisions = [
-                alias
-                for alias in aliases
-                if alias in self.alias_lookup
-            ]
+            collisions = [alias for alias in aliases if alias in self.alias_lookup]
             if collisions:
                 raise ValueError(
                     f"Topic aliases collide with existing topics: {collisions}"
@@ -234,7 +291,6 @@ class TopicConfig:
                 hot=False,
                 labels=labels,
                 aliases=aliases,
-                hierarchy={},
             )
             self._clear_cache()
             added.append(name)
@@ -248,19 +304,13 @@ class TopicConfig:
         )
         protected = sorted(PROTECTED_TOPICS.intersection(requested_deactivations))
         if protected:
-            raise ValueError(
-                f"Protected topics cannot be deactivated: {protected}"
-            )
-        unknown = [
-            name for name in requested_deactivations if name not in self._config
-        ]
+            raise ValueError(f"Protected topics cannot be deactivated: {protected}")
+        unknown = [name for name in requested_deactivations if name not in self._config]
         if unknown:
             raise ValueError(f"Unknown topics cannot be deactivated: {unknown}")
 
         actual_deactivations = [
-            name
-            for name in requested_deactivations
-            if self._config[name].active
+            name for name in requested_deactivations if self._config[name].active
         ]
         if active_before and len(actual_deactivations) > len(active_before) // 2:
             raise ValueError("Bulk topic deactivation was rejected")
@@ -269,6 +319,7 @@ class TopicConfig:
             self._config[name].active = False
 
         self._enforce_protected_topics()
+        self._config = _validate_topic_mapping(self._config)
         self._clear_cache()
         return {"added": added, "deactivated": actual_deactivations}
 
@@ -282,19 +333,18 @@ class TopicConfig:
     def _clear_cache(self) -> None:
         self._alias_lookup = None
         self._label_block = None
-        self._hierarchy = None
         self._active_topics = None
         self._hot_topics = None
 
     @property
     def raw(self) -> Dict[str, TopicSchema]:
-        return self._config
+        return copy.deepcopy(self._config)
 
     @property
     def alias_lookup(self) -> Dict[str, str]:
         if self._alias_lookup is None:
             self._alias_lookup = build_topic_alias_lookup(self._config)
-        return self._alias_lookup
+        return dict(self._alias_lookup)
 
     @property
     def label_block(self) -> str:
@@ -303,19 +353,10 @@ class TopicConfig:
         return self._label_block
 
     @property
-    def hierarchy(self) -> Dict[str, dict]:
-        if self._hierarchy is None:
-            self._hierarchy = {
-                topic: config.hierarchy
-                for topic, config in self._config.items()
-            }
-        return self._hierarchy
-
-    @property
     def active_topics(self) -> List[str]:
         if self._active_topics is None:
             self._active_topics = get_active_topic_names(self._config)
-        return self._active_topics
+        return list(self._active_topics)
 
     @property
     def hot_topics(self) -> List[str]:
@@ -326,7 +367,7 @@ class TopicConfig:
                 for name, config in self._config.items()
                 if config.hot and name in active
             ]
-        return self._hot_topics
+        return list(self._hot_topics)
 
     def normalize_topic(self, topic: str) -> Optional[str]:
         if not topic:
@@ -338,7 +379,7 @@ class TopicConfig:
 
     def get_labels_for_topic(self, topic: str) -> List[str]:
         config = self._config.get(topic)
-        return config.labels if config else []
+        return list(config.labels) if config else []
 
     def is_active(self, topic: str) -> bool:
         config = self._config.get(topic)

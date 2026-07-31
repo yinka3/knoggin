@@ -1,17 +1,11 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from common.schema.contracts import EngineScope
 from core.agent.executor import AgentExecutor
+from core.agent.run import AgentRun, AgentRunLimits
 from core.agent.tools.search import SearchTools
-from core.agent.types import (
-    AgentContext,
-    AgentRunIdentity,
-    AgentRunConfig,
-    AgentState,
-    RetrievedEvidence,
-)
 from tests.fixtures.fakes import FakeRedis
 from tests.knowledge.test_retrieval_embedding_smoke import (
     cosine,
@@ -148,7 +142,7 @@ class QuietExecutor(AgentExecutor):
         self.llm_calls = []
 
     async def _emit_llm_call(self, model, reasoning):
-        self.llm_calls.append((model, reasoning, self.ctx.state.attempt_count))
+        self.llm_calls.append((model, reasoning, self.ctx.attempt_count))
 
 
 class FakeKnowledgeStore:
@@ -189,23 +183,19 @@ class FakeKnowledgeStore:
 
 
 def make_agent_context():
-    return AgentContext(
-        config=AgentRunConfig(max_attempts=4, max_calls=4),
-        state=AgentState(),
-        evidence=RetrievedEvidence(),
-        scope=EngineScope(
-            user_name="ada", session_id="session-agent", project_id="project-1"
-        ),
-        agent=AgentRunIdentity(
-            config=SimpleNamespace(id="agent-1"),
-            name="STELLA",
-            persona="Careful test assistant",
-        ),
+    return AgentRun.open(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-agent",
         user_query=(
             "What did we decide about AgentExecutor tool behavior and prompt "
             "context testing?"
         ),
         run_id="run-agent-smoke",
+        agent_config=SimpleNamespace(id="agent-1"),
+        agent_name="STELLA",
+        persona="Careful test assistant",
+        limits=AgentRunLimits(max_attempts=4, max_calls=4),
         hot_topics=["Testing"],
         active_topics=["Testing"],
     )
@@ -373,7 +363,7 @@ async def test_real_embedding_agent_loop_retrieves_agent_tool_context():
         "Agent/tool smoke final answer from retrieved executor"
     )
 
-    retrieved_ids = [message["id"] for message in executor.ctx.evidence.messages]
+    retrieved_ids = [message["id"] for message in executor.ctx.messages]
     target_ids = {"msg_1", "msg_2", "msg_3", "msg_4", "msg_5"}
     assert retrieved_ids[0] in target_ids
     assert len(target_ids.intersection(retrieved_ids[:4])) >= 3

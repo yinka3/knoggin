@@ -1,5 +1,8 @@
+import math
+
 import pytest
 
+from common.schema.agent_contracts import AgentConfig
 from core.agent.services.agent_manager import AgentManager
 from tests.fixtures.fakes import FakeResources
 
@@ -86,3 +89,46 @@ async def test_agent_manager_set_default_unsets_previous_default(manager):
         if call[0] == "execute" and "UPDATE public.agents" in call[1]
     ]
     assert len(default_updates) == 2
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("name", "temperature", "brain_revision", "enabled_tools"),
+    [
+        ("  ", 0.7, 1, None),
+        ("Analyst", math.nan, 1, None),
+        ("Analyst", 0.7, 0, None),
+        ("Analyst", 0.7, 1, ["search_entity", " SEARCH_ENTITY "]),
+    ],
+)
+def test_agent_config_rejects_invalid_domain_values(
+    name,
+    temperature,
+    brain_revision,
+    enabled_tools,
+):
+    with pytest.raises(ValueError):
+        AgentConfig(
+            id="agent-1",
+            name=name,
+            persona="Careful analyst",
+            temperature=temperature,
+            brain_revision=brain_revision,
+            enabled_tools=enabled_tools,
+        )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_rejects_unknown_tools_before_persistence(manager):
+    agent_manager, resources = manager
+
+    with pytest.raises(ValueError, match="Unknown agent tools"):
+        await agent_manager.create_agent(
+            name="Researcher",
+            persona="Careful analyst",
+            enabled_tools=["not_a_tool"],
+        )
+
+    assert resources.postgres.agents == {}

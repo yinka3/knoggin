@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, NamedTuple, Optional
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.agent_stream import PublicAgentStreamEvent
-from common.schema.contracts import EngineScope
-from common.schema.document import DocumentFocus
+from common.schema.agent_contracts import AgentConfig
+from common.schema.agent_stream import (
+    PublicAgentStreamEvent,
+    validate_public_agent_stream_event,
+)
+from common.schema.document import (
+    DocumentFocus,
+    create_document_focus,
+    dump_document_focus,
+    parse_document_focus,
+)
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.agent.document_selection import (
@@ -17,16 +25,10 @@ from core.agent.document_selection import (
 )
 from core.agent.executor import AgentExecutor
 from core.agent.maintenance import build_maintenance_candidates
-from core.agent.source_adapters import build_pasted_text_candidates
+from core.agent.run import AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
+from core.agent.source_adapters import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
-from core.agent.types import (
-    AgentContext,
-    AgentRunIdentity,
-    AgentRunConfig,
-    AgentState,
-    RetrievedEvidence,
-)
 
 if TYPE_CHECKING:
     from core.session.context import Session
@@ -35,6 +37,14 @@ if TYPE_CHECKING:
 PUBLIC_AGENT_ERROR_MESSAGE = (
     "The agent couldn't complete this request. Please try again."
 )
+
+
+class ResolvedAgentIdentity(NamedTuple):
+    """Private identity data passed once into the owning AgentRun factory."""
+
+    config: AgentConfig
+    name: str
+    persona: str
 
 
 class Orchestrator:
@@ -87,7 +97,7 @@ class Orchestrator:
             # Configuration
             config = ConfigManager.get().config
             limits = config.developer_settings.limits
-            run_config = AgentRunConfig.from_settings(limits)
+            run_limits = AgentRunLimits.from_settings(limits)
 
             # Identity & Persona
             identity = await self._resolve_agent_identity(
@@ -116,9 +126,7 @@ class Orchestrator:
             if request_document_focus is not None:
                 # Request focus is ephemeral.  It overrides a persisted session
                 # focus for this run without writing to session state.
-                tools.document_focus = request_document_focus.model_dump(
-                    mode="json"
-                )
+                tools.document_focus = request_document_focus.model_dump(mode="json")
             topic_config = context.project.topic_config
 
             effective_enabled_tools = (
@@ -134,7 +142,7 @@ class Orchestrator:
                 topic_settings=config.developer_settings.topic_evaluation,
             )
 
-            # Context & State Assembly
+            # One aggregate owns all mutable state for this execution.
             requested_hot_topics = (
                 hot_topics if hot_topics is not None else topic_config.hot_topics
             )
@@ -151,18 +159,19 @@ class Orchestrator:
                 except Exception as exc:
                     logger.warning(f"Failed to preload hot topic context: {exc}")
 
-            ctx = AgentContext(
-                config=run_config,
-                state=AgentState(),
-                evidence=RetrievedEvidence(),
-                scope=EngineScope(
-                    user_name=user_name,
-                    session_id=session_id,
-                    project_id=context.project_id or "",
-                ),
-                agent=identity,
+            run = AgentRun.open(
+                user_name=user_name,
+                session_id=session_id,
+                project_id=context.project_id or "",
                 user_query=user_query,
                 run_id=run_id,
+                agent_config=identity.config,
+                agent_name=identity.name,
+                persona=identity.persona,
+                limits=run_limits,
+                model=effective_model,
+                temperature=effective_temperature,
+                enabled_tools=effective_enabled_tools,
                 hot_topics=effective_hot_topics,
                 active_topics=topic_config.active_topics,
                 hot_topic_context=hot_topic_context,
@@ -184,9 +193,7 @@ class Orchestrator:
             )
 
             # Execution via AgentExecutor
-            executor = AgentExecutor(
-                ctx, context.llm, tools
-            )
+            executor = AgentExecutor(run, context.llm, tools)
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
@@ -194,25 +201,28 @@ class Orchestrator:
                 enabled_tools=effective_enabled_tools,
                 simulated_date=simulated_date,
                 agent_temperature=effective_temperature,
-                agent_brain=agent_brain
-                or (agent_cfg.brain if agent_cfg else None),
+                agent_brain=agent_brain or (agent_cfg.brain if agent_cfg else None),
                 agent_directives=agent_directives,
                 client_tools=client_tools,
             ):
-                yield event
+                yield validate_public_agent_stream_event(event)
 
         except DocumentSelectionError as exc:
             logger.info("Document selection rejected: {}", exc)
-            yield {
-                "event": "error",
-                "data": {"message": str(exc)},
-            }
+            yield validate_public_agent_stream_event(
+                {
+                    "event": "error",
+                    "data": {"message": str(exc)},
+                }
+            )
         except Exception as e:
             logger.exception(f"Orchestrator error: {e}")
-            yield {
-                "event": "error",
-                "data": {"message": PUBLIC_AGENT_ERROR_MESSAGE},
-            }
+            yield validate_public_agent_stream_event(
+                {
+                    "event": "error",
+                    "data": {"message": PUBLIC_AGENT_ERROR_MESSAGE},
+                }
+            )
         finally:
             if tools:
                 try:
@@ -247,7 +257,7 @@ class Orchestrator:
             raise DocumentSelectionError(
                 f"Document path '/{relative_path}' is ambiguous; select one document"
             ) from exc
-        return DocumentFocus(
+        return create_document_focus(
             mode="request",
             created_at=get_now_iso(),
             **target,
@@ -259,7 +269,7 @@ class Orchestrator:
         agent_id: Optional[str],
         name_override: Optional[str],
         persona_override: Optional[str],
-    ) -> AgentRunIdentity:
+    ) -> ResolvedAgentIdentity:
         """Resolve the durable Postgres agent used for this run."""
         manager = AgentManager(context.resources, context.user_name, {})
         resolved_id = agent_id or await manager.get_default_agent_id()
@@ -267,7 +277,7 @@ class Orchestrator:
         if agent_cfg is None:
             raise ValueError(f"Agent identity not found: {resolved_id}")
 
-        return AgentRunIdentity(
+        return ResolvedAgentIdentity(
             config=agent_cfg,
             name=name_override or agent_cfg.name,
             persona=(
@@ -305,9 +315,7 @@ class Orchestrator:
             agent_id=agent_id,
             episode_settings=config.developer_settings.jobs.episode,
             topic_refresh_callback=(
-                context.project.refresh_topic_mappings
-                if context.project
-                else None
+                context.project.refresh_topic_mappings if context.project else None
             ),
         )
 
@@ -338,7 +346,7 @@ class Orchestrator:
         if focus is None:
             return None
         try:
-            persisted = DocumentFocus.model_validate(focus)
+            persisted = parse_document_focus(focus)
             if context.document_service is None:
                 return None
             target = await context.document_service.resolve_focus_target(
@@ -359,11 +367,13 @@ class Orchestrator:
                     else None
                 ),
             )
-            return DocumentFocus(
-                mode="pinned",
-                created_at=persisted.created_at,
-                **target,
-            ).model_dump(mode="json")
+            return dump_document_focus(
+                create_document_focus(
+                    mode="pinned",
+                    created_at=persisted.created_at,
+                    **target,
+                )
+            )
         except (FileNotFoundError, ValueError) as exc:
             logger.warning(
                 "Ignoring invalid or inaccessible document focus for session "

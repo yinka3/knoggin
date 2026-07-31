@@ -2,11 +2,14 @@ import pytest
 
 from common.exceptions import LLMProviderError
 from common.schema.contracts import (
+    ExtractionTrace,
+)
+from common.schema.extraction_output import (
     ConnectionMention,
     ConnectionsResult,
-    ExtractionTrace,
     UserConnectionMention,
 )
+from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from tests.ingestion.test_batch_processor_entity_resolution_contract import (
     MESSAGES,
@@ -91,15 +94,20 @@ async def extract(
     if entity_msg_map is None:
         entity_msg_map = {101: [1], 102: [1], 103: [1]}
 
-    return await processor._extract_connections(
-        entity_ids=entity_ids,
-        entity_msg_map=entity_msg_map,
+    batch = IngestionBatch.open(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
         messages=MESSAGES if messages is None else messages,
         session_text="[USER]: prior context",
-        session_id="session-1",
-        trace=trace,
-        issues=issues,
     )
+    batch.entity_ids = entity_ids
+    batch.entity_message_map = entity_msg_map
+    if trace is not None:
+        batch.trace = trace
+    if issues is not None:
+        batch.issues = issues
+    return await processor._extract_connections(batch)
 
 
 @pytest.mark.ingestion
@@ -227,9 +235,14 @@ async def test_extract_connections_llm_failure_records_fallback_and_issue():
 
     assert observations == []
     assert trace.fallbacks == [
-        {"stage": "connections", "fallback": "empty_connections"}
+        {
+            "stage": "connections",
+            "fallback": "empty_connections",
+            "error_code": "llm_provider_error",
+        }
     ]
     assert [issue.code for issue in issues] == ["llm_extraction_failed"]
+    assert issues[0].metadata["error_code"] == "llm_provider_error"
 
 
 @pytest.mark.ingestion
@@ -270,9 +283,7 @@ async def test_extract_connections_missing_profile_records_issue_and_skips_llm()
 
     assert observations == []
     assert processor.llm.calls == []
-    assert [issue.code for issue in issues] == [
-        "connection_candidate_profile_missing"
-    ]
+    assert [issue.code for issue in issues] == ["connection_candidate_profile_missing"]
 
 
 @pytest.mark.ingestion
@@ -338,9 +349,7 @@ async def test_extract_connections_rejects_relationship_msg_id_without_entity_so
     assert observations == []
     assert trace.relationships_seen == 1
     assert trace.relationships_rejected == 1
-    assert [issue.code for issue in issues] == [
-        "invalid_relationship_evidence_msg_id"
-    ]
+    assert [issue.code for issue in issues] == ["invalid_relationship_evidence_msg_id"]
 
 
 @pytest.mark.ingestion

@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from common.schema.contracts import (
+from common.schema.episode_output import (
     EpisodeConsolidation,
     EpisodeDecision,
     LLMEpisodeDecision,

@@ -6,12 +6,9 @@ from loguru import logger
 
 from common.schema.contracts import (
     AliasUpdate,
-    BatchResult,
-    EngineScope,
-    EngineWorkUnit,
     EntityWrite,
     EpisodeEligibility,
-    GraphMutationPlan,
+    ExecutionScope,
     GraphWriteSummary,
     MessageEntityRef,
     RelationshipWrite,
@@ -19,28 +16,11 @@ from common.schema.contracts import (
 )
 from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.events import emit
+from core.ingestion.batch import IngestionBatch
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
-
-
-def _resolve_scope(
-    batch: BatchResult,
-    session_id: str,
-    project_id: str,
-    user_name: Optional[str],
-) -> EngineScope:
-    batch_scope = batch.scope
-    scope_values = {
-        "user_name": (batch_scope.user_name if batch_scope else None) or user_name,
-        "session_id": (batch_scope.session_id if batch_scope else None) or session_id,
-        "project_id": (batch_scope.project_id if batch_scope else None) or project_id,
-    }
-    missing_scope = [key for key, value in scope_values.items() if not value]
-    if missing_scope:
-        raise ValueError(f"Graph batch write missing required scope: {missing_scope}")
-
-    return EngineScope(**scope_values)
+from infrastructure.work_record import WorkRecord
 
 
 def _normalize_embedding(value) -> Optional[list[float]]:
@@ -51,17 +31,16 @@ def _normalize_embedding(value) -> Optional[list[float]]:
     return list(value)
 
 
-async def build_graph_mutation_plan(
-    batch: BatchResult,
+async def prepare_ingestion_batch_graph_writes(
+    batch: IngestionBatch,
     knowledge_store: KnowledgeStore,
     entities: EntityResolver,
-    session_id: str,
-    project_id: str,
-    user_name: str = None,
-) -> GraphMutationPlan:
-    """Build typed graph-write intent from a processed batch."""
+) -> None:
+    """Fill one completed ingestion batch with its owned graph-write commands."""
 
-    scope = _resolve_scope(batch, session_id, project_id, user_name)
+    if not isinstance(batch, IngestionBatch):
+        raise TypeError("prepare_ingestion_batch_graph_writes requires an IngestionBatch")
+    scope = batch.scope
     entity_ids = batch.entity_ids
     new_entity_ids = set(batch.new_entity_ids)
     alias_updated_ids = set(batch.alias_updated_ids)
@@ -204,9 +183,7 @@ async def build_graph_mutation_plan(
         )
 
     batch_work_unit_id = batch.work_unit.id if batch.work_unit else None
-    graph_work_unit = EngineWorkUnit.for_graph_write(
-        scope, batch_id=batch_work_unit_id
-    )
+    graph_work_unit = WorkRecord.for_graph_write(scope, batch_id=batch_work_unit_id)
     message_entity_refs = [
         MessageEntityRef(message_id=message_id, entity_id=entity_id)
         for entity_id in sorted(safe_entity_ids)
@@ -219,163 +196,158 @@ async def build_graph_mutation_plan(
         )
     ]
 
-    return GraphMutationPlan(
-        work_unit=graph_work_unit,
-        scope=scope,
-        entity_ids=entity_ids,
+    batch.set_graph_write_buffers(
+        graph_work_unit=graph_work_unit,
         safe_entity_ids=safe_entity_ids,
-        new_entity_ids=new_entity_ids,
-        alias_updates=alias_updates,
+        graph_alias_updates=alias_updates,
         entity_writes=entity_writes,
+        relationship_writes=relationship_writes,
         message_entity_refs=message_entity_refs,
         eligible_messages=eligible_messages,
-        relationship_writes=relationship_writes,
         skipped_relationships=skipped_relationships,
         zombie_entity_ids=zombie_entity_ids,
         dirty_entity_ids=set(safe_entity_ids),
     )
 
 
-def _summary_for_skipped_plan(plan: GraphMutationPlan) -> GraphWriteSummary:
-    return GraphWriteSummary(
-        zombies_filtered=len(plan.zombie_entity_ids),
-        relationships_skipped=len(plan.skipped_relationships),
-    )
-
-
 def _attach_graph_work_summary(
-    batch: BatchResult, plan: GraphMutationPlan, summary: GraphWriteSummary
+    batch: IngestionBatch,
+    graph_work,
+    summary: GraphWriteSummary,
 ) -> None:
-    if not batch.work_unit:
+    if batch.work_unit is None:
         return
     batch.work_unit.metadata["graph_write"] = asdict(summary)
-    batch.work_unit.metadata["graph_write_work_unit_id"] = plan.work_unit.id
-    batch.work_unit.metadata["graph_write_work_unit"] = plan.work_unit.model_dump(
-        mode="json"
-    )
+    batch.work_unit.metadata["graph_write_work_unit_id"] = graph_work.id
+    batch.work_unit.metadata["graph_write_work_record"] = graph_work.snapshot()
 
 
-async def execute_graph_mutation_plan(
-    plan: GraphMutationPlan,
+async def _execute_graph_write_buffers(
+    *,
+    scope: ExecutionScope,
+    alias_updates: list[AliasUpdate],
+    entity_writes: list[EntityWrite],
+    relationship_writes: list[RelationshipWrite],
+    message_entity_refs: list[MessageEntityRef],
+    eligible_messages: list[EpisodeEligibility],
+    dirty_entity_ids: set[int],
+    zombie_entity_ids: set[int],
+    skipped_relationships: list[SkippedRelationship],
     knowledge_store: KnowledgeStore,
     redis_client: aioredis.Redis = None,
 ) -> GraphWriteSummary:
-    """Execute a typed graph mutation plan through the knowledge store."""
+    """Persist one already-prepared set of graph write buffers."""
 
     alias_update_map = {
-        update.entity_id: update.aliases
-        for update in plan.alias_updates
-        if update.aliases
+        update.entity_id: update.aliases for update in alias_updates if update.aliases
     }
     if alias_update_map:
         await knowledge_store.update_entity_aliases(
-            alias_update_map, project_id=plan.scope.project_id
+            alias_update_map, project_id=scope.project_id
         )
 
-    if (
-        plan.entity_writes
-        or plan.relationship_writes
-        or plan.message_entity_refs
-        or plan.eligible_messages
-    ):
+    if entity_writes or relationship_writes or message_entity_refs or eligible_messages:
         await knowledge_store.write_batch(
-            plan.entity_writes,
-            plan.relationship_writes,
-            message_entity_refs=plan.message_entity_refs,
-            eligible_messages=plan.eligible_messages,
-            scope=plan.scope,
+            entity_writes,
+            relationship_writes,
+            message_entity_refs=message_entity_refs,
+            eligible_messages=eligible_messages,
+            scope=scope,
         )
 
     dirty_entities_marked = 0
-    if redis_client is not None and plan.dirty_entity_ids:
-        dirty_key = RedisKeys.dirty_entities(
-            plan.scope.user_name,
-            plan.scope.project_id,
-        )
+    if redis_client is not None and dirty_entity_ids:
+        dirty_key = RedisKeys.dirty_entities(scope.user_name, scope.project_id)
         dirty_entities_marked = await redis_client.sadd(
             dirty_key,
-            *[str(entity_id) for entity_id in sorted(plan.dirty_entity_ids)],
+            *[str(entity_id) for entity_id in sorted(dirty_entity_ids)],
         )
         await redis_client.delete(
-            RedisKeys.project_profile_complete(
-                plan.scope.user_name,
-                plan.scope.project_id,
-            )
+            RedisKeys.project_profile_complete(scope.user_name, scope.project_id)
         )
         await emit(
-            plan.scope.project_id,
+            scope.project_id,
             "job",
             "dirty_entities_marked",
             {
-                "user_name": plan.scope.user_name,
-                "project_id": plan.scope.project_id,
+                "user_name": scope.user_name,
+                "project_id": scope.project_id,
                 "dirty_key": dirty_key,
-                "entity_ids": sorted(plan.dirty_entity_ids),
+                "entity_ids": sorted(dirty_entity_ids),
                 "marked_count": dirty_entities_marked,
                 "reason": "graph_write",
             },
         )
 
     return GraphWriteSummary(
-        entities_written=len(plan.entity_writes),
-        relationships_written=len(plan.relationship_writes),
+        entities_written=len(entity_writes),
+        relationships_written=len(relationship_writes),
         aliases_updated=len(alias_update_map),
         dirty_entities_marked=dirty_entities_marked,
-        zombies_filtered=len(plan.zombie_entity_ids),
-        relationships_skipped=len(plan.skipped_relationships),
+        zombies_filtered=len(zombie_entity_ids),
+        relationships_skipped=len(skipped_relationships),
     )
 
 
-async def write_batch_to_graph(
-    batch: BatchResult,
+async def write_ingestion_batch_to_graph(
+    batch: IngestionBatch,
     knowledge_store: KnowledgeStore,
     entities: EntityResolver,
-    session_id: str,
-    project_id: str,
-    user_name: str = None,
     redis_client: aioredis.Redis = None,
 ) -> GraphWriteSummary:
-    """Build and execute graph mutations from a processed batch."""
+    """Prepare and persist graph buffers directly from one ingestion aggregate."""
 
-    plan = await build_graph_mutation_plan(
-        batch,
-        knowledge_store,
-        entities,
-        session_id=session_id,
-        project_id=project_id,
-        user_name=user_name,
-    )
-
-    if not plan.has_writes():
-        summary = _summary_for_skipped_plan(plan)
-        plan.work_unit.mark_skipped("No graph writes")
-        _attach_graph_work_summary(batch, plan, summary)
+    await prepare_ingestion_batch_graph_writes(batch, knowledge_store, entities)
+    batch.seal_for_commit()
+    batch.require_sealed_for_commit()
+    graph_work = batch.graph_work_unit
+    if graph_work is None:
+        raise RuntimeError("Prepared IngestionBatch requires graph work telemetry")
+    graph_work.mark_running()
+    if not (
+        batch.entity_writes
+        or batch.relationship_writes
+        or batch.message_entity_refs
+        or batch.eligible_messages
+        or batch.graph_alias_updates
+    ):
+        summary = GraphWriteSummary(
+            zombies_filtered=len(batch.zombie_entity_ids),
+            relationships_skipped=len(batch.skipped_relationships),
+        )
+        graph_work.mark_skipped("No graph writes")
+        _attach_graph_work_summary(batch, graph_work, summary)
+        batch.mark_graph_committed()
         return summary
 
-    plan.work_unit.mark_running()
     try:
-        summary = await execute_graph_mutation_plan(plan, knowledge_store, redis_client)
-    except Exception as e:
-        plan.work_unit.mark_failed(str(e))
+        summary = await _execute_graph_write_buffers(
+            scope=batch.scope,
+            alias_updates=batch.graph_alias_updates,
+            entity_writes=batch.entity_writes,
+            relationship_writes=batch.relationship_writes,
+            message_entity_refs=batch.message_entity_refs,
+            eligible_messages=batch.eligible_messages,
+            dirty_entity_ids=batch.dirty_entity_ids,
+            zombie_entity_ids=batch.zombie_entity_ids,
+            skipped_relationships=batch.skipped_relationships,
+            knowledge_store=knowledge_store,
+            redis_client=redis_client,
+        )
+    except Exception as exc:
+        graph_work.mark_failed(str(exc))
         raise
 
-    plan.work_unit.mark_succeeded(
-        f"{summary.entities_written} entities, "
-        f"{summary.relationships_written} relationships"
+    graph_work.mark_succeeded(
+        f"{summary.entities_written} entities, {summary.relationships_written} relationships"
     )
-    _attach_graph_work_summary(batch, plan, summary)
-
-    logger.info(
-        f"Graph write: {summary.entities_written} entities, "
-        f"{summary.relationships_written} relationships "
-        f"(Filtered {summary.zombies_filtered} zombies, "
-        f"skipped {summary.relationships_skipped} relationships)"
-    )
+    _attach_graph_work_summary(batch, graph_work, summary)
+    batch.mark_graph_committed()
     return summary
 
 
 async def write_batch_callback(
-    batch: BatchResult,
+    batch: IngestionBatch,
     knowledge_store: KnowledgeStore,
     entities: EntityResolver,
     session_id: str,
@@ -387,18 +359,11 @@ async def write_batch_callback(
 
     Returns (success, error_message).
     """
-    has_writes = batch.has_graph_writes()
-    if not has_writes:
-        return True, None
-
     try:
-        await write_batch_to_graph(
+        await write_ingestion_batch_to_graph(
             batch,
             knowledge_store,
             entities,
-            session_id=session_id,
-            project_id=project_id,
-            user_name=user_name,
             redis_client=redis_client,
         )
         return True, None

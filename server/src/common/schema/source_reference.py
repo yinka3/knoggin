@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from common.schema.immutable import FrozenDict
 
 SourceKind = Literal[
     "pdf_document",
@@ -194,7 +195,7 @@ class SourceReferenceCandidate(BaseModel):
     content_hash: str = Field(min_length=64, max_length=64)
     locator: SourceLocator
     excerpt: str = Field(min_length=1)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=FrozenDict)
     encounter_kind: EncounterKind
     agent_run_id: str = Field(min_length=1)
     tool_call_id: str | None = None
@@ -226,6 +227,11 @@ class SourceReferenceCandidate(BaseModel):
         if not value.strip():
             raise ValueError("excerpt must not be blank")
         return value
+
+    @field_validator("metadata")
+    @classmethod
+    def _freeze_metadata(cls, value: dict[str, Any]) -> FrozenDict:
+        return FrozenDict(value)
 
     @field_validator("canonical_url")
     @classmethod
@@ -365,4 +371,4 @@ class AssistantMessageWithSources(BaseModel):
 
     message_id: int = Field(gt=0)
     content: str
-    sources_consulted: list[SourceConsulted] = Field(default_factory=list)
+    sources_consulted: tuple[SourceConsulted, ...] = Field(default_factory=tuple)

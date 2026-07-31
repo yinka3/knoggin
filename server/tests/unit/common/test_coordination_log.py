@@ -1,7 +1,7 @@
 import pytest
 
-from common.schema.settings import CoordinationLogSettings
 from common.schema.events import InternalEvent
+from common.schema.settings import CoordinationLogSettings
 from common.utils.coordination_log import CoordinationLog, format_logfmt
 from common.utils.event_persistence_policy import normalize_coordination_event
 from common.utils.events import EventEmitter

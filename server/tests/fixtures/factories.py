@@ -1,4 +1,3 @@
-
 from common.conf.topics_config import TopicConfig
 from common.schema.settings import TopicSchema
 from core.project.state import ProjectState
@@ -14,10 +13,8 @@ from tests.fixtures.fakes import (
 def make_topic_config():
     return TopicConfig(
         {
-            "General": TopicSchema(active=True, labels=[], hierarchy={}, aliases=[]),
-            "Identity": TopicSchema(
-                active=True, labels=["person"], hierarchy={}, aliases=["me"]
-            ),
+            "General": TopicSchema(active=True, labels=[], aliases=[]),
+            "Identity": TopicSchema(active=True, labels=["person"], aliases=["me"]),
         }
     )
 

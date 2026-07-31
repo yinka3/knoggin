@@ -13,7 +13,6 @@ from common.scoping import (
 from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
 
-
 _MAX_PATH_DEPTH = 4
 
 

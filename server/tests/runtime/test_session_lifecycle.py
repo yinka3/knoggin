@@ -507,6 +507,12 @@ async def test_document_focus_survives_session_resume(
         "path_prefix": None,
         "created_at": "2026-06-22T12:00:00+00:00",
     }
+    expected_focus = {
+        "mode": "pinned",
+        "target_type": "folder_upload",
+        "folder_root_id": "folder-1",
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
         "session-1",
@@ -529,4 +535,4 @@ async def test_document_focus_survives_session_resume(
     await manager.get_or_resume_session("session-1")
 
     assert "session-1" in active_sessions
-    assert await manager.get_document_focus("session-1") == focus
+    assert await manager.get_document_focus("session-1") == expected_focus

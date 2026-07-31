@@ -28,7 +28,6 @@ class TopicTools:
                 self.user_name,
                 self.project_id,
             )
-            self.entities.hierarchy_config = self.topic_config.hierarchy
             self.active_topics = self.topic_config.active_topics
             if self.topic_refresh_callback:
                 self.topic_refresh_callback()

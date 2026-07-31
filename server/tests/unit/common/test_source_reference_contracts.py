@@ -7,14 +7,13 @@ from common.schema.source_reference import (
     CodeLineLocator,
     CsvRowLocator,
     DocxParagraphLocator,
-    PdfPageLocator,
     PastedTextLocator,
+    PdfPageLocator,
     SearchResultLocator,
     SourceReference,
     SourceReferenceCandidate,
     TextLineLocator,
 )
-
 
 CONTENT_HASH = "a" * 64
 

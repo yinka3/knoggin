@@ -2136,7 +2136,7 @@ async def test_delete_document_enforces_project_and_session_visibility():
 @pytest.mark.no_network
 async def test_recovery_requeues_interrupted_document_indexing(document_harness):
     service, postgres = document_harness
-    uploaded = await service.add_document(
+    await service.add_document(
         content=b"alpha beta gamma",
         original_name="notes.md",
     )

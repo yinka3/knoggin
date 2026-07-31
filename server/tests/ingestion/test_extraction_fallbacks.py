@@ -2,10 +2,10 @@ import pytest
 from pydantic import ValidationError
 
 from common.schema.contracts import (
-    ConnectionMention,
-    ConnectionsResult,
     RelationshipObservation,
 )
+from common.schema.extraction_output import ConnectionMention, ConnectionsResult
+from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.profile import EntityProfile
 
@@ -90,13 +90,17 @@ def test_connections_result_requires_a_local_message_reference():
 async def test_connection_extraction_falls_back_to_empty_on_llm_failure():
     processor = make_processor(None)
 
-    result = await processor._extract_connections(
-        entity_ids=[1, 2],
-        entity_msg_map={1: [7], 2: [7]},
+    batch = IngestionBatch.open(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
         messages=[{"id": 7, "message": "Alice met Bob."}],
         session_text="",
-        session_id="session-1",
     )
+    batch.entity_ids = [1, 2]
+    batch.entity_message_map = {1: [7], 2: [7]}
+
+    result = await processor._extract_connections(batch)
 
     assert result == []
 
@@ -119,13 +123,17 @@ async def test_connection_extraction_keeps_valid_connections():
         )
     )
 
-    result = await processor._extract_connections(
-        entity_ids=[1, 2],
-        entity_msg_map={1: [7], 2: [7]},
+    batch = IngestionBatch.open(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
         messages=[{"id": 7, "message": "Alice met Bob."}],
         session_text="",
-        session_id="session-1",
     )
+    batch.entity_ids = [1, 2]
+    batch.entity_message_map = {1: [7], 2: [7]}
+
+    result = await processor._extract_connections(batch)
 
     assert result == [
         RelationshipObservation(

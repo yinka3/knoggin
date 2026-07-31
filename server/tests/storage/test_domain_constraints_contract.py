@@ -203,3 +203,57 @@ async def test_domain_constraints_reject_invalid_entity_and_audit_lifecycle_valu
             WHERE audit_id = 'audit-1'
             """
         )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_additive_constraints_reject_invalid_graph_and_episode_values(
+    real_postgres_client,
+):
+    await _seed_scoped_graph(real_postgres_client)
+
+    with pytest.raises(CheckViolation, match="entities_canonical_name_nonblank_check"):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO entities (
+                entity_id, user_name, project_id, canonical_name, topic
+            )
+            VALUES (5, 'ada', 'project-1', '   ', 'People')
+            """
+        )
+    with pytest.raises(CheckViolation, match="messages_id_positive_check"):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO messages (
+                user_name, session_id, message_id, project_id, role, content
+            )
+            VALUES ('ada', 'session-1', 0, 'project-1', 'user', 'Invalid ID')
+            """
+        )
+
+    await real_postgres_client.execute(
+        """
+        INSERT INTO entities (
+            entity_id, user_name, project_id, canonical_name, topic
+        )
+        VALUES (5, 'ada', 'project-1', 'Third', 'People');
+        INSERT INTO episodes (episode_id, project_id, session_id, summary)
+        VALUES ('episode-1', 'project-1', 'session-1', 'Focus limit');
+        INSERT INTO episode_entities (
+            episode_id, project_id, entity_id, is_focus_entity
+        )
+        VALUES
+            ('episode-1', 'project-1', 2, TRUE),
+            ('episode-1', 'project-1', 3, TRUE);
+        """
+    )
+    with pytest.raises(CheckViolation, match="at most two focus entities"):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO episode_entities (
+                episode_id, project_id, entity_id, is_focus_entity
+            )
+            VALUES ('episode-1', 'project-1', 5, TRUE)
+            """
+        )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from typing import AsyncGenerator, Dict, List, Optional, Union
+from typing import AsyncGenerator, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -27,7 +27,6 @@ from core.agent.formatters import (
     format_retrieved_messages,
 )
 from core.agent.internals import (
-    AgentContext,
     build_evidence_context,
     build_user_message,
     execute_tool,
@@ -35,6 +34,7 @@ from core.agent.internals import (
     summarize_result,
     update_accumulators,
 )
+from core.agent.run import AgentRun
 from core.agent.source_adapters import capture_tool_source_candidates
 from core.agent.system_prompt import (
     get_agent_prompt,
@@ -50,7 +50,6 @@ from core.agent.tools.registry import (
     get_tool_schemas,
 )
 from core.agent.types import (
-    ClarificationRequest,
     FinalResponse,
     ToolCall,
 )
@@ -87,14 +86,15 @@ class AgentExecutor:
 
     def __init__(
         self,
-        ctx: AgentContext,
+        ctx: AgentRun,
         llm: LLMService,
         tools: Tools,
     ):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
-        self.ctx.state.source_candidates.extend(ctx.initial_source_candidates)
+        for candidate in ctx.initial_source_candidates:
+            ctx.record_source(candidate)
 
     async def execute(
         self,
@@ -122,7 +122,7 @@ class AgentExecutor:
             ):
                 yield event
         finally:
-            self.ctx.state.clear_short_uuid_references()
+            self.ctx.clear_short_uuid_references()
 
     async def _execute_run(
         self,
@@ -160,21 +160,25 @@ class AgentExecutor:
         needs_replanning = False
         needs_final_synthesis = False
 
-        while self.ctx.state.attempt_count < self.ctx.config.max_attempts:
+        while self.ctx.attempt_count < self.ctx.limits.max_attempts:
             if (
-                self.ctx.state.consecutive_errors
-                >= self.ctx.config.max_consecutive_errors
+                self.ctx.consecutive_errors
+                >= self.ctx.limits.max_consecutive_errors
             ):
                 yield self._terminal_error()
                 return
 
-            self.ctx.state.attempt_count += 1
+            if isinstance(self.ctx, AgentRun):
+                if not self.ctx.begin_attempt():
+                    break
+            else:
+                self.ctx.attempt_count += 1
 
             current_model = None
             current_reasoning = None
 
             if (
-                self.ctx.state.attempt_count == 1
+                self.ctx.attempt_count == 1
                 or needs_replanning
                 or needs_final_synthesis
             ):
@@ -269,7 +273,9 @@ class AgentExecutor:
                         content = submit.args.get("content", "")
                         response = FinalResponse(
                             content=content,
-                            sources_consulted=list(self.ctx.state.source_candidates),
+                            usage=dict(self.ctx.usage),
+                            sources=list(self.ctx.sources),
+                            sources_consulted=list(self.ctx.source_candidates),
                         )
 
                         if current_mode_name == "Librarian":
@@ -280,6 +286,8 @@ class AgentExecutor:
                             needs_final_synthesis = True
                             break
 
+                        if isinstance(self.ctx, AgentRun) and content.strip():
+                            self.ctx.finalize(content)
                         yield self._wrap_final_response(response)
                         return
 
@@ -299,7 +307,7 @@ class AgentExecutor:
                             "event": "clarification",
                             "data": {
                                 "question": question,
-                                "usage": self.ctx.state.usage,
+                                "usage": self.ctx.usage,
                             },
                         }
                         return
@@ -341,20 +349,20 @@ class AgentExecutor:
                     )
 
                     if all_empty:
-                        self.ctx.state.consecutive_empty_results += 1
+                        self.ctx.consecutive_empty_results += 1
                         if (
-                            self.ctx.state.consecutive_empty_results
-                            >= self.ctx.config.empty_result_replan_threshold
+                            self.ctx.consecutive_empty_results
+                            >= self.ctx.limits.empty_result_replan_threshold
                         ):
                             logger.info(
                                 f"AgentExecutor: "
-                                f"{self.ctx.state.consecutive_empty_results} "
+                                f"{self.ctx.consecutive_empty_results} "
                                 "consecutive empty results. Forcing replan."
                             )
                             needs_replanning = True
-                            self.ctx.state.consecutive_empty_results = 0
+                            self.ctx.consecutive_empty_results = 0
                     else:
-                        self.ctx.state.consecutive_empty_results = 0
+                        self.ctx.consecutive_empty_results = 0
 
                     break
 
@@ -367,15 +375,15 @@ class AgentExecutor:
 
             if step_failed:
                 if (
-                    self.ctx.state.consecutive_errors
-                    >= self.ctx.config.max_consecutive_errors
+                    self.ctx.consecutive_errors
+                    >= self.ctx.limits.max_consecutive_errors
                 ):
                     yield self._terminal_error()
                     return
                 continue
 
         # Fallback if max attempts reached
-        if self.ctx.state.consecutive_errors:
+        if self.ctx.consecutive_errors:
             yield self._terminal_error()
             return
         yield await self._fallback()
@@ -401,16 +409,13 @@ class AgentExecutor:
             active_schemas = active_schemas + client_tools
 
         active_tool_names = get_active_tool_names(active_schemas)
-        runtime_instructions = get_runtime_instructions(
-            self.ctx,
-            active_tool_names
-        )
+        runtime_instructions = get_runtime_instructions(self.ctx, active_tool_names)
 
         system_prompt = get_agent_prompt(
             user_name=self.ctx.scope.user_name,
             current_time=date,
-            persona=self.ctx.agent.persona,
-            agent_name=self.ctx.agent.name,
+            persona=self.ctx.persona,
+            agent_name=self.ctx.agent_name,
             documents_context=documents_context,
             document_focus_context=document_focus_context,
             agent_directives=directives,
@@ -423,15 +428,14 @@ class AgentExecutor:
         )
 
         user_message = build_user_message(self.ctx, last_result)
-        self.ctx.state.last_error = None
+        self.ctx.last_error = None
         configure_tool_authorization(
             self.tools,
             active_schemas,
             user_name=self.ctx.scope.user_name,
-            agent_id=self.ctx.agent.config.id or getattr(self.tools, "agent_id", ""),
+            agent_id=self.ctx.agent_config.id or getattr(self.tools, "agent_id", ""),
             project_id=(
-                self.ctx.scope.project_id
-                or str(getattr(self.tools, "project_id", ""))
+                self.ctx.scope.project_id or str(getattr(self.tools, "project_id", ""))
             ),
             session_id=self.ctx.scope.session_id,
             run_id=self.ctx.run_id,
@@ -486,28 +490,31 @@ class AgentExecutor:
                 name=call["name"],
                 args=self._safe_parse_args(call.get("arguments", "{}")),
                 thinking=thinking,
-                call_id=call.get("id") or str(uuid.uuid4()),
+                call_id=str(call.get("id") or uuid.uuid4()),
             )
             for call in calls
         ]
 
     def _record_step_error(self, message: str, kind: str) -> None:
-        self.ctx.state.last_error = message
-        self.ctx.state.consecutive_errors += 1
+        if isinstance(self.ctx, AgentRun):
+            self.ctx.record_error(message)
+        else:
+            self.ctx.last_error = message
+            self.ctx.consecutive_errors += 1
         logger.warning(
             f"AgentExecutor: {kind} step failure "
-            f"({self.ctx.state.consecutive_errors}/"
-            f"{self.ctx.config.max_consecutive_errors}): {message}"
+            f"({self.ctx.consecutive_errors}/"
+            f"{self.ctx.limits.max_consecutive_errors}): {message}"
         )
 
     def _terminal_error(self) -> ErrorEvent:
-        message = self.ctx.state.last_error or "Agent execution failed"
+        message = self.ctx.last_error or "Agent execution failed"
         return {
             "event": "error",
             "data": {
                 "message": (
                     "Agent stopped after "
-                    f"{self.ctx.state.consecutive_errors} consecutive errors: "
+                    f"{self.ctx.consecutive_errors} consecutive errors: "
                     f"{message}"
                 )
             },
@@ -537,21 +544,30 @@ class AgentExecutor:
     ) -> AsyncGenerator[Dict, None]:
         """Executes a batch of tool calls sequentially to avoid shared state races."""
 
-        if self.ctx.state.call_count >= self.ctx.config.max_calls:
-            err_msg = f"Global call limit reached ({self.ctx.config.max_calls})"
+        if self.ctx.call_count >= self.ctx.limits.max_calls:
+            err_msg = f"Global call limit reached ({self.ctx.limits.max_calls})"
             results_out.append({"tool": "all", "error": err_msg})
-            yield {"event": "tool_error", "data": {"tool": "all", "error": err_msg}}
+            yield {
+                "event": "tool_error",
+                "data": {
+                    "tool": "all",
+                    "error": err_msg,
+                    "call_id": self._global_limit_call_id(),
+                },
+            }
             return
 
         for call in tool_calls:
-            if self.ctx.state.call_count >= self.ctx.config.max_calls:
-                err_msg = (
-                    f"Global call limit reached ({self.ctx.config.max_calls})"
-                )
+            if self.ctx.call_count >= self.ctx.limits.max_calls:
+                err_msg = f"Global call limit reached ({self.ctx.limits.max_calls})"
                 results_out.append({"tool": "all", "error": err_msg})
                 yield {
                     "event": "tool_error",
-                    "data": {"tool": "all", "error": err_msg},
+                    "data": {
+                        "tool": "all",
+                        "error": err_msg,
+                        "call_id": self._global_limit_call_id(),
+                    },
                 }
                 return
 
@@ -566,36 +582,41 @@ class AgentExecutor:
             }
 
             try:
-                if self.ctx.state.tool_limit_reached(call.name, self.ctx.config):
-                    self.ctx.state.last_error = (
+                if self.ctx.tool_limit_reached(call.name, self.ctx.limits):
+                    self.ctx.last_error = (
                         f"Tool '{call.name}' has reached its call limit"
                     )
                     results_out.append(
-                        {"tool": call.name, "error": self.ctx.state.last_error}
+                        {"tool": call.name, "error": self.ctx.last_error}
                     )
                     yield {
                         "event": "tool_error",
                         "data": {
                             "tool": call.name,
                             "error": f"Call limit reached for {call.name}",
+                            "call_id": call.call_id,
                         },
                     }
                     continue
 
-                if self.ctx.state.is_duplicate(call.name, call.args):
-                    self.ctx.state.last_error = (
+                if self.ctx.is_duplicate(call.name, call.args):
+                    self.ctx.last_error = (
                         f"Duplicate call to '{call.name}' with same arguments"
                     )
                     results_out.append(
-                        {"tool": call.name, "error": self.ctx.state.last_error}
+                        {"tool": call.name, "error": self.ctx.last_error}
                     )
                     yield {
                         "event": "tool_error",
-                        "data": {"tool": call.name, "error": "Duplicate call skipped"},
+                        "data": {
+                            "tool": call.name,
+                            "error": "Duplicate call skipped",
+                            "call_id": call.call_id,
+                        },
                     }
                     continue
 
-                self.ctx.state.record_call(call.name, call.args)
+                self.ctx.record_tool_call(call.name, call.args)
 
                 if call.name == "request_clarification":
                     question = call.args.get("question", "Could you clarify?")
@@ -603,15 +624,19 @@ class AgentExecutor:
                     return
 
                 if call.args.get("_parse_error"):
-                    self.ctx.state.last_error = (
+                    self.ctx.last_error = (
                         f"Failed to parse arguments for '{call.name}'"
                     )
                     results_out.append(
-                        {"tool": call.name, "error": self.ctx.state.last_error}
+                        {"tool": call.name, "error": self.ctx.last_error}
                     )
                     yield {
                         "event": "tool_error",
-                        "data": {"tool": call.name, "error": "Argument parse failure"},
+                        "data": {
+                            "tool": call.name,
+                            "error": "Argument parse failure",
+                            "call_id": call.call_id,
+                        },
                     }
                     continue
 
@@ -619,9 +644,9 @@ class AgentExecutor:
                 previous_short_uuid_references = getattr(
                     self.tools, "short_uuid_references", missing
                 )
-                self.tools.short_uuid_references = self.ctx.state.short_uuid_references
+                self.tools.short_uuid_references = self.ctx.short_uuid_references
                 try:
-                    async with asyncio.timeout(self.ctx.config.tool_timeout):
+                    async with asyncio.timeout(self.ctx.limits.tool_timeout):
                         result = await execute_tool(
                             self.tools,
                             call.name,
@@ -631,7 +656,9 @@ class AgentExecutor:
                     if previous_short_uuid_references is missing:
                         delattr(self.tools, "short_uuid_references")
                     else:
-                        self.tools.short_uuid_references = previous_short_uuid_references
+                        self.tools.short_uuid_references = (
+                            previous_short_uuid_references
+                        )
 
                 await apply_tool_result_hooks(
                     self.ctx,
@@ -640,7 +667,7 @@ class AgentExecutor:
                     result,
                 )
 
-                self.ctx.state.source_candidates.extend(
+                self.ctx.source_candidates.extend(
                     capture_tool_source_candidates(self.ctx, call, result)
                 )
 
@@ -648,8 +675,8 @@ class AgentExecutor:
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
                 update_accumulators(self.ctx, call.name, model_result)
 
-                self.ctx.state.consecutive_errors = 0
-                self.ctx.state.last_error = None
+                self.ctx.consecutive_errors = 0
+                self.ctx.last_error = None
                 results_out.append({"tool": call.name, "result": model_result})
 
                 yield {
@@ -664,7 +691,7 @@ class AgentExecutor:
             except TimeoutError:
                 message = (
                     "Tool execution timed out after "
-                    f"{self.ctx.config.tool_timeout:g} seconds"
+                    f"{self.ctx.limits.tool_timeout:g} seconds"
                 )
                 logger.warning(f"Tool {call.name}: {message}")
                 handled_as_maintenance = await apply_tool_error_hooks(
@@ -673,12 +700,16 @@ class AgentExecutor:
                     call.name,
                 )
                 if not handled_as_maintenance:
-                    self.ctx.state.last_error = message
-                    self.ctx.state.consecutive_errors += 1
+                    self.ctx.last_error = message
+                    self.ctx.consecutive_errors += 1
                 results_out.append({"tool": call.name, "error": message})
                 yield {
                     "event": "tool_error",
-                    "data": {"tool": call.name, "error": message},
+                    "data": {
+                        "tool": call.name,
+                        "error": message,
+                        "call_id": call.call_id,
+                    },
                 }
             except ToolExecutionError as e:
                 if _is_local_reference_resolution_error(e.message):
@@ -693,105 +724,113 @@ class AgentExecutor:
                         },
                     )
                 handled_as_maintenance = await apply_tool_error_hooks(
-                    self.ctx,
-                    self.tools,
-                    call.name
+                    self.ctx, self.tools, call.name
                 )
                 if not handled_as_maintenance:
-                    self.ctx.state.last_error = e.message
-                    self.ctx.state.consecutive_errors += 1
+                    self.ctx.last_error = e.message
+                    self.ctx.consecutive_errors += 1
                 results_out.append({"tool": call.name, "error": e.message})
                 yield {
                     "event": "tool_error",
-                    "data": {"tool": call.name, "error": e.message},
+                    "data": {
+                        "tool": call.name,
+                        "error": e.message,
+                        "call_id": call.call_id,
+                    },
                 }
             except Exception as e:
                 logger.exception(f"Tool {call.name} unexpected failure: {e}")
                 handled_as_maintenance = await apply_tool_error_hooks(
-                    self.ctx,
-                    self.tools,
-                    call.name
+                    self.ctx, self.tools, call.name
                 )
                 if not handled_as_maintenance:
-                    self.ctx.state.last_error = "Internal tool failure"
-                    self.ctx.state.consecutive_errors += 1
+                    self.ctx.last_error = "Internal tool failure"
+                    self.ctx.consecutive_errors += 1
                 results_out.append(
                     {"tool": call.name, "error": "Internal tool failure"}
                 )
                 yield {
                     "event": "tool_error",
-                    "data": {"tool": call.name, "error": "Internal tool failure"},
+                    "data": {
+                        "tool": call.name,
+                        "error": "Internal tool failure",
+                        "call_id": call.call_id,
+                    },
                 }
 
+    def _global_limit_call_id(self) -> str:
+        """Return a stable synthetic ID for a run-level, non-tool-specific limit."""
+
+        return f"{self.ctx.run_id or 'agent'}:global-call-limit"
+
     def _accumulate_usage(self, usage: Optional[StreamUsage]):
+        if isinstance(self.ctx, AgentRun):
+            self.ctx.record_usage(usage)
+            return
         if usage:
-            self.ctx.state.usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
-            self.ctx.state.usage["completion_tokens"] += usage.get(
+            self.ctx.usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            self.ctx.usage["completion_tokens"] += usage.get(
                 "completion_tokens", 0
             )
-            self.ctx.state.usage["total_tokens"] += usage.get("total_tokens", 0)
-            self.ctx.state.usage["approximate"] = (
-                self.ctx.state.usage["approximate"]
-                or usage.get("approximate", False)
-            )
+            self.ctx.usage["total_tokens"] += usage.get("total_tokens", 0)
+            self.ctx.usage["approximate"] = self.ctx.usage[
+                "approximate"
+            ] or usage.get("approximate", False)
 
-    def _wrap_final_response(
-        self, response: Union[FinalResponse, ClarificationRequest]
-    ) -> Dict:
-        if isinstance(response, FinalResponse):
-            sources_consulted = (
-                response.sources_consulted
-                if response.sources_consulted is not None
-                else self.ctx.state.source_candidates
-            )
-            event = {
-                "event": "response",
-                "data": {
-                    "content": response.content,
-                    "usage": self.ctx.state.usage,
-                    "sources": self.ctx.evidence.sources
-                    if self.ctx.evidence.sources
-                    else None,
-                },
-            }
-            if sources_consulted:
-                event["data"]["sources_consulted"] = [
-                    candidate.model_dump(mode="json")
-                    for candidate in sources_consulted
-                ]
-            return event
-        else:
-            return {
-                "event": "clarification",
-                "data": {"question": response.question, "usage": self.ctx.state.usage},
-            }
+    def _wrap_final_response(self, response: FinalResponse) -> Dict:
+        sources_consulted = (
+            response.sources_consulted
+            if response.sources_consulted is not None
+            else self.ctx.source_candidates
+        )
+        usage = (
+            response.usage if response.usage is not None else dict(self.ctx.usage)
+        )
+        sources = (
+            response.sources
+            if response.sources is not None
+            else list(self.ctx.sources)
+        )
+        event = {
+            "event": "response",
+            "data": {
+                "content": response.content,
+                "usage": usage,
+                "sources": sources or None,
+            },
+        }
+        if sources_consulted:
+            event["data"]["sources_consulted"] = [
+                candidate.model_dump(mode="json") for candidate in sources_consulted
+            ]
+        return event
 
     async def _fallback(self) -> Dict:
         """Unified fallback when agent exhausts attempts."""
         logger.warning(
             "AgentExecutor: Entering fallback after "
-            f"{self.ctx.state.attempt_count} attempts, "
-            f"{self.ctx.state.call_count} tool calls. "
-            f"Evidence: {self.ctx.evidence.has_any()}"
+            f"{self.ctx.attempt_count} attempts, "
+            f"{self.ctx.call_count} tool calls. "
+            f"Evidence: {self.ctx.has_any()}"
         )
-        if self.ctx.evidence.has_any():
+        if self.ctx.has_any():
             summary = await self._generate_fallback_summary()
             event = {
                 "event": "response",
                 "data": {
                     "content": summary
                     or "I found information but couldn't summarize it.",
-                    "usage": self.ctx.state.usage,
-                    "sources": self.ctx.evidence.sources
-                    if self.ctx.evidence.sources
+                    "usage": self.ctx.usage,
+                    "sources": self.ctx.sources
+                    if self.ctx.sources
                     else None,
                     "fallback": True,
                 },
             }
-            if self.ctx.state.source_candidates:
+            if self.ctx.source_candidates:
                 event["data"]["sources_consulted"] = [
                     candidate.model_dump(mode="json")
-                    for candidate in self.ctx.state.source_candidates
+                    for candidate in self.ctx.source_candidates
                 ]
             return event
         else:
@@ -799,7 +838,7 @@ class AgentExecutor:
                 "event": "clarification",
                 "data": {
                     "question": "I'm having trouble with that. Could you rephrase?",
-                    "usage": self.ctx.state.usage,
+                    "usage": self.ctx.usage,
                     "fallback": True,
                 },
             }
@@ -807,19 +846,19 @@ class AgentExecutor:
     async def _generate_fallback_summary(self) -> Optional[str]:
         """Generate a final response summary from accumulated evidence."""
         evidence_ctx = ""
-        if self.ctx.evidence.profiles:
+        if self.ctx.profiles:
             evidence_ctx += (
                 "\nProfiles FOUND:\n"
-                f"{format_entity_results(self.ctx.evidence.profiles)}\n"
+                f"{format_entity_results(self.ctx.profiles)}\n"
             )
-        if self.ctx.evidence.messages:
+        if self.ctx.messages:
             evidence_ctx += (
                 "\nRelevant Messages:\n"
-                f"{format_retrieved_messages(self.ctx.evidence.messages)}\n"
+                f"{format_retrieved_messages(self.ctx.messages)}\n"
             )
-        if self.ctx.evidence.graph:
+        if self.ctx.graph:
             evidence_ctx += (
-                f"\nGraph Context:\n{format_graph_results(self.ctx.evidence.graph)}\n"
+                f"\nGraph Context:\n{format_graph_results(self.ctx.graph)}\n"
             )
 
         prompt = get_fallback_summary_prompt(
@@ -828,8 +867,7 @@ class AgentExecutor:
 
         return await self.llm.generate_text(
             system=(
-                "You are a helpful assistant providing a summary of found "
-                "information."
+                "You are a helpful assistant providing a summary of found information."
             ),
             user=prompt,
             temperature=0.3,
@@ -837,38 +875,38 @@ class AgentExecutor:
 
     async def _manage_context_size(self):
         """Monitor accumulated evidence and summarize if it approaches token limits."""
-        evidence_str = build_evidence_context(self.ctx.evidence)
-        self.ctx.evidence.token_count = self.llm.count_tokens(evidence_str)
+        evidence_str = build_evidence_context(self.ctx)
+        self.ctx.evidence_token_count = self.llm.count_tokens(evidence_str)
 
-        if self.ctx.evidence.token_count > MAX_TOKEN_CHUNK_SIZE:
+        if self.ctx.evidence_token_count > MAX_TOKEN_CHUNK_SIZE:
             logger.info(
-                f"Evidence size ({self.ctx.evidence.token_count} tokens) "
+                f"Evidence size ({self.ctx.evidence_token_count} tokens) "
                 "exceeds limit. Summarizing..."
             )
 
             summary = await self._generate_evidence_summary(evidence_str)
 
             if summary:
-                self.ctx.evidence.summary = summary
+                self.ctx.evidence_summary = summary
             else:
                 logger.warning(
                     "Evidence summarization failed. Truncating raw evidence as "
                     "fallback."
                 )
 
-            self.ctx.evidence.messages = self.ctx.evidence.messages[-5:]
-            self.ctx.evidence.profiles = self.ctx.evidence.profiles[-5:]
-            self.ctx.evidence.graph = self.ctx.evidence.graph[-15:]
-            self.ctx.evidence.episodes = []
-            self.ctx.evidence.paths = []
-            self.ctx.evidence.hierarchy = []
+            self.ctx.messages = self.ctx.messages[-5:]
+            self.ctx.profiles = self.ctx.profiles[-5:]
+            self.ctx.graph = self.ctx.graph[-15:]
+            self.ctx.episodes = []
+            self.ctx.paths = []
+            self.ctx.hierarchy = []
 
             # Re-calculate token count
             if summary:
-                self.ctx.evidence.token_count = self.llm.count_tokens(summary)
+                self.ctx.evidence_token_count = self.llm.count_tokens(summary)
             else:
-                new_evidence_str = build_evidence_context(self.ctx.evidence)
-                self.ctx.evidence.token_count = self.llm.count_tokens(new_evidence_str)
+                new_evidence_str = build_evidence_context(self.ctx)
+                self.ctx.evidence_token_count = self.llm.count_tokens(new_evidence_str)
 
     async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
         """Call LLM to condense existing evidence into a core summary."""
@@ -903,11 +941,11 @@ class AgentExecutor:
                 "run_id": self.ctx.run_id,
                 "model": model,
                 "reasoning": reasoning,
-                "turn": self.ctx.state.attempt_count,
+                "turn": self.ctx.attempt_count,
                 "evidence_state": {
-                    "profiles": len(self.ctx.evidence.profiles),
-                    "messages": len(self.ctx.evidence.messages),
-                    "graph": len(self.ctx.evidence.graph),
+                    "profiles": len(self.ctx.profiles),
+                    "messages": len(self.ctx.messages),
+                    "graph": len(self.ctx.graph),
                 },
             },
             verbose_only=True,

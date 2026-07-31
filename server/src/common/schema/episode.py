@@ -1,13 +1,13 @@
 """Episode-domain contracts for LLM decisions and persisted aggregates."""
 
 import math
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 from common.utils.time_utils import get_now
-
 
 EPISODE_EMBEDDING_DIMENSION = 1024
 
@@ -83,7 +83,7 @@ class Episode(EpisodeNarrative):
     first_message_at: Optional[datetime] = None
     last_message_at: Optional[datetime] = None
     embedding: Optional[List[float]] = Field(default=None, exclude=True)
-    messages: List[MessageEpisode] = Field(default_factory=list, min_length=1)
+    messages: List[MessageEpisode] = Field(..., min_length=1)
     entities: List[EntityEpisode] = Field(default_factory=list)
     relationships: List[RelationshipEpisode] = Field(default_factory=list)
     version_history: List[EpisodeVersion] = Field(default_factory=list)
@@ -91,8 +91,10 @@ class Episode(EpisodeNarrative):
     updated_at: datetime = Field(default_factory=get_now)
     generator_metadata: Dict[str, Any] = Field(default_factory=dict)
 
-    def model_copy(self, *, update=None, deep=False):
-        """Copy through validation so domain invariants apply to updates."""
+    def validated_copy(
+        self, *, update: Mapping[str, Any] | None = None
+    ) -> "Episode":
+        """Create a copy after validating any requested domain changes."""
 
         data = self.model_dump()
         data["embedding"] = self.embedding

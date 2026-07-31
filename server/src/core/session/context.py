@@ -9,25 +9,22 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.contracts import (
-    BatchResult,
-    RelationshipObservation,
-    ResolutionResult,
-)
+from common.schema.contracts import RelationshipObservation
 from common.schema.primitives import Message
-from common.schema.source_reference import SourceReferenceCandidate
 from common.schema.settings import RootConfig
+from common.schema.source_reference import SourceReferenceCandidate
 from common.utils.core_utils import (
     fetch_conversation_turns,
 )
 from common.utils.events import EventEmitter, emit
 from common.utils.tasks import BackgroundTaskGroup
 from common.utils.time_utils import parse_iso_time_or_now
+from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.batch_consumer import IngestionWorker
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.db.write_graph_db import (
     write_batch_callback,
-    write_batch_to_graph,
+    write_ingestion_batch_to_graph,
 )
 from core.knowledge.documents import DocumentService
 from core.project.state import ProjectState
@@ -477,31 +474,37 @@ class Session:
         alias_updates=None,
     ):
         """Delegate to shared graph write logic."""
-        batch = BatchResult(
-            resolution=ResolutionResult(
-                entity_ids=entity_ids,
-                new_ids=new_entity_ids,
-                alias_ids=alias_updated_ids,
-                alias_updates=alias_updates or {},
-            ),
-            relationship_observations=relationship_observations,
+        batch = IngestionBatch.open(
+            user_name=self.user_name,
+            project_id=self.project_id,
+            session_id=self.session_id,
+            messages=[],
+            session_text="",
         )
-        batch.set_scope(self.user_name, self.session_id, self.project_id)
-        await write_batch_to_graph(
+        batch.validate_input()
+        batch.mark_extracted()
+        batch.set_resolution(
+            entity_ids=entity_ids,
+            new_entity_ids=new_entity_ids,
+            alias_updated_ids=alias_updated_ids,
+            entity_message_map={},
+            alias_updates=alias_updates or {},
+            candidate_suggestions=[],
+        )
+        batch.set_relationship_observations(relationship_observations)
+        batch.complete()
+        await write_ingestion_batch_to_graph(
             batch,
             knowledge_store=self.knowledge_store,
             entities=self.project.entities,
-            session_id=self.session_id,
-            project_id=self.project_id,
-            user_name=self.user_name,
             redis_client=self.redis_client,
         )
 
     async def _write_to_graph_callback(
-        self, result: BatchResult
+        self, batch: IngestionBatch
     ) -> tuple[bool, str | None]:
         return await write_batch_callback(
-            result,
+            batch,
             knowledge_store=self.knowledge_store,
             entities=self.project.entities,
             session_id=self.session_id,

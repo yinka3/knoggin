@@ -6,6 +6,20 @@ from core.agent.orchestrator import Orchestrator
 from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeResources
 
+FAKE_RESPONSE_EVENT = {
+    "event": "response",
+    "data": {
+        "content": "done",
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "approximate": False,
+        },
+        "sources": None,
+    },
+}
+
 
 class FakeLimits:
     max_tool_calls = 9
@@ -78,7 +92,7 @@ class FakeExecutor:
 
     async def execute(self, **kwargs):
         self.execute_kwargs = kwargs
-        yield {"event": "final", "data": {"content": "done"}}
+        yield FAKE_RESPONSE_EVENT
 
 
 class FakeSession:
@@ -170,9 +184,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
         "core.agent.orchestrator.ConfigManager.get",
         staticmethod(lambda: FakeConfigManager()),
     )
-    monkeypatch.setattr(
-        "core.agent.orchestrator.AgentExecutor", FakeExecutor
-    )
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id):
         assert context_arg is context
@@ -185,9 +197,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
             "tools": tools,
         }
 
-    monkeypatch.setattr(
-        Orchestrator, "_bootstrap_services", fake_bootstrap_services
-    )
+    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
 
     events = [
         event
@@ -201,7 +211,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
         )
     ]
 
-    assert events == [{"event": "final", "data": {"content": "done"}}]
+    assert events == [FAKE_RESPONSE_EVENT]
     executor = FakeExecutor.instances[0]
     assert executor.ctx.user_query == "hello"
     assert executor.ctx.history == [{"role": "user", "content": "prior"}]
@@ -237,9 +247,7 @@ async def test_orchestrator_hides_unexpected_error_details(monkeypatch):
     async def fail_bootstrap_services(*_args):
         raise RuntimeError("postgres://internal-host/knoggin")
 
-    monkeypatch.setattr(
-        Orchestrator, "_bootstrap_services", fail_bootstrap_services
-    )
+    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fail_bootstrap_services)
 
     events = [
         event
@@ -255,8 +263,7 @@ async def test_orchestrator_hides_unexpected_error_details(monkeypatch):
         {
             "event": "error",
             "data": {
-                "message": "The agent couldn't complete this request. "
-                "Please try again."
+                "message": "The agent couldn't complete this request. Please try again."
             },
         }
     ]
@@ -281,9 +288,7 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
         "core.agent.orchestrator.ConfigManager.get",
         staticmethod(lambda: FakeConfigManager()),
     )
-    monkeypatch.setattr(
-        "core.agent.orchestrator.AgentExecutor", FakeExecutor
-    )
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id):
         assert context_arg is context
@@ -293,9 +298,7 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
             "tools": tools,
         }
 
-    monkeypatch.setattr(
-        Orchestrator, "_bootstrap_services", fake_bootstrap_services
-    )
+    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
 
     events = [
         event
@@ -308,7 +311,7 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
         )
     ]
 
-    assert events == [{"event": "final", "data": {"content": "done"}}]
+    assert events == [FAKE_RESPONSE_EVENT]
     assert FakeExecutor.instances[0].execute_kwargs["enabled_tools"] == []
 
 
@@ -335,9 +338,7 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
         "core.agent.orchestrator.ConfigManager.get",
         staticmethod(lambda: FakeConfigManager()),
     )
-    monkeypatch.setattr(
-        "core.agent.orchestrator.AgentExecutor", FakeExecutor
-    )
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id):
         return {
@@ -345,9 +346,7 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
             "tools": tools,
         }
 
-    monkeypatch.setattr(
-        Orchestrator, "_bootstrap_services", fake_bootstrap_services
-    )
+    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
 
     events = [
         event
@@ -360,7 +359,7 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
         )
     ]
 
-    assert events == [{"event": "final", "data": {"content": "done"}}]
+    assert events == [FAKE_RESPONSE_EVENT]
     candidate = FakeExecutor.instances[0].ctx.maintenance_candidates[0]
     assert candidate.kind == "topic_evaluation"
     assert candidate.suggested_tool == "update_topics"
@@ -387,9 +386,7 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
         "core.agent.orchestrator.ConfigManager.get",
         staticmethod(lambda: FakeConfigManager()),
     )
-    monkeypatch.setattr(
-        "core.agent.orchestrator.AgentExecutor", FakeExecutor
-    )
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id):
         return {
@@ -413,7 +410,7 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
         )
     ]
 
-    assert events == [{"event": "final", "data": {"content": "done"}}]
+    assert events == [FAKE_RESPONSE_EVENT]
     executor = FakeExecutor.instances[0]
     assert executor.ctx.hot_topics == ["Identity"]
     assert executor.ctx.hot_topic_context == {
@@ -434,6 +431,13 @@ async def test_orchestrator_loads_validated_document_focus_once():
         "target_type": "subtree",
         "document_id": None,
         "relative_path": None,
+        "folder_root_id": "folder-1",
+        "path_prefix": "src",
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
+    expected_focus = {
+        "mode": "pinned",
+        "target_type": "subtree",
         "folder_root_id": "folder-1",
         "path_prefix": "src",
         "created_at": "2026-06-22T12:00:00+00:00",
@@ -460,7 +464,7 @@ async def test_orchestrator_loads_validated_document_focus_once():
 
     loaded = await Orchestrator()._load_document_focus(context)
 
-    assert loaded == focus
+    assert loaded == expected_focus
 
 
 @pytest.mark.runtime
@@ -554,7 +558,7 @@ async def test_orchestrator_uses_request_document_focus_without_persisting_it(
         )
     ]
 
-    assert events == [{"event": "final", "data": {"content": "done"}}]
+    assert events == [FAKE_RESPONSE_EVENT]
     assert FakeExecutor.instances[0].ctx.user_query == "Summarize, please."
     assert FakeExecutor.instances[0].ctx.document_focus.document_id == "doc-1"
     assert tools.document_focus["document_id"] == "doc-1"
@@ -632,7 +636,7 @@ async def test_orchestrator_seeds_pasted_text_candidates_from_canonical_turn(
         )
     ]
 
-    assert events == [{"event": "final", "data": {"content": "done"}}]
+    assert events == [FAKE_RESPONSE_EVENT]
     candidates = FakeExecutor.instances[0].ctx.initial_source_candidates
     assert len(candidates) == 1
     assert candidates[0].source_message_id == 42

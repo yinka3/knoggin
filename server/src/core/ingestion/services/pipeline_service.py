@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor
-from contextvars import ContextVar
 from typing import Dict, List, Optional, Set, Tuple
 
 import redis.asyncio as aioredis
@@ -12,20 +11,18 @@ from wordfreq import word_frequency
 from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
 from common.schema.contracts import (
-    BatchResult,
     CandidateSuggestion,
-    ConnectionsResult,
-    EngineWorkUnit,
-    ExtractionTrace,
     RelationshipObservation,
-    ResolutionResult,
     ValidationIssue,
 )
+from common.schema.extraction_output import ConnectionsResult
 from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
 from common.utils.local_references import build_local_id_maps, resolve_local_id
 from common.utils.time_utils import get_now_unix
+from core.ingestion.batch import IngestionBatch
+from core.ingestion.dlq_payload import DLQPayload
 from core.ingestion.dlq_state import (
     DLQ_STATUS_PROCESSING,
     DLQ_STATUS_QUEUED,
@@ -33,7 +30,6 @@ from core.ingestion.dlq_state import (
     ensure_dlq_id,
     serialize_dlq_entry,
 )
-from core.ingestion.dlq_payload import DLQPayload
 from core.ingestion.prompts import get_connection_reasoning_prompt
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.profile import EntityProfile
@@ -57,6 +53,7 @@ class IngestionPipeline:
     limited to configured extraction stages and does not override deterministic
     safety checks.
     """
+
     def __init__(
         self,
         project_id: str,
@@ -105,11 +102,6 @@ class IngestionPipeline:
             )
             if verb and verb.strip()
         }
-        self._work_unit_context: ContextVar[Optional[EngineWorkUnit]] = ContextVar(
-            "ingestion_work_unit",
-            default=None,
-        )
-
     @property
     def get_next_ent_id(self):
         if self._get_next_ent_id is None:
@@ -140,13 +132,6 @@ class IngestionPipeline:
         if hasattr(self.processor, "update_settings"):
             self.processor.update_settings(config)
 
-    async def _run_with_work_unit(self, work_unit, operation, *args):
-        token = self._work_unit_context.set(work_unit)
-        try:
-            return await operation(*args)
-        finally:
-            self._work_unit_context.reset(token)
-
     @staticmethod
     def _record_issue(
         issues: Optional[List[ValidationIssue]],
@@ -176,46 +161,57 @@ class IngestionPipeline:
     def _normalize_name(name: str) -> str:
         return (name or "").strip().casefold()
 
-    async def run(
+    def open_batch(
         self, messages: List[Dict], session_text: str, *, session_id: str
-    ) -> BatchResult:
-        """Process a single scoped ingestion batch."""
+    ) -> IngestionBatch:
+        """Allocate the aggregate that the worker owns through persistence."""
         if not session_id:
             raise ValueError("IngestionPipeline.run requires session_id")
 
+        return IngestionBatch.open(
+            user_name=self.user_name,
+            project_id=self.project_id,
+            session_id=session_id,
+            messages=messages,
+            session_text=session_text,
+        )
+
+    async def process(self, batch: IngestionBatch) -> None:
+        """Mutate one workflow-owned ingestion batch through pipeline stages."""
+        if not isinstance(batch, IngestionBatch):
+            raise TypeError("IngestionPipeline.process requires an IngestionBatch")
+        if batch.scope.user_name != self.user_name:
+            raise ValueError("IngestionBatch user_name does not match this pipeline")
+        if batch.scope.project_id != self.project_id:
+            raise ValueError("IngestionBatch project_id does not match this pipeline")
+
         with logger.contextualize(
-            user=self.user_name, session=session_id, component="IngestionPipeline"
+            user=self.user_name,
+            session=batch.scope.session_id,
+            component="IngestionPipeline",
         ):
-            result = BatchResult()
-            result.set_scope(self.user_name, session_id, self.project_id)
-            if result.scope:
-                result.work_unit = EngineWorkUnit.for_message_batch(
-                    result.scope, [message["id"] for message in messages]
-                )
-                result.work_unit.mark_running()
+            batch.work_unit.mark_running()
+            batch.validate_input()
 
-            if not messages:
-                if result.work_unit:
-                    result.work_unit.mark_skipped("No messages")
-                return result
+            if not batch.messages:
+                batch.work_unit.mark_skipped("No messages")
+                batch.complete()
+                return
 
-            result.trace.batch_size = len(messages)
-            result.trace.message_ids = [message["id"] for message in messages]
+            batch.trace.batch_size = len(batch.messages)
+            batch.trace.message_ids = [message["id"] for message in batch.messages]
             await emit(
-                session_id,
+                batch.scope.session_id,
                 "pipeline",
                 "batch_start",
-                {"size": len(messages), "msg_ids": result.trace.message_ids},
+                {"size": len(batch.messages), "msg_ids": batch.trace.message_ids},
             )
 
             try:
-                mentions = await self._run_with_work_unit(
-                    result.work_unit,
-                    self._extract_mentions,
-                    messages, session_id, result.trace, result.issues
-                )
+                mentions = await self._extract_mentions(batch)
+                batch.mark_extracted()
                 await emit(
-                    session_id,
+                    batch.scope.session_id,
                     "pipeline",
                     "mentions_extracted",
                     {
@@ -229,53 +225,45 @@ class IngestionPipeline:
 
                 mentions = [mention for mention in mentions if mention[1]]
                 if not mentions:
-                    if result.work_unit:
-                        result.work_unit.issues = list(result.issues)
-                        result.work_unit.mark_succeeded("No mentions found")
-                    return result
+                    batch.work_unit.issues = list(batch.issues)
+                    batch.work_unit.mark_succeeded("No mentions found")
+                    batch.complete()
+                    return
 
-                resolution = await self._run_with_work_unit(
-                    result.work_unit,
-                    self._resolve_mentions,
-                    mentions, messages, session_id, result.issues
-                )
+                await self._resolve_mentions(batch, mentions)
                 await emit(
-                    session_id,
+                    batch.scope.session_id,
                     "pipeline",
                     "resolution_complete",
                     {
-                        "new": len(resolution.new_ids),
-                        "existing": len(resolution.entity_ids) - len(resolution.new_ids),
-                        "aliases_added": len(resolution.alias_ids),
+                        "new": len(batch.new_entity_ids),
+                        "existing": len(batch.entity_ids)
+                        - len(batch.new_entity_ids),
+                        "aliases_added": len(batch.alias_updated_ids),
                     },
                 )
 
-                result.resolution = resolution
-                observations = await self._extract_connections(
-                    resolution.entity_ids,
-                    resolution.entity_msg_map,
-                    messages,
-                    session_text,
-                    session_id,
-                    result.trace,
-                    result.issues,
-                )
-                total_pairs = sum(
-                    not item.identity_rooted for item in observations
-                )
-                total_user_pairs = sum(
-                    item.identity_rooted for item in observations
-                )
+                observations = await self._extract_connections(batch)
+                total_pairs = sum(not item.identity_rooted for item in observations)
+                total_user_pairs = sum(item.identity_rooted for item in observations)
                 await emit(
-                    session_id,
+                    batch.scope.session_id,
                     "pipeline",
                     "connections_extracted",
                     {
                         "messages_with_connections": len(
-                            {item.message_id for item in observations if not item.identity_rooted}
+                            {
+                                item.message_id
+                                for item in observations
+                                if not item.identity_rooted
+                            }
                         ),
                         "messages_with_user_connections": len(
-                            {item.message_id for item in observations if item.identity_rooted}
+                            {
+                                item.message_id
+                                for item in observations
+                                if item.identity_rooted
+                            }
                         ),
                         "total_pairs": total_pairs,
                         "total_user_pairs": total_user_pairs,
@@ -300,86 +288,71 @@ class IngestionPipeline:
                     verbose_only=True,
                 )
 
-                result.relationship_observations = observations
-                if result.work_unit:
-                    result.work_unit.issues = list(result.issues)
+                batch.set_relationship_observations(observations)
+                batch.work_unit.issues = list(batch.issues)
 
                 await emit(
-                    session_id,
+                    batch.scope.session_id,
                     "pipeline",
                     "batch_complete",
                     {
-                        "entities": len(result.entity_ids),
-                        "new_entities": len(result.new_entity_ids),
-                        "success": result.success,
+                        "entities": len(batch.entity_ids),
+                        "new_entities": len(batch.new_entity_ids),
+                        "success": batch.success,
                         "trace": {
-                            "llm_mentions_seen": result.trace.llm_mentions_seen,
+                            "llm_mentions_seen": batch.trace.llm_mentions_seen,
                             "llm_mentions_accepted": (
-                                result.trace.llm_mentions_accepted
+                                batch.trace.llm_mentions_accepted
                             ),
                             "llm_mentions_rejected": (
-                                result.trace.llm_mentions_rejected
+                                batch.trace.llm_mentions_rejected
                             ),
-                            "relationships_seen": result.trace.relationships_seen,
+                            "relationships_seen": batch.trace.relationships_seen,
                             "relationships_accepted": (
-                                result.trace.relationships_accepted
+                                batch.trace.relationships_accepted
                             ),
                             "relationships_rejected": (
-                                result.trace.relationships_rejected
+                                batch.trace.relationships_rejected
                             ),
                             "user_relationships_seen": (
-                                result.trace.user_relationships_seen
+                                batch.trace.user_relationships_seen
                             ),
                             "user_relationships_accepted": (
-                                result.trace.user_relationships_accepted
+                                batch.trace.user_relationships_accepted
                             ),
                             "user_relationships_rejected": (
-                                result.trace.user_relationships_rejected
+                                batch.trace.user_relationships_rejected
                             ),
-                            "fallbacks": result.trace.fallbacks,
-                            "issues": len(result.issues),
+                            "fallbacks": batch.trace.fallbacks,
+                            "issues": len(batch.issues),
                         },
                     },
                 )
-                if result.work_unit:
-                    result.work_unit.mark_succeeded(
-                        f"{len(result.entity_ids)} entities, "
-                        f"{total_pairs + total_user_pairs} relationships"
-                    )
-                return result
+                batch.work_unit.mark_succeeded(
+                    f"{len(batch.entity_ids)} entities, "
+                    f"{total_pairs + total_user_pairs} relationships"
+                )
+                batch.complete()
             except Exception as exc:
                 logger.error(f"Batch processing failed: {exc}")
-                result.success = False
-                result.error = str(exc)
-                if result.work_unit:
-                    result.work_unit.issues = list(result.issues)
-                    result.work_unit.mark_failed(result.error)
-                return result
+                batch.fail(exc)
+                batch.work_unit.issues = list(batch.issues)
+                batch.work_unit.mark_failed(batch.error)
 
     async def _extract_mentions(
         self,
-        messages: List[Dict],
-        session_id: str,
-        trace: Optional[ExtractionTrace] = None,
-        issues: Optional[List[ValidationIssue]] = None,
+        batch: IngestionBatch,
     ) -> List[Tuple[int, str, str, str]]:
-        """Run NER across all messages. Returns List[(msg_id, name, type, topic)]."""
+        """Run NER against one aggregate and normalize its accepted topics."""
 
-        mentions = await self.processor.extract_mentions(
-            self.user_name,
-            messages,
-            session_id,
-            trace=trace,
-            issues=issues,
-            work_unit=self._work_unit_context.get(),
-        )
+        mentions = await self.processor.extract_mentions(batch)
 
         normalized_mentions = []
         for msg_id, text, typ, topic in mentions:
             norm_topic = self.topic_config.normalize_topic(topic)
             if norm_topic is None:
                 self._record_issue(
-                    issues,
+                    batch.issues,
                     stage="mentions",
                     code="invalid_topic",
                     message="Mention topic could not be resolved",
@@ -390,7 +363,7 @@ class IngestionPipeline:
 
             if norm_topic not in self.topic_config.active_topics:
                 self._record_issue(
-                    issues,
+                    batch.issues,
                     stage="mentions",
                     code="inactive_topic",
                     message="Mention topic is inactive",
@@ -405,15 +378,13 @@ class IngestionPipeline:
 
     async def _resolve_mentions(
         self,
+        batch: IngestionBatch,
         mentions: List[Tuple[int, str, str, str]],
-        messages: List[Dict],
-        session_id: str,
-        issues: Optional[List[ValidationIssue]] = None,
-    ) -> ResolutionResult:
-        """
-        Deterministic entity resolution using 4 scoring signals.
-        Replaces VP-02 LLM disambiguation.
-        """
+    ) -> None:
+        """Resolve mentions and apply the resulting state to one aggregate."""
+
+        messages = batch.messages
+        session_id = batch.scope.session_id
         async with self.entities.resolution_lock:
             msg_text_map = {m["id"]: m["message"] for m in messages}
 
@@ -426,6 +397,7 @@ class IngestionPipeline:
             candidate_suggestions: List[CandidateSuggestion] = []
 
             mention_candidates = await self._candidate_entries_for_mentions(
+                batch,
                 mentions,
             )
 
@@ -544,7 +516,7 @@ class IngestionPipeline:
                                     suggestion.created_entity_id = ent_id
                         except Exception as e:
                             self._record_issue(
-                                issues,
+                                batch.issues,
                                 stage="resolution",
                                 code="entity_registration_failed",
                                 message=f"Failed to register entity '{name}': {e}",
@@ -564,10 +536,10 @@ class IngestionPipeline:
                         entity_ids.append(ent_id)
                     entity_msg_map[ent_id].append(msg_id)
 
-            return ResolutionResult(
+            batch.set_resolution(
                 entity_ids=entity_ids,
-                new_ids=new_ids,
-                alias_ids=alias_ids,
+                new_entity_ids=new_ids,
+                alias_updated_ids=alias_ids,
                 entity_msg_map=entity_msg_map,
                 alias_updates=alias_updates,
                 candidate_suggestions=candidate_suggestions,
@@ -575,21 +547,21 @@ class IngestionPipeline:
 
     async def _candidate_entries_for_mentions(
         self,
+        batch: IngestionBatch,
         mentions: List[Tuple[int, str, str, str]],
     ) -> List[Optional[Tuple[str, object]]]:
         unique_names = list({name for _, name, _, _ in mentions if name})
         embedding_map = {}
         if unique_names:
             embedding_service = self.entities.embedding_service
-            work_unit = self._work_unit_context.get()
-            if work_unit is not None and getattr(
+            if getattr(
                 embedding_service,
-                "supports_model_work_units",
+                "supports_model_work_records",
                 False,
             ):
                 embeddings_array = await embedding_service.encode(
                     unique_names,
-                    parent_work_unit=work_unit,
+                    parent_work_record=batch.work_unit,
                 )
             else:
                 embeddings_array = await embedding_service.encode(unique_names)
@@ -944,21 +916,19 @@ class IngestionPipeline:
 
     async def _build_connection_candidates(
         self,
-        entity_ids: List[int],
-        entity_msg_map: Dict[int, List[int]],
-        issues: Optional[List[ValidationIssue]],
+        batch: IngestionBatch,
     ) -> Tuple[List[Dict], Set[str], Dict[str, set], Dict[str, str]]:
         candidates = []
         valid_entity_names = set()
         entity_source_msgs_by_name: Dict[str, set] = {}
         canonical_name_by_name: Dict[str, str] = {}
 
-        for ent_id in entity_ids:
+        for ent_id in batch.entity_ids:
             profile = await self.entities.get_profile(ent_id)
-            source_msgs = set(entity_msg_map.get(ent_id, []))
+            source_msgs = set(batch.entity_message_map.get(ent_id, []))
             if not profile:
                 self._record_issue(
-                    issues,
+                    batch.issues,
                     stage="connections",
                     code="connection_candidate_profile_missing",
                     message="Connection extraction candidate entity has no profile",
@@ -998,29 +968,29 @@ class IngestionPipeline:
 
     async def _extract_connections(
         self,
-        entity_ids: List[int],
-        entity_msg_map: Dict[int, List[int]],
-        messages: List[Dict],
-        session_text: str,
-        session_id: str,
-        trace: Optional[ExtractionTrace] = None,
-        issues: Optional[List[ValidationIssue]] = None,
+        batch: IngestionBatch,
     ) -> List[RelationshipObservation]:
-        """Extract connections between entities."""
+        """Extract connections using state owned by one ingestion batch."""
 
-        if not entity_ids:
+        if not isinstance(batch, IngestionBatch):
+            raise TypeError("_extract_connections requires an IngestionBatch")
+        if not batch.entity_ids:
             return []
+        messages = batch.messages
+        session_text = batch.session_text
+        session_id = batch.scope.session_id
+        trace = batch.trace
+        issues = batch.issues
 
-        if trace is not None:
-            trace.relationship_model = getattr(self.llm, "extraction_model", None)
-            trace.relationship_prompt = "VEGAPUNK-02"
+        trace.relationship_model = getattr(self.llm, "extraction_model", None)
+        trace.relationship_prompt = "VEGAPUNK-02"
 
         (
             candidates,
             valid_entity_names,
             entity_source_msgs_by_name,
             canonical_name_by_name,
-        ) = await self._build_connection_candidates(entity_ids, entity_msg_map, issues)
+        ) = await self._build_connection_candidates(batch)
 
         if not candidates:
             return []
@@ -1056,7 +1026,11 @@ class IngestionPipeline:
         except (ConfigurationError, LLMError) as e:
             if trace is not None:
                 trace.fallbacks.append(
-                    {"stage": "connections", "fallback": "empty_connections"}
+                    {
+                        "stage": "connections",
+                        "fallback": "empty_connections",
+                        "error_code": e.code,
+                    }
                 )
             self._record_issue(
                 issues,
@@ -1064,6 +1038,7 @@ class IngestionPipeline:
                 code="llm_extraction_failed",
                 message=f"VP-02 connection extraction failed: {e}",
                 severity="warning",
+                metadata={"error_code": e.code, **e.details},
             )
             return []
 
@@ -1100,9 +1075,7 @@ class IngestionPipeline:
             canonical_a = canonical_name_by_name.get(entity_a_key)
             canonical_b = canonical_name_by_name.get(entity_b_key)
             try:
-                actual_msg_id = int(
-                    resolve_local_id(conn.msg_id, message_ids_by_local)
-                )
+                actual_msg_id = int(resolve_local_id(conn.msg_id, message_ids_by_local))
             except ValueError:
                 if trace is not None:
                     trace.relationships_rejected += 1
@@ -1174,12 +1147,8 @@ class IngestionPipeline:
                     },
                 )
                 continue
-            entity_a_source_msgs = entity_source_msgs_by_name.get(
-                entity_a_key, set()
-            )
-            entity_b_source_msgs = entity_source_msgs_by_name.get(
-                entity_b_key, set()
-            )
+            entity_a_source_msgs = entity_source_msgs_by_name.get(entity_a_key, set())
+            entity_b_source_msgs = entity_source_msgs_by_name.get(entity_b_key, set())
             if (
                 actual_msg_id not in entity_a_source_msgs
                 or actual_msg_id not in entity_b_source_msgs
@@ -1251,9 +1220,7 @@ class IngestionPipeline:
             entity_name_key = self._normalize_name(conn.entity_name)
             canonical_entity_name = canonical_name_by_name.get(entity_name_key)
             try:
-                actual_msg_id = int(
-                    resolve_local_id(conn.msg_id, message_ids_by_local)
-                )
+                actual_msg_id = int(resolve_local_id(conn.msg_id, message_ids_by_local))
             except ValueError:
                 if trace is not None:
                     trace.user_relationships_rejected += 1
@@ -1311,9 +1278,7 @@ class IngestionPipeline:
                     metadata={"entity_name": conn.entity_name},
                 )
                 continue
-            entity_source_msgs = entity_source_msgs_by_name.get(
-                entity_name_key, set()
-            )
+            entity_source_msgs = entity_source_msgs_by_name.get(entity_name_key, set())
             if actual_msg_id not in entity_source_msgs:
                 if trace is not None:
                     trace.user_relationships_rejected += 1
@@ -1390,7 +1355,7 @@ class IngestionPipeline:
         error: str,
         stage: str = "processing",
         session_text: str = None,
-        batch_result: BatchResult = None,
+        batch: IngestionBatch | None = None,
         attempt: int = 1,
         *,
         session_id: str,
@@ -1416,10 +1381,9 @@ class IngestionPipeline:
         if stage in ["processing", "message_log"] and session_text is not None:
             entry["session_text"] = session_text
 
-        if stage in ["graph_write", "message_log"] and batch_result is not None:
-            entry["batch_result"] = DLQPayload.from_batch(batch_result).model_dump(
-                mode="json"
-            )
+        if stage in ["graph_write", "message_log", "processing"] and batch is not None:
+            payload = DLQPayload.from_ingestion_batch(batch)
+            entry["batch_result"] = payload.model_dump(mode="json")
 
         try:
             dlq_id = ensure_dlq_id(entry)

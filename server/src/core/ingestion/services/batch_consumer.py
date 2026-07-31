@@ -4,10 +4,10 @@ from typing import Awaitable, Callable, Dict, List, Optional
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.schema.contracts import BatchResult
 from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
 from common.utils.json_utils import safe_json_loads
+from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
@@ -35,7 +35,9 @@ class IngestionWorker:
         processor: IngestionPipeline,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
-        write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
+        write_to_graph: Callable[
+            [IngestionBatch], Awaitable[tuple[bool, Optional[str]]]
+        ],
         settings: IngestionSettings,
     ):
 
@@ -254,23 +256,27 @@ class IngestionWorker:
                 session_text = self._format_session_text(conversation)
 
                 try:
-                    result = await self.processor.run(
-                        messages, session_text, session_id=self.session_id
-                    )
+                    batch = await self._process_messages(messages, session_text)
                 except Exception as e:
                     logger.error(
                         f"Fatal error during IngestionPipeline computation: {e}"
                     )
-                    result = BatchResult(
-                        success=False, error=f"Fatal exception: {str(e)}"
+                    batch = IngestionBatch.open(
+                        user_name=self.user_name,
+                        project_id=self.processor.project_id,
+                        session_id=self.session_id,
+                        messages=messages,
+                        session_text=session_text,
                     )
+                    batch.fail(f"Fatal exception: {e}")
 
-                if not result.success:
+                if not batch.success:
                     dlq_success = await self.processor.move_to_dead_letter(
                         messages,
-                        result.error,
+                        batch.error,
                         stage="processing",
                         session_text=session_text,
+                        batch=batch,
                         session_id=self.session_id,
                     )
                     if not dlq_success:
@@ -287,9 +293,7 @@ class IngestionWorker:
                         break
                     dlq_count += len(messages)
                 else:
-                    can_continue, dlq_written = await self._save_message_logs_or_dlq(
-                        messages, session_text, result
-                    )
+                    can_continue, dlq_written = await self._save_message_logs_or_dlq(batch)
                     if dlq_written:
                         dlq_count += len(messages)
                     if not can_continue:
@@ -301,17 +305,32 @@ class IngestionWorker:
                         await self.redis.ltrim(self._buffer_key, len(raw), -1)
                         continue
 
-                    await self._save_candidate_suggestions(result)
+                    await self._save_candidate_suggestions(batch)
 
-                    can_continue, dlq_written = await self._write_graph_or_dlq(
-                        messages, result
-                    )
+                    can_continue, dlq_written = await self._write_graph_or_dlq(batch)
                     if dlq_written:
                         dlq_count += len(messages)
                     if not can_continue:
                         break
                     if not dlq_written:
-                        await self._mark_batch_processed(messages)
+                        try:
+                            await self._mark_batch_processed(batch)
+                        except Exception as exc:
+                            dlq_success = await self.processor.move_to_dead_letter(
+                                batch.messages,
+                                f"CHECKPOINT_COMMIT_FAILED: {exc}",
+                                stage="checkpoint",
+                                session_text=batch.session_text,
+                                batch=batch,
+                                session_id=self.session_id,
+                            )
+                            if not dlq_success:
+                                logger.critical(
+                                    "DLQ write failed after checkpoint failure. "
+                                    "Leaving messages in buffer."
+                                )
+                                break
+                            dlq_count += len(messages)
 
                 batches_count += 1
                 total_processed += len(messages)
@@ -368,11 +387,9 @@ class IngestionWorker:
 
     async def _save_message_logs_or_dlq(
         self,
-        messages: List[Dict],
-        session_text: str,
-        result: BatchResult,
+        batch: IngestionBatch,
     ) -> tuple[bool, bool]:
-        batch = [
+        message_rows = [
             {
                 "id": msg["id"],
                 "content": msg["message"],
@@ -382,20 +399,21 @@ class IngestionWorker:
                 "project_id": self.processor.project_id,
                 "timestamp": msg.get("timestamp", ""),
             }
-            for msg in messages
+            for msg in batch.messages
         ]
         try:
             await asyncio.wait_for(
-                self.knowledge_store.save_message_logs(batch), timeout=30.0
+                self.knowledge_store.save_message_logs(message_rows), timeout=30.0
             )
+            batch.mark_message_logs_handled()
             return True, False
         except Exception as e:
             dlq_success = await self.processor.move_to_dead_letter(
-                messages,
+                batch.messages,
                 f"MESSAGE_LOG_SAVE_FAILED: {e}",
                 stage="message_log",
-                session_text=session_text,
-                batch_result=result,
+                session_text=batch.session_text,
+                batch=batch,
                 session_id=self.session_id,
             )
             if not dlq_success:
@@ -406,21 +424,18 @@ class IngestionWorker:
                 return False, False
             return True, True
 
-    async def _save_candidate_suggestions(self, result: BatchResult) -> None:
-        if not result.candidate_suggestions:
+    async def _save_candidate_suggestions(
+        self, batch: IngestionBatch
+    ) -> None:
+        if not batch.candidate_suggestions:
+            batch.mark_candidate_suggestions_handled()
             return
 
-        if result.scope is None:
-            result.set_scope(
-                self.user_name,
-                self.session_id,
-                self.processor.project_id,
-            )
         try:
             await asyncio.wait_for(
                 self.knowledge_store.save_candidate_suggestions(
-                    result.scope,
-                    result.candidate_suggestions,
+                    batch.scope,
+                    batch.candidate_suggestions,
                 ),
                 timeout=30.0,
             )
@@ -431,21 +446,19 @@ class IngestionWorker:
                 "candidate_suggestions_save_failed",
                 {
                     "error": str(e),
-                    "suggestion_count": len(result.candidate_suggestions),
+                    "suggestion_count": len(batch.candidate_suggestions),
                 },
             )
+        finally:
+            batch.mark_candidate_suggestions_handled()
 
     async def _write_graph_or_dlq(
         self,
-        messages: List[Dict],
-        result: BatchResult,
+        batch: IngestionBatch,
     ) -> tuple[bool, bool]:
-        if not result.has_graph_mutations():
-            return True, False
-
         try:
             graph_success, error_msg = await asyncio.wait_for(
-                self.write_to_graph(result), timeout=self.batch_timeout
+                self.write_to_graph(batch), timeout=self.batch_timeout
             )
         except asyncio.TimeoutError:
             graph_success, error_msg = False, "GRAPH_WRITE_TIMEOUT"
@@ -463,27 +476,39 @@ class IngestionWorker:
         )
 
         dlq_success = await self.processor.move_to_dead_letter(
-            messages,
+            batch.messages,
             error_msg or "GRAPH_WRITE_FAILED [unknown]",
             stage="graph_write",
-            batch_result=result,
+            batch=batch,
             session_id=self.session_id,
         )
         if not dlq_success:
             logger.critical(
                 "DLQ write failed after graph failure. Leaving "
-                f"{len(messages)} messages in buffer for retry."
+                f"{len(batch.messages)} messages in buffer for retry."
             )
             await emit(
                 self.session_id,
                 "pipeline",
                 "dlq_write_failed",
-                {"msg_count": len(messages)},
+                {"msg_count": len(batch.messages)},
             )
             return False, False
         return True, True
 
-    async def _mark_batch_processed(self, messages: List[Dict]) -> None:
+    async def _process_messages(
+        self, messages: List[Dict], session_text: str
+    ) -> IngestionBatch:
+        """Allocate and retain the aggregate through the worker lifecycle."""
+
+        batch = self.processor.open_batch(
+            messages, session_text, session_id=self.session_id
+        )
+        await self.processor.process(batch)
+        return batch
+
+    async def _mark_batch_processed(self, batch: IngestionBatch) -> None:
+        messages = batch.messages
         count = await self.redis.incrby(self._checkpoint_key, len(messages))
         if count >= self.checkpoint_interval:
             await emit(
@@ -504,3 +529,4 @@ class IngestionWorker:
             RedisKeys.project_last_processed(self.user_name, self.processor.project_id),
             last_id,
         )
+        batch.mark_checkpoint_committed()

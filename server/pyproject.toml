@@ -107,7 +107,10 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
-ignore = []
+# Long literal strings are intentional in tool schemas and test fixtures. Ruff's
+# formatter remains available for layout; E501 would otherwise create a noisy,
+# non-actionable baseline.
+ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["common", "infrastructure", "core", "log"]

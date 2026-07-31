@@ -46,12 +46,12 @@ from .scanning import build_folder_preview, normalize_relative_path
 from .storage import (
     DocumentChunk,
     csv_data_rows,
+    docx_heading_path,
     embedding_text,
     extract_and_split_document,
     extract_docx_paragraphs,
     extract_pdf_pages,
     extract_text,
-    docx_heading_path,
 )
 
 BlockingRunner = Callable[..., Awaitable[Any]]

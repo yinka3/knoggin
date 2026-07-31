@@ -6,7 +6,11 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from psycopg import sql
 
-from common.schema.document import DocumentFocus
+from common.schema.document import (
+    create_document_focus,
+    dump_document_focus,
+    parse_document_focus,
+)
 from common.utils.events import EventEmitter
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
@@ -89,8 +93,10 @@ class SessionManager:
                 meta = dict(row)
                 sid = meta["session_id"]
                 # Convert timestamps to ISO string
-                if meta.get("created_at"): meta["created_at"] = meta["created_at"].isoformat()
-                if meta.get("last_active_at"): meta["last_active_at"] = meta["last_active_at"].isoformat()
+                if meta.get("created_at"):
+                    meta["created_at"] = meta["created_at"].isoformat()
+                if meta.get("last_active_at"):
+                    meta["last_active_at"] = meta["last_active_at"].isoformat()
 
                 # Parse JSONB fields back to dict/lists if needed
                 if isinstance(meta.get("enabled_tools"), str):
@@ -476,7 +482,7 @@ class SessionManager:
         if not isinstance(focus, dict):
             return None
 
-        return DocumentFocus.model_validate(focus).model_dump(mode="json")
+        return dump_document_focus(parse_document_focus(focus))
 
     async def set_document_focus(
         self,
@@ -499,11 +505,13 @@ class SessionManager:
             folder_root_id=folder_root_id,
             path_prefix=path_prefix,
         )
-        focus = DocumentFocus(
-            mode="pinned",
-            created_at=get_now_iso(),
-            **target,
-        ).model_dump(mode="json")
+        focus = dump_document_focus(
+            create_document_focus(
+                mode="pinned",
+                created_at=get_now_iso(),
+                **target,
+            )
+        )
 
         query = "UPDATE public.sessions SET document_focus = %(focus)s WHERE session_id = %(session_id)s"
         await self.pg.execute(query, {"focus": json.dumps(focus), "session_id": session_id})

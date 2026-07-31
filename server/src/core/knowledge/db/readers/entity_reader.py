@@ -283,7 +283,7 @@ class EntityReader:
         )
         params = [entity_id, visible_project_ids, IDENTITY_ENTITY_ID]
 
-        query = f"""
+        query = """
         SELECT
             e.entity_id AS id,
             e.session_id,
@@ -292,7 +292,7 @@ class EntityReader:
             COALESCE(
                 array_agg(a.alias ORDER BY a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),
-                '{{}}'
+                '{}'
             ) AS aliases,
             e.type,
             e.topic,
@@ -530,7 +530,7 @@ class EntityReader:
             visible_project_ids,
             IDENTITY_ENTITY_ID,
         ]
-        query = f"""
+        query = """
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entity_search
         WHERE entity_id != %s
@@ -569,7 +569,7 @@ class EntityReader:
             visible_project_ids,
             IDENTITY_ENTITY_ID,
         ]
-        query = f"""
+        query = """
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entity_search
         WHERE 1 - (embedding <=> %s::vector) >= %s

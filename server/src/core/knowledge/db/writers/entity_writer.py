@@ -4,9 +4,9 @@ from typing import Dict, List, Optional, Sequence
 from loguru import logger
 
 from common.schema.contracts import (
-    EngineScope,
     EntityWrite,
     EpisodeEligibility,
+    ExecutionScope,
     MessageEntityRef,
     RelationshipWrite,
     relationship_identity,
@@ -180,12 +180,12 @@ class EntityWriter:
         *,
         message_entity_refs: Sequence[MessageEntityRef] = (),
         eligible_messages: Sequence[EpisodeEligibility] = (),
-        scope: EngineScope,
+        scope: ExecutionScope,
     ) -> bool:
         """Persist typed graph commands inside one explicit execution scope."""
 
-        if not isinstance(scope, EngineScope):
-            raise TypeError("write_batch requires an EngineScope")
+        if not isinstance(scope, ExecutionScope):
+            raise TypeError("write_batch requires an ExecutionScope")
         user_name = require_scope_value(scope.user_name, "user_name", "graph write")
         session_id = require_scope_value(
             scope.session_id, "session_id", "graph write"
@@ -444,7 +444,20 @@ class EntityWriter:
                                 EXCLUDED.relationship_type,
                                 relationships.relationship_type
                             ),
-                            weight = relationships.weight + 1,
+                            weight = relationships.weight + CASE
+                                WHEN EXISTS (
+                                    SELECT 1
+                                    FROM relationship_evidence_refs
+                                        AS existing_evidence
+                                    WHERE existing_evidence.relationship_id =
+                                        relationships.relationship_id
+                                      AND existing_evidence.project_id = %s
+                                      AND existing_evidence.user_name = %s
+                                      AND existing_evidence.session_id = %s
+                                      AND existing_evidence.message_id = %s
+                                ) THEN 0
+                                ELSE 1
+                            END,
                             confidence = GREATEST(
                                 relationships.confidence,
                                 EXCLUDED.confidence
@@ -472,6 +485,10 @@ class EntityWriter:
                             relationship.entity_b_id,
                             project_id,
                             IDENTITY_ENTITY_ID,
+                            project_id,
+                            user_name,
+                            session_id,
+                            relationship.message_id,
                         ),
                     )
                     record = await cur.fetchone()
@@ -553,7 +570,7 @@ class EntityWriter:
         self,
         cur,
         references: Sequence[MessageEntityRef],
-        scope: EngineScope,
+        scope: ExecutionScope,
     ) -> None:
         user_name = require_scope_value(
             scope.user_name, "user_name", "message-entity write"
@@ -624,7 +641,7 @@ class EntityWriter:
         self,
         cur,
         eligible_messages: Sequence[EpisodeEligibility],
-        scope: EngineScope,
+        scope: ExecutionScope,
     ) -> None:
         user_name = require_scope_value(
             scope.user_name, "user_name", "episode eligibility write"

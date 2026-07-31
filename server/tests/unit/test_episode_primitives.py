@@ -69,6 +69,21 @@ def test_episode_accepts_known_messages_and_two_focus_entities():
     assert [entity.entity_id for entity in episode.entities] == [42, 43]
 
 
+@pytest.mark.parametrize("messages", (None, []))
+def test_episode_requires_at_least_one_message(messages):
+    values = {
+        "episode_id": "episode-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "summary": "The team agreed to build the storage slice first.",
+    }
+    if messages is not None:
+        values["messages"] = messages
+
+    with pytest.raises(ValidationError):
+        Episode(**values)
+
+
 @pytest.mark.parametrize(
     "messages",
     (
@@ -120,3 +135,19 @@ def test_episode_rejects_duplicate_or_excess_focus_entities():
                 EntityEpisode(entity_id=44, is_focus_entity=True),
             ],
         )
+
+
+def test_episode_model_copy_keeps_pydantic_semantics_and_validated_copy_checks_updates():
+    episode = Episode(
+        episode_id="episode-1",
+        project_id="project-1",
+        session_id="session-1",
+        summary="The team agreed to build the storage slice first.",
+        messages=[MessageEpisode(message_id=11, message_position=0)],
+    )
+
+    unchecked = episode.model_copy(update={"messages": []})
+    assert unchecked.messages == []
+
+    with pytest.raises(ValidationError):
+        episode.validated_copy(update={"messages": []})

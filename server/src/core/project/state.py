@@ -63,9 +63,10 @@ class ProjectState:
             postgres_client=postgres_client,
             embedding_service=embedding_service,
             background_work=background_work,
-            document_rerank_enabled=os.getenv(
-                "KNOGGIN_DOCUMENT_RERANK_ENABLED", "true"
-            ).strip().lower() in {"1", "true", "yes", "on"},
+            document_rerank_enabled=os.getenv("KNOGGIN_DOCUMENT_RERANK_ENABLED", "true")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"},
             document_rerank_candidates=int(
                 os.getenv("KNOGGIN_DOCUMENT_RERANK_CANDIDATES", "15")
             ),
@@ -110,8 +111,7 @@ class ProjectState:
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "Timed out waiting for AAC discussion shutdown "
-                f"for {self.project_id}"
+                f"Timed out waiting for AAC discussion shutdown for {self.project_id}"
             )
 
     async def shutdown(self):
@@ -139,7 +139,6 @@ class ProjectState:
 
     def refresh_topic_mappings(self):
         """Refresh runtime consumers after the shared TopicConfig changes."""
-        self.entities.hierarchy_config = self.topic_config.hierarchy
         if self.batch_processor is not None:
             self.batch_processor.refresh_topic_mappings()
         else:

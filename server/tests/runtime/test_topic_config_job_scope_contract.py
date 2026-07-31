@@ -29,7 +29,7 @@ class TopicHarness(TopicTools):
                 "Identity": TopicSchema(active=True, labels=["person"]),
             }
         )
-        self.entities = type("Entities", (), {"hierarchy_config": {}})()
+        self.entities = object()
         self.active_topics = []
         self.refreshes = 0
         self.topic_refresh_callback = self._refresh
@@ -59,7 +59,6 @@ async def test_update_topics_persists_project_config_and_refreshes_runtime():
     assert result["success"] is True
     assert result["added"] == ["Research"]
     assert "Research" in result["active_topics"]
-    assert tools.entities.hierarchy_config == tools.topic_config.hierarchy
     assert tools.refreshes == 1
     assert "UPDATE public.projects" in postgres.calls[0][0]
     assert await redis.get(

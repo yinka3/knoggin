@@ -5,12 +5,13 @@ from typing import Awaitable, Callable, Optional
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.schema.contracts import BatchResult, EngineScope, EngineWorkUnit
+from common.schema.contracts import ExecutionScope
 from common.schema.settings import DLQSettings
 from common.utils.events import emit
-from core.ingestion.dlq_payload import DLQPayload
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_unix
+from core.ingestion.batch import IngestionBatch, IngestionMilestone
+from core.ingestion.dlq_payload import DLQPayload
 from core.ingestion.dlq_state import (
     DLQ_STATUS_COMPLETED,
     DLQ_STATUS_PARKED,
@@ -27,6 +28,7 @@ from core.ingestion.services.pipeline_service import (
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.redis_client import RedisKeys
+from infrastructure.work_record import WorkRecord
 
 
 class DLQReplayJob(BaseJob):
@@ -76,7 +78,9 @@ class DLQReplayJob(BaseJob):
         self,
         entities: EntityResolver,
         processor: IngestionPipeline,
-        write_to_graph: Callable[[BatchResult], Awaitable[tuple[bool, Optional[str]]]],
+        write_to_graph: Callable[
+            [IngestionBatch], Awaitable[tuple[bool, Optional[str]]]
+        ],
         redis_client: aioredis.Redis,
         settings: DLQSettings,
     ):
@@ -306,13 +310,13 @@ class DLQReplayJob(BaseJob):
         self,
         entry: dict,
         ctx: JobContext,
-        batch_result: Optional[BatchResult] = None,
-    ) -> EngineScope:
+        batch: Optional[IngestionBatch] = None,
+    ) -> ExecutionScope:
         session_id = entry.get("session_id")
         if not session_id:
             raise ValueError("DLQ entry missing required session_id")
 
-        return EngineScope(
+        return ExecutionScope(
             user_name=entry.get("user_name") or ctx.user_name,
             session_id=session_id,
             project_id=entry.get("project_id")
@@ -324,10 +328,10 @@ class DLQReplayJob(BaseJob):
         self,
         entry: dict,
         ctx: JobContext,
-        batch_result: Optional[BatchResult] = None,
-    ) -> EngineWorkUnit:
-        scope = self._resolve_replay_scope(entry, ctx, batch_result)
-        return EngineWorkUnit.for_dlq_replay(
+        batch: Optional[IngestionBatch] = None,
+    ) -> WorkRecord:
+        scope = self._resolve_replay_scope(entry, ctx, batch)
+        return WorkRecord.for_dlq_replay(
             scope=scope,
             stage=entry.get("stage", "unknown"),
             attempt=entry.get("attempt", 1),
@@ -335,38 +339,48 @@ class DLQReplayJob(BaseJob):
 
     def _refresh_replay_scope(
         self,
-        replay_unit: EngineWorkUnit,
+        replay_unit: WorkRecord,
         entry: dict,
         ctx: JobContext,
-        batch_result: BatchResult,
+        batch: IngestionBatch,
     ) -> None:
-        replay_unit.scope = self._resolve_replay_scope(entry, ctx, batch_result)
-        batch_result.scope = replay_unit.scope
-        if batch_result.work_unit:
-            batch_result.work_unit.scope = replay_unit.scope
+        replay_unit.scope = self._resolve_replay_scope(entry, ctx, batch)
+        batch.scope = replay_unit.scope
+        batch.work_unit.scope = replay_unit.scope
 
     def _attach_replay_unit(
         self,
-        batch_result: Optional[BatchResult],
-        replay_unit: EngineWorkUnit,
+        batch: Optional[IngestionBatch],
+        replay_unit: WorkRecord,
     ) -> None:
-        if batch_result and batch_result.work_unit:
-            batch_result.work_unit.metadata["dlq_replay_work_unit"] = (
-                replay_unit.model_dump(mode="json")
-            )
+        if batch is not None:
+            batch.work_unit.metadata["dlq_replay_work_record"] = replay_unit.snapshot()
 
     async def _emit_replay_unit_finished(
-        self, ctx: JobContext, replay_unit: EngineWorkUnit
+        self, ctx: JobContext, replay_unit: WorkRecord
     ) -> None:
         await emit(
             ctx.project_id,
             "job",
             "dlq_work_unit_finished",
-            replay_unit.model_dump(mode="json"),
+            replay_unit.snapshot(),
             verbose_only=True,
         )
 
-    def _validate_batch_result(self, result: BatchResult) -> BatchResult:
+    @staticmethod
+    def _set_replay_attempt(
+        result: IngestionBatch, attempt: int
+    ) -> None:
+        result.work_unit.attempt = attempt
+
+    @staticmethod
+    def _hydrate_replay_batch(payload_data: dict) -> IngestionBatch:
+        payload = DLQPayload.model_validate(payload_data)
+        return payload.to_ingestion_batch()
+
+    def _validate_replay_batch(
+        self, result: IngestionBatch
+    ) -> IngestionBatch:
         """
         Filter out stale entity IDs (e.g. phantom entities purged after a failed write),
         forcing the DLQ to fall back to a safer full reprocessing retry.
@@ -386,8 +400,10 @@ class DLQReplayJob(BaseJob):
         return result
 
     async def _write_replay_graph_if_needed(
-        self, result: BatchResult
+        self, result: IngestionBatch
     ) -> Optional[str]:
+        if IngestionMilestone.GRAPH_COMMITTED in result.milestones:
+            return None
         if not result.has_graph_writes():
             return None
         if self.write_to_graph is None:
@@ -397,6 +413,33 @@ class DLQReplayJob(BaseJob):
         if success:
             return None
         return err or "Graph write failed"
+
+    async def _commit_replay_checkpoint(self, batch: IngestionBatch) -> None:
+        """Finish a replay after graph persistence without repeating graph work."""
+
+        if IngestionMilestone.CHECKPOINT_COMMITTED in batch.milestones:
+            return
+        if IngestionMilestone.GRAPH_COMMITTED not in batch.milestones:
+            raise ValueError("Checkpoint replay requires a graph-committed batch")
+        if not batch.messages:
+            raise ValueError("Checkpoint replay requires batch messages")
+        last_id = max(int(message["id"]) for message in batch.messages)
+        await self.redis.set(
+            RedisKeys.last_processed(batch.scope.user_name, batch.scope.session_id),
+            last_id,
+        )
+        await self.redis.set(
+            RedisKeys.project_last_processed(
+                batch.scope.user_name,
+                batch.scope.project_id,
+            ),
+            last_id,
+        )
+        await self.redis.set(
+            RedisKeys.checkpoint(batch.scope.user_name, batch.scope.session_id),
+            0,
+        )
+        batch.mark_checkpoint_committed()
 
     async def _retry_graph_write(self, entry: dict, ctx: JobContext) -> bool:
         """Retry just the graph write — no LLM cost."""
@@ -410,23 +453,16 @@ class DLQReplayJob(BaseJob):
         result = None
 
         try:
-            result = DLQPayload.model_validate(entry["batch_result"]).to_batch()
+            result = self._hydrate_replay_batch(entry["batch_result"])
             self._refresh_replay_scope(replay_unit, entry, ctx, result)
-            if result.work_unit:
-                result.work_unit.trace.attempt = entry.get("attempt", 1)
-            result = self._validate_batch_result(result)
-
-            if not result.entity_ids:
-                logger.warning("DLQ: No valid entities left after validation, skipping")
-                replay_unit.mark_skipped("No valid entities left")
-                self._attach_replay_unit(result, replay_unit)
-                await self._emit_replay_unit_finished(ctx, replay_unit)
-                return True  # Consider it handled
+            self._set_replay_attempt(result, entry.get("attempt", 1))
+            result = self._validate_replay_batch(result)
 
             graph_error = await self._write_replay_graph_if_needed(result)
             success = graph_error is None
 
             if success:
+                await self._commit_replay_checkpoint(result)
                 replay_unit.mark_succeeded("Graph write retry succeeded")
                 self._attach_replay_unit(result, replay_unit)
                 await self._emit_replay_unit_finished(ctx, replay_unit)
@@ -472,13 +508,6 @@ class DLQReplayJob(BaseJob):
         result = None
 
         try:
-            messages = entry.get("messages", [])
-            if not messages:
-                logger.warning("DLQ: No messages in entry, skipping message log retry")
-                replay_unit.mark_skipped("No messages")
-                await self._emit_replay_unit_finished(ctx, replay_unit)
-                return True
-
             batch_result_dict = entry.get("batch_result")
             if not batch_result_dict:
                 logger.error(
@@ -487,32 +516,17 @@ class DLQReplayJob(BaseJob):
                 )
                 return await self._retry_processing(entry, ctx)
 
-            result = DLQPayload.model_validate(batch_result_dict).to_batch()
+            result = self._hydrate_replay_batch(batch_result_dict)
             self._refresh_replay_scope(replay_unit, entry, ctx, result)
-            if result.work_unit:
-                result.work_unit.trace.attempt = entry.get("attempt", 1)
-            result = self._validate_batch_result(result)
-            replay_scope = replay_unit.scope
-
-            batch = [
-                {
-                    "id": msg["id"],
-                    "content": msg.get("message", msg.get("content", "")),
-                    "role": msg.get("role", "user"),
-                    "user_name": replay_scope.user_name,
-                    "session_id": replay_scope.session_id,
-                    "project_id": replay_scope.project_id,
-                    "timestamp": msg.get("timestamp", ""),
-                }
-                for msg in messages
-            ]
-
-            await asyncio.wait_for(
-                self.processor.knowledge_store.save_message_logs(batch), timeout=30.0
-            )
-            logger.info(
-                f"DLQ: Message log retry succeeded for {len(messages)} messages"
-            )
+            self._set_replay_attempt(result, entry.get("attempt", 1))
+            result = self._validate_replay_batch(result)
+            messages = result.messages or entry.get("messages", [])
+            if not messages:
+                logger.warning("DLQ: No messages in entry, skipping message log retry")
+                replay_unit.mark_skipped("No messages")
+                await self._emit_replay_unit_finished(ctx, replay_unit)
+                return True
+            await self._save_message_logs_for_replay(result, messages)
 
             await self._save_candidate_suggestions_for_replay(result)
 
@@ -526,6 +540,8 @@ class DLQReplayJob(BaseJob):
                 self._attach_replay_unit(result, replay_unit)
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 return False
+
+            await self._commit_replay_checkpoint(result)
 
             replay_unit.mark_succeeded("Message log retry succeeded")
             self._attach_replay_unit(result, replay_unit)
@@ -545,8 +561,13 @@ class DLQReplayJob(BaseJob):
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
 
-    async def _save_candidate_suggestions_for_replay(self, result: BatchResult) -> None:
+    async def _save_candidate_suggestions_for_replay(
+        self, result: IngestionBatch
+    ) -> None:
+        if IngestionMilestone.CANDIDATE_SUGGESTIONS_HANDLED in result.milestones:
+            return
         if not result.candidate_suggestions:
+            result.mark_candidate_suggestions_handled()
             return
         if result.scope is None:
             logger.warning("Skipping candidate suggestion replay without batch scope")
@@ -571,6 +592,35 @@ class DLQReplayJob(BaseJob):
                     "source": "dlq_replay",
                 },
             )
+        finally:
+            result.mark_candidate_suggestions_handled()
+
+    async def _save_message_logs_for_replay(
+        self, result: IngestionBatch, messages: list[dict]
+    ) -> None:
+        """Persist logs exactly once before advancing replay durability."""
+
+        if IngestionMilestone.MESSAGE_LOGS_HANDLED in result.milestones:
+            return
+        if result.scope is None:
+            raise ValueError("Message log replay requires batch scope")
+        batch = [
+            {
+                "id": msg["id"],
+                "content": msg.get("message", msg.get("content", "")),
+                "role": msg.get("role", "user"),
+                "user_name": result.scope.user_name,
+                "session_id": result.scope.session_id,
+                "project_id": result.scope.project_id,
+                "timestamp": msg.get("timestamp", ""),
+            }
+            for msg in messages
+        ]
+        await asyncio.wait_for(
+            self.processor.knowledge_store.save_message_logs(batch), timeout=30.0
+        )
+        result.mark_message_logs_handled()
+        logger.info("DLQ: Message log replay succeeded for %s messages", len(messages))
 
     async def _retry_processing(self, entry: dict, ctx: JobContext) -> bool:
         """Full reprocess with stored context — LLM cost."""
@@ -593,12 +643,14 @@ class DLQReplayJob(BaseJob):
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 return True
 
-            result = await self.processor.run(
-                messages, session_text, session_id=replay_unit.scope.session_id
+            result = self.processor.open_batch(
+                messages,
+                session_text,
+                session_id=replay_unit.scope.session_id,
             )
+            await self.processor.process(result)
             self._refresh_replay_scope(replay_unit, entry, ctx, result)
-            if result.work_unit:
-                result.work_unit.trace.attempt = entry.get("attempt", 1)
+            self._set_replay_attempt(result, entry.get("attempt", 1))
 
             if not result.success:
                 logger.warning(f"DLQ: Reprocessing failed: {result.error}")
@@ -607,6 +659,7 @@ class DLQReplayJob(BaseJob):
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 return False
 
+            await self._save_message_logs_for_replay(result, result.messages)
             await self._save_candidate_suggestions_for_replay(result)
 
             graph_error = await self._write_replay_graph_if_needed(result)
@@ -619,6 +672,8 @@ class DLQReplayJob(BaseJob):
                 self._attach_replay_unit(result, replay_unit)
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 return False
+
+            await self._commit_replay_checkpoint(result)
 
             logger.info(f"DLQ: Full reprocess succeeded for {len(messages)} messages")
             replay_unit.mark_succeeded("Full reprocess succeeded")
@@ -647,6 +702,29 @@ class DLQReplayJob(BaseJob):
         except Exception as e:
             logger.error(f"DLQ reprocessing failed: {e}")
             replay_unit.mark_failed(str(e))
+            self._attach_replay_unit(result, replay_unit)
+            await self._emit_replay_unit_finished(ctx, replay_unit)
+            return False
+
+    async def _retry_checkpoint(self, entry: dict, ctx: JobContext) -> bool:
+        """Retry only the final durable checkpoint after a graph commit."""
+
+        replay_unit = self._replay_work_unit(entry, ctx)
+        replay_unit.mark_running()
+        result = None
+        try:
+            result = self._hydrate_replay_batch(entry["batch_result"])
+            self._refresh_replay_scope(replay_unit, entry, ctx, result)
+            self._set_replay_attempt(result, entry.get("attempt", 1))
+            if IngestionMilestone.GRAPH_COMMITTED not in result.milestones:
+                raise ValueError("Checkpoint DLQ payload is missing graph commit")
+            await self._commit_replay_checkpoint(result)
+            replay_unit.mark_succeeded("Checkpoint retry succeeded")
+            self._attach_replay_unit(result, replay_unit)
+            await self._emit_replay_unit_finished(ctx, replay_unit)
+            return True
+        except Exception as exc:
+            replay_unit.mark_failed(str(exc))
             self._attach_replay_unit(result, replay_unit)
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
@@ -739,6 +817,8 @@ class DLQReplayJob(BaseJob):
                         success = await self._retry_graph_write(entry, ctx)
                     elif stage == "message_log":
                         success = await self._retry_message_log(entry, ctx)
+                    elif stage == "checkpoint":
+                        success = await self._retry_checkpoint(entry, ctx)
                     else:
                         success = await self._retry_processing(entry, ctx)
 

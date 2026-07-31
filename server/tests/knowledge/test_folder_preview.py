@@ -343,7 +343,7 @@ async def test_preview_applies_depth_size_count_and_total_limits(
 @pytest.mark.no_network
 async def test_preview_total_size_limit_is_not_overridable(preview_service):
     settings = FolderScanSettings(
-        max_document_size_bytes=10,
+        max_document_size_bytes=3,
         max_total_size_bytes=3,
         max_file_count=10,
     )
@@ -366,3 +366,26 @@ def test_folder_scan_default_limits():
     assert settings.max_total_size_bytes == 500 * 1024 * 1024
     assert settings.max_folder_depth == 20
     assert settings.max_document_size_bytes == 25 * 1024 * 1024
+
+
+@pytest.mark.no_network
+def test_folder_scan_settings_normalize_extensions_and_reject_conflicts():
+    settings = FolderScanSettings(
+        allowed_extensions={"PY", ".md", ".PY"},
+        blocked_extensions={".log"},
+    )
+
+    assert settings.allowed_extensions == frozenset({".py", ".md"})
+    assert settings.blocked_extensions == frozenset({".log"})
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        FolderScanSettings(
+            allowed_extensions={"md"},
+            blocked_extensions={".md"},
+        )
+
+    with pytest.raises(ValueError, match="must not exceed"):
+        FolderScanSettings(
+            max_document_size_bytes=4,
+            max_total_size_bytes=3,
+        )

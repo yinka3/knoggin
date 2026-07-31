@@ -1910,3 +1910,144 @@ ON public.message_source_refs(message_id, project_id, session_id);
 
 CREATE INDEX IF NOT EXISTS message_source_refs_episode_lookup_idx
 ON public.message_source_refs(project_id, session_id, message_id, created_at);
+
+-- ============================================================================
+-- ADDITIVE INTEGRITY CONSTRAINTS
+--
+-- These constraints are intentionally NOT VALID for existing deployments: they
+-- protect all new writes without silently rewriting legacy rows. Validate them
+-- after the deployment-specific legacy-data repair has completed.
+-- ============================================================================
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_id_positive_check'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_id_positive_check
+        CHECK (entity_id > 0) NOT VALID;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_canonical_name_nonblank_check'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_canonical_name_nonblank_check
+        CHECK (btrim(canonical_name) <> '') NOT VALID;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_type_nonblank_check'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_type_nonblank_check
+        CHECK (type IS NULL OR btrim(type) <> '') NOT VALID;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_topic_nonblank_check'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_topic_nonblank_check
+        CHECK (btrim(topic) <> '') NOT VALID;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'messages_id_positive_check'
+          AND conrelid = 'public.messages'::regclass
+    ) THEN
+        ALTER TABLE public.messages
+        ADD CONSTRAINT messages_id_positive_check
+        CHECK (message_id > 0) NOT VALID;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'message_source_refs_locator_range_check'
+          AND conrelid = 'public.message_source_refs'::regclass
+    ) THEN
+        ALTER TABLE public.message_source_refs
+        ADD CONSTRAINT message_source_refs_locator_range_check
+        CHECK (
+            CASE locator ->> 'kind'
+                WHEN 'text_lines' THEN
+                    CASE
+                        WHEN locator ->> 'start_line' ~ '^[1-9][0-9]*$'
+                         AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
+                        THEN (locator ->> 'end_line')::BIGINT
+                             >= (locator ->> 'start_line')::BIGINT
+                        ELSE FALSE
+                    END
+                WHEN 'code_lines' THEN
+                    CASE
+                        WHEN locator ->> 'start_line' ~ '^[1-9][0-9]*$'
+                         AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
+                        THEN (locator ->> 'end_line')::BIGINT
+                             >= (locator ->> 'start_line')::BIGINT
+                        ELSE FALSE
+                    END
+                WHEN 'csv_rows' THEN
+                    CASE
+                        WHEN locator ->> 'start_row' ~ '^[1-9][0-9]*$'
+                         AND locator ->> 'end_row' ~ '^[1-9][0-9]*$'
+                        THEN (locator ->> 'end_row')::BIGINT
+                             >= (locator ->> 'start_row')::BIGINT
+                        ELSE FALSE
+                    END
+                WHEN 'docx_paragraphs' THEN
+                    CASE
+                        WHEN locator ->> 'start_paragraph' ~ '^[1-9][0-9]*$'
+                         AND locator ->> 'end_paragraph' ~ '^[1-9][0-9]*$'
+                        THEN (locator ->> 'end_paragraph')::BIGINT
+                             >= (locator ->> 'start_paragraph')::BIGINT
+                        ELSE FALSE
+                    END
+                WHEN 'character_span' THEN
+                    CASE
+                        WHEN locator ->> 'start_char' ~ '^[0-9]+$'
+                         AND locator ->> 'end_char' ~ '^[1-9][0-9]*$'
+                        THEN (locator ->> 'end_char')::BIGINT
+                             > (locator ->> 'start_char')::BIGINT
+                        ELSE FALSE
+                    END
+                ELSE TRUE
+            END
+        ) NOT VALID;
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.enforce_episode_focus_entity_limit()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.is_focus_entity AND (
+        SELECT count(*)
+        FROM public.episode_entities
+        WHERE episode_id = NEW.episode_id
+          AND is_focus_entity
+    ) > 2 THEN
+        RAISE EXCEPTION
+            'episodes may contain at most two focus entities'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS episode_entities_focus_limit_trigger
+    ON public.episode_entities;
+CREATE TRIGGER episode_entities_focus_limit_trigger
+AFTER INSERT OR UPDATE OF episode_id, is_focus_entity
+ON public.episode_entities
+FOR EACH ROW EXECUTE FUNCTION public.enforce_episode_focus_entity_limit();

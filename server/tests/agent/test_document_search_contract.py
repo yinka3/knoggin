@@ -690,30 +690,6 @@ async def test_read_document_adds_source_context_from_the_returned_read_range():
         },
     }
 
-
-@pytest.mark.no_network
-async def test_search_documents_adds_docx_paragraph_source_context():
-    content_hash = "d" * 64
-    stored_chunk = {
-        "document_id": "file-1",
-        "original_name": "outline.docx",
-        "relative_path": "docs/outline.docx",
-        "extension": ".docx",
-        "content_hash": content_hash,
-        "chunk_index": 3,
-        "content": "Architecture\nThe worker stores each passage.",
-        "locator": {
-            "kind": "docx_paragraphs",
-            "start_paragraph": 7,
-            "end_paragraph": 8,
-            "heading_path": ["Architecture"],
-        },
-    }
-
-    result = SearchTools._with_document_source_context(stored_chunk)
-
-    assert result["source_context"]["source_kind"] == "text_document"
-    assert result["source_context"]["locator"] == stored_chunk["locator"]
     tools = SearchTools()
     tools.document_service = ReadOnlyDocumentService(read_result=read_result)
     tools.session_id = "session-1"
@@ -738,6 +714,31 @@ async def test_search_documents_adds_docx_paragraph_source_context():
             "chunk_index": "lines:3-4",
         },
     }
+
+
+@pytest.mark.no_network
+async def test_search_documents_adds_docx_paragraph_source_context():
+    content_hash = "d" * 64
+    stored_chunk = {
+        "document_id": "file-1",
+        "original_name": "outline.docx",
+        "relative_path": "docs/outline.docx",
+        "extension": ".docx",
+        "content_hash": content_hash,
+        "chunk_index": 3,
+        "content": "Architecture\nThe worker stores each passage.",
+        "locator": {
+            "kind": "docx_paragraphs",
+            "start_paragraph": 7,
+            "end_paragraph": 8,
+            "heading_path": ["Architecture"],
+        },
+    }
+
+    result = SearchTools._with_document_source_context(stored_chunk)
+
+    assert result["source_context"]["source_kind"] == "text_document"
+    assert result["source_context"]["locator"] == stored_chunk["locator"]
 
 
 @pytest.mark.no_network

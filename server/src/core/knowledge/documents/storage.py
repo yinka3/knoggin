@@ -20,10 +20,10 @@ import tree_sitter_rust
 import tree_sitter_sql
 import tree_sitter_typescript
 import tree_sitter_yaml
+from docx import Document as DocxDocument
 from llama_index.core.node_parser import SentenceSplitter
 from PIL import Image as PILImage
 from pypdf import PdfReader
-from docx import Document as DocxDocument
 from tree_sitter import Language, Parser
 
 from core.knowledge.documents.constants import (

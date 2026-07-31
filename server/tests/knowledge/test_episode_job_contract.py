@@ -1,11 +1,11 @@
 import pytest
 
 import core.ingestion.jobs.episode_job as episode_job_module
-from common.schema.contracts import (
+from common.schema.episode import Episode, EpisodeCheckpoint, MessageEpisode
+from common.schema.episode_output import (
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,
 )
-from common.schema.episode import Episode, EpisodeCheckpoint, MessageEpisode
 from common.schema.settings import EpisodeSettings, IngestionSettings
 from core.ingestion.jobs.episode_job import EpisodeJob
 from infrastructure.job.base import JobContext

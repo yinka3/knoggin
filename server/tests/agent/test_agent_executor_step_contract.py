@@ -3,16 +3,9 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import LLMProviderError
-from common.schema.contracts import EngineScope
 from core.agent.executor import AgentExecutor
-from core.agent.types import (
-    AgentContext,
-    AgentRunIdentity,
-    AgentRunConfig,
-    AgentState,
-    MaintenanceCandidate,
-    RetrievedEvidence,
-)
+from core.agent.run import AgentRun, AgentRunLimits
+from core.agent.types import MaintenanceCandidate
 
 
 class StreamingLLM:
@@ -33,20 +26,16 @@ class StreamingLLM:
 
 
 def make_executor(llm):
-    ctx = AgentContext(
-        config=AgentRunConfig(),
-        state=AgentState(),
-        evidence=RetrievedEvidence(),
-        scope=EngineScope(
-            user_name="ada", session_id="session-1", project_id="project-1"
-        ),
-        agent=AgentRunIdentity(
-            config=SimpleNamespace(id="agent-1"),
-            name="STELLA",
-            persona="Careful memory assistant",
-        ),
+    ctx = AgentRun.open(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
         user_query="What changed in profile behavior?",
         run_id="run-1",
+        agent_config=SimpleNamespace(id="agent-1"),
+        agent_name="STELLA",
+        persona="Careful memory assistant",
+        limits=AgentRunLimits(),
         active_topics=["Identity", "Testing"],
     )
     tools = SimpleNamespace(document_service=None)

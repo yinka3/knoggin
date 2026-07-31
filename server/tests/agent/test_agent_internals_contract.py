@@ -2,37 +2,28 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.schema.contracts import EngineScope
 from core.agent.internals import (
     build_user_message,
     summarize_result,
     update_accumulators,
 )
-from core.agent.types import (
-    AgentContext,
-    AgentRunIdentity,
-    AgentRunConfig,
-    AgentState,
-    RetrievedEvidence,
-)
+from core.agent.run import AgentRun, AgentRunLimits
 
 
 def make_ctx(**overrides):
     data = {
-        "config": AgentRunConfig(max_history_turns=2, max_accumulated_messages=2),
-        "state": AgentState(),
-        "evidence": RetrievedEvidence(),
-        "scope": EngineScope(
-            user_name="ada", session_id="session-1", project_id="project-1"
-        ),
-        "agent": AgentRunIdentity(
-            config=SimpleNamespace(id="agent-1"), name="STELLA", persona=""
-        ),
+        "user_name": "ada",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "agent_config": SimpleNamespace(id="agent-1"),
+        "agent_name": "STELLA",
+        "persona": "",
+        "limits": AgentRunLimits(max_history_turns=2, max_accumulated_messages=2),
         "user_query": "What changed in profile behavior?",
         "run_id": "run-1",
     }
     data.update(overrides)
-    return AgentContext(**data)
+    return AgentRun.open(**data)
 
 
 @pytest.mark.no_network
@@ -60,10 +51,10 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
             }
         },
     )
-    ctx.state.call_count = 1
-    ctx.state.last_error = "Duplicate call skipped"
-    ctx.evidence.profiles.append({"id": 7, "canonical_name": "Ada"})
-    ctx.evidence.profiles.append({"id": 8, "canonical_name": "Grace"})
+    ctx.call_count = 1
+    ctx.last_error = "Duplicate call skipped"
+    ctx.profiles.append({"id": 7, "canonical_name": "Ada"})
+    ctx.profiles.append({"id": 8, "canonical_name": "Grace"})
 
     message = build_user_message(
         ctx,
@@ -162,7 +153,7 @@ def test_update_accumulators_dedupes_and_trims_messages_by_score():
         },
     )
 
-    assert [msg["id"] for msg in ctx.evidence.messages] == ["msg_2", "msg_3"]
+    assert [msg["id"] for msg in ctx.messages] == ["msg_2", "msg_3"]
 
 
 @pytest.mark.no_network
@@ -249,17 +240,17 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
         {"data": [{"url": "https://example.test/news"}]},
     )
 
-    assert ctx.evidence.profiles == [{"id": 1, "canonical_name": "Ada"}]
-    assert ctx.evidence.graph == [
+    assert ctx.profiles == [{"id": 1, "canonical_name": "Ada"}]
+    assert ctx.graph == [
         {"source": "Ada", "target": "Knoggin", "score": 0.8},
         {"source": "Ada", "target": "Testing"},
     ]
-    assert ctx.evidence.paths == [{"entity_a": "Ada", "entity_b": "Knoggin"}]
-    assert ctx.evidence.hierarchy == [{"entity": "Knoggin"}]
-    assert ctx.evidence.episodes == [{"resolution": "exact"}]
+    assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Knoggin"}]
+    assert ctx.hierarchy == [{"entity": "Knoggin"}]
+    assert ctx.episodes == [{"resolution": "exact"}]
     assert [
         (msg["id"], msg["source_type"], msg["message"])
-        for msg in ctx.evidence.messages
+        for msg in ctx.messages
     ] == [
         ("document:file-1:2", "document", "profile plan"),
         (
@@ -268,7 +259,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             "10: exact content",
         ),
     ]
-    assert ctx.evidence.sources == [
+    assert ctx.sources == [
         {"url": "https://example.test/a"},
         {"url": "https://example.test/news"},
     ]
@@ -277,7 +268,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
 @pytest.mark.no_network
 def test_update_accumulators_caps_non_message_evidence_buckets():
     ctx = make_ctx(
-        config=AgentRunConfig(
+        limits=AgentRunLimits(
             max_history_turns=2,
             max_accumulated_messages=2,
             max_accumulated_profiles=2,
@@ -365,16 +356,16 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
         },
     )
 
-    assert [profile["id"] for profile in ctx.evidence.profiles] == [2, 3]
-    assert [(item["source"], item["target"]) for item in ctx.evidence.graph] == [
+    assert [profile["id"] for profile in ctx.profiles] == [2, 3]
+    assert [(item["source"], item["target"]) for item in ctx.graph] == [
         ("Ada", "Beta"),
         ("Ada", "Gamma"),
     ]
-    assert ctx.evidence.paths == [{"entity_a": "Ada", "entity_b": "Beta"}]
-    assert ctx.evidence.hierarchy == [{"entity": "Beta"}]
-    assert ctx.evidence.episodes == [{"id": "episode-2"}]
-    assert ctx.evidence.sources == [{"url": "https://example.test/new"}]
-    assert [message["chunk_index"] for message in ctx.evidence.messages] == [2, 3]
+    assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Beta"}]
+    assert ctx.hierarchy == [{"entity": "Beta"}]
+    assert ctx.episodes == [{"id": "episode-2"}]
+    assert ctx.sources == [{"url": "https://example.test/new"}]
+    assert [message["chunk_index"] for message in ctx.messages] == [2, 3]
 
 
 @pytest.mark.no_network
@@ -385,7 +376,7 @@ def test_update_accumulators_ignores_errors_and_empty_results():
     update_accumulators(ctx, "search_messages", {"data": []})
     update_accumulators(ctx, "unknown", {"data": [{"id": "x"}]})
 
-    assert ctx.evidence.has_any() is False
+    assert ctx.has_any() is False
 
 
 @pytest.mark.no_network

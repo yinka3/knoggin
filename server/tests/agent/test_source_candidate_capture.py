@@ -3,28 +3,16 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import ToolExecutionError
-from common.schema.contracts import EngineScope
 from common.schema.source_reference import SourceReferenceCandidate
 from core.agent.executor import AgentExecutor
-from core.agent.types import (
-    AgentContext,
-    AgentRunIdentity,
-    AgentRunConfig,
-    AgentState,
-    FinalResponse,
-    RetrievedEvidence,
-    ToolCall,
-)
+from core.agent.run import AgentRun, AgentRunLimits
+from core.agent.types import FinalResponse, ToolCall
 
 
 def _pasted_candidate():
     return SourceReferenceCandidate(
-        scope=EngineScope(
-            user_name="ada", session_id="session-1", project_id="project-1"
-        ),
-        agent=AgentRunIdentity(
-            config=SimpleNamespace(id="agent-1"), name="STELLA", persona=""
-        ),
+        project_id="project-1",
+        session_id="session-1",
         source_kind="user_pasted_text",
         source_message_id=41,
         content_hash="a" * 64,
@@ -38,13 +26,16 @@ def _pasted_candidate():
 
 
 def _executor(initial_source_candidates=None):
-    context = AgentContext(
-        config=AgentRunConfig(max_calls=4),
-        state=AgentState(),
-        evidence=RetrievedEvidence(),
+    context = AgentRun.open(
+        user_name="ada",
         project_id="project-1",
         session_id="session-1",
+        user_query="Find sources",
         run_id="run-1",
+        agent_config=SimpleNamespace(id="agent-1"),
+        agent_name="STELLA",
+        persona="",
+        limits=AgentRunLimits(max_calls=4),
         initial_source_candidates=(
             list(initial_source_candidates)
             if initial_source_candidates is not None
@@ -52,6 +43,35 @@ def _executor(initial_source_candidates=None):
         ),
     )
     return AgentExecutor(context, llm=object(), tools=SimpleNamespace())
+
+
+@pytest.mark.no_network
+def test_final_response_uses_its_explicit_usage_and_source_snapshot():
+    executor = _executor(initial_source_candidates=[])
+    response = executor._wrap_final_response(
+        FinalResponse(
+            content="Done.",
+            usage={
+                "prompt_tokens": 3,
+                "completion_tokens": 4,
+                "total_tokens": 7,
+                "approximate": False,
+            },
+            sources=[{"kind": "message", "id": 7}],
+            sources_consulted=[],
+        )
+    )
+
+    assert response["data"] == {
+        "content": "Done.",
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 4,
+            "total_tokens": 7,
+            "approximate": False,
+        },
+        "sources": [{"kind": "message", "id": 7}],
+    }
 
 
 @pytest.mark.no_network
@@ -164,7 +184,7 @@ async def test_executor_ignores_source_context_without_a_tool_call_id(monkeypatc
     ):
         pass
 
-    assert executor.ctx.state.source_candidates == [_pasted_candidate()]
+    assert executor.ctx.source_candidates == [_pasted_candidate()]
 
 
 @pytest.mark.no_network

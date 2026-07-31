@@ -1,29 +1,21 @@
-import json
-import uuid
-from dataclasses import dataclass
 from time import perf_counter
 from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 
-from common.schema.contracts import (
+from common.schema.episode import Episode
+from common.schema.episode_output import (
     EpisodeConsolidation,
     EpisodeDecision,
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,
-)
-from common.schema.episode import (
-    EntityEpisode,
-    Episode,
-    MessageEpisode,
-    RelationshipEpisode,
 )
 from common.schema.settings import (
     EpisodeSettings,
     IngestionSettings,
 )
 from common.utils.events import emit
-from common.utils.local_references import build_local_id_maps, resolve_local_id
+from core.ingestion.episode_build import EpisodeBuild
 from core.ingestion.prompts import (
     get_episode_consolidation_prompt,
     get_episode_generation_prompt,
@@ -33,51 +25,6 @@ from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.llm_client import LLMService
-
-
-@dataclass(frozen=True)
-class EpisodeCandidateContext:
-    """One ready-to-generate window and the bounded context around it."""
-
-    messages: list[dict]
-    entity_ids_by_message: dict[int, list[int]]
-    relationship_ids_by_message: dict[int, list[str]]
-    entity_catalog: list[dict]
-    relationship_catalog: list[dict]
-    prior_episodes: list[Episode]
-
-    @property
-    def entity_ids(self) -> list[int]:
-        return sorted(
-            {
-                entity_id
-                for message_entity_ids in self.entity_ids_by_message.values()
-                for entity_id in message_entity_ids
-            }
-        )
-
-    @property
-    def relationship_ids(self) -> list[str]:
-        return sorted(
-            {
-                relationship_id
-                for message_relationship_ids in self.relationship_ids_by_message.values()
-                for relationship_id in message_relationship_ids
-            }
-        )
-
-
-@dataclass(frozen=True)
-class EpisodeProcessingResult:
-    """One durable episode outcome, including a checkpointed skip."""
-
-    action: str
-    episode_id: str | None
-    source_message_count: int
-    episode_source_message_count: int = 0
-    entity_link_count: int = 0
-    relationship_link_count: int = 0
-    consolidation_limit_hit: bool = False
 
 
 class EpisodeJob(BaseJob):
@@ -171,14 +118,14 @@ class EpisodeJob(BaseJob):
             message_count=self.target_message_count,
         )
 
-    async def load_candidate_context(
+    async def load_candidate_build(
         self,
         *,
         user_name: str,
         project_id: str,
         session_id: str,
-    ) -> EpisodeCandidateContext | None:
-        """Load one eligible window with all canonical graph context."""
+    ) -> EpisodeBuild | None:
+        """Load one eligible window into its workflow-owned aggregate."""
 
         messages = await self.load_next_window(
             user_name=user_name,
@@ -213,7 +160,9 @@ class EpisodeJob(BaseJob):
             project_id=project_id,
             session_id=session_id,
         )
-        return EpisodeCandidateContext(
+        return EpisodeBuild.from_window(
+            project_id=project_id,
+            session_id=session_id,
             messages=messages,
             entity_ids_by_message=entity_ids_by_message,
             relationship_ids_by_message=relationship_ids_by_message,
@@ -329,64 +278,36 @@ class EpisodeJob(BaseJob):
     ) -> EpisodeDecision | None:
         """Generate one grounded episode decision for a ready candidate window."""
 
-        context = await self.load_candidate_context(
+        build = await self.load_candidate_build(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
         )
-        if context is None:
+        if build is None:
             return None
-        return await self._generate_decision_for_context(context, user_name=user_name)
+        try:
+            return await self._generate_decision_for_build(build, user_name=user_name)
+        finally:
+            build.release()
 
-    async def _generate_decision_for_context(
+    async def _generate_decision_for_build(
         self,
-        context: EpisodeCandidateContext,
+        build: EpisodeBuild,
         *,
         user_name: str,
     ) -> EpisodeDecision:
-        """Ask the LLM for a decision after candidate context is already loaded."""
+        """Generate a strict decision directly into one episode build."""
 
         if self.llm is None:
             raise RuntimeError("EpisodeJob requires an LLM to generate a decision")
-
-        message_local_ids, message_ids_by_local = build_local_id_maps(
-            (int(message["message_id"]) for message in context.messages),
-            "m",
-        )
-        entity_local_ids, entity_ids_by_local = build_local_id_maps(
-            context.entity_ids,
-            "e",
-        )
-        relationship_local_ids, relationship_ids_by_local = build_local_id_maps(
-            context.relationship_ids,
-            "r",
-        )
-        episode_local_ids, episode_ids_by_local = build_local_id_maps(
-            (episode.episode_id for episode in context.prior_episodes),
-            "ep",
-        )
-        system_prompt = get_episode_generation_prompt(user_name)
+        build.prepare_local_references()
         output = await self.llm.generate_structured(
             response_model=LLMEpisodeDecision,
-            system=system_prompt,
-            user=self._build_generation_input(
-                context,
-                message_local_ids=message_local_ids,
-                entity_local_ids=entity_local_ids,
-                relationship_local_ids=relationship_local_ids,
-                episode_local_ids=episode_local_ids,
-            ),
+            system=get_episode_generation_prompt(user_name),
+            user=build.generation_payload(),
             temperature=0.0,
         )
-        decision = self._resolve_decision(
-            output,
-            message_ids_by_local=message_ids_by_local,
-            entity_ids_by_local=entity_ids_by_local,
-            relationship_ids_by_local=relationship_ids_by_local,
-            episode_ids_by_local=episode_ids_by_local,
-        )
-        self._validate_decision(decision, context)
-        return decision
+        return build.apply_llm_decision(output)
 
     async def process_next_window(
         self,
@@ -394,19 +315,20 @@ class EpisodeJob(BaseJob):
         user_name: str,
         project_id: str,
         session_id: str,
-    ) -> EpisodeProcessingResult | None:
-        """Generate and atomically persist one episode decision for a session."""
+    ) -> EpisodeBuild | None:
+        """Generate and persist one episode window in its owning aggregate."""
 
-        context = await self.load_candidate_context(
+        build = await self.load_candidate_build(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
         )
-        if context is None:
+        if build is None:
             return None
+        builds = [build]
         try:
-            decision = await self._generate_decision_for_context(
-                context,
+            decision = await self._generate_decision_for_build(
+                build,
                 user_name=user_name,
             )
         except ValueError as exc:
@@ -416,102 +338,80 @@ class EpisodeJob(BaseJob):
                 user_name=user_name,
                 project_id=project_id,
                 session_id=session_id,
-                source_message_count=len(context.messages),
+                source_message_count=len(build.messages),
             )
+            build.release()
             raise
-        window_message_ids = [
-            int(message["message_id"]) for message in context.messages
-        ]
-        episode = self._build_episode(
-            decision,
-            context,
-            project_id=project_id,
-            session_id=session_id,
-        )
-        if (
-            episode is not None
-            and decision.action == "consolidate"
-            and episode.generator_metadata["effective_action"] == "consolidate"
-        ):
-            consolidation_context = context
-            try:
-                consolidation_context = await self._load_consolidation_context(
-                    decision.target_episode_id,
-                    context,
-                    user_name=user_name,
-                    project_id=project_id,
-                    session_id=session_id,
-                )
-                consolidation = await self._regenerate_consolidation(
-                    decision.target_episode_id,
-                    consolidation_context,
-                    user_name=user_name,
-                )
-            except ValueError as exc:
-                await self._emit_validation_failure(
-                    exc,
-                    stage="consolidation",
-                    user_name=user_name,
-                    project_id=project_id,
-                    session_id=session_id,
-                    source_message_count=len(consolidation_context.messages),
-                )
-                raise
-            decision = EpisodeDecision(
-                action="consolidate",
-                target_episode_id=decision.target_episode_id,
-                **consolidation.model_dump(),
+        try:
+            window_message_ids = build.message_ids
+            episode = build.create_episode(
+                max_message_count=self.max_message_count,
+                max_age_hours=self.max_age_hours,
             )
-            episode = self._build_episode(
-                decision,
-                consolidation_context,
+            if (
+                episode is not None
+                and decision.action == "consolidate"
+                and episode.generator_metadata["effective_action"] == "consolidate"
+            ):
+                build = await self._load_consolidation_build(
+                    decision.target_episode_id,
+                    build,
+                    user_name=user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                )
+                builds.append(build)
+                decision = await self._regenerate_consolidation_for_build(
+                    decision.target_episode_id,
+                    build,
+                    user_name=user_name,
+                )
+                episode = build.create_episode(
+                    max_message_count=self.max_message_count,
+                    max_age_hours=self.max_age_hours,
+                )
+            if episode is not None:
+                episode = await self._embed_build_episode(build)
+            persisted = await self.knowledge_store.write_episode_window(
+                episode,
+                window_message_ids,
+                user_name=user_name,
                 project_id=project_id,
                 session_id=session_id,
             )
-        if episode is not None:
-            episode = await self._embed_episode(episode)
-        persisted = await self.knowledge_store.write_episode_window(
-            episode,
-            window_message_ids,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-        if not persisted:
-            return None
-        return EpisodeProcessingResult(
-            action=(
-                "skip"
-                if episode is None
-                else str(episode.generator_metadata["effective_action"])
-            ),
-            episode_id=episode.episode_id if episode else None,
-            source_message_count=len(window_message_ids),
-            episode_source_message_count=len(episode.messages) if episode else 0,
-            entity_link_count=len(episode.entities) if episode else 0,
-            relationship_link_count=len(episode.relationships) if episode else 0,
-            consolidation_limit_hit=(
-                bool(episode.generator_metadata.get("consolidation_limit_hit"))
-                if episode
-                else False
-            ),
-        )
+            if not persisted:
+                return None
+            build.mark_persisted()
+            return build
+        except ValueError as exc:
+            await self._emit_validation_failure(
+                exc,
+                stage="consolidation" if decision.action == "consolidate" else "episode",
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                source_message_count=len(build.messages),
+            )
+            raise
+        finally:
+            for owned_build in builds:
+                owned_build.release()
 
-    async def _load_consolidation_context(
+    async def _load_consolidation_build(
         self,
         target_episode_id: str | None,
-        window_context: EpisodeCandidateContext,
+        window_build: EpisodeBuild,
         *,
         user_name: str,
         project_id: str,
         session_id: str,
-    ) -> EpisodeCandidateContext:
-        """Load the complete bounded source set for one selected consolidation."""
+    ) -> EpisodeBuild:
+        """Load a replacement aggregate containing the full consolidation source."""
 
         target_episode = next(
             (
                 episode
-                for episode in window_context.prior_episodes
+                for episode in window_build.prior_episodes
                 if episode.episode_id == target_episode_id
             ),
             None,
@@ -541,7 +441,7 @@ class EpisodeJob(BaseJob):
         messages_by_id.update(
             {
                 int(message["message_id"]): dict(message)
-                for message in window_context.messages
+                for message in window_build.messages
             }
         )
         messages = sorted(
@@ -564,7 +464,9 @@ class EpisodeJob(BaseJob):
             project_id=project_id,
             session_id=session_id,
         )
-        return EpisodeCandidateContext(
+        return EpisodeBuild.from_window(
+            project_id=project_id,
+            session_id=session_id,
             messages=messages,
             entity_ids_by_message=entity_ids_by_message,
             relationship_ids_by_message=relationship_ids_by_message,
@@ -573,152 +475,44 @@ class EpisodeJob(BaseJob):
             prior_episodes=[target_episode],
         )
 
-    async def _regenerate_consolidation(
+    async def _regenerate_consolidation_for_build(
         self,
         target_episode_id: str | None,
-        context: EpisodeCandidateContext,
+        build: EpisodeBuild,
         *,
         user_name: str,
-    ) -> EpisodeConsolidation:
-        """Regenerate one selected episode against all of its source evidence."""
+    ) -> EpisodeDecision:
+        """Regenerate and resolve a consolidation response into one build."""
 
         if self.llm is None:
             raise RuntimeError("EpisodeJob requires an LLM to regenerate an episode")
         if not target_episode_id:
             raise ValueError("Episode consolidation requires a target episode ID")
-        message_local_ids, message_ids_by_local = build_local_id_maps(
-            (int(message["message_id"]) for message in context.messages),
-            "m",
-        )
-        entity_local_ids, entity_ids_by_local = build_local_id_maps(
-            context.entity_ids,
-            "e",
-        )
-        relationship_local_ids, relationship_ids_by_local = build_local_id_maps(
-            context.relationship_ids,
-            "r",
-        )
-        episode_local_ids, _ = build_local_id_maps(
-            (episode.episode_id for episode in context.prior_episodes),
-            "ep",
-        )
-        try:
-            target_episode_local_id = episode_local_ids[target_episode_id]
-        except KeyError as exc:
-            raise ValueError(
-                "Episode consolidation target is not in the supplied context"
-            ) from exc
-        system_prompt = get_episode_consolidation_prompt(user_name)
+        build.prepare_local_references()
         output = await self.llm.generate_structured(
             response_model=LLMEpisodeConsolidation,
-            system=system_prompt,
-            user=self._build_consolidation_input(
-                target_episode_local_id,
-                context,
-                message_local_ids=message_local_ids,
-                entity_local_ids=entity_local_ids,
-                relationship_local_ids=relationship_local_ids,
-            ),
+            system=get_episode_consolidation_prompt(user_name),
+            user=build.consolidation_payload(target_episode_id),
             temperature=0.0,
         )
-        consolidation = self._resolve_consolidation(
+        return build.apply_llm_consolidation(
             output,
-            message_ids_by_local=message_ids_by_local,
-            entity_ids_by_local=entity_ids_by_local,
-            relationship_ids_by_local=relationship_ids_by_local,
+            target_episode_id=target_episode_id,
         )
-        self._validate_ranked_output(consolidation, context, "consolidation")
-        return consolidation
 
-    async def _embed_episode(self, episode: Episode) -> Episode:
-        """Embed the current episode narrative before it is persisted."""
+    async def _embed_build_episode(self, build: EpisodeBuild) -> Episode:
+        """Attach the embedding to the aggregate-owned final episode."""
 
         if self.embedding_service is None:
             raise RuntimeError("EpisodeJob requires an embedding service")
+        if build.final_episode is None:
+            raise ValueError("EpisodeBuild has no episode to embed")
         embeddings = await self.embedding_service.encode(
-            [build_episode_embedding_text(episode)]
+            [build_episode_embedding_text(build.final_episode)]
         )
         if len(embeddings) != 1:
             raise RuntimeError("Episode embedding service returned an invalid result")
-        return Episode.model_validate(
-            {**episode.model_dump(), "embedding": embeddings[0]}
-        )
-
-    def _build_episode(
-        self,
-        decision: EpisodeDecision,
-        context: EpisodeCandidateContext,
-        *,
-        project_id: str,
-        session_id: str,
-    ) -> Episode | None:
-        """Translate validated output into the aggregate persisted by the writer."""
-
-        if decision.action == "skip":
-            return None
-
-        current_messages = self._messages_from_decision(decision, context)
-        target_episode = next(
-            (
-                episode
-                for episode in context.prior_episodes
-                if episode.episode_id == decision.target_episode_id
-            ),
-            None,
-        )
-        should_create = decision.action == "create" or target_episode is None
-        consolidation_limit_hit = False
-        messages = current_messages
-        if not should_create:
-            messages = self._combine_messages(target_episode.messages, current_messages)
-            if self._exceeds_consolidation_limits(
-                target_episode,
-                context,
-                message_count=len(messages),
-            ):
-                should_create = True
-                consolidation_limit_hit = True
-                messages = current_messages
-
-        episode_id = (
-            self._episode_id_for_window(project_id, session_id, current_messages)
-            if should_create
-            else target_episode.episode_id
-        )
-        return Episode(
-            episode_id=episode_id,
-            project_id=project_id,
-            session_id=session_id,
-            summary=decision.summary,
-            new_developments=decision.new_developments,
-            updates=decision.updates,
-            unresolved=decision.unresolved,
-            importance=decision.importance,
-            messages=messages,
-            entities=[
-                EntityEpisode(
-                    entity_id=focus.entity_id,
-                    prominence_weight=focus.prominence_weight,
-                    role=focus.role,
-                    is_focus_entity=True,
-                )
-                for focus in decision.focus_entities
-            ],
-            relationships=[
-                RelationshipEpisode(
-                    relationship_id=relationship.relationship_id,
-                    prominence_weight=relationship.prominence_weight,
-                    is_central_relationship=True,
-                )
-                for relationship in decision.central_relationships
-            ],
-            generator_metadata={
-                "decision_action": decision.action,
-                "effective_action": "create" if should_create else "consolidate",
-                "consolidated": not should_create and decision.action == "consolidate",
-                "consolidation_limit_hit": consolidation_limit_hit,
-            },
-        )
+        return build.attach_embedding(embeddings[0])
 
     @staticmethod
     async def _emit_validation_failure(
@@ -768,386 +562,6 @@ class EpisodeJob(BaseJob):
                     "reason": "validation_rejected",
                     "stage": stage,
                 },
-            )
-
-    def _exceeds_consolidation_limits(
-        self,
-        target_episode: Episode,
-        context: EpisodeCandidateContext,
-        *,
-        message_count: int,
-    ) -> bool:
-        if message_count > self.max_message_count:
-            return True
-        if self.max_age_hours is None:
-            return False
-        timestamp_values = [
-            int(message["timestamp_ms"])
-            for message in context.messages
-            if message.get("timestamp_ms") is not None
-        ]
-        if not timestamp_values:
-            return False
-        latest_timestamp_ms = max(timestamp_values)
-        age_hours = (
-            latest_timestamp_ms / 1000 - target_episode.created_at.timestamp()
-        ) / 3600
-        return age_hours > self.max_age_hours
-
-    @staticmethod
-    def _messages_from_decision(
-        decision: EpisodeDecision,
-        context: EpisodeCandidateContext,
-    ) -> list[MessageEpisode]:
-        influences_by_message = {
-            influence.message_id: influence for influence in decision.message_influences
-        }
-        return [
-            MessageEpisode(
-                message_id=int(message["message_id"]),
-                influence_weight=influences_by_message[
-                    int(message["message_id"])
-                ].influence_weight,
-                influence_reason=influences_by_message[
-                    int(message["message_id"])
-                ].influence_reason,
-                message_position=position,
-            )
-            for position, message in enumerate(context.messages)
-        ]
-
-    @staticmethod
-    def _combine_messages(
-        existing_messages: list[MessageEpisode],
-        current_messages: list[MessageEpisode],
-    ) -> list[MessageEpisode]:
-        messages_by_id = {message.message_id: message for message in existing_messages}
-        messages_by_id.update(
-            {message.message_id: message for message in current_messages}
-        )
-        return [
-            message.model_copy(update={"message_position": position})
-            for position, message in enumerate(
-                sorted(messages_by_id.values(), key=lambda item: item.message_id)
-            )
-        ]
-
-    @staticmethod
-    def _episode_id_for_window(
-        project_id: str,
-        session_id: str,
-        messages: list[MessageEpisode],
-    ) -> str:
-        source_message_ids = ",".join(str(message.message_id) for message in messages)
-        return str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"knoggin:episode:{project_id}:{session_id}:{source_message_ids}",
-            )
-        )
-
-    @staticmethod
-    def _build_generation_input(
-        context: EpisodeCandidateContext,
-        *,
-        message_local_ids: dict[int, str],
-        entity_local_ids: dict[int, str],
-        relationship_local_ids: dict[str, str],
-        episode_local_ids: dict[str, str],
-    ) -> str:
-        """Render bounded episode evidence using this call's local references."""
-
-        payload = EpisodeJob._build_localized_context_payload(
-            context,
-            message_key="messages",
-            message_local_ids=message_local_ids,
-            entity_local_ids=entity_local_ids,
-            relationship_local_ids=relationship_local_ids,
-        )
-        payload["prior_episodes"] = [
-            {
-                "episode_id": episode_local_ids[episode.episode_id],
-                "summary": episode.summary,
-                "new_developments": episode.new_developments,
-                "updates": episode.updates,
-                "unresolved": episode.unresolved,
-                "importance": episode.importance,
-            }
-            for episode in context.prior_episodes
-        ]
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-    @staticmethod
-    def _build_consolidation_input(
-        target_episode_local_id: str,
-        context: EpisodeCandidateContext,
-        *,
-        message_local_ids: dict[int, str],
-        entity_local_ids: dict[int, str],
-        relationship_local_ids: dict[str, str],
-    ) -> str:
-        """Render the complete regeneration source set with local references."""
-
-        payload = EpisodeJob._build_localized_context_payload(
-            context,
-            message_key="source_messages",
-            message_local_ids=message_local_ids,
-            entity_local_ids=entity_local_ids,
-            relationship_local_ids=relationship_local_ids,
-        )
-        payload["target_episode_id"] = target_episode_local_id
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-    @staticmethod
-    def _build_localized_context_payload(
-        context: EpisodeCandidateContext,
-        *,
-        message_key: str,
-        message_local_ids: dict[int, str],
-        entity_local_ids: dict[int, str],
-        relationship_local_ids: dict[str, str],
-    ) -> dict:
-        """Render canonical episode evidence without exposing system identifiers."""
-
-        payload = {
-            message_key: [
-                {
-                    "message_id": message_local_ids[int(message["message_id"])],
-                    "role": message.get("role"),
-                    "content": message.get("content"),
-                    "timestamp_ms": message.get("timestamp_ms"),
-                }
-                for message in context.messages
-            ],
-            "entity_refs_by_message": {
-                message_local_ids[int(message["message_id"])]: [
-                    entity_local_ids[entity_id]
-                    for entity_id in context.entity_ids_by_message.get(
-                        int(message["message_id"]), []
-                    )
-                ]
-                for message in context.messages
-            },
-            "relationship_refs_by_message": {
-                message_local_ids[int(message["message_id"])]: [
-                    relationship_local_ids[relationship_id]
-                    for relationship_id in context.relationship_ids_by_message.get(
-                        int(message["message_id"]), []
-                    )
-                ]
-                for message in context.messages
-            },
-            "entity_catalog": [
-                {
-                    "entity_id": entity_local_ids[int(entity["entity_id"])],
-                    "canonical_name": entity.get("canonical_name"),
-                    "type": entity.get("type"),
-                    "aliases": entity.get("aliases", []),
-                }
-                for entity in context.entity_catalog
-            ],
-            "relationship_catalog": [
-                {
-                    "relationship_id": relationship_local_ids[
-                        str(relationship["relationship_id"])
-                    ],
-                    "entity_a": EpisodeJob._render_relationship_endpoint(
-                        relationship["entity_a"], entity_local_ids
-                    ),
-                    "entity_b": EpisodeJob._render_relationship_endpoint(
-                        relationship["entity_b"], entity_local_ids
-                    ),
-                    "relationship_type": relationship.get("relationship_type"),
-                    "confidence": relationship.get("confidence"),
-                    "context": relationship.get("context"),
-                    "evidence_message_ids": [
-                        message_local_ids[int(message_id)]
-                        for message_id in relationship.get("evidence_message_ids", [])
-                    ],
-                }
-                for relationship in context.relationship_catalog
-            ],
-        }
-        return payload
-
-    @staticmethod
-    def _render_relationship_endpoint(
-        endpoint: dict,
-        entity_local_ids: dict[int, str],
-    ) -> dict:
-        """Render an endpoint without leaking an ID that is not selectable."""
-
-        rendered = {
-            "canonical_name": endpoint.get("canonical_name"),
-            "type": endpoint.get("type"),
-        }
-        local_entity_id = entity_local_ids.get(int(endpoint["entity_id"]))
-        if local_entity_id is not None:
-            rendered["entity_id"] = local_entity_id
-        return rendered
-
-    @staticmethod
-    def _resolve_decision(
-        decision: LLMEpisodeDecision,
-        *,
-        message_ids_by_local: dict[str, int],
-        entity_ids_by_local: dict[str, int],
-        relationship_ids_by_local: dict[str, str],
-        episode_ids_by_local: dict[str, str],
-    ) -> EpisodeDecision:
-        """Resolve a model decision into the internal real-ID contract."""
-
-        payload = decision.model_dump()
-        if decision.target_episode_id is not None:
-            payload["target_episode_id"] = str(
-                resolve_local_id(decision.target_episode_id, episode_ids_by_local)
-            )
-        payload.update(
-            EpisodeJob._resolve_ranked_references(
-                decision,
-                message_ids_by_local=message_ids_by_local,
-                entity_ids_by_local=entity_ids_by_local,
-                relationship_ids_by_local=relationship_ids_by_local,
-            )
-        )
-        return EpisodeDecision.model_validate(payload)
-
-    @staticmethod
-    def _resolve_consolidation(
-        consolidation: LLMEpisodeConsolidation,
-        *,
-        message_ids_by_local: dict[str, int],
-        entity_ids_by_local: dict[str, int],
-        relationship_ids_by_local: dict[str, str],
-    ) -> EpisodeConsolidation:
-        """Resolve a model regeneration into the internal real-ID contract."""
-
-        payload = consolidation.model_dump()
-        payload.update(
-            EpisodeJob._resolve_ranked_references(
-                consolidation,
-                message_ids_by_local=message_ids_by_local,
-                entity_ids_by_local=entity_ids_by_local,
-                relationship_ids_by_local=relationship_ids_by_local,
-            )
-        )
-        return EpisodeConsolidation.model_validate(payload)
-
-    @staticmethod
-    def _resolve_ranked_references(
-        output: LLMEpisodeDecision | LLMEpisodeConsolidation,
-        *,
-        message_ids_by_local: dict[str, int],
-        entity_ids_by_local: dict[str, int],
-        relationship_ids_by_local: dict[str, str],
-    ) -> dict:
-        """Resolve all local ranked selections before validation or persistence."""
-
-        return {
-            "message_influences": [
-                {
-                    **influence.model_dump(),
-                    "message_id": int(
-                        resolve_local_id(
-                            influence.message_id,
-                            message_ids_by_local,
-                        )
-                    ),
-                }
-                for influence in output.message_influences
-            ],
-            "focus_entities": [
-                {
-                    **focus.model_dump(),
-                    "entity_id": int(
-                        resolve_local_id(focus.entity_id, entity_ids_by_local)
-                    ),
-                }
-                for focus in output.focus_entities
-            ],
-            "central_relationships": [
-                {
-                    **relationship.model_dump(),
-                    "relationship_id": str(
-                        resolve_local_id(
-                            relationship.relationship_id,
-                            relationship_ids_by_local,
-                        )
-                    ),
-                }
-                for relationship in output.central_relationships
-            ],
-        }
-
-    @staticmethod
-    def _validate_decision(
-        decision: EpisodeDecision,
-        context: EpisodeCandidateContext,
-    ) -> None:
-        """Reject identifiers or coverage that do not match canonical context."""
-
-        if decision.action == "skip":
-            return
-
-        EpisodeJob._validate_ranked_output(decision, context, "decision")
-
-        if decision.action == "consolidate":
-            candidate_episode_ids = {
-                episode.episode_id for episode in context.prior_episodes
-            }
-            if decision.target_episode_id not in candidate_episode_ids:
-                raise ValueError(
-                    "Episode decision consolidation target must be a prior candidate"
-                )
-
-    @staticmethod
-    def _validate_ranked_output(
-        output: EpisodeDecision | EpisodeConsolidation,
-        context: EpisodeCandidateContext,
-        output_name: str,
-    ) -> None:
-        """Reject rankings that do not exactly match the supplied source set."""
-
-        source_message_ids = {
-            int(message["message_id"]) for message in context.messages
-        }
-        influence_message_ids = [
-            influence.message_id for influence in output.message_influences
-        ]
-        if (
-            len(influence_message_ids) != len(set(influence_message_ids))
-            or set(influence_message_ids) != source_message_ids
-        ):
-            raise ValueError(
-                f"Episode {output_name} message influences must cover each "
-                "source message "
-                "exactly once"
-            )
-
-        focus_entity_ids = [focus.entity_id for focus in output.focus_entities]
-        if len(focus_entity_ids) != len(set(focus_entity_ids)):
-            raise ValueError(f"Episode {output_name} focus entities must be unique")
-        if len(focus_entity_ids) > 2:
-            raise ValueError(
-                f"Episode {output_name} may select at most two focus entities"
-            )
-        if not set(focus_entity_ids).issubset(context.entity_ids):
-            raise ValueError(
-                f"Episode {output_name} focus entities must belong to the source window"
-            )
-
-        central_relationship_ids = [
-            relationship.relationship_id
-            for relationship in output.central_relationships
-        ]
-        if len(central_relationship_ids) != len(set(central_relationship_ids)):
-            raise ValueError(
-                f"Episode {output_name} central relationships must be unique"
-            )
-        if not set(central_relationship_ids).issubset(context.relationship_ids):
-            raise ValueError(
-                f"Episode {output_name} central relationships must belong to "
-                "the source window"
             )
 
     async def execute(self, ctx: JobContext) -> JobResult:
@@ -1208,8 +622,8 @@ class EpisodeJob(BaseJob):
                     "user_name": ctx.user_name,
                     "project_id": ctx.project_id,
                     "session_id": session_id,
-                    "action": outcome.action,
-                    "episode_id": outcome.episode_id,
+                    "action": outcome.outcome_action,
+                    "episode_id": outcome.outcome_episode_id,
                     "source_message_count": outcome.source_message_count,
                     "episode_source_message_count": (
                         outcome.episode_source_message_count
@@ -1230,7 +644,7 @@ class EpisodeJob(BaseJob):
             success=not failures,
             summary=(
                 f"EpisodeJob processed {len(outcomes)} windows "
-                f"({', '.join(outcome.action for outcome in outcomes) or 'none'}); "
+                f"({', '.join(outcome.outcome_action for outcome in outcomes) or 'none'}); "
                 f"failures={len(failures)}"
             ),
         )

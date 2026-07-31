@@ -10,7 +10,7 @@ You bring a topic configuration that reflects your domain: the entity types that
 
 - **Source-grounded memory** — extracted knowledge is an index over evidence, not unquestionable truth. Every fact traces back to the message or file that produced it.
 - **Project-scoped** — memory, sessions, entities, and jobs are all scoped to a project boundary.
-- **Domain-shaped extraction** — topic configuration controls entity labels, aliases, hierarchy rules, active topics, and matching thresholds.
+- **Domain-shaped extraction** — topic configuration controls entity labels, aliases, active topics, and matching thresholds; `PART_OF` hierarchy edges live in the knowledge graph.
 - **Hybrid NER pipeline** — combines known-alias matching, GLiNER, and LLM extraction with confidence filtering and deduplication.
 - **Graph-guided retrieval** — the knowledge graph helps find related context instead of treating every memory as an isolated chunk.
 - **Background maintenance** — scheduled jobs handle profile refinement, entity merges, duplicate detection, dead-letter replay, and cleanup.

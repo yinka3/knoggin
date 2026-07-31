@@ -381,7 +381,7 @@ class LLMService:
             except InstructorRetryException as exc:
                 raise LLMResponseError(
                     "LLM structured response failed validation",
-                    details={"model": model, "error": str(exc)},
+                    details=self._structured_validation_error_details(model, exc),
                 ) from exc
             except (
                 APIConnectionError,
@@ -401,6 +401,20 @@ class LLMService:
 
         self._trace_exchange(model, user, response)
         return response
+
+    @staticmethod
+    def _structured_validation_error_details(
+        model: str, exc: InstructorRetryException
+    ) -> Dict[str, str]:
+        """Preserve bounded model-output diagnostics for the retry/DLQ path."""
+
+        details = {"model": model, "error": str(exc)}
+        last_completion = getattr(exc, "last_completion", None)
+        if last_completion is not None:
+            excerpt = str(last_completion)
+            if excerpt:
+                details["response_excerpt"] = excerpt[:4096]
+        return details
 
     async def stream_with_tools(
         self,

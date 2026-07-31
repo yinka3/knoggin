@@ -12,8 +12,8 @@ import torch
 from loguru import logger
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
-from common.schema.contracts import EngineWorkUnit
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
+from infrastructure.work_record import WorkRecord
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ class EmbeddingService:
     """Embedding infrastructure for the knowledge graph."""
 
     BATCH_SIZE = 64
-    supports_model_work_units = True
+    supports_model_work_records = True
     _ONNX_PROVIDER_ALIASES = {
         "cpu": "CPUExecutionProvider",
         "coreml": "CoreMLExecutionProvider",
@@ -157,23 +157,27 @@ class EmbeddingService:
         name: str,
         priority: ModelWorkPriority,
         work_kind: str,
-        parent_work_unit: EngineWorkUnit | None = None,
+        parent_work_record: WorkRecord | None = None,
     ):
+        if parent_work_record is not None and not isinstance(
+            parent_work_record, WorkRecord
+        ):
+            raise TypeError("parent_work_record must be a WorkRecord")
         if self._model_work is not None:
-            work_unit = None
-            if parent_work_unit is not None:
-                work_unit = EngineWorkUnit.for_model_operation(
-                    kind=work_kind,
-                    scope=parent_work_unit.scope,
-                    parent_work_unit_id=parent_work_unit.id,
-                    priority=parent_work_unit.priority,
+            work_record = None
+            if parent_work_record is not None:
+                work_record = WorkRecord.for_model_operation(
+                    work_kind,
+                    parent_work_record.scope,
+                    parent_id=parent_work_record.id,
+                    priority=parent_work_record.priority,
                 )
             return await self._model_work.run_blocking(
                 operation,
                 priority=priority,
                 name=name,
-                work_unit=work_unit,
-                parent_work_unit=parent_work_unit,
+                work_record=work_record,
+                parent_work_record=parent_work_record,
             )
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, operation)
@@ -289,7 +293,7 @@ class EmbeddingService:
         self,
         texts: List[str],
         *,
-        parent_work_unit: EngineWorkUnit | None = None,
+        parent_work_record: WorkRecord | None = None,
     ) -> List[List[float]]:
         """Batch encode texts to vectors with chunking for large inputs (async)."""
         if not texts:
@@ -300,7 +304,7 @@ class EmbeddingService:
             name="embedding-encode",
             priority=ModelWorkPriority.BACKGROUND,
             work_kind="embedding",
-            parent_work_unit=parent_work_unit,
+            parent_work_record=parent_work_record,
         )
 
     def _encode_sync(self, texts: List[str]) -> List[List[float]]:
