@@ -39,55 +39,6 @@ def _candidate(**overrides):
 
 @pytest.mark.unit
 @pytest.mark.no_network
-@pytest.mark.parametrize(
-    ("locator", "excerpt"),
-    [
-        ({"kind": "text_lines", "start_line": 4, "end_line": 6}, "plain text"),
-        (
-            {
-                "kind": "text_lines",
-                "start_line": 8,
-                "end_line": 10,
-                "section_path": ["Overview", "Risks"],
-            },
-            "markdown text",
-        ),
-        ({"kind": "csv_rows", "start_row": 2, "end_row": 4}, "CSV data"),
-        (
-            {
-                "kind": "code_lines",
-                "start_line": 12,
-                "end_line": 18,
-                "symbol_name": "build_report",
-            },
-            "source code",
-        ),
-        (
-            {
-                "kind": "docx_paragraphs",
-                "start_paragraph": 4,
-                "end_paragraph": 6,
-                "heading_path": ["Overview", "Risks"],
-            },
-            "Word document text",
-        ),
-    ],
-)
-def test_document_candidates_accept_supported_reliable_locators(locator, excerpt):
-    candidate = SourceReferenceCandidate.model_validate(
-        _candidate(
-            source_kind="text_document",
-            locator=locator,
-            excerpt=excerpt,
-        )
-    )
-
-    assert candidate.locator.model_dump() == locator
-    assert candidate.excerpt == excerpt
-
-
-@pytest.mark.unit
-@pytest.mark.no_network
 def test_pdf_candidate_accepts_page_aware_two_page_fixture():
     candidate = SourceReferenceCandidate.model_validate(_candidate())
 

@@ -150,7 +150,7 @@ class SourceReferenceWriter:
           AND message.role = 'assistant'
           AND session.user_name = %s
           AND (
-              %s IS NULL
+              %s::uuid IS NULL
               OR EXISTS (
                   SELECT 1
                   FROM public.project_documents AS document
