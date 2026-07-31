@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.schema.agent_contracts import AgentConfig
+from common.schema.agent.identity import AgentConfig
 from core.agent.document_selection import DocumentSelectionError
 from core.agent.orchestrator import Orchestrator
 from infrastructure.redis_client import RedisKeys
@@ -216,9 +216,9 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     executor = FakeExecutor.instances[0]
     assert executor.ctx.user_query == "hello"
     assert executor.ctx.history == [{"role": "user", "content": "prior"}]
-    assert executor.ctx.config.max_calls == 9
-    assert executor.ctx.config.tool_timeout == 1.5
-    assert executor.ctx.config.get_tool_limit("search_entity") == 4
+    assert executor.ctx.limits.max_calls == 9
+    assert executor.ctx.limits.tool_timeout == 1.5
+    assert executor.ctx.limits.get_tool_limit("search_entity") == 4
     assert executor.ctx.hot_topics == ["Research"]
     assert executor.ctx.active_topics == ["Research", "Identity"]
     assert executor.ctx.hot_topic_context == {

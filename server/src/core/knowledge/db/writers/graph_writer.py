@@ -5,7 +5,10 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from common.schema.contracts import normalize_relationship_type, relationship_identity
+from common.schema.ingestion.contracts import (
+    normalize_relationship_type,
+    relationship_identity,
+)
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from common.utils.time_utils import get_now_ms
 from core.knowledge.db.writers.age_projection_writer import (

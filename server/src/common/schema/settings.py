@@ -4,7 +4,7 @@ from typing import List, Optional
 from pydantic import ConfigDict, Field, ValidationError, field_validator
 
 from common.exceptions import ConfigurationError
-from common.schema.agent_settings import AgentLimitSettings
+from common.schema.agent.settings import AgentLimitSettings
 from common.schema.config import ConfigModel
 
 

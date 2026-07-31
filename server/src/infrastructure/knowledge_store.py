@@ -3,7 +3,8 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from common.schema.contracts import (
+from common.schema.episode.models import Episode, EpisodeCheckpoint
+from common.schema.ingestion.contracts import (
     CandidateSuggestion,
     EntityWrite,
     EpisodeEligibility,
@@ -11,8 +12,7 @@ from common.schema.contracts import (
     MessageEntityRef,
     RelationshipWrite,
 )
-from common.schema.episode import Episode, EpisodeCheckpoint
-from common.schema.source_reference import (
+from common.schema.source.references import (
     AssistantMessageWithSources,
     SourceConsulted,
     SourceReference,

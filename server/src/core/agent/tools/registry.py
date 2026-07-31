@@ -4,15 +4,15 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 import httpx
 
 from common.conf.topics_config import TopicConfig
-from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
-from common.schema.settings import EpisodeSettings
-from common.schema.tool_schema import (
+from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
+from common.schema.agent.tool_contracts import (
     CAPABILITY_CLASSES,
     DESTRUCTIVE_WRITE_CAPABILITY,
     SAFE_DEFAULT_CAPABILITIES,
     TOOL_SCHEMAS,
     get_schema_capability,
 )
+from common.schema.settings import EpisodeSettings
 from core.agent.tools.graph import GraphTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools

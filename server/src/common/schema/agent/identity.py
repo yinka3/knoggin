@@ -1,4 +1,4 @@
-"""Agent-facing contract models."""
+"""Agent identity and persona models."""
 
 import math
 from dataclasses import dataclass, field

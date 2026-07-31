@@ -4,7 +4,7 @@ from typing import Optional
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     AliasUpdate,
     EntityWrite,
     EpisodeEligibility,

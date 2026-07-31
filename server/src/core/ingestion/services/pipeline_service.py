@@ -10,12 +10,12 @@ from wordfreq import word_frequency
 
 from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     CandidateSuggestion,
     RelationshipObservation,
     ValidationIssue,
 )
-from common.schema.extraction_output import ConnectionsResult
+from common.schema.ingestion.extraction import RelationshipExtraction
 from common.schema.settings import EntityResolutionSettings
 from common.utils.core_utils import format_vp02_input
 from common.utils.events import emit
@@ -648,7 +648,12 @@ class IngestionPipeline:
     def _mention_dedupe_key(
         self, name: str, mention_type: str, topic: str
     ) -> Tuple[str, str, str]:
-        normalized_topic = self.topic_config.normalize_topic(topic)
+        topic_config = getattr(self, "topic_config", None)
+        normalized_topic = (
+            topic_config.normalize_topic(topic)
+            if topic_config is not None
+            else (topic or "").strip()
+        )
         return (
             name.strip().casefold(),
             (mention_type or "").strip().casefold(),
@@ -1017,8 +1022,8 @@ class IngestionPipeline:
         )
 
         try:
-            conn_result: ConnectionsResult = await self.llm.generate_structured(
-                response_model=ConnectionsResult,
+            conn_result: RelationshipExtraction = await self.llm.generate_structured(
+                response_model=RelationshipExtraction,
                 system=system_03,
                 user=user_03,
                 temperature=0.0,

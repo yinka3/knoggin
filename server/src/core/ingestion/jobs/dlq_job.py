@@ -5,7 +5,7 @@ from typing import Awaitable, Callable, Optional
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.schema.contracts import ExecutionScope
+from common.schema.ingestion.contracts import ExecutionScope
 from common.schema.settings import DLQSettings, IngestionSettings
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads

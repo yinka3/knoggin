@@ -4,24 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
 
 from loguru import logger
 
-from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.source.locators import PastedTextLocator
+from common.schema.source.references import SourceReferenceCandidate
 
 if TYPE_CHECKING:
     from core.agent.run import AgentRun
     from core.agent.types import ToolCall
-
-
-@dataclass(frozen=True)
-class PastedTextSpan:
-    """A zero-based, end-exclusive span in the canonical user message."""
-
-    start_char: int
-    end_char: int
 
 
 _FENCED_BLOCK_RE = re.compile(
@@ -39,7 +31,7 @@ def build_pasted_text_candidates(
     source_message_id: int,
     message_content: str,
     agent_run_id: str,
-    spans: Sequence[PastedTextSpan | Mapping[str, int]] | None = None,
+    spans: Sequence[PastedTextLocator | Mapping[str, int]] | None = None,
 ) -> list[SourceReferenceCandidate]:
     """Create candidates for structured spans or clearly delimited text blocks."""
     if not isinstance(source_message_id, int) or isinstance(source_message_id, bool):
@@ -63,11 +55,7 @@ def build_pasted_text_candidates(
             content_hash=_sha256_excerpt(
                 message_content[span.start_char : span.end_char]
             ),
-            locator={
-                "kind": "character_span",
-                "start_char": span.start_char,
-                "end_char": span.end_char,
-            },
+            locator=span,
             excerpt=message_content[span.start_char : span.end_char],
             metadata={"pasted_text": True},
             encounter_kind="user_pasted_text",
@@ -80,17 +68,14 @@ def build_pasted_text_candidates(
 
 def _validate_structured_spans(
     message_content: str,
-    spans: Sequence[PastedTextSpan | Mapping[str, int]],
-) -> list[PastedTextSpan]:
+    spans: Sequence[PastedTextLocator | Mapping[str, int]],
+) -> list[PastedTextLocator]:
     resolved = []
     for raw_span in spans:
-        if isinstance(raw_span, PastedTextSpan):
+        if isinstance(raw_span, PastedTextLocator):
             span = raw_span
         elif isinstance(raw_span, Mapping):
-            span = PastedTextSpan(
-                start_char=raw_span.get("start_char"),
-                end_char=raw_span.get("end_char"),
-            )
+            span = PastedTextLocator.model_validate(raw_span)
         else:
             raise ValueError("pasted_text_spans entries must be objects")
         _validate_span(message_content, span)
@@ -98,12 +83,14 @@ def _validate_structured_spans(
     return _unique_nonblank_spans(message_content, resolved)
 
 
-def _find_delimited_pasted_text_spans(message_content: str) -> list[PastedTextSpan]:
+def _find_delimited_pasted_text_spans(
+    message_content: str,
+) -> list[PastedTextLocator]:
     spans = []
     for pattern in (_FENCED_BLOCK_RE, _PASTED_TEXT_TAG_RE):
         for match in pattern.finditer(message_content):
             spans.append(
-                PastedTextSpan(
+                PastedTextLocator(
                     start_char=match.start("excerpt"),
                     end_char=match.end("excerpt"),
                 )
@@ -113,8 +100,8 @@ def _find_delimited_pasted_text_spans(message_content: str) -> list[PastedTextSp
 
 def _unique_nonblank_spans(
     message_content: str,
-    spans: Iterable[PastedTextSpan],
-) -> list[PastedTextSpan]:
+    spans: Iterable[PastedTextLocator],
+) -> list[PastedTextLocator]:
     unique = {}
     for span in spans:
         _validate_span(message_content, span)
@@ -123,7 +110,7 @@ def _unique_nonblank_spans(
     return [unique[key] for key in sorted(unique)]
 
 
-def _validate_span(message_content: str, span: PastedTextSpan) -> None:
+def _validate_span(message_content: str, span: PastedTextLocator) -> None:
     if (
         not isinstance(span.start_char, int)
         or isinstance(span.start_char, bool)

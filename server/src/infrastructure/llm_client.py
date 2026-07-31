@@ -26,7 +26,7 @@ from common.exceptions import (
     LLMProviderError,
     LLMResponseError,
 )
-from common.schema.agent_stream import (
+from common.schema.agent.stream import (
     InternalAgentStreamEvent,
     StreamToolCall,
     StreamUsage,

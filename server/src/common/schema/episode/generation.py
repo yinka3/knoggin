@@ -1,10 +1,10 @@
-"""LLM boundary and resolved-domain schemas for episodic memory generation."""
+"""LLM-boundary and resolved schemas for episode generation."""
 
 from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from common.schema.episode import EpisodeNarrative
+from common.schema.episode.models import EpisodeNarrative
 from common.schema.llm import (
     StructuredLLMOutput,
     normalize_optional_text,

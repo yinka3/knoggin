@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.schema.aac_schema import AAC_DEFAULT_ENABLED_TOOLS
+from common.schema.agent.community_tools import AAC_DEFAULT_ENABLED_TOOLS
 from core.agent.tools.community_tools import (
     MAX_SPAWNED_SPECIALISTS,
     CommunityTools,

@@ -1,11 +1,11 @@
 import pytest
 
 import core.ingestion.jobs.episode_job as episode_job_module
-from common.schema.episode import Episode, EpisodeCheckpoint, MessageEpisode
-from common.schema.episode_output import (
+from common.schema.episode.generation import (
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,
 )
+from common.schema.episode.models import Episode, EpisodeCheckpoint, MessageEpisode
 from common.schema.settings import EpisodeSettings, IngestionSettings
 from core.ingestion.jobs.episode_job import EpisodeJob
 from infrastructure.job.base import JobContext
@@ -253,7 +253,7 @@ async def test_episode_job_builds_full_candidate_context_and_bounds_prior_episod
         ingestion_settings=IngestionSettings(batch_size=8),
     )
 
-    context = await job.load_candidate_context(
+    context = await job.load_build(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, Mapping
 import yaml
 
 if TYPE_CHECKING:
-    from common.schema.agent_contracts import AgentConfig
+    from common.schema.agent.identity import AgentConfig
 
 
 _TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
@@ -253,7 +253,7 @@ def load_agent_file(agent_id: str) -> tuple[dict, str]:
 
 def load_agent_config(agent_id: str = "AGENT_IDENTITY") -> "AgentConfig":
     """Load the packaged default agent used to seed Postgres."""
-    from common.schema.agent_contracts import AgentConfig
+    from common.schema.agent.identity import AgentConfig
 
     frontmatter, body = load_agent_file(agent_id)
     return AgentConfig(

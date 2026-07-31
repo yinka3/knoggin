@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any
 
-from common.schema.source_reference import (
+from common.schema.source.references import (
     AssistantMessageWithSources,
     SourceConsulted,
     SourceReference,

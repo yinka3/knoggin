@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Sequence
 
 from loguru import logger
 
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     EntityWrite,
     EpisodeEligibility,
     ExecutionScope,

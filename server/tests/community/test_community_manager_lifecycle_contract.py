@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
-from common.schema.agent_contracts import AgentConfig
+from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
+from common.schema.agent.identity import AgentConfig
 from common.schema.settings import CommunitySettings, DeveloperSettings, RootConfig
 from core.community.community_manager import (
     ACTIVE_DISCUSSION_TTL_SECONDS,

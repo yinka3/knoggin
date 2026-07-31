@@ -9,7 +9,7 @@ import yaml
 from loguru import logger
 from pydantic import BaseModel, ValidationError
 
-from common.schema.agent_settings import validate_tool_limit_overrides
+from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.settings import RootConfig
 from common.utils.core_utils import safe_update
 

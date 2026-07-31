@@ -2,7 +2,7 @@ import json
 import math
 from typing import Dict, List
 
-from common.schema.episode import (
+from common.schema.episode.models import (
     EPISODE_EMBEDDING_DIMENSION,
     EntityEpisode,
     Episode,

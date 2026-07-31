@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from psycopg.errors import CheckViolation, ForeignKeyViolation
 
-from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from tests.fixtures.fakes import RecordingPostgresClient

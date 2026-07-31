@@ -889,14 +889,6 @@ class ProjectManager:
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
         )
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                lambda config: dlq_job.update_checkpoint_interval(
-                    config.checkpoint_interval
-                ),
-                "developer_settings.ingestion",
-            )
-        )
 
         cleaner_job = EntityCleanupJob(
             user_name=self.user_name,

@@ -1,10 +1,10 @@
 import pytest
 from pydantic import ValidationError
 
-from common.schema.episode_output import LLMEpisodeDecision
-from common.schema.extraction_output import (
-    ConnectionsResult,
-    NERResult,
+from common.schema.episode.generation import LLMEpisodeDecision
+from common.schema.ingestion.extraction import (
+    EntityExtraction,
+    RelationshipExtraction,
 )
 
 
@@ -12,7 +12,7 @@ from common.schema.extraction_output import (
 @pytest.mark.no_network
 def test_ner_output_rejects_unknown_and_blank_entity_fields():
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        NERResult.model_validate(
+        EntityExtraction.model_validate(
             {
                 "mentions": [],
                 "unexpected": True,
@@ -20,7 +20,7 @@ def test_ner_output_rejects_unknown_and_blank_entity_fields():
         )
 
     with pytest.raises(ValidationError, match="name must not be blank"):
-        NERResult.model_validate(
+        EntityExtraction.model_validate(
             {
                 "mentions": [
                     {
@@ -37,7 +37,7 @@ def test_ner_output_rejects_unknown_and_blank_entity_fields():
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_connection_output_strips_required_text_and_rejects_blank_evidence():
-    output = ConnectionsResult.model_validate(
+    output = RelationshipExtraction.model_validate(
         {
             "connections": [
                 {
@@ -55,7 +55,7 @@ def test_connection_output_strips_required_text_and_rejects_blank_evidence():
     assert output.connections[0].context == "Ada uses Knoggin."
 
     with pytest.raises(ValidationError, match="context must not be blank"):
-        ConnectionsResult.model_validate(
+        RelationshipExtraction.model_validate(
             {
                 "connections": [
                     {

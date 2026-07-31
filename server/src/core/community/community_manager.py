@@ -8,15 +8,18 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.aac_schema import AAC_READ_TOOL_NAMES, AAC_SPECIFIC_SCHEMAS
-from common.schema.agent_contracts import AgentConfig
+from common.schema.agent.community_tools import (
+    AAC_READ_TOOL_NAMES,
+    AAC_SPECIFIC_SCHEMAS,
+)
+from common.schema.agent.identity import AgentConfig
 from common.scoping import IDENTITY_SCOPE
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
 from common.utils.local_references import build_local_id_maps, resolve_local_id
 from common.utils.time_utils import get_now
 from core.agent.executor import AgentExecutor
-from core.agent.run import AgentRun, AgentRunLimits
+from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
 from core.agent.system_prompt import get_agent_prompt
 from core.agent.tools.community_tools import CommunityTools
@@ -396,9 +399,11 @@ class CommunityManager:
             project_id=ctx.project.project_id,
             user_query=f"Community Discussion Topic: {topic}",
             run_id=f"run_{uuid.uuid4().hex[:8]}",
-            agent_config=agent,
-            agent_name=agent.name,
-            persona=agent.persona_markdown,
+            agent=AgentIdentity(
+                config=agent,
+                name=agent.name,
+                persona=agent.persona_markdown,
+            ),
             limits=COMMUNITY_RUN_LIMITS,
             model=agent.model,
             temperature=agent.temperature,

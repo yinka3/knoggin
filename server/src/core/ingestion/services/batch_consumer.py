@@ -7,7 +7,7 @@ from loguru import logger
 from common.schema.settings import IngestionSettings
 from common.utils.events import emit, emit_sync
 from common.utils.json_utils import safe_json_loads
-from core.ingestion.batch import IngestionBatch
+from core.ingestion.batch import IngestionBatch, IngestionMessage
 from core.ingestion.checkpoint import commit_ingestion_checkpoint
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from infrastructure.knowledge_store import KnowledgeStore
@@ -366,7 +366,7 @@ class IngestionWorker:
             )
             return deferred_partial
 
-    async def _read_buffer_batch(self) -> tuple[List, List[Dict]]:
+    async def _read_buffer_batch(self) -> tuple[List, List[IngestionMessage]]:
         raw = await self.redis.lrange(self._buffer_key, 0, self.batch_size - 1)
         if not raw:
             await emit(self.session_id, "pipeline", "buffer_empty", {})
@@ -376,7 +376,7 @@ class IngestionWorker:
             self.session_id, "pipeline", "buffer_draining", {"queued": len(raw)}
         )
 
-        messages = []
+        messages: List[IngestionMessage] = []
         invalid_count = 0
         for item in raw:
             parsed = safe_json_loads(item)

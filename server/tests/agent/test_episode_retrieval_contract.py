@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 import core.agent.tools.graph as graph_module
-from common.schema.episode import EntityEpisode, Episode, MessageEpisode
+from common.schema.episode.models import EntityEpisode, Episode, MessageEpisode
 from core.agent.tools.graph import GraphTools
 from core.knowledge.entity.profile import EntityProfile
 

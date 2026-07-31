@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from common.schema.episode_output import LLMEpisodeDecision
+from common.schema.episode.generation import LLMEpisodeDecision
 from core.ingestion.episode_build import EpisodeBuild
 
 

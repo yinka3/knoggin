@@ -2,7 +2,11 @@ import asyncio
 
 import pytest
 
-from common.schema.contracts import AliasUpdate, EntityWrite, SkippedRelationship
+from common.schema.ingestion.contracts import (
+    AliasUpdate,
+    EntityWrite,
+    SkippedRelationship,
+)
 from core.ingestion.batch import IngestionBatch, IngestionMilestone, IngestionStage
 from core.ingestion.services import pipeline_service
 from core.ingestion.services.pipeline_service import IngestionPipeline

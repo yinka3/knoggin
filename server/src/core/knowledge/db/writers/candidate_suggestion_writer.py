@@ -1,7 +1,7 @@
 import hashlib
 import json
 
-from common.schema.contracts import CandidateSuggestion, ExecutionScope
+from common.schema.ingestion.contracts import CandidateSuggestion, ExecutionScope
 from common.scoping import require_scope_value
 
 

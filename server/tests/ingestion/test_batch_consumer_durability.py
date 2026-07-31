@@ -1,6 +1,6 @@
 import pytest
 
-from common.schema.contracts import CandidateSuggestion
+from common.schema.ingestion.contracts import CandidateSuggestion
 from core.ingestion.batch import IngestionBatch, IngestionMilestone
 from core.ingestion.services import batch_consumer
 from core.ingestion.services.batch_consumer import IngestionWorker

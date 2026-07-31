@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from common.schema.primitives import Message
-from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.source.references import SourceReferenceCandidate
 from core.session.context import Session
 from infrastructure.redis_client import RedisKeys
 from tests.fixtures.factories import make_project_state

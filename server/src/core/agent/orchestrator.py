@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.agent_contracts import AgentConfig
-from common.schema.agent_stream import (
+from common.schema.agent.stream import (
     PublicAgentStreamEvent,
     validate_public_agent_stream_event,
 )
@@ -25,7 +24,7 @@ from core.agent.document_selection import (
 )
 from core.agent.executor import AgentExecutor
 from core.agent.maintenance import build_maintenance_candidates
-from core.agent.run import AgentRun, AgentRunLimits
+from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
 from core.agent.source_adapters import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
@@ -37,14 +36,6 @@ if TYPE_CHECKING:
 PUBLIC_AGENT_ERROR_MESSAGE = (
     "The agent couldn't complete this request. Please try again."
 )
-
-
-class ResolvedAgentIdentity(NamedTuple):
-    """Private identity data passed once into the owning AgentRun factory."""
-
-    config: AgentConfig
-    name: str
-    persona: str
 
 
 class Orchestrator:
@@ -165,9 +156,7 @@ class Orchestrator:
                 project_id=context.project_id or "",
                 user_query=user_query,
                 run_id=run_id,
-                agent_config=identity.config,
-                agent_name=identity.name,
-                persona=identity.persona,
+                agent=identity,
                 limits=run_limits,
                 model=effective_model,
                 temperature=effective_temperature,
@@ -269,7 +258,7 @@ class Orchestrator:
         agent_id: Optional[str],
         name_override: Optional[str],
         persona_override: Optional[str],
-    ) -> ResolvedAgentIdentity:
+    ) -> AgentIdentity:
         """Resolve the durable Postgres agent used for this run."""
         manager = AgentManager(context.resources, context.user_name, {})
         resolved_id = agent_id or await manager.get_default_agent_id()
@@ -277,7 +266,7 @@ class Orchestrator:
         if agent_cfg is None:
             raise ValueError(f"Agent identity not found: {resolved_id}")
 
-        return ResolvedAgentIdentity(
+        return AgentIdentity(
             config=agent_cfg,
             name=name_override or agent_cfg.name,
             persona=(

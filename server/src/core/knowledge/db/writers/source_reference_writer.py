@@ -6,7 +6,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Sequence
 
-from common.schema.source_reference import SourceReference, SourceReferenceCandidate
+from common.schema.source.references import SourceReference, SourceReferenceCandidate
 from common.scoping import require_scope_value
 
 

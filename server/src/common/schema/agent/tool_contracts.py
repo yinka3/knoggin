@@ -1,3 +1,5 @@
+"""Tool-call JSON schemas and argument validation."""
+
 TOOL_SCHEMAS = [
     {
         "type": "function",

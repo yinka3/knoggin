@@ -3,18 +3,22 @@ from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 
-from common.schema.episode import Episode
-from common.schema.episode_output import (
+from common.schema.episode.generation import (
     EpisodeDecision,
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,
 )
+from common.schema.episode.models import Episode
 from common.schema.settings import (
     EpisodeSettings,
     IngestionSettings,
 )
 from common.utils.events import emit
-from core.ingestion.episode_build import EpisodeBuild
+from core.ingestion.episode_build import (
+    EpisodeBuild,
+    EpisodeEntityCatalogEntry,
+    EpisodeRelationshipCatalogEntry,
+)
 from core.ingestion.prompts import (
     get_episode_consolidation_prompt,
     get_episode_generation_prompt,
@@ -117,7 +121,7 @@ class EpisodeJob(BaseJob):
             message_count=self.target_message_count,
         )
 
-    async def load_candidate_build(
+    async def load_build(
         self,
         *,
         user_name: str,
@@ -180,8 +184,8 @@ class EpisodeJob(BaseJob):
     ) -> tuple[
         dict[int, list[int]],
         dict[int, list[str]],
-        list[dict],
-        list[dict],
+        list[EpisodeEntityCatalogEntry],
+        list[EpisodeRelationshipCatalogEntry],
     ]:
         entity_ids_by_message = await self.knowledge_store.get_entity_ids_for_messages(
             message_ids,
@@ -277,7 +281,7 @@ class EpisodeJob(BaseJob):
     ) -> EpisodeDecision | None:
         """Generate one grounded episode decision for a ready candidate window."""
 
-        build = await self.load_candidate_build(
+        build = await self.load_build(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
@@ -317,7 +321,7 @@ class EpisodeJob(BaseJob):
     ) -> EpisodeBuild | None:
         """Generate and persist one episode window in its owning aggregate."""
 
-        build = await self.load_candidate_build(
+        build = await self.load_build(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,

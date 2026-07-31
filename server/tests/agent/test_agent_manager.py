@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from common.schema.agent_contracts import AgentConfig
+from common.schema.agent.identity import AgentConfig
 from core.agent.services.agent_manager import AgentManager
 from tests.fixtures.fakes import FakeResources
 

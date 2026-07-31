@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
-from common.schema.episode import (
+from common.schema.episode.models import (
     EntityEpisode,
     Episode,
     EpisodeCheckpoint,

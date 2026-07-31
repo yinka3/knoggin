@@ -5,8 +5,8 @@ from typing import Dict, List, Mapping
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.aac_schema import AAC_DEFAULT_ENABLED_TOOLS
-from common.schema.agent_contracts import PersonaProfile
+from common.schema.agent.community_tools import AAC_DEFAULT_ENABLED_TOOLS
+from common.schema.agent.identity import PersonaProfile
 from common.utils.agent_identity import (
     build_brain_snapshot_summary,
     normalize_agent_brain,

@@ -1,7 +1,7 @@
 import pytest
 
-from common.schema.source_reference import SourceReferenceCandidate
-from common.schema.tool_schema import TOOL_SCHEMAS
+from common.schema.agent.tool_contracts import TOOL_SCHEMAS
+from common.schema.source.references import SourceReferenceCandidate
 from core.agent.tools.search import SearchTools
 
 
