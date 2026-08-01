@@ -31,7 +31,11 @@ class TopicBuilder:
             warnings.warn(f"'{name}' is auto-included. Skipping.", stacklevel=2)
             return self
 
-        clean_labels = [l for raw in (labels or []) if (l := _validate_label(raw))]
+        clean_labels = [
+            clean_label
+            for raw in (labels or [])
+            if (clean_label := _validate_label(raw))
+        ]
 
         self._topics[name] = {
             "active": active,

@@ -146,3 +146,144 @@ def test_episode_build_consolidates_against_a_prior_episode_and_releases():
     build.mark_persisted()
     build.release()
     assert build.released is True
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("messages", "message_map", "match"),
+    [
+        ([{"role": "user"}], {7: [2]}, "message_id"),
+        (
+            [
+                {"message_id": 7, "timestamp_ms": 2000},
+                {"message_id": 8, "timestamp_ms": 1000},
+            ],
+            {7: [2], 8: []},
+            "timestamp ordering",
+        ),
+    ],
+)
+def test_episode_build_rejects_malformed_source_messages(
+    messages, message_map, match
+):
+    build = EpisodeBuild.from_window(
+        project_id="project-1",
+        session_id="session-1",
+        messages=messages,
+        entity_ids_by_message=message_map,
+        relationship_ids_by_message={message_id: [] for message_id in message_map},
+        entity_catalog=[],
+        relationship_catalog=[],
+        prior_episodes=[],
+    )
+
+    with pytest.raises(ValueError, match=match):
+        build.validate_source_window()
+
+
+@pytest.mark.no_network
+def test_episode_build_rejects_relationship_evidence_outside_source_window():
+    build = make_build()
+    build.relationship_catalog[0]["evidence_message_ids"] = [999]
+
+    with pytest.raises(ValueError, match="outside the source window"):
+        build.prepare_local_references()
+
+
+@pytest.mark.no_network
+def test_episode_build_rejects_prior_episode_from_another_scope():
+    seed = make_build()
+    seed.prepare_local_references()
+    seed.apply_llm_decision(
+        LLMEpisodeDecision(
+            action="create",
+            summary="A prior episode belongs to the source session.",
+            message_influences=[{"message_id": "m1", "influence_weight": 0.9}],
+        )
+    )
+    prior_episode = seed.create_episode(max_message_count=8, max_age_hours=None)
+    assert prior_episode is not None
+    prior_episode = prior_episode.model_copy(update={"session_id": "other-session"})
+
+    build = make_build()
+    build.prior_episodes = [prior_episode]
+
+    with pytest.raises(ValueError, match="project and session scope"):
+        build.prepare_local_references()
+
+
+@pytest.mark.no_network
+def test_episode_build_creation_identity_is_deterministic_for_same_window():
+    def create_episode():
+        build = make_build()
+        build.prepare_local_references()
+        build.apply_llm_decision(
+            LLMEpisodeDecision(
+                action="create",
+                summary="The same source window gets the same identity.",
+                message_influences=[{"message_id": "m1", "influence_weight": 0.9}],
+            )
+        )
+        return build.create_episode(max_message_count=8, max_age_hours=None)
+
+    first = create_episode()
+    second = create_episode()
+
+    assert first is not None
+    assert second is not None
+    assert first.episode_id == second.episode_id
+
+
+@pytest.mark.no_network
+def test_episode_build_consolidation_limit_creates_new_episode_identity():
+    seed = make_build()
+    seed.prepare_local_references()
+    seed.apply_llm_decision(
+        LLMEpisodeDecision(
+            action="create",
+            summary="The existing episode is intentionally small.",
+            message_influences=[{"message_id": "m1", "influence_weight": 0.9}],
+        )
+    )
+    prior_episode = seed.create_episode(max_message_count=8, max_age_hours=None)
+    assert prior_episode is not None
+
+    build = make_build()
+    build.messages[0]["message_id"] = 8
+    build.entity_ids_by_message = {8: [2]}
+    build.relationship_ids_by_message = {8: ["project-1:2:3"]}
+    build.relationship_catalog[0]["evidence_message_ids"] = [8]
+    build.prior_episodes = [prior_episode]
+    build.prepare_local_references()
+    build.apply_llm_decision(
+        LLMEpisodeDecision(
+            action="consolidate",
+            target_episode_id="ep1",
+            summary="The source window exceeds the consolidation limit.",
+            message_influences=[{"message_id": "m1", "influence_weight": 0.9}],
+        )
+    )
+
+    episode = build.create_episode(max_message_count=1, max_age_hours=None)
+
+    assert episode is not None
+    assert build.consolidation_limit_hit is True
+    assert episode.generator_metadata["effective_action"] == "create"
+    assert episode.episode_id != prior_episode.episode_id
+
+
+@pytest.mark.no_network
+def test_episode_build_rejects_mutation_after_sealing_and_release():
+    build = make_build()
+    build.prepare_local_references()
+    build.apply_llm_decision(
+        LLMEpisodeDecision(action="skip", skip_reason="No durable development.")
+    )
+    build.mark_persisted()
+
+    with pytest.raises(RuntimeError, match="sealed"):
+        build.prepare_local_references()
+
+    build.release()
+    with pytest.raises(RuntimeError, match="released"):
+        build.create_episode(max_message_count=8, max_age_hours=None)

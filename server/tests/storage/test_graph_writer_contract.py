@@ -3,7 +3,6 @@ import json
 import pytest
 
 from common.scoping import IDENTITY_ENTITY_ID
-from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 

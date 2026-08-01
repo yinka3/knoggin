@@ -12,6 +12,8 @@ endpoint assumptions.
 The package currently keeps only SDK-facing primitives that are still useful
 without committing to the final engine/API workflow:
 
+- `AsyncKnogginClient`: async client for the frozen v1 project, session,
+  message, run, and SSE contracts.
 - `TopicBuilder`: fluent helper for topic configuration dictionaries.
 - `AgentResult`: basic result object for future agent responses.
 - `tool`: decorator for marking local Python callables as agent tools.
@@ -35,3 +37,8 @@ topics = (
     .build()
 )
 ```
+
+The client sends `X-User-Name` (and an optional bearer token), preserves the
+server's stable error codes, and validates ordered SSE events through exactly
+one terminal run event. `enabled_tools=None` inherits defaults; an empty list
+disables optional tools.

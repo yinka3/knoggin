@@ -124,7 +124,21 @@ class EpisodeBuild:
 
     @property
     def message_ids(self) -> list[int]:
-        return [int(message["message_id"]) for message in self.messages]
+        message_ids = []
+        for message in self.messages:
+            raw_message_id = message.get("message_id")
+            if raw_message_id is None:
+                raise ValueError(
+                    "EpisodeBuild source messages require message_id"
+                )
+            try:
+                message_id = int(raw_message_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "EpisodeBuild source message_id must be an integer"
+                ) from exc
+            message_ids.append(message_id)
+        return message_ids
 
     @property
     def entity_ids(self) -> list[int]:
@@ -200,6 +214,50 @@ class EpisodeBuild:
             raise ValueError(
                 "EpisodeBuild relationship references must cover source messages"
             )
+
+        previous_timestamp_ms = None
+        missing_timestamp_seen = False
+        for message in self.messages:
+            timestamp_ms = message.get("timestamp_ms")
+            if timestamp_ms is None:
+                missing_timestamp_seen = True
+                continue
+            try:
+                timestamp_ms = int(timestamp_ms)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "EpisodeBuild source message timestamps must be integers"
+                ) from exc
+            if missing_timestamp_seen or (
+                previous_timestamp_ms is not None
+                and timestamp_ms < previous_timestamp_ms
+            ):
+                raise ValueError(
+                    "EpisodeBuild source messages must use chronological "
+                    "timestamp ordering"
+                )
+            previous_timestamp_ms = timestamp_ms
+
+        for episode in self.prior_episodes:
+            if (
+                episode.project_id != self.project_id
+                or episode.session_id != self.session_id
+            ):
+                raise ValueError(
+                    "EpisodeBuild prior episodes require matching project and "
+                    "session scope"
+                )
+
+        for relationship in self.relationship_catalog:
+            evidence_message_ids = relationship.get("evidence_message_ids") or []
+            if any(
+                int(message_id) not in expected_message_ids
+                for message_id in evidence_message_ids
+            ):
+                raise ValueError(
+                    "EpisodeBuild relationship evidence cannot reference a "
+                    "message outside the source window"
+                )
 
     def prepare_local_references(self) -> None:
         """Build the only identifiers exposed to the LLM for this build."""

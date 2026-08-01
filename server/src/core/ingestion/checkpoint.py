@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 import redis.asyncio as aioredis
 
 from core.ingestion.batch import IngestionBatch
 from infrastructure.redis_client import RedisKeys
-
 
 CHECKPOINT_COMMIT_TTL_SECONDS = 7 * 24 * 60 * 60
 
@@ -33,6 +34,20 @@ redis.call('SET', KEYS[3], ARGV[3])
 redis.call('SET', KEYS[4], tostring(count) .. ':' .. tostring(reached), 'EX', ARGV[4])
 return {count, reached}
 """
+
+
+def _checkpoint_commit_token(batch: IngestionBatch) -> str:
+    """Return a retry-stable identity for one message batch."""
+
+    identity = {
+        "user_name": batch.scope.user_name,
+        "project_id": batch.scope.project_id,
+        "session_id": batch.scope.session_id,
+        "message_ids": sorted(int(message["id"]) for message in batch.messages),
+    }
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +83,11 @@ async def commit_ingestion_checkpoint(
         RedisKeys.checkpoint(scope.user_name, scope.session_id),
         RedisKeys.last_processed(scope.user_name, scope.session_id),
         RedisKeys.project_last_processed(scope.user_name, scope.project_id),
-        RedisKeys.checkpoint_commit(scope.user_name, scope.session_id, batch.batch_id),
+        RedisKeys.checkpoint_commit(
+            scope.user_name,
+            scope.session_id,
+            _checkpoint_commit_token(batch),
+        ),
         len(batch.messages),
         checkpoint_interval,
         last_id,

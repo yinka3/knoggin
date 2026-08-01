@@ -241,6 +241,16 @@ class EntityWriter:
                                 %s, %s, %s, %s, %s, %s,
                                 %s, %s, %s, %s, %s
                             )
+                            ON CONFLICT (entity_id) DO UPDATE SET
+                                session_id = EXCLUDED.session_id,
+                                canonical_name = EXCLUDED.canonical_name,
+                                type = EXCLUDED.type,
+                                topic = EXCLUDED.topic,
+                                confidence = EXCLUDED.confidence,
+                                last_mentioned_ms = EXCLUDED.last_mentioned_ms,
+                                last_updated_ms = EXCLUDED.last_updated_ms
+                            WHERE entities.project_id = EXCLUDED.project_id
+                            RETURNING entity_id
                             """,
                             (
                                 entity.entity_id,
@@ -256,6 +266,11 @@ class EntityWriter:
                                 None,
                             ),
                         )
+                        if await cur.fetchone() is None:
+                            raise RuntimeError(
+                                f"Entity {entity.entity_id} already exists "
+                                f"outside project {project_id}"
+                            )
                     else:
                         await cur.execute(
                             """

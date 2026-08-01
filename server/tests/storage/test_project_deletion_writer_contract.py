@@ -169,3 +169,287 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.projects WHERE project_id = 'project-2'"
     ) == {"count": 1}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_project_deletion_removes_episode_graph_search_and_source_aggregates(
+    real_postgres_client,
+):
+    """Project deletion removes derived aggregates without touching a sibling project."""
+
+    writer = ProjectDeletionWriter(real_postgres_client)
+    embedding = "[" + ",".join(["0"] * 1024) + "]"
+
+    async with real_postgres_client.transaction() as cur:
+        await cur.execute(
+            """
+            INSERT INTO sessions (session_id, user_name, project_id)
+            VALUES ('session-1', 'ada', 'project-1'), ('session-2', 'ada', 'project-2')
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO messages (
+                user_name, session_id, message_id, project_id, role, content,
+                timestamp_ms, episode_eligible
+            ) VALUES
+                ('ada', 'session-1', 101, 'project-1', 'user', 'Delete project one', 1000, TRUE),
+                ('ada', 'session-2', 201, 'project-2', 'user', 'Keep project two', 2000, TRUE)
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO entities (
+                entity_id, user_name, project_id, canonical_name, type, topic
+            ) VALUES
+                (42, 'ada', 'project-1', 'Project One', 'concept', 'General'),
+                (43, 'ada', 'project-1', 'Project One Detail', 'concept', 'General'),
+                (52, 'ada', 'project-2', 'Project Two', 'concept', 'General'),
+                (53, 'ada', 'project-2', 'Project Two Detail', 'concept', 'General')
+            """
+        )
+        await cur.execute(
+            "INSERT INTO entity_aliases (entity_id, alias) VALUES (42, 'P1'), (52, 'P2')"
+        )
+        await cur.execute(
+            """
+            INSERT INTO relationships (
+                relationship_id, user_name, project_id, entity_a_id, entity_b_id,
+                relationship_type, context
+            ) VALUES
+                ('project-1:42:43:related', 'ada', 'project-1', 42, 43, 'related', 'P1 context'),
+                ('project-2:52:53:related', 'ada', 'project-2', 52, 53, 'related', 'P2 context')
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO relationship_evidence_refs (
+                relationship_id, project_id, user_name, session_id, message_id
+            ) VALUES
+                ('project-1:42:43:related', 'project-1', 'ada', 'session-1', 101),
+                ('project-2:52:53:related', 'project-2', 'ada', 'session-2', 201)
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO episodes (
+                episode_id, project_id, session_id, summary, source_message_count,
+                first_message_at, last_message_at, created_at, updated_at
+            ) VALUES
+                (
+                    'episode-1', 'project-1', 'session-1', 'Delete project one episode', 1,
+                    TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00',
+                    TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00'
+                ),
+                (
+                    'episode-2', 'project-2', 'session-2', 'Keep project two episode', 1,
+                    TIMESTAMPTZ '2026-01-02 00:00:01+00', TIMESTAMPTZ '2026-01-02 00:00:01+00',
+                    TIMESTAMPTZ '2026-01-02 00:00:01+00', TIMESTAMPTZ '2026-01-02 00:00:01+00'
+                )
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO episode_messages (
+                episode_id, project_id, session_id, message_id,
+                influence_weight, message_position
+            ) VALUES
+                ('episode-1', 'project-1', 'session-1', 101, 1.0, 0),
+                ('episode-2', 'project-2', 'session-2', 201, 1.0, 0)
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO episode_entities (
+                episode_id, project_id, entity_id, prominence_weight,
+                is_focus_entity, source_message_count
+            ) VALUES
+                ('episode-1', 'project-1', 42, 1.0, TRUE, 1),
+                ('episode-2', 'project-2', 52, 1.0, TRUE, 1)
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO episode_relationships (
+                episode_id, project_id, relationship_id, prominence_weight,
+                is_central_relationship, source_message_count
+            ) VALUES
+                ('episode-1', 'project-1', 'project-1:42:43:related', 1.0, TRUE, 1),
+                ('episode-2', 'project-2', 'project-2:52:53:related', 1.0, TRUE, 1)
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO episode_processing_checkpoints (
+                project_id, session_id, last_evaluated_message_id
+            ) VALUES ('project-1', 'session-1', 101), ('project-2', 'session-2', 201)
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO entity_search (entity_id, canonical_name, user_name, project_id)
+            VALUES (42, 'Project One', 'ada', 'project-1'), (52, 'Project Two', 'ada', 'project-2')
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO message_search (
+                message_id, user_name, session_id, project_id, content_tsvector
+            ) VALUES
+                (101, 'ada', 'session-1', 'project-1', to_tsvector('simple', 'Delete project one')),
+                (201, 'ada', 'session-2', 'project-2', to_tsvector('simple', 'Keep project two'))
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO project_documents (
+                document_id, project_id, visibility_scope, original_name,
+                relative_path, extension, size_bytes, content_hash
+            ) VALUES
+                (
+                    '77777777-7777-4777-8777-777777777777', 'project-1', 'project',
+                    'delete.md', 'delete.md', '.md', 6, repeat('1', 64)
+                ),
+                (
+                    '88888888-8888-4888-8888-888888888888', 'project-2', 'project',
+                    'keep.md', 'keep.md', '.md', 4, repeat('2', 64)
+                )
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO document_content (document_id, content)
+            VALUES
+                ('77777777-7777-4777-8777-777777777777', 'delete'),
+                ('88888888-8888-4888-8888-888888888888', 'keep')
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO document_chunks (
+                chunk_id, document_id, chunk_index, content, relative_path, embedding
+            ) VALUES
+                (
+                    '99999999-9999-4999-8999-999999999999',
+                    '77777777-7777-4777-8777-777777777777', 0, 'delete', 'delete.md', %s::vector
+                ),
+                (
+                    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                    '88888888-8888-4888-8888-888888888888', 0, 'keep', 'keep.md', %s::vector
+                )
+            """,
+            (embedding, embedding),
+        )
+        await cur.execute(
+            """
+            INSERT INTO message_source_refs (
+                source_ref_id, project_id, session_id, message_id, source_kind,
+                document_id, content_hash, locator, excerpt, metadata, encounter_kind,
+                agent_run_id, tool_call_id, result_position, idempotency_key
+            ) VALUES
+                (
+                    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'project-1', 'session-1', 101,
+                    'text_document', '77777777-7777-4777-8777-777777777777', repeat('1', 64),
+                    '{"kind":"text_lines","start_line":1,"end_line":1}'::jsonb,
+                    'delete', '{"document_name":"delete.md"}'::jsonb, 'document_search',
+                    'run-delete', 'tool-delete', 0, 'source-delete'
+                ),
+                (
+                    'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'project-2', 'session-2', 201,
+                    'text_document', '88888888-8888-4888-8888-888888888888', repeat('2', 64),
+                    '{"kind":"text_lines","start_line":1,"end_line":1}'::jsonb,
+                    'keep', '{"document_name":"keep.md"}'::jsonb, 'document_search',
+                    'run-keep', 'tool-keep', 0, 'source-keep'
+                )
+            """
+        )
+
+    deleted = await writer.delete_project(user_name="ada", project_id="project-1")
+
+    assert deleted is not None
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM projects WHERE project_id = 'project-1'"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM projects WHERE project_id = 'project-2'"
+    ) == {"count": 1}
+
+    project_one_queries = {
+        "sessions": "SELECT count(*) AS count FROM sessions WHERE project_id = 'project-1'",
+        "messages": "SELECT count(*) AS count FROM messages WHERE project_id = 'project-1'",
+        "episodes": "SELECT count(*) AS count FROM episodes WHERE project_id = 'project-1'",
+        "episode_messages": "SELECT count(*) AS count FROM episode_messages WHERE project_id = 'project-1'",
+        "episode_entities": "SELECT count(*) AS count FROM episode_entities WHERE project_id = 'project-1'",
+        "episode_relationships": "SELECT count(*) AS count FROM episode_relationships WHERE project_id = 'project-1'",
+        "checkpoints": "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-1'",
+        "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-1'",
+        "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-1'",
+        "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-1'",
+        "entity_search": "SELECT count(*) AS count FROM entity_search WHERE project_id = 'project-1'",
+        "message_search": "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-1'",
+        "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-1'",
+        "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-1'",
+        "chunks": (
+            "SELECT count(*) AS count FROM document_chunks c "
+            "JOIN project_documents d ON d.document_id = c.document_id "
+            "WHERE d.project_id = 'project-1'"
+        ),
+        "content": (
+            "SELECT count(*) AS count FROM document_content c "
+            "JOIN project_documents d ON d.document_id = c.document_id "
+            "WHERE d.project_id = 'project-1'"
+        ),
+        "aliases": (
+            "SELECT count(*) AS count FROM entity_aliases a "
+            "JOIN entities e ON e.entity_id = a.entity_id "
+            "WHERE e.project_id = 'project-1'"
+        ),
+        "project_search_revisions": (
+            "SELECT count(*) AS count FROM project_search_revisions "
+            "WHERE project_id = 'project-1'"
+        ),
+    }
+    for query in project_one_queries.values():
+        assert await real_postgres_client.fetch_one(query) == {"count": 0}
+
+    project_two_queries = {
+        "sessions": "SELECT count(*) AS count FROM sessions WHERE project_id = 'project-2'",
+        "messages": "SELECT count(*) AS count FROM messages WHERE project_id = 'project-2'",
+        "episodes": "SELECT count(*) AS count FROM episodes WHERE project_id = 'project-2'",
+        "episode_messages": "SELECT count(*) AS count FROM episode_messages WHERE project_id = 'project-2'",
+        "episode_entities": "SELECT count(*) AS count FROM episode_entities WHERE project_id = 'project-2'",
+        "episode_relationships": "SELECT count(*) AS count FROM episode_relationships WHERE project_id = 'project-2'",
+        "checkpoints": "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-2'",
+        "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-2'",
+        "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-2'",
+        "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-2'",
+        "entity_search": "SELECT count(*) AS count FROM entity_search WHERE project_id = 'project-2'",
+        "message_search": "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-2'",
+        "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-2'",
+        "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-2'",
+        "chunks": (
+            "SELECT count(*) AS count FROM document_chunks c "
+            "JOIN project_documents d ON d.document_id = c.document_id "
+            "WHERE d.project_id = 'project-2'"
+        ),
+        "content": (
+            "SELECT count(*) AS count FROM document_content c "
+            "JOIN project_documents d ON d.document_id = c.document_id "
+            "WHERE d.project_id = 'project-2'"
+        ),
+        "aliases": (
+            "SELECT count(*) AS count FROM entity_aliases a "
+            "JOIN entities e ON e.entity_id = a.entity_id "
+            "WHERE e.project_id = 'project-2'"
+        ),
+        "project_search_revisions": (
+            "SELECT count(*) AS count FROM project_search_revisions "
+            "WHERE project_id = 'project-2'"
+        ),
+    }
+    for name, query in project_two_queries.items():
+        expected_count = 2 if name == "entities" else 1
+        assert await real_postgres_client.fetch_one(query) == {"count": expected_count}

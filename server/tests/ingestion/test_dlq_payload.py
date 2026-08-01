@@ -7,19 +7,19 @@ from core.ingestion.checkpoint import commit_ingestion_checkpoint
 from core.ingestion.dlq_payload import DLQPayload
 from core.ingestion.services import pipeline_service
 from core.ingestion.services.pipeline_service import IngestionPipeline
-from infrastructure.work_record import WorkRecord
 from infrastructure.redis_client import RedisKeys
+from infrastructure.work_record import WorkRecord
 from tests.fixtures.fakes import FakeRedis
 
 
-def _graph_committed_batch() -> IngestionBatch:
+def _graph_committed_batch(batch_id="batch-1") -> IngestionBatch:
     batch = IngestionBatch.open(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
         messages=[{"id": 7, "message": "Ada met Grace."}],
         session_text="[USER]: Ada met Grace.",
-        batch_id="batch-1",
+        batch_id=batch_id,
     )
     batch.validate_input()
     batch.mark_extracted()
@@ -125,3 +125,25 @@ async def test_checkpoint_commit_is_idempotent_and_retains_counter_progress():
     assert replay.checkpoint_count == 1
     assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
     assert redis.strings[RedisKeys.last_processed("ada", "session-1")] == "7"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_checkpoint_commit_is_idempotent_for_a_fresh_retry_batch():
+    first_batch = _graph_committed_batch("batch-1")
+    retry_batch = _graph_committed_batch("batch-2")
+    redis = FakeRedis()
+
+    first = await commit_ingestion_checkpoint(
+        redis,
+        first_batch,
+        checkpoint_interval=4,
+    )
+    retry = await commit_ingestion_checkpoint(
+        redis,
+        retry_batch,
+        checkpoint_interval=4,
+    )
+
+    assert retry == first
+    assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"

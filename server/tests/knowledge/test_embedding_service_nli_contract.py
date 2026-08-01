@@ -213,3 +213,78 @@ async def test_embedding_service_loads_embedder_before_lazy_onnx_reranker(
             "backend": "onnx",
         }
     ]
+
+
+@pytest.mark.no_network
+async def test_embedding_service_runs_pooled_onnx_sentence_export_directly(
+    monkeypatch, tmp_path
+):
+    model_path = tmp_path / "embedding-model"
+    onnx_path = model_path / "onnx" / "model.onnx"
+    onnx_path.parent.mkdir(parents=True)
+    onnx_path.write_bytes(b"fake")
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            assert model_name == str(model_path)
+            assert kwargs == {"trust_remote_code": True}
+            return cls()
+
+        def __call__(self, texts, **kwargs):
+            assert texts == ["first", "second"]
+            assert kwargs == {
+                "padding": True,
+                "truncation": True,
+                "return_tensors": "np",
+            }
+            return {
+                "input_ids": np.asarray([[1, 2], [3, 4]], dtype=np.int64),
+                "attention_mask": np.ones((2, 2), dtype=np.int64),
+            }
+
+    class FakeSession:
+        def __init__(self, model_name, *, providers):
+            assert model_name == str(onnx_path)
+            assert providers == ["CPUExecutionProvider"]
+
+        def get_inputs(self):
+            return [
+                type("Input", (), {"name": "input_ids"})(),
+                type("Input", (), {"name": "attention_mask"})(),
+            ]
+
+        def get_outputs(self):
+            return [
+                type(
+                    "Output",
+                    (),
+                    {"name": "sentence_embedding", "shape": ["batch", 3]},
+                )()
+            ]
+
+        def run(self, output_names, inputs):
+            assert output_names == ["sentence_embedding"]
+            assert set(inputs) == {"input_ids", "attention_mask"}
+            return [
+                np.asarray(
+                    [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+                    dtype=np.float32,
+                )
+            ]
+
+    monkeypatch.setattr(embedding_module, "AutoTokenizer", FakeTokenizer)
+    monkeypatch.setattr(embedding_module.ort, "InferenceSession", FakeSession)
+    service = EmbeddingService(
+        embedding_model=str(model_path),
+        embedding_backend="onnx",
+        device="cpu",
+    )
+
+    await service.load_models()
+
+    assert service.embedding_dim == 3
+    np.testing.assert_allclose(
+        await service.encode(["first", "second"]),
+        [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+    )

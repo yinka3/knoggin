@@ -450,9 +450,6 @@ class IngestionPipeline:
                                 )
                             )
                             if existing_id and aliases_added:
-                                self.entities.commit_new_aliases(
-                                    existing_id, new_aliases
-                                )
                                 alias_ids.add(existing_id)
                                 if existing_id not in alias_updates:
                                     alias_updates[existing_id] = []

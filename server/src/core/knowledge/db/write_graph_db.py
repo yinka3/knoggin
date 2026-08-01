@@ -23,6 +23,10 @@ from infrastructure.redis_client import RedisKeys
 from infrastructure.work_record import WorkRecord
 
 
+class GraphWritePostgresCommittedError(RuntimeError):
+    """Redis-side failure after the PostgreSQL graph transaction committed."""
+
+
 def _normalize_embedding(value) -> Optional[list[float]]:
     if value is None:
         return None
@@ -248,6 +252,7 @@ async def _execute_graph_write_buffers(
             alias_update_map, project_id=scope.project_id
         )
 
+    postgres_committed = False
     if entity_writes or relationship_writes or message_entity_refs or eligible_messages:
         await knowledge_store.write_batch(
             entity_writes,
@@ -256,30 +261,36 @@ async def _execute_graph_write_buffers(
             eligible_messages=eligible_messages,
             scope=scope,
         )
+        postgres_committed = True
 
     dirty_entities_marked = 0
     if redis_client is not None and dirty_entity_ids:
-        dirty_key = RedisKeys.dirty_entities(scope.user_name, scope.project_id)
-        dirty_entities_marked = await redis_client.sadd(
-            dirty_key,
-            *[str(entity_id) for entity_id in sorted(dirty_entity_ids)],
-        )
-        await redis_client.delete(
-            RedisKeys.project_profile_complete(scope.user_name, scope.project_id)
-        )
-        await emit(
-            scope.project_id,
-            "job",
-            "dirty_entities_marked",
-            {
-                "user_name": scope.user_name,
-                "project_id": scope.project_id,
-                "dirty_key": dirty_key,
-                "entity_ids": sorted(dirty_entity_ids),
-                "marked_count": dirty_entities_marked,
-                "reason": "graph_write",
-            },
-        )
+        try:
+            dirty_key = RedisKeys.dirty_entities(scope.user_name, scope.project_id)
+            dirty_entities_marked = await redis_client.sadd(
+                dirty_key,
+                *[str(entity_id) for entity_id in sorted(dirty_entity_ids)],
+            )
+            await redis_client.delete(
+                RedisKeys.project_profile_complete(scope.user_name, scope.project_id)
+            )
+            await emit(
+                scope.project_id,
+                "job",
+                "dirty_entities_marked",
+                {
+                    "user_name": scope.user_name,
+                    "project_id": scope.project_id,
+                    "dirty_key": dirty_key,
+                    "entity_ids": sorted(dirty_entity_ids),
+                    "marked_count": dirty_entities_marked,
+                    "reason": "graph_write",
+                },
+            )
+        except Exception as exc:
+            if postgres_committed:
+                raise GraphWritePostgresCommittedError(str(exc)) from exc
+            raise
 
     return GraphWriteSummary(
         entities_written=len(entity_writes),
@@ -336,6 +347,10 @@ async def write_ingestion_batch_to_graph(
             knowledge_store=knowledge_store,
             redis_client=redis_client,
         )
+    except GraphWritePostgresCommittedError as exc:
+        graph_work.mark_failed(str(exc))
+        batch.work_unit.metadata["postgres_graph_committed"] = True
+        raise
     except Exception as exc:
         graph_work.mark_failed(str(exc))
         raise
@@ -343,6 +358,8 @@ async def write_ingestion_batch_to_graph(
     graph_work.mark_succeeded(
         f"{summary.entities_written} entities, {summary.relationships_written} relationships"
     )
+    for alias_update in batch.graph_alias_updates:
+        entities.commit_new_aliases(alias_update.entity_id, list(alias_update.aliases))
     _attach_graph_work_summary(batch, graph_work, summary)
     batch.mark_graph_committed()
     return summary
@@ -371,7 +388,10 @@ async def write_batch_callback(
         return True, None
     except Exception as e:
         logger.error(f"Graph write callback failed: {e}")
-        if batch.new_entity_ids:
+        postgres_graph_committed = bool(
+            batch.work_unit.metadata.get("postgres_graph_committed")
+        )
+        if batch.new_entity_ids and not postgres_graph_committed:
             # We must aggressively purge these newly created entities from the cache.
             # If we leave them, the live pipeline might resolve future mentions to these
             # "phantom" IDs before the DLQ can retry. This would cause the live pipeline
