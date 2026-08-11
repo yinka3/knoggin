@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from common.schema.episode import (
+from common.schema.episode.models import (
     EntityEpisode,
     Episode,
     MessageEpisode,

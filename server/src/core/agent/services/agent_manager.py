@@ -4,7 +4,7 @@ from typing import List, Mapping, Optional, Union
 
 from loguru import logger
 
-from common.schema.agent_contracts import AgentConfig, PersonaProfile
+from common.schema.agent.identity import AgentConfig, PersonaProfile
 from common.utils.agent_identity import (
     build_brain_snapshot_summary,
     normalize_agent_brain,

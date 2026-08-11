@@ -1,8 +1,6 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from uuid import uuid4
-
-from common.schema.source_reference import SourceReferenceCandidate
 
 
 @dataclass(frozen=True)
@@ -25,11 +23,3 @@ class ToolCall:
     args: Dict = field(default_factory=dict)
     thinking: Optional[str] = None
     call_id: str = field(default_factory=lambda: str(uuid4()))
-
-
-@dataclass
-class FinalResponse:
-    content: str
-    usage: Optional[Dict] = None
-    sources: Optional[List[Dict]] = None
-    sources_consulted: Optional[List[SourceReferenceCandidate]] = None

@@ -5,22 +5,60 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import NotRequired, Optional, TypedDict
 
-from common.schema.episode import (
-    EntityEpisode,
-    Episode,
-    MessageEpisode,
-    RelationshipEpisode,
-)
-from common.schema.episode_output import (
+from common.schema.episode.generation import (
     EpisodeConsolidation,
     EpisodeDecision,
     LLMEpisodeConsolidation,
     LLMEpisodeDecision,
 )
+from common.schema.episode.models import (
+    EntityEpisode,
+    Episode,
+    MessageEpisode,
+    RelationshipEpisode,
+)
 from common.utils.local_references import build_local_id_maps, resolve_local_id
 from core.ingestion.episode_policy import EpisodeGenerationPolicy
+
+
+class EpisodeSourceMessage(TypedDict):
+    """Static database-row shape used as episode-generation evidence."""
+
+    message_id: int
+    role: NotRequired[str | None]
+    content: NotRequired[str | None]
+    timestamp_ms: NotRequired[int | None]
+
+
+class EpisodeEntityCatalogEntry(TypedDict):
+    """Static entity projection included in an episode-generation prompt."""
+
+    entity_id: int
+    canonical_name: NotRequired[str | None]
+    type: NotRequired[str | None]
+    aliases: NotRequired[list[str]]
+
+
+class EpisodeRelationshipEndpoint(TypedDict):
+    """Static entity endpoint embedded in a relationship catalog entry."""
+
+    entity_id: int
+    canonical_name: NotRequired[str | None]
+    type: NotRequired[str | None]
+
+
+class EpisodeRelationshipCatalogEntry(TypedDict):
+    """Static relationship projection included in an episode prompt."""
+
+    relationship_id: str
+    entity_a: EpisodeRelationshipEndpoint
+    entity_b: EpisodeRelationshipEndpoint
+    relationship_type: NotRequired[str | None]
+    confidence: NotRequired[float | None]
+    context: NotRequired[str | None]
+    evidence_message_ids: NotRequired[list[int]]
 
 
 @dataclass(slots=True)
@@ -30,11 +68,11 @@ class EpisodeBuild:
     project_id: str
     session_id: str
     policy: EpisodeGenerationPolicy
-    messages: list[dict]
+    messages: list[EpisodeSourceMessage]
     entity_ids_by_message: dict[int, list[int]]
     relationship_ids_by_message: dict[int, list[str]]
-    entity_catalog: list[dict]
-    relationship_catalog: list[dict]
+    entity_catalog: list[EpisodeEntityCatalogEntry]
+    relationship_catalog: list[EpisodeRelationshipCatalogEntry]
     prior_episodes: list[Episode]
     build_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     local_message_ids: dict[int, str] = field(default_factory=dict)
@@ -62,11 +100,11 @@ class EpisodeBuild:
         project_id: str,
         session_id: str,
         policy: EpisodeGenerationPolicy,
-        messages: list[dict],
+        messages: list[EpisodeSourceMessage],
         entity_ids_by_message: dict[int, list[int]],
         relationship_ids_by_message: dict[int, list[str]],
-        entity_catalog: list[dict],
-        relationship_catalog: list[dict],
+        entity_catalog: list[EpisodeEntityCatalogEntry],
+        relationship_catalog: list[EpisodeRelationshipCatalogEntry],
         prior_episodes: list[Episode],
     ) -> "EpisodeBuild":
         """Allocate one build with ownership of a bounded episode window."""
@@ -93,7 +131,21 @@ class EpisodeBuild:
 
     @property
     def message_ids(self) -> list[int]:
-        return [int(message["message_id"]) for message in self.messages]
+        message_ids = []
+        for message in self.messages:
+            raw_message_id = message.get("message_id")
+            if raw_message_id is None:
+                raise ValueError(
+                    "EpisodeBuild source messages require message_id"
+                )
+            try:
+                message_id = int(raw_message_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "EpisodeBuild source message_id must be an integer"
+                ) from exc
+            message_ids.append(message_id)
+        return message_ids
 
     @property
     def entity_ids(self) -> list[int]:
@@ -171,6 +223,50 @@ class EpisodeBuild:
             raise ValueError(
                 "EpisodeBuild relationship references must cover source messages"
             )
+
+        previous_timestamp_ms = None
+        missing_timestamp_seen = False
+        for message in self.messages:
+            timestamp_ms = message.get("timestamp_ms")
+            if timestamp_ms is None:
+                missing_timestamp_seen = True
+                continue
+            try:
+                timestamp_ms = int(timestamp_ms)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "EpisodeBuild source message timestamps must be integers"
+                ) from exc
+            if missing_timestamp_seen or (
+                previous_timestamp_ms is not None
+                and timestamp_ms < previous_timestamp_ms
+            ):
+                raise ValueError(
+                    "EpisodeBuild source messages must use chronological "
+                    "timestamp ordering"
+                )
+            previous_timestamp_ms = timestamp_ms
+
+        for episode in self.prior_episodes:
+            if (
+                episode.project_id != self.project_id
+                or episode.session_id != self.session_id
+            ):
+                raise ValueError(
+                    "EpisodeBuild prior episodes require matching project and "
+                    "session scope"
+                )
+
+        for relationship in self.relationship_catalog:
+            evidence_message_ids = relationship.get("evidence_message_ids") or []
+            if any(
+                int(message_id) not in expected_message_ids
+                for message_id in evidence_message_ids
+            ):
+                raise ValueError(
+                    "EpisodeBuild relationship evidence cannot reference a "
+                    "message outside the source window"
+                )
 
     def prepare_local_references(self) -> None:
         """Build the only identifiers exposed to the LLM for this build."""
@@ -466,7 +562,9 @@ class EpisodeBuild:
             ],
         }
 
-    def _render_relationship_endpoint(self, endpoint: dict) -> dict:
+    def _render_relationship_endpoint(
+        self, endpoint: EpisodeRelationshipEndpoint
+    ) -> dict:
         rendered = {
             "canonical_name": endpoint.get("canonical_name"),
             "type": endpoint.get("type"),

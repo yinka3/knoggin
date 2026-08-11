@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from common.schema.episode import EpisodeCheckpoint
+from common.schema.episode.models import EpisodeCheckpoint
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -476,3 +476,132 @@ async def test_episode_reader_loads_relationship_evidence_for_source_messages():
         "project-1",
         "session-1",
     )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_episode_reader_isolates_user_project_and_session_scopes(
+    real_postgres_client,
+):
+    """Reader queries must not expose another user's or project's episodes."""
+
+    await real_postgres_client.execute(
+        """
+        INSERT INTO projects (project_id, user_name, name)
+        VALUES ('project-3', 'bob', 'Bob project');
+
+        INSERT INTO sessions (session_id, user_name, project_id)
+        VALUES
+            ('session-1', 'ada', 'project-1'),
+            ('session-2', 'ada', 'project-2'),
+            ('session-3', 'bob', 'project-3');
+
+        INSERT INTO messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, episode_eligible
+        ) VALUES
+            ('ada', 'session-1', 101, 'project-1', 'user', 'Project one source', 1000, TRUE),
+            ('ada', 'session-2', 102, 'project-2', 'user', 'Project two source', 2000, TRUE),
+            ('bob', 'session-3', 103, 'project-3', 'user', 'Bob project source', 3000, TRUE);
+
+        INSERT INTO episodes (
+            episode_id, project_id, session_id, summary, source_message_count,
+            first_message_at, last_message_at, created_at, updated_at
+        ) VALUES
+            (
+                'episode-1', 'project-1', 'session-1',
+                'Visible project one memory', 1,
+                TIMESTAMPTZ '2026-01-01 00:00:01+00',
+                TIMESTAMPTZ '2026-01-01 00:00:01+00',
+                TIMESTAMPTZ '2026-01-01 00:00:01+00',
+                TIMESTAMPTZ '2026-01-01 00:00:01+00'
+            ),
+            (
+                'episode-2', 'project-2', 'session-2',
+                'Private project two memory', 1,
+                TIMESTAMPTZ '2026-01-02 00:00:01+00',
+                TIMESTAMPTZ '2026-01-02 00:00:01+00',
+                TIMESTAMPTZ '2026-01-02 00:00:01+00',
+                TIMESTAMPTZ '2026-01-02 00:00:01+00'
+            ),
+            (
+                'episode-3', 'project-3', 'session-3',
+                'Private Bob memory', 1,
+                TIMESTAMPTZ '2026-01-03 00:00:01+00',
+                TIMESTAMPTZ '2026-01-03 00:00:01+00',
+                TIMESTAMPTZ '2026-01-03 00:00:01+00',
+                TIMESTAMPTZ '2026-01-03 00:00:01+00'
+            );
+
+        INSERT INTO episode_messages (
+            episode_id, project_id, session_id, message_id,
+            influence_weight, message_position
+        ) VALUES
+            ('episode-1', 'project-1', 'session-1', 101, 1.0, 0),
+            ('episode-2', 'project-2', 'session-2', 102, 1.0, 0),
+            ('episode-3', 'project-3', 'session-3', 103, 1.0, 0);
+        """
+    )
+
+    reader = EpisodeReader(real_postgres_client)
+
+    visible = await reader.get_episode(
+        "episode-1",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    assert visible is not None
+    assert visible.summary == "Visible project one memory"
+    assert [message.message_id for message in visible.messages] == [101]
+
+    assert await reader.get_episode(
+        "episode-2",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    ) is None
+    assert await reader.get_episode(
+        "episode-3",
+        user_name="ada",
+        project_id="project-3",
+        session_id="session-3",
+    ) is None
+    assert await reader.get_episode(
+        "episode-1",
+        user_name="bob",
+        project_id="project-1",
+        session_id="session-1",
+    ) is None
+
+    recent = await reader.get_recent_episodes(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        limit=10,
+    )
+    assert [episode.episode_id for episode in recent] == ["episode-1"]
+
+    search_matches = await reader.search_episodes(
+        "visible",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        limit=10,
+    )
+    assert [episode.episode_id for episode in search_matches] == ["episode-1"]
+
+    assert await reader.get_episode_source_messages(
+        "episode-2",
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    ) == []
+    assert await reader.get_episode_source_messages(
+        "episode-3",
+        user_name="ada",
+        project_id="project-3",
+        session_id="session-3",
+    ) == []

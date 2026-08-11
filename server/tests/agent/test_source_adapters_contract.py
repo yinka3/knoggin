@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.source.references import SourceReferenceCandidate
 from core.agent.source_adapters import build_pasted_text_candidates
 from core.agent.tools.search import SearchTools
 

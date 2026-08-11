@@ -221,3 +221,115 @@ async def test_search_index_rebuilder_database_failure_exits_transaction():
 
     assert client.transaction_enters == 3
     assert client.transaction_exits == 3
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_search_index_rebuild_is_idempotent_and_preserves_sibling_project(
+    real_postgres_client,
+):
+    await real_postgres_client.execute(
+        """
+        INSERT INTO sessions (session_id, user_name, project_id)
+        VALUES ('session-1', 'ada', 'project-1'), ('session-2', 'ada', 'project-2')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO messages (
+            user_name, session_id, message_id, project_id, role, content
+        ) VALUES
+            ('ada', 'session-1', 101, 'project-1', 'user', 'Fresh project one content'),
+            ('ada', 'session-2', 201, 'project-2', 'user', 'Keep project two content')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO entities (
+            entity_id, user_name, project_id, canonical_name, type, topic
+        ) VALUES
+            (1, 'ada', '__identity__', 'ada', 'person', 'Identity'),
+            (2, 'ada', 'project-1', 'Project One', 'concept', 'General'),
+            (3, 'ada', 'project-2', 'Project Two', 'concept', 'General')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO episodes (
+            episode_id, project_id, session_id, summary, source_message_count,
+            first_message_at, last_message_at
+        ) VALUES (
+            'episode-1', 'project-1', 'session-1', 'Project one episode', 1,
+            TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00'
+        )
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO message_search (
+            message_id, user_name, session_id, project_id, content_tsvector
+        ) VALUES
+            (101, 'ada', 'session-1', 'project-1', to_tsvector('english', 'stale project one')),
+            (201, 'ada', 'session-2', 'project-2', to_tsvector('english', 'Keep project two content'))
+        """
+    )
+    await real_postgres_client.execute(
+        """
+            INSERT INTO entity_search (entity_id, canonical_name, user_name, project_id)
+            VALUES
+                (2, 'Project One', 'ada', 'project-1'),
+                (3, 'Project Two', 'ada', 'project-2')
+        """
+    )
+
+    embedding = RecordingEmbeddingService()
+    rebuilder = SearchIndexer(real_postgres_client, embedding)
+
+    expected_summary = {
+        "messages": 1,
+        "entities": 1,
+        "identity": 1,
+        "episodes": 1,
+    }
+    assert await rebuilder.rebuild_project_indexes(
+        "project-1", "ada", ["project-1"]
+    ) == expected_summary
+    assert await rebuilder.rebuild_project_indexes(
+        "project-1", "ada", ["project-1"]
+    ) == expected_summary
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-1'"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM entity_search WHERE project_id = 'project-1'"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM entity_search WHERE entity_id = 2 AND embedding IS NOT NULL"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM entity_search WHERE project_id = '__identity__'"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM episodes WHERE project_id = 'project-1' AND embedding IS NOT NULL"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT content_tsvector @@ plainto_tsquery('english', %s) AS matches
+        FROM message_search
+        WHERE message_id = 101
+        """,
+        ("fresh",),
+    ) == {"matches": True}
+    assert await real_postgres_client.fetch_one(
+        "SELECT canonical_name FROM entity_search WHERE entity_id = 2"
+    ) == {"canonical_name": "Project One"}
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-2'"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        "SELECT canonical_name FROM entity_search WHERE entity_id = 3"
+    ) == {"canonical_name": "Project Two"}

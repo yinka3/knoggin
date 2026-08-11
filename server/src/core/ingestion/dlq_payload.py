@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     CandidateSuggestion,
     ExecutionScope,
     ExtractionTrace,

@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping
 
 from common.conf.domain_config import CompiledDomain
 from common.conf.relationship_config import normalize_relationship
-from common.schema.contracts import relationship_identity
+from common.schema.ingestion.contracts import relationship_identity
 
 
 @dataclass(frozen=True, slots=True)

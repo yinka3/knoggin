@@ -7,7 +7,7 @@ from core.agent.internals import (
     summarize_result,
     update_accumulators,
 )
-from core.agent.run import AgentRun, AgentRunLimits
+from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
 
 def make_ctx(**overrides):
@@ -15,9 +15,11 @@ def make_ctx(**overrides):
         "user_name": "ada",
         "project_id": "project-1",
         "session_id": "session-1",
-        "agent_config": SimpleNamespace(id="agent-1"),
-        "agent_name": "STELLA",
-        "persona": "",
+        "agent": AgentIdentity(
+            config=SimpleNamespace(id="agent-1"),
+            name="STELLA",
+            persona="",
+        ),
         "limits": AgentRunLimits(max_history_turns=2, max_accumulated_messages=2),
         "user_query": "What changed in profile behavior?",
         "run_id": "run-1",

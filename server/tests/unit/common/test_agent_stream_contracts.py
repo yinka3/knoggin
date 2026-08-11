@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from common.schema.agent_stream import validate_public_agent_stream_event
+from common.schema.agent.stream import validate_public_agent_stream_event
 
 USAGE = {
     "prompt_tokens": 1,

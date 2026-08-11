@@ -50,8 +50,8 @@ async def load_local_embedding_service():
 
     try:
         await service.load_models()
-    except Exception as exc:
+    except Exception:
         service.cleanup()
-        pytest.skip(f"Local embedding service could not load: {exc}")
+        raise
 
     return service

@@ -57,10 +57,12 @@ async def test_local_embedding_service_similarity_ordering_smoke():
             "ChatGPT product chatbot",
         ]
         embeddings = await service.encode(texts)
-    except Exception as exc:
-        pytest.skip(f"Local embedding service could not load or encode: {exc}")
+        single_embedding = await service.encode_single(texts[0])
     finally:
         service.cleanup()
 
+    assert len(embeddings) == len(texts)
+    assert all(len(embedding) == service.embedding_dim for embedding in embeddings)
+    np.testing.assert_allclose(single_embedding, embeddings[0], rtol=1e-5, atol=1e-6)
     assert cosine(embeddings[0], embeddings[1]) > cosine(embeddings[0], embeddings[2])
     assert cosine(embeddings[3], embeddings[3]) > cosine(embeddings[3], embeddings[4])

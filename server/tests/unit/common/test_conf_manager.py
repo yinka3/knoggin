@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 
 from common.conf.manager import ConfigManager, deep_merge
-from common.schema.agent_settings import AgentLimitSettings
+from common.schema.agent.settings import AgentLimitSettings
 from common.schema.settings import LLMSettings, RootConfig
 
 

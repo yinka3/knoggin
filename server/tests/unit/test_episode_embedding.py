@@ -1,6 +1,6 @@
 import pytest
 
-from common.schema.episode import Episode, MessageEpisode
+from common.schema.episode.models import Episode, MessageEpisode
 from core.knowledge.episode_embedding import build_episode_embedding_text
 
 

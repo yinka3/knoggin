@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.schema.agent_contracts import AgentConfig
+from common.schema.agent.identity import AgentConfig
 from core.agent.document_selection import DocumentSelectionError
 from core.agent.orchestrator import Orchestrator
 from infrastructure.redis_client import RedisKeys

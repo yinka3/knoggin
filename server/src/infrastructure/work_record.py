@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any, Optional, assert_never
 from uuid import uuid4
 
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     ExecutionScope,
     ValidationIssue,
 )

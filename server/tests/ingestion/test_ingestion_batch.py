@@ -2,12 +2,22 @@ import asyncio
 
 import pytest
 
-from common.schema.contracts import AliasUpdate, EntityWrite, SkippedRelationship
+from common.schema.ingestion.contracts import (
+    AliasUpdate,
+    EntityWrite,
+    SkippedRelationship,
+)
 from core.ingestion.batch import IngestionBatch, IngestionMilestone, IngestionStage
 from core.ingestion.services import pipeline_service
 from core.ingestion.services.pipeline_service import IngestionPipeline
+<<<<<<< HEAD
 from infrastructure.work_record import WorkRecord, WorkStatus
 from tests.fixtures.ingestion import ingestion_policy
+=======
+from core.knowledge.entity.profile import EntityProfile
+from core.knowledge.entity.resolver import EntityCandidate
+from infrastructure.work_record import WorkRecord
+>>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
 
 
 def open_batch(**overrides) -> IngestionBatch:
@@ -340,6 +350,56 @@ async def test_resolution_handoff_uses_the_batch_contract_keyword():
     assert batch.entity_ids == [2]
     assert batch.new_entity_ids == {2}
     assert batch.entity_message_map == {2: [7]}
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_resolution_stages_existing_alias_until_graph_commit():
+    class Resolver:
+        def __init__(self):
+            self.resolution_lock = asyncio.Lock()
+            self.committed_aliases = []
+
+        async def get_profile(self, _entity_id):
+            return EntityProfile(
+                canonical_name="Robert Chen",
+                entity_type="person",
+                topic="People",
+                project_id="project-1",
+            )
+
+        def validate_existing(self, _canonical_name, _mentions):
+            return 101, True, ["Bobby"]
+
+        def commit_new_aliases(self, entity_id, aliases):
+            self.committed_aliases.append((entity_id, aliases))
+
+    resolver = Resolver()
+    pipeline = object.__new__(IngestionPipeline)
+    pipeline.entities = resolver
+    pipeline.project_id = "project-1"
+    pipeline.user_name = "ada"
+    pipeline.resolution_threshold = 0.8
+    pipeline._is_profile_visible = lambda _profile: True
+    pipeline._should_accept_candidate = lambda *_args, **_kwargs: True
+
+    async def candidate_entries(_batch, _mentions):
+        return [
+            (
+                "candidates",
+                [EntityCandidate(entity_id=101, score=1.0, signals={"exact"})],
+            )
+        ]
+
+    pipeline._candidate_entries_for_mentions = candidate_entries
+    batch = open_batch()
+    batch.validate_input()
+    batch.mark_extracted()
+
+    await pipeline._resolve_mentions(batch, [(7, "Bobby", "person", "People")])
+
+    assert resolver.committed_aliases == []
+    assert batch.alias_updates == {101: ["Bobby"]}
 
 
 @pytest.mark.ingestion

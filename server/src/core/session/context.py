@@ -11,7 +11,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
-from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import (
     fetch_conversation_turns,
 )

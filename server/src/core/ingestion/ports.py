@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     CandidateSuggestion,
     EntityWrite,
     EpisodeEligibility,
@@ -16,7 +16,7 @@ from common.schema.contracts import (
     MessageEntityRef,
     RelationshipWrite,
 )
-from common.schema.episode import Episode, EpisodeCheckpoint
+from common.schema.episode.models import Episode, EpisodeCheckpoint
 
 ResponseT = TypeVar("ResponseT")
 

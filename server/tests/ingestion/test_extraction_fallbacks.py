@@ -1,10 +1,13 @@
 import pytest
 from pydantic import ValidationError
 
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     RelationshipObservation,
 )
-from common.schema.extraction_output import ConnectionMention, ConnectionsResult
+from common.schema.ingestion.extraction import (
+    RelationshipExtraction,
+    RelationshipMention,
+)
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.profile import EntityProfile
@@ -50,7 +53,7 @@ def make_processor(llm_response):
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_connections_result_accepts_source_message_ids():
-    result = ConnectionsResult.model_validate(
+    result = RelationshipExtraction.model_validate(
         {
             "connections": [
                 {
@@ -72,7 +75,7 @@ async def test_connections_result_accepts_source_message_ids():
 @pytest.mark.no_network
 def test_connections_result_requires_a_local_message_reference():
     with pytest.raises(ValidationError):
-        ConnectionsResult.model_validate(
+        RelationshipExtraction.model_validate(
             {
                 "connections": [
                     {
@@ -113,9 +116,9 @@ async def test_connection_extraction_falls_back_to_empty_on_llm_failure():
 @pytest.mark.no_network
 async def test_connection_extraction_keeps_valid_connections():
     processor = make_processor(
-        ConnectionsResult(
+        RelationshipExtraction(
             connections=[
-                ConnectionMention(
+                RelationshipMention(
                     msg_id="m1",
                     entity_a="Alice",
                     entity_b="Bob",

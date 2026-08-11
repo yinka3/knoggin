@@ -10,18 +10,19 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import (
     AbstractSet,
-    Any,
     Dict,
     Iterable,
     List,
+    NotRequired,
     Optional,
     Sequence,
     Set,
+    TypedDict,
     assert_never,
 )
 from uuid import uuid4
 
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     AliasUpdate,
     CandidateSuggestion,
     EntityWrite,
@@ -36,6 +37,15 @@ from common.schema.contracts import (
 )
 from core.ingestion.policy import IngestionPolicy
 from infrastructure.work_record import WorkRecord, WorkStatus
+
+
+class IngestionMessage(TypedDict):
+    """Static shape of one message read from the ingestion Redis buffer."""
+
+    id: int
+    message: str
+    timestamp: NotRequired[str]
+    role: NotRequired[str]
 
 
 class IngestionStage(StrEnum):
@@ -110,7 +120,7 @@ class IngestionBatch:
 
     batch_id: str
     scope: ExecutionScope
-    messages: List[Dict[str, Any]]
+    messages: List[IngestionMessage]
     session_text: str
     work_unit: WorkRecord
     policy: IngestionPolicy
@@ -153,7 +163,7 @@ class IngestionBatch:
         user_name: str,
         project_id: Optional[str],
         session_id: str,
-        messages: Iterable[Dict[str, Any]],
+        messages: Iterable[IngestionMessage],
         session_text: str,
         policy: IngestionPolicy,
         batch_id: Optional[str] = None,

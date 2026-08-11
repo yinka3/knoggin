@@ -1,4 +1,4 @@
-"""Engine contract models for LLM outputs and pipeline handoffs."""
+"""Typed contracts for ingestion and graph-persistence handoffs."""
 
 import math
 from dataclasses import asdict, dataclass, field

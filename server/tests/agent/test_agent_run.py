@@ -2,9 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.schema.agent_contracts import AgentConfig
+from common.schema.agent.identity import AgentConfig
 from core.agent.executor import AgentExecutor
-from core.agent.run import AgentRun, AgentRunLimits
+from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
 
 def make_agent_config() -> AgentConfig:
@@ -27,9 +27,11 @@ def make_run(**overrides) -> AgentRun:
         "project_id": "project-1",
         "session_id": "session-1",
         "user_query": "What changed?",
-        "agent_config": make_agent_config(),
-        "agent_name": "Researcher",
-        "persona": "Careful and evidence-led",
+        "agent": AgentIdentity(
+            config=make_agent_config(),
+            name="Researcher",
+            persona="Careful and evidence-led",
+        ),
         "limits": AgentRunLimits(max_calls=2, max_attempts=2),
         "run_id": "run-1",
     }
@@ -44,7 +46,7 @@ def test_agent_run_owns_scope_limits_and_identity():
     assert run.scope.user_name == "ada"
     assert run.scope.project_id == "project-1"
     assert run.limits.max_calls == 2
-    assert run.agent_config.id == "agent-1"
+    assert run.agent.config.id == "agent-1"
     with pytest.raises(AttributeError):
         run.limits.max_calls = 4
 

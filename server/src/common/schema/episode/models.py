@@ -1,4 +1,4 @@
-"""Episode-domain contracts for LLM decisions and persisted aggregates."""
+"""Episode primitives and persisted aggregates."""
 
 import math
 from collections.abc import Mapping
@@ -101,6 +101,23 @@ class Episode(EpisodeNarrative):
         if update:
             data.update(update)
         return type(self).model_validate(data)
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> "Episode":
+        """Preserve Pydantic copy semantics while protecting vector integrity.
+
+        ``model_copy`` intentionally leaves general model updates unchecked.  The
+        embedding is the exception: it crosses a fixed-width storage boundary,
+        so validate it before accepting an updated vector.
+        """
+
+        if update and "embedding" in update:
+            self.validate_embedding(update["embedding"])
+        return super().model_copy(update=update, deep=deep)
 
     @field_validator("embedding")
     @classmethod

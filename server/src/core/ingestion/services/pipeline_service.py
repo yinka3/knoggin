@@ -13,12 +13,12 @@ from common.conf.domain_config import CompiledDomain
 from common.conf.relationship_config import normalize_relationship
 from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     CandidateSuggestion,
     RelationshipObservation,
     ValidationIssue,
 )
-from common.schema.extraction_output import ConnectionsResult
+from common.schema.ingestion.extraction import RelationshipExtraction
 from common.schema.settings import (
     EntityResolutionSettings,
     IngestionSettings,
@@ -544,9 +544,6 @@ class IngestionPipeline:
                                 )
                             )
                             if existing_id and aliases_added:
-                                self.entities.commit_new_aliases(
-                                    existing_id, new_aliases
-                                )
                                 alias_ids.add(existing_id)
                                 if existing_id not in alias_updates:
                                     alias_updates[existing_id] = []
@@ -1185,8 +1182,8 @@ class IngestionPipeline:
         )
 
         try:
-            conn_result: ConnectionsResult = await self.llm.generate_structured(
-                response_model=ConnectionsResult,
+            conn_result: RelationshipExtraction = await self.llm.generate_structured(
+                response_model=RelationshipExtraction,
                 system=system_03,
                 user=user_03,
                 temperature=0.0,

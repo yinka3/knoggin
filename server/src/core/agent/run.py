@@ -11,12 +11,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 
-from common.schema.agent_contracts import AgentConfig
-from common.schema.agent_settings import validate_tool_limit_overrides
-from common.schema.agent_stream import StreamUsage
-from common.schema.contracts import ExecutionScope
+from common.schema.agent.identity import AgentConfig
+from common.schema.agent.settings import validate_tool_limit_overrides
+from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
-from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.ingestion.contracts import ExecutionScope
+from common.schema.source.references import SourceReferenceCandidate
 from core.agent.tools.registry import (
     get_default_tool_limits,
     get_registered_tool_names,
@@ -33,6 +33,15 @@ def _empty_usage() -> StreamUsage:
         "total_tokens": 0,
         "approximate": False,
     }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentIdentity:
+    """Resolved agent identity and effective presentation for one run."""
+
+    config: AgentConfig
+    name: str
+    persona: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,9 +101,7 @@ class AgentRun:
     project_id: str
     session_id: str
     user_query: str
-    agent_config: AgentConfig
-    agent_name: str
-    persona: str
+    agent: AgentIdentity
     model: Optional[str]
     temperature: float
     enabled_tools: Optional[Tuple[str, ...]]
@@ -142,9 +149,7 @@ class AgentRun:
         project_id: str,
         session_id: str,
         user_query: str,
-        agent_config: AgentConfig,
-        agent_name: str,
-        persona: str,
+        agent: AgentIdentity,
         limits: AgentRunLimits,
         model: Optional[str] = None,
         temperature: float = 0.7,
@@ -162,9 +167,7 @@ class AgentRun:
             project_id=project_id,
             session_id=session_id,
             user_query=user_query,
-            agent_config=agent_config,
-            agent_name=agent_name,
-            persona=persona,
+            agent=agent,
             model=model,
             temperature=temperature,
             enabled_tools=tuple(enabled_tools) if enabled_tools is not None else None,

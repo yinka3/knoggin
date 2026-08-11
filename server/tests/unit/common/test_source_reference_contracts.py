@@ -3,16 +3,18 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from common.schema.source_reference import (
+from common.schema.source.locators import (
     CodeLineLocator,
     CsvRowLocator,
     DocxParagraphLocator,
     PastedTextLocator,
     PdfPageLocator,
     SearchResultLocator,
+    TextLineLocator,
+)
+from common.schema.source.references import (
     SourceReference,
     SourceReferenceCandidate,
-    TextLineLocator,
 )
 
 CONTENT_HASH = "a" * 64

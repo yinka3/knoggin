@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.source.references import SourceReferenceCandidate
 from infrastructure.knowledge_store import KnowledgeStore
 
 

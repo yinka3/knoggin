@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from loguru import logger
 
 from common.exceptions import ToolExecutionError
-from common.schema.tool_schema import (
+from common.schema.agent.tool_contracts import (
     READ_CAPABILITY,
     TOOL_SCHEMAS,
     TOOL_SCHEMAS_BY_NAME,

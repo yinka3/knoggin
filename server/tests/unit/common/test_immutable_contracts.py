@@ -7,7 +7,7 @@ from common.schema.document import (
     FolderUploadEntry,
     WorkspaceSyncChanges,
 )
-from common.schema.source_reference import SourceReferenceCandidate
+from common.schema.source.references import SourceReferenceCandidate
 
 
 @pytest.mark.unit

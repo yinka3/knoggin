@@ -9,13 +9,15 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from common.exceptions import ConfigurationError, LLMError, ToolExecutionError
-from common.schema.agent_stream import (
+from common.schema.agent.stream import (
     ErrorEvent,
     InternalAgentStreamEvent,
     PublicAgentStreamEvent,
+    ResponseEvent,
     StreamToolCall,
     StreamUsage,
 )
+from common.schema.source.references import SourceReferenceCandidate
 from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
@@ -49,10 +51,7 @@ from core.agent.tools.registry import (
     get_runtime_instructions,
     get_tool_schemas,
 )
-from core.agent.types import (
-    FinalResponse,
-    ToolCall,
-)
+from core.agent.types import ToolCall
 from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
@@ -276,7 +275,7 @@ class AgentExecutor:
                             )
                             step_failed = True
                             break
-                        response = FinalResponse(
+                        response = self._wrap_final_response(
                             content=content,
                             usage=dict(self.ctx.usage),
                             sources=list(self.ctx.sources),
@@ -292,7 +291,7 @@ class AgentExecutor:
                             break
 
                         self.ctx.finalize(content)
-                        yield self._wrap_final_response(response)
+                        yield response
                         return
 
                     clarification = next(
@@ -416,8 +415,8 @@ class AgentExecutor:
         system_prompt = get_agent_prompt(
             user_name=self.ctx.scope.user_name,
             current_time=date,
-            persona=self.ctx.persona,
-            agent_name=self.ctx.agent_name,
+            persona=self.ctx.agent.persona,
+            agent_name=self.ctx.agent.name,
             documents_context=documents_context,
             document_focus_context=document_focus_context,
             agent_directives=directives,
@@ -436,7 +435,7 @@ class AgentExecutor:
             self.tools,
             active_schemas,
             user_name=self.ctx.scope.user_name,
-            agent_id=self.ctx.agent_config.id or getattr(self.tools, "agent_id", ""),
+            agent_id=self.ctx.agent.config.id or getattr(self.tools, "agent_id", ""),
             project_id=(
                 self.ctx.scope.project_id or str(getattr(self.tools, "project_id", ""))
             ),
@@ -775,20 +774,18 @@ class AgentExecutor:
     def _accumulate_usage(self, usage: Optional[StreamUsage]):
         self.ctx.record_usage(usage)
 
-    def _wrap_final_response(self, response: FinalResponse) -> Dict:
-        sources_consulted = (
-            response.sources_consulted
-            if response.sources_consulted is not None
-            else self.ctx.source_candidates
-        )
-        usage = response.usage if response.usage is not None else dict(self.ctx.usage)
-        sources = (
-            response.sources if response.sources is not None else list(self.ctx.sources)
-        )
-        event = {
+    def _wrap_final_response(
+        self,
+        *,
+        content: str,
+        usage: StreamUsage,
+        sources: List[Dict],
+        sources_consulted: List[SourceReferenceCandidate],
+    ) -> ResponseEvent:
+        event: ResponseEvent = {
             "event": "response",
             "data": {
-                "content": response.content,
+                "content": content,
                 "usage": usage,
                 "sources": sources or None,
             },

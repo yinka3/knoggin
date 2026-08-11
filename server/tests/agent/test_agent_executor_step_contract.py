@@ -4,7 +4,7 @@ import pytest
 
 from common.exceptions import LLMProviderError
 from core.agent.executor import AgentExecutor
-from core.agent.run import AgentRun, AgentRunLimits
+from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.types import MaintenanceCandidate
 
 
@@ -32,9 +32,11 @@ def make_executor(llm):
         session_id="session-1",
         user_query="What changed in profile behavior?",
         run_id="run-1",
-        agent_config=SimpleNamespace(id="agent-1"),
-        agent_name="STELLA",
-        persona="Careful memory assistant",
+        agent=AgentIdentity(
+            config=SimpleNamespace(id="agent-1"),
+            name="STELLA",
+            persona="Careful memory assistant",
+        ),
         limits=AgentRunLimits(),
         active_topics=["Identity", "Testing"],
     )

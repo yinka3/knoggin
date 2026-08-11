@@ -1,4 +1,4 @@
-"""Validated configuration owned by the agent runtime."""
+"""Validated limits owned by the agent runtime."""
 
 from collections.abc import Mapping
 from typing import Dict

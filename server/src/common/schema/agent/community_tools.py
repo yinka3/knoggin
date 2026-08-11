@@ -1,3 +1,5 @@
+"""Community-agent tool contracts and default tool policy."""
+
 AAC_READ_TOOL_NAMES = [
     "search_entity",
     "episode_check",

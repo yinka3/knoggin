@@ -3,8 +3,8 @@ from pydantic import ValidationError
 
 from common.conf.topics_config import TopicConfig
 from common.exceptions import LLMProviderError
-from common.schema.contracts import ExtractionTrace
-from common.schema.extraction_output import NERMention, NERResult
+from common.schema.ingestion.contracts import ExtractionTrace
+from common.schema.ingestion.extraction import EntityExtraction, EntityMention
 from common.schema.settings import TextProcessorSettings, TopicSchema
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.processor import TextProcessor
@@ -81,7 +81,7 @@ class FakeLLM:
     extraction_model = "fake-ner-model"
 
     def __init__(self, response=None, *, raise_error=False):
-        self.response = response if response is not None else NERResult()
+        self.response = response if response is not None else EntityExtraction()
         self.raise_error = raise_error
         self.calls = []
 
@@ -127,7 +127,7 @@ def make_entity(
     typ="Tools",
     confidence=0.95,
 ):
-    return NERMention(
+    return EntityMention(
         msg_id=msg_id,
         name=name,
         type=typ,
@@ -438,7 +438,7 @@ async def test_extract_mentions_llm_failure_falls_back_and_records_issue():
 async def test_extract_mentions_empty_llm_result_records_known_gliner_fallback():
     processor, _ = make_processor(
         gliner_matches={MESSAGES[0]["message"]: [("Linear", "tool")]},
-        llm_response=NERResult(mentions=[]),
+        llm_response=EntityExtraction(mentions=[]),
         llm_ner=True,
     )
     trace = ExtractionTrace()
@@ -455,8 +455,13 @@ async def test_extract_mentions_empty_llm_result_records_known_gliner_fallback()
 @pytest.mark.no_network
 async def test_extract_mentions_accepts_valid_llm_mentions():
     processor, _ = make_processor(
+<<<<<<< HEAD
         llm_response=NERResult(
             mentions=[make_entity("Linear", msg_id="m2", typ="Tools")]
+=======
+        llm_response=EntityExtraction(
+            mentions=[make_entity("Linear", msg_id="m2", typ="tool", topic="Tools")]
+>>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
         ),
         llm_ner=True,
     )
@@ -477,8 +482,13 @@ async def test_extract_mentions_resolves_local_llm_msg_id_to_real_message_id():
         {**MESSAGES[1], "id": 99},
     ]
     processor, llm = make_processor(
+<<<<<<< HEAD
         llm_response=NERResult(
             mentions=[make_entity("Linear", msg_id="m2", typ="Tools")]
+=======
+        llm_response=EntityExtraction(
+            mentions=[make_entity("Linear", msg_id="m2", typ="tool", topic="Tools")]
+>>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
         ),
         llm_ner=True,
     )
@@ -501,7 +511,7 @@ async def test_extract_mentions_resolves_local_llm_msg_id_to_real_message_id():
 @pytest.mark.no_network
 def test_ner_result_requires_a_local_message_reference():
     with pytest.raises(ValidationError):
-        NERResult.model_validate(
+        EntityExtraction.model_validate(
             {
                 "mentions": [
                     {
@@ -538,7 +548,7 @@ def test_ner_result_rejects_model_supplied_topic():
 @pytest.mark.no_network
 async def test_extract_mentions_rejects_invalid_llm_msg_id():
     processor, _ = make_processor(
-        llm_response=NERResult(mentions=[make_entity("Linear", msg_id="m999")]),
+        llm_response=EntityExtraction(mentions=[make_entity("Linear", msg_id="m999")]),
         llm_ner=True,
     )
     trace = ExtractionTrace()
@@ -556,7 +566,7 @@ async def test_extract_mentions_rejects_invalid_llm_msg_id():
 @pytest.mark.no_network
 async def test_extract_mentions_rejects_low_confidence_llm_mentions():
     processor, _ = make_processor(
-        llm_response=NERResult(
+        llm_response=EntityExtraction(
             mentions=[make_entity("Linear", msg_id="m2", confidence=0.5)]
         ),
         llm_ner=True,
@@ -579,8 +589,13 @@ async def test_extract_mentions_rejects_duplicate_llm_mentions_already_covered()
         known_aliases={"alice": 101},
         profiles={101: make_profile("Alice")},
         known_matches={MESSAGES[0]["message"]: ["Alice"]},
+<<<<<<< HEAD
         llm_response=NERResult(
             mentions=[make_entity("Alice", msg_id="m1", typ="Identity")]
+=======
+        llm_response=EntityExtraction(
+            mentions=[make_entity("Alice", msg_id="m1", typ="person", topic="Identity")]
+>>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
         ),
         llm_ner=True,
     )
@@ -601,7 +616,7 @@ async def test_extract_mentions_does_not_expose_known_entity_ids_to_llm():
         known_aliases={"alice": 101},
         profiles={101: make_profile("Alice")},
         known_matches={MESSAGES[0]["message"]: ["Alice"]},
-        llm_response=NERResult(),
+        llm_response=EntityExtraction(),
         llm_ner=True,
     )
 
@@ -616,7 +631,7 @@ async def test_extract_mentions_does_not_expose_known_entity_ids_to_llm():
 @pytest.mark.no_network
 async def test_extract_mentions_rejects_invalid_llm_entity():
     processor, _ = make_processor(
-        llm_response=NERResult(
+        llm_response=EntityExtraction(
             mentions=[
                 make_entity(
                     "Mystery",
@@ -641,7 +656,7 @@ async def test_extract_mentions_rejects_invalid_llm_entity():
 @pytest.mark.no_network
 async def test_extract_mentions_uses_named_ner_prompt_with_user_name():
     processor, llm = make_processor(
-        llm_response=NERResult(),
+        llm_response=EntityExtraction(),
         llm_ner=True,
     )
 
@@ -650,4 +665,4 @@ async def test_extract_mentions_uses_named_ner_prompt_with_user_name():
     assert "VEGAPUNK-01" in llm.calls[0]["system"]
     assert "ada" in llm.calls[0]["system"]
     assert llm.calls[0]["temperature"] == 0.0
-    assert llm.calls[0]["response_model"] is NERResult
+    assert llm.calls[0]["response_model"] is EntityExtraction
