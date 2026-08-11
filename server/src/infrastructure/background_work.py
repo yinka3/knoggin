@@ -2,11 +2,13 @@
 
 import asyncio
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Awaitable, Callable, Deque, TypeVar
 
 from common.exceptions import KnogginError
+from common.schema.health import sanitize_health_details
 
 ResultT = TypeVar("ResultT")
 
@@ -77,6 +79,7 @@ class BackgroundWorkCoordinator:
         self._ready_projects: Deque[str] = deque()
         self._ready_project_ids: set[str] = set()
         self._active_project_ids: set[str] = set()
+        self._active_work_by_project: dict[str, str] = {}
         self._coalesced_futures: dict[tuple[str, str], asyncio.Future] = {}
         self._condition = asyncio.Condition()
         self._workers: list[asyncio.Task] = []
@@ -206,6 +209,7 @@ class BackgroundWorkCoordinator:
                         continue
                     work = queue.popleft()
                     self._active_project_ids.add(project_id)
+                    self._active_work_by_project[project_id] = work.name
                     if not queue:
                         del self._project_queues[project_id]
                     return project_id, work
@@ -220,6 +224,7 @@ class BackgroundWorkCoordinator:
     ) -> None:
         async with self._condition:
             self._active_project_ids.discard(project_id)
+            self._active_work_by_project.pop(project_id, None)
             if work.coalesce_key is not None:
                 key = (project_id, work.coalesce_key)
                 if self._coalesced_futures.get(key) is work.future:
@@ -277,6 +282,46 @@ class BackgroundWorkCoordinator:
             "rejected_by_reason": dict(self._rejected_by_reason),
         }
 
+    def snapshot_for_health(self, *, project_id: str | None = None) -> dict[str, object]:
+        """Return metrics safe for a project-scoped health response.
+
+        The internal snapshot intentionally contains project identifiers for
+        scheduler diagnostics. A public projection reports only the requested
+        project's queue depth and never forwards the identifier map itself.
+        """
+
+        snapshot = dict(self.snapshot())
+        queued_by_project = snapshot.pop("queued_by_project", {})
+        snapshot.pop("ready_projects", None)
+        snapshot.pop("active_projects", None)
+        if project_id is not None and isinstance(queued_by_project, Mapping):
+            queued_for_project = queued_by_project.get(project_id, 0)
+            snapshot["queued_for_project"] = (
+                queued_for_project
+                if isinstance(queued_for_project, int)
+                and not isinstance(queued_for_project, bool)
+                and queued_for_project >= 0
+                else 0
+            )
+            if hasattr(self, "_project_queues"):
+                queued_work = self._project_queues.get(project_id, ())
+                snapshot["queued_operation_categories"] = [
+                    work.name[:100]
+                    for work in list(queued_work)[:20]
+                    if isinstance(work.name, str)
+                ]
+            if hasattr(self, "_active_work_by_project"):
+                active_name = self._active_work_by_project.get(project_id)
+                snapshot["active_operation_categories"] = (
+                    [active_name[:100]]
+                    if isinstance(active_name, str)
+                    else []
+                )
+                snapshot["active_for_project"] = (
+                    project_id in self._active_project_ids
+                )
+        return sanitize_health_details(snapshot)
+
     async def shutdown(self) -> None:
         if self._closed:
             return
@@ -290,6 +335,7 @@ class BackgroundWorkCoordinator:
             self._project_queues.clear()
             self._ready_projects.clear()
             self._ready_project_ids.clear()
+            self._active_work_by_project.clear()
             self._coalesced_futures.clear()
             self._condition.notify_all()
         if self._workers:

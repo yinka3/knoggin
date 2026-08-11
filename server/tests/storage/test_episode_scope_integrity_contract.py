@@ -123,9 +123,7 @@ async def test_episode_and_source_messages_must_share_project_session_scope(
             """
         )
 
-    await real_postgres_client.execute(
-        "DELETE FROM messages WHERE message_id = 101"
-    )
+    await real_postgres_client.execute("DELETE FROM messages WHERE message_id = 101")
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM episode_messages"
     ) == {"count": 0}
@@ -167,9 +165,13 @@ async def test_episode_derived_attachments_must_share_project_scope(
         """
         INSERT INTO relationships (
             relationship_id, user_name, project_id,
-            entity_a_id, entity_b_id, relationship_type
+            entity_a_id, entity_b_id, relationship_type,
+            observed_relationship_label
         )
-        VALUES ('project-2:3:4:related', 'ada', 'project-2', 3, 4, 'related')
+        VALUES (
+            'project-2:3:4:related', 'ada', 'project-2', 3, 4,
+            'related', 'related'
+        )
         """
     )
 

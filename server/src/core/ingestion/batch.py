@@ -8,7 +8,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import AbstractSet, Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import (
+    AbstractSet,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    assert_never,
+)
 from uuid import uuid4
 
 from common.schema.contracts import (
@@ -24,7 +34,8 @@ from common.schema.contracts import (
     SkippedRelationship,
     ValidationIssue,
 )
-from infrastructure.work_record import WorkRecord
+from core.ingestion.policy import IngestionPolicy
+from infrastructure.work_record import WorkRecord, WorkStatus
 
 
 class IngestionStage(StrEnum):
@@ -102,6 +113,7 @@ class IngestionBatch:
     messages: List[Dict[str, Any]]
     session_text: str
     work_unit: WorkRecord
+    policy: IngestionPolicy
     stage: IngestionStage = IngestionStage.RAW
     revision: int = 0
     validated_revision: Optional[int] = None
@@ -143,6 +155,7 @@ class IngestionBatch:
         session_id: str,
         messages: Iterable[Dict[str, Any]],
         session_text: str,
+        policy: IngestionPolicy,
         batch_id: Optional[str] = None,
     ) -> "IngestionBatch":
         """Allocate the one aggregate that owns a live pipeline operation."""
@@ -153,18 +166,22 @@ class IngestionBatch:
             project_id=project_id,
         )
         owned_messages = list(messages)
+        work_unit = WorkRecord.for_ingestion(
+            scope,
+            [
+                message.get("id") if isinstance(message, dict) else None
+                for message in owned_messages
+            ],
+        )
+        work_unit.metadata["policy_version"] = policy.version
         return cls(
             batch_id=batch_id or str(uuid4()),
             scope=scope,
             messages=owned_messages,
             session_text=session_text,
-            work_unit=WorkRecord.for_ingestion(
-                scope,
-                [
-                    message.get("id") if isinstance(message, dict) else None
-                    for message in owned_messages
-                ],
-            ),
+            policy=policy,
+            work_unit=work_unit,
+            checkpoint_interval=policy.checkpoint_interval,
         )
 
     def _require_mutable(self) -> None:
@@ -358,24 +375,14 @@ class IngestionBatch:
     def mark_candidate_suggestions_handled(self) -> None:
         self._require_mutable()
         if self.stage is not IngestionStage.COMPLETED:
-            raise ValueError("Candidate suggestions can only be handled after completion")
+            raise ValueError(
+                "Candidate suggestions can only be handled after completion"
+            )
         self._mark_milestone(IngestionMilestone.CANDIDATE_SUGGESTIONS_HANDLED)
-
-    def set_checkpoint_policy(self, checkpoint_interval: int) -> None:
-        """Freeze the checkpoint threshold used for this batch and its replay."""
-
-        self._require_mutable()
-        if self.stage is not IngestionStage.COMPLETED:
-            raise ValueError("Checkpoint policy can only be set after completion")
-        if not isinstance(checkpoint_interval, int) or checkpoint_interval <= 0:
-            raise ValueError("checkpoint_interval must be a positive integer")
-        self.checkpoint_interval = checkpoint_interval
-        self._mark_changed()
 
     def record_checkpoint_progress(
         self,
         *,
-        checkpoint_interval: int,
         current_count: int,
     ) -> None:
         """Record committed counter state without reopening sealed graph data."""
@@ -384,11 +391,10 @@ class IngestionBatch:
             raise RuntimeError("IngestionBatch has been released")
         if self.stage is not IngestionStage.GRAPH_COMMITTED:
             raise ValueError("Checkpoint progress requires a graph-committed batch")
-        if not isinstance(checkpoint_interval, int) or checkpoint_interval <= 0:
-            raise ValueError("checkpoint_interval must be a positive integer")
         if not isinstance(current_count, int) or current_count < 0:
             raise ValueError("checkpoint current_count must be a non-negative integer")
-        self.checkpoint_interval = checkpoint_interval
+        if self.checkpoint_interval != self.policy.checkpoint_interval:
+            raise ValueError("Checkpoint progress requires the batch policy interval")
         self.checkpoint_count = current_count
 
     def complete(self) -> None:
@@ -415,6 +421,18 @@ class IngestionBatch:
                 self._advance_durable(IngestionStage.FAILED)
             else:
                 self.advance_to(IngestionStage.FAILED)
+
+    def cancel_work(self, summary: str = "Ingestion cancelled") -> None:
+        """Record cancellation on every active operational record this batch owns."""
+
+        if self.released:
+            raise RuntimeError("IngestionBatch has been released")
+        for work in (self.graph_work_unit, self.work_unit):
+            if work is not None and work.status in {
+                WorkStatus.PENDING,
+                WorkStatus.RUNNING,
+            }:
+                work.mark_cancelled(summary)
 
     def seal_for_commit(self) -> None:
         """Freeze prepared data after validating it for graph persistence."""
@@ -446,6 +464,30 @@ class IngestionBatch:
 
     def mark_graph_committed(self) -> None:
         self.require_sealed_for_commit()
+        graph_work = self.graph_work_unit
+        if graph_work is None:
+            raise RuntimeError("Graph commit requires a graph work unit")
+        match graph_work.status:
+            case WorkStatus.SUCCEEDED | WorkStatus.SKIPPED:
+                pass
+            case WorkStatus.PENDING:
+                raise ValueError(
+                    "Graph commit requires succeeded or skipped graph work; "
+                    "graph work is pending"
+                )
+            case WorkStatus.RUNNING:
+                raise ValueError(
+                    "Graph commit requires succeeded or skipped graph work; "
+                    "graph work is running"
+                )
+            case WorkStatus.FAILED:
+                raise ValueError("Graph commit cannot follow failed graph work")
+            case WorkStatus.DEFERRED:
+                raise ValueError("Graph commit cannot follow deferred graph work")
+            case WorkStatus.CANCELLED:
+                raise ValueError("Graph commit cannot follow cancelled graph work")
+            case unexpected:
+                assert_never(unexpected)
         self._mark_milestone(IngestionMilestone.GRAPH_COMMITTED)
         self._advance_durable(IngestionStage.GRAPH_COMMITTED)
 
@@ -454,6 +496,10 @@ class IngestionBatch:
             raise RuntimeError("IngestionBatch has been released")
         if self.stage is not IngestionStage.GRAPH_COMMITTED:
             raise ValueError("Checkpointing requires a graph-committed IngestionBatch")
+        if self.checkpoint_interval is None or self.checkpoint_count is None:
+            raise ValueError(
+                "Checkpointing requires a recorded checkpoint commit result"
+            )
         self._mark_milestone(IngestionMilestone.CHECKPOINT_COMMITTED)
         self._advance_durable(IngestionStage.COMMITTED)
 

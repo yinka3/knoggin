@@ -8,6 +8,8 @@ from common.schema.extraction_output import ConnectionMention, ConnectionsResult
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.profile import EntityProfile
+from tests.fixtures.factories import make_domain_config
+from tests.fixtures.ingestion import ingestion_policy
 
 
 class FakeLLM:
@@ -40,6 +42,7 @@ def make_processor(llm_response):
         cpu_executor=None,
         user_name="Ada",
         topic_config=None,
+        compiled_domain=make_domain_config().compile(),
         get_next_ent_id=None,
     )
 
@@ -96,6 +99,7 @@ async def test_connection_extraction_falls_back_to_empty_on_llm_failure():
         session_id="session-1",
         messages=[{"id": 7, "message": "Alice met Bob."}],
         session_text="",
+        policy=ingestion_policy(),
     )
     batch.entity_ids = [1, 2]
     batch.entity_message_map = {1: [7], 2: [7]}
@@ -129,6 +133,7 @@ async def test_connection_extraction_keeps_valid_connections():
         session_id="session-1",
         messages=[{"id": 7, "message": "Alice met Bob."}],
         session_text="",
+        policy=ingestion_policy(),
     )
     batch.entity_ids = [1, 2]
     batch.entity_message_map = {1: [7], 2: [7]}
@@ -141,6 +146,10 @@ async def test_connection_extraction_keeps_valid_connections():
             entity_a_name="Alice",
             entity_b_name="Bob",
             relationship_type="met",
+            observed_label="met",
+            domain_status="unrecognized",
+            source_type="Identity",
+            target_type="Identity",
             confidence=0.9,
             context="Alice met Bob.",
         )

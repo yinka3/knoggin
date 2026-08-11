@@ -31,4 +31,4 @@ def test_episode_embedding_text_uses_only_current_narrative_fields():
 @pytest.mark.no_network
 def test_episode_rejects_invalid_embedding_dimensions():
     with pytest.raises(ValueError, match="exactly 1024 dimensions"):
-        make_episode(embedding=[0.0] * 1023)
+        make_episode().validated_copy(update={"embedding": [0.0] * 1023})

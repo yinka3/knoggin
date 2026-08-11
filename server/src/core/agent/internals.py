@@ -792,6 +792,20 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} items", count
 
+    if tool_name == "list_workspace_files":
+        count = len(data) if isinstance(data, list) else 0
+        return f"Found {count} managed workspace files", count
+
+    if tool_name == "read_workspace_file":
+        return "Read managed workspace file", 1
+
+    if tool_name in (
+        "create_workspace_file",
+        "update_workspace_file",
+        "append_workspace_file",
+    ):
+        return "Managed workspace file updated", 1
+
     if tool_name == "get_folder_upload_summary":
         if isinstance(data, dict):
             return "Loaded folder upload summary", 1

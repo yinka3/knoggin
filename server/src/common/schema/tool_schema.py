@@ -2,6 +2,75 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_engine_health",
+            "description": (
+                "Read the live Knoggin engine health. This is a bounded, "
+                "read-only diagnostic for dependency availability and runtime "
+                "lifecycle state; it does not change anything."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            "tags": ["runtime:health", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_resource_health",
+            "description": (
+                "Read bounded resource capacity and queue pressure for the "
+                "current project. This is a read-only diagnostic and does not "
+                "trigger work or acquire leases."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            "tags": ["runtime:health", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ingestion_health",
+            "description": (
+                "Read bounded ingestion worker, pending-buffer, checkpoint, "
+                "and dead-letter queue health for the current session. This "
+                "is a read-only diagnostic and does not wake, flush, stop, "
+                "or retry ingestion work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            "tags": ["runtime:health", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_background_health",
+            "description": (
+                "Read bounded scheduler, background-work, and document-indexing "
+                "health for the current project. This is a read-only diagnostic; "
+                "it does not acquire leases, trigger jobs, or alter queues."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            "tags": ["runtime:health", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_topics",
             "description": (
                 "Propose bounded changes to the current project's durable topic "
@@ -850,6 +919,182 @@ TOOL_SCHEMAS = [
             },
             "tags": ["graph", "core"]
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_workspace_files",
+            "description": (
+                "List bounded metadata for files in the current project's "
+                "managed workspace. This is project-scoped and does not expose "
+                "the host filesystem."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path_prefix": {
+                        "type": "string",
+                        "maxLength": 512,
+                        "description": "Optional relative directory or path prefix.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Maximum files to return (default 100).",
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            "tags": ["workspace:read", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_workspace_file",
+            "description": (
+                "Read a bounded line and character slice from one file in the "
+                "current project's managed workspace. PROJECT.md is readable "
+                "but remains user-owned."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512,
+                        "description": "Relative managed-workspace file path.",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "First one-based line to read (default 1).",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional inclusive final line, within 200 lines.",
+                    },
+                    "max_characters": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 12000,
+                        "description": "Maximum returned characters (default 12000).",
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "tags": ["workspace:read", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_workspace_file",
+            "description": (
+                "Create a non-empty bounded artifact in the current project's "
+                "managed workspace. Ordinary agent tools cannot create or edit "
+                "the user-owned PROJECT.md."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512,
+                        "description": "Relative path for the new workspace artifact.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20000,
+                        "description": "UTF-8 text content, at most 20,000 characters.",
+                    },
+                },
+                "required": ["path", "content"],
+                "additionalProperties": False,
+            },
+            "tags": ["workspace:write", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_workspace_file",
+            "description": (
+                "Replace a managed workspace artifact using optimistic "
+                "concurrency. The supplied SHA-256 content hash must still be "
+                "current; PROJECT.md cannot be changed by this ordinary tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512,
+                        "description": "Relative path of the workspace artifact.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20000,
+                        "description": "Replacement UTF-8 text content.",
+                    },
+                    "expected_content_hash": {
+                        "type": "string",
+                        "minLength": 64,
+                        "maxLength": 64,
+                        "description": "Current SHA-256 hash of the file content.",
+                    },
+                },
+                "required": ["path", "content", "expected_content_hash"],
+                "additionalProperties": False,
+            },
+            "tags": ["workspace:write", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_workspace_file",
+            "description": (
+                "Append bounded UTF-8 content to a managed workspace artifact "
+                "using an expected SHA-256 content hash. PROJECT.md cannot be "
+                "changed by this ordinary tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512,
+                        "description": "Relative path of the workspace artifact.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20000,
+                        "description": "UTF-8 text appended to the artifact.",
+                    },
+                    "expected_content_hash": {
+                        "type": "string",
+                        "minLength": 64,
+                        "maxLength": 64,
+                        "description": "Current SHA-256 hash of the file content.",
+                    },
+                },
+                "required": ["path", "content", "expected_content_hash"],
+                "additionalProperties": False,
+            },
+            "tags": ["workspace:write", "project", "core"],
+        },
     }
 ]
 
@@ -885,6 +1130,9 @@ _TOOL_CAPABILITIES = {
     "edit_brain": IDENTITY_WRITE_CAPABILITY,
     "restore_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
+    "create_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
+    "update_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
+    "append_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:

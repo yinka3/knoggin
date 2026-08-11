@@ -1,7 +1,10 @@
+from typing import assert_never
+
 from loguru import logger
 
 from common.conf.manager import ConfigManager
 from core.community.community_manager import CommunityManager
+from core.community.policy import CommunityDiscussionAdmissionOutcome
 from core.project.state import ProjectState
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 
@@ -43,7 +46,18 @@ class AACJob(BaseJob):
             self.resources,
         )
         try:
-            await manager.trigger_discussion()
+            admission = await manager.trigger_discussion()
+
+            match admission.outcome:
+                case CommunityDiscussionAdmissionOutcome.SKIPPED:
+                    return JobResult(
+                        success=True,
+                        summary=f"Discussion skipped: {admission.reason}",
+                    )
+                case CommunityDiscussionAdmissionOutcome.STARTED:
+                    pass
+                case unexpected:
+                    assert_never(unexpected)
 
             if (
                 self.resources.knowledge_store
@@ -55,7 +69,13 @@ class AACJob(BaseJob):
                     project_id=self.project_state.project_id,
                 )
 
-            return JobResult(success=True, summary="Discussion triggered")
+            return JobResult(
+                success=True,
+                summary=(
+                    f"Discussion started: {admission.discussion_id} "
+                    f"(policy {admission.policy_version})"
+                ),
+            )
         except Exception as e:
             logger.error(f"AAC: Discussion failed: {e}")
             return JobResult(success=False, summary=str(e))

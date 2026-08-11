@@ -1,15 +1,21 @@
 import asyncio
+import hashlib
 import json
 import uuid
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from enum import Enum
 from functools import partial
 from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.conf.domain_config import DomainConfig
 from common.conf.manager import ConfigManager
-from common.conf.topics_config import TopicConfig, load_topic_seed
+from common.conf.topics_config import TopicConfig
+from common.schema.settings import TopicSchema
 from common.scoping import IDENTITY_ENTITY_ID, build_readable_project_ids
+from common.utils.time_utils import get_now_iso
 from core.community.community_job import AACJob
 from core.ingestion.jobs.cleaner_job import EntityCleanupJob
 from core.ingestion.jobs.dlq_job import DLQReplayJob
@@ -17,6 +23,7 @@ from core.ingestion.jobs.episode_job import EpisodeJob
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.db.write_graph_db import write_batch_callback
+from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
 from core.knowledge.entity.resolver import EntityResolver
@@ -26,7 +33,31 @@ from core.knowledge.jobs.audit_retention_cleanup_job import (
 from core.knowledge.jobs.merge_rollback_cleanup_job import (
     MergeCleanupJob,
 )
+from core.knowledge.relationship_advisories import (
+    AdvisoryThresholds,
+    RelationshipAdvisory,
+    RelationshipAdvisoryDecision,
+)
+from core.project.domain_config_operations import (
+    DomainCandidate,
+    DomainConfigOperations,
+    DomainPreview,
+    DomainValidation,
+    parse_candidate,
+)
+from core.project.domain_config_operations import (
+    preview_domain_config as build_domain_preview,
+)
+from core.project.domain_config_operations import (
+    validate_domain_config as validate_domain_candidate,
+)
+from core.project.domain_config_store import (
+    DomainActivation,
+    DomainConfigConflict,
+    DomainConfigStore,
+)
 from core.project.state import ProjectState
+from core.project.workspace_service import PROJECT_FILE_PATH, build_project_markdown
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
 from infrastructure.resources import ResourceManager
@@ -36,6 +67,62 @@ class ProjectStatus(str, Enum):
     ACTIVE = "active"
     ARCHIVED = "archived"
     DELETED = "deleted"
+
+
+def _topic_projection(domain_config: DomainConfig) -> dict[str, TopicSchema]:
+    """Build the internal topic view from the active domain configuration.
+
+    DomainConfig is the only project-owned semantic configuration.  A compact
+    topic projection remains for older runtime consumers that need active topic
+    names or prompt formatting; it is derived at project creation and is never
+    seeded independently.
+    """
+
+    labels_by_topic: dict[str, list[str]] = {
+        topic.name: [] for topic in domain_config.topics
+    }
+    for entity_type in domain_config.entity_types:
+        labels_by_topic[entity_type.topic].extend(entity_type.labels)
+
+    projected: dict[str, TopicSchema] = {}
+    for topic in domain_config.topics:
+        labels = list(dict.fromkeys(labels_by_topic[topic.name]))
+        projected[topic.name] = TopicSchema(
+            active=topic.active,
+            labels=labels,
+            aliases=[],
+        )
+    return projected
+
+
+def _parse_initial_domain(candidate: DomainConfig | Mapping[str, object]) -> DomainConfig:
+    """Validate the complete domain required to create a new project."""
+
+    config = parse_candidate(candidate)
+    if config.version != 0:
+        raise ValueError("A new project's domain_config.version must be 0")
+    if not config.topics:
+        raise ValueError("A new project requires at least one domain topic")
+    if not config.entity_types:
+        raise ValueError("A new project requires at least one domain entity type")
+
+    topics = {topic.name.casefold(): topic for topic in config.topics}
+    identity_topic = topics.get("identity")
+    if identity_topic is None or not identity_topic.active:
+        raise ValueError(
+            "A new project's domain must include an active 'Identity' topic"
+        )
+    entity_types = {entity.name.casefold(): entity for entity in config.entity_types}
+    identity_type = entity_types.get("identity")
+    if (
+        identity_type is None
+        or identity_type.topic.casefold() != "identity"
+        or not identity_topic.active
+    ):
+        raise ValueError(
+            "A new project's domain must include an entity type named 'Identity'"
+        )
+    return config.with_version(1)
 
 
 class ProjectManager:
@@ -49,6 +136,7 @@ class ProjectManager:
         self.active_projects: Dict[str, ProjectState] = {}
         self._identity_initialized = False
         self._maintenance_lock = asyncio.Lock()
+        self._closed = False
 
     @property
     def config(self):
@@ -61,31 +149,33 @@ class ProjectManager:
     async def create_project(
         self,
         name: str,
+        domain_config: DomainConfig | Mapping[str, object],
         description: Optional[str] = None,
         access_mode: str = "open",
         allowed_projects: Optional[List[str]] = None,
     ) -> dict:
-        """Create a new project and store its metadata in Postgres."""
+        """Create a project with its first active domain revision."""
         if not name or not name.strip():
             raise ValueError("create_project requires a non-empty project name")
 
         name = name.strip()
+        active_domain = _parse_initial_domain(domain_config)
         project_id = str(uuid.uuid4())
         allowed_projects = await self._validate_allowed_project_ids(
             project_id, allowed_projects or []
         )
-        topic_seed = {
+        topic_projection = {
             topic: config.model_dump(mode="json")
-            for topic, config in load_topic_seed().items()
+            for topic, config in _topic_projection(active_domain).items()
         }
 
         project_query = """
             INSERT INTO public.projects (
                 project_id, user_name, name, description, access_mode, status,
-                topic_config
+                topic_config, domain_config
             ) VALUES (
                 %(project_id)s, %(user_name)s, %(name)s, %(description)s,
-                %(access_mode)s, %(status)s, %(topic_config)s
+                %(access_mode)s, %(status)s, %(topic_config)s, %(domain_config)s
             )
         """
         scope_query = """
@@ -94,6 +184,17 @@ class ProjectManager:
             )
             VALUES (%(user_name)s, %(project_id)s, %(readable)s)
         """
+        project_workspace_writer = DocumentWriter(self.pg, project_id)
+        workspace_source_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"knoggin-project-workspace:{project_id}",
+            )
+        )
+        project_file_content = build_project_markdown(name, description).encode(
+            "utf-8"
+        )
+        project_file_hash = hashlib.sha256(project_file_content).hexdigest()
         async with self.pg.transaction() as cur:
             await cur.execute(
                 project_query,
@@ -104,7 +205,8 @@ class ProjectManager:
                     "description": description,
                     "access_mode": access_mode,
                     "status": ProjectStatus.ACTIVE.value,
-                    "topic_config": json.dumps(topic_seed),
+                    "topic_config": json.dumps(topic_projection),
+                    "domain_config": json.dumps(active_domain.to_dict()),
                 },
             )
             for allowed_id in allowed_projects:
@@ -116,6 +218,17 @@ class ProjectManager:
                         "readable": allowed_id,
                     },
                 )
+            await project_workspace_writer.insert_managed_workspace_source_and_file(
+                cursor=cur,
+                source_id=workspace_source_id,
+                display_name="Project Workspace",
+                relative_path=PROJECT_FILE_PATH,
+                original_name=PROJECT_FILE_PATH,
+                extension=".md",
+                content=project_file_content,
+                content_hash=project_file_hash,
+                created_at=get_now_iso(),
+            )
 
         logger.info(f"Created project {project_id} ('{name}')")
         return await self.get_project(project_id)
@@ -147,8 +260,8 @@ class ProjectManager:
             ]:
                 if meta.get(time_field):
                     meta[time_field] = meta[time_field].isoformat()
-            if "topic_config" in meta:
-                del meta["topic_config"]
+            for private_field in ("topic_config", "domain_config"):
+                meta.pop(private_field, None)
             projects.append(meta)
 
         return projects
@@ -180,9 +293,123 @@ class ProjectManager:
         ]:
             if meta.get(time_field):
                 meta[time_field] = meta[time_field].isoformat()
-        if "topic_config" in meta:
-            del meta["topic_config"]
+        for private_field in ("topic_config", "domain_config"):
+            meta.pop(private_field, None)
         return meta
+
+    def validate_domain_config(self, candidate: DomainCandidate) -> DomainValidation:
+        """Validate a complete candidate without touching project state."""
+
+        return validate_domain_candidate(candidate)
+
+    async def get_domain_config(self, project_id: str) -> DomainConfig:
+        """Read the durable active domain configuration for one project."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        return await DomainConfigStore(self.pg).load(self.user_name, project_id)
+
+    async def preview_domain_config(
+        self,
+        project_id: str,
+        candidate: DomainCandidate,
+    ) -> DomainPreview:
+        """Compare a complete candidate with the project's active revision."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        current = await DomainConfigStore(self.pg).load(
+            self.user_name,
+            project_id,
+        )
+        return build_domain_preview(current, candidate)
+
+    async def activate_domain_config(
+        self,
+        project_id: str,
+        candidate: DomainCandidate,
+        *,
+        expected_version: int,
+    ) -> DomainActivation:
+        """Validate and optimistically activate a project's domain candidate.
+
+        Active runtimes receive the new immutable snapshot through
+        ``ProjectState``.  Projects without a loaded runtime update durable
+        storage directly; their next runtime bootstrap reads the new revision.
+        """
+
+        async with self._maintenance_lock:
+            await self._require_domain_project(project_id, allow_archived=False)
+            active_state = self.active_projects.get(project_id)
+            if active_state is not None:
+                return await DomainConfigOperations.activate(
+                    active_state,
+                    candidate,
+                    expected_version=expected_version,
+                )
+
+            parsed = parse_candidate(candidate)
+            return await DomainConfigStore(self.pg).activate(
+                user_name=self.user_name,
+                project_id=project_id,
+                candidate=parsed,
+                expected_version=expected_version,
+            )
+
+    async def _require_domain_project(
+        self,
+        project_id: str,
+        *,
+        allow_archived: bool,
+    ) -> dict:
+        project = await self.get_project(project_id)
+        if project is None:
+            raise ValueError(f"Project '{project_id}' does not exist")
+        allowed_statuses = {ProjectStatus.ACTIVE.value}
+        if allow_archived:
+            allowed_statuses.add(ProjectStatus.ARCHIVED.value)
+        if project["status"] not in allowed_statuses:
+            raise ValueError(
+                f"Project '{project_id}' is {project['status']} and cannot use "
+                "domain configuration operations"
+            )
+        return project
+
+    async def get_relationship_advisories(
+        self,
+        project_id: str,
+        *,
+        thresholds: AdvisoryThresholds | None = None,
+    ) -> list[RelationshipAdvisory]:
+        """Read evidence-backed relationship advisories with dispositions."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        return await self.resources.knowledge_store.get_relationship_advisories(
+            user_name=self.user_name,
+            project_id=project_id,
+            thresholds=thresholds,
+        )
+
+    async def apply_relationship_advisory_action(
+        self,
+        project_id: str,
+        pattern_key: str,
+        action: str,
+        *,
+        relationship_type: str | None = None,
+        note: str | None = None,
+        decided_by: str | None = None,
+    ) -> RelationshipAdvisoryDecision:
+        """Persist an advisory decision without activating domain changes."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        return await self.resources.knowledge_store.apply_relationship_advisory_action(
+            user_name=self.user_name,
+            project_id=project_id,
+            pattern_key=pattern_key,
+            action=action,
+            relationship_type=relationship_type,
+            note=note,
+            decided_by=decided_by,
+        )
 
     async def get_readable_project_ids(
         self,
@@ -535,18 +762,40 @@ class ProjectManager:
         return deleted
 
     async def acquire_project_for_session(
-        self, project_id: str, session_id: str, topics_config: Optional[dict] = None
+        self, project_id: str, session_id: str
     ) -> ProjectState:
         """Acquire runtime project state and record durable session membership."""
         async with self._maintenance_lock:
+            if self._closed:
+                raise RuntimeError("ProjectManager is shutting down")
             return await self._acquire_project_for_session(
                 project_id,
                 session_id,
-                topics_config=topics_config,
             )
 
+    @asynccontextmanager
+    async def project_runtime(
+        self,
+        project_id: str,
+        session_id: str,
+    ) -> AsyncIterator[ProjectState]:
+        """Own one session's lease on a project's in-memory runtime.
+
+        A caller that successfully enters this context owns exactly one
+        ``acquire_project_for_session`` reference.  Releasing that reference is
+        guaranteed on normal completion, failure, and cancellation.
+        """
+        state = await self.acquire_project_for_session(
+            project_id,
+            session_id,
+        )
+        try:
+            yield state
+        finally:
+            await self.release_project(project_id)
+
     async def _acquire_project_for_session(
-        self, project_id: str, session_id: str, topics_config: Optional[dict] = None
+        self, project_id: str, session_id: str
     ) -> ProjectState:
         if not project_id or not project_id.strip():
             raise ValueError("A persisted project_id is required to acquire a project")
@@ -565,52 +814,20 @@ class ProjectManager:
         await self._ensure_identity_invariant()
         project_state = await self._get_or_start_project(
             project_id,
-            initial_topics_config=topics_config,
             project_metadata=project,
         )
         return project_state
 
-    async def _ensure_project_topics_config(
-        self, project_id: str, initial_topics_config: Optional[dict] = None
-    ) -> None:
-        rows = await self.pg.fetch_all(
-            """
-            SELECT topic_config
-            FROM public.projects
-            WHERE user_name = %(user_name)s AND project_id = %(project_id)s
-            """,
-            {"user_name": self.user_name, "project_id": project_id},
-        )
-        if not rows:
-            raise ValueError(f"Project not found while seeding topics: {project_id}")
-        if rows[0].get("topic_config"):
-            return
-
-        topic_config = TopicConfig(
-            initial_topics_config
-            if initial_topics_config is not None
-            else load_topic_seed()
-        )
-        await topic_config.save(
-            self.pg,
-            self.user_name,
-            project_id,
-        )
-
-    async def get_or_start_project(
-        self, project_id: str, initial_topics_config: Optional[dict] = None
-    ) -> ProjectState:
+    async def get_or_start_project(self, project_id: str) -> ProjectState:
         """Get an existing ProjectState or bootstrap a new one."""
         async with self._maintenance_lock:
             return await self._get_or_start_project(
                 project_id,
-                initial_topics_config=initial_topics_config,
             )
 
     async def _get_or_start_project(
         self,
         project_id: str,
-        initial_topics_config: Optional[dict] = None,
         project_metadata: Optional[dict] = None,
     ) -> ProjectState:
         project = project_metadata or await self.get_project(project_id)
@@ -635,10 +852,10 @@ class ProjectManager:
             project_metadata=project,
         )
 
-        # Project topic config is the runtime source of truth. Seed it only when
-        # this project has no persisted config yet.
-        await self._ensure_project_topics_config(project_id, initial_topics_config)
+        domain_store = DomainConfigStore(self.pg)
+        domain_config = await domain_store.load(self.user_name, project_id)
         t_config = await TopicConfig.load(self.pg, self.user_name, project_id)
+        compiled_domain = domain_config.compile()
 
         # Entity Manager
         er_cfg = self.dev_settings.entity_resolution
@@ -682,6 +899,7 @@ class ProjectManager:
             cpu_executor=self.resources.executor,
             user_name=self.user_name,
             topic_config=t_config,
+            compiled_domain=compiled_domain,
             get_next_ent_id=self.resources.knowledge_store.allocate_entity_id,
             resolution_threshold=er_cfg.resolution_threshold,
             common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
@@ -708,9 +926,11 @@ class ProjectManager:
             redis_client=self.resources.redis,
             postgres_client=self.resources.postgres,
             embedding_service=self.resources.embedding,
+            domain_config=domain_config,
             readable_project_ids=readable_project_ids,
             batch_processor=project_processor,
             background_work=getattr(self.resources, "background_work", None),
+            domain_config_store=domain_store,
         )
         project_state.episode_job = episode_job
 
@@ -759,6 +979,202 @@ class ProjectManager:
                 identity_project_ids,
             )
 
+    async def preview_historical_reclassification(
+        self,
+        project_id: str,
+        *,
+        limit: int | None = 1000,
+    ) -> dict:
+        """Preview deterministic historical entity changes for active domain."""
+
+        async with self._maintenance_lock:
+            project = await self.get_project(project_id)
+            if project is None:
+                raise ValueError(f"Project '{project_id}' does not exist")
+
+            stored = await DomainConfigStore(self.pg).load(
+                self.user_name,
+                project_id,
+            )
+            domain = stored.compile()
+            return await self.resources.knowledge_store.preview_historical_reclassification(
+                user_name=self.user_name,
+                project_id=project_id,
+                domain=domain,
+                limit=limit,
+            )
+
+    async def reclassify_historical_entities(
+        self,
+        project_id: str,
+        *,
+        expected_domain_version: int,
+        batch_size: int = 100,
+        max_entities: int | None = None,
+    ) -> dict:
+        """Apply explicit, bounded historical entity reclassification.
+
+        The project must be runtime-inactive. Reclassification changes only
+        canonical entity type/topic fields; relationship observations retain
+        the source types they had when the evidence was captured. Derived AGE
+        and search projections are rebuilt after successful updates.
+        """
+
+        if (
+            not isinstance(expected_domain_version, int)
+            or isinstance(expected_domain_version, bool)
+            or expected_domain_version < 0
+        ):
+            raise ValueError("expected_domain_version must be a non-negative integer")
+
+        async with self._maintenance_lock:
+            project = await self.get_project(project_id)
+            if project is None:
+                raise ValueError(f"Project '{project_id}' does not exist")
+
+            active_runtime_projects = [
+                active_id
+                for active_id, state in self.active_projects.items()
+                if state.active_runtime_sessions_count > 0
+            ]
+            if active_runtime_projects:
+                raise RuntimeError(
+                    "Historical reclassification requires all project runtimes "
+                    "to be inactive; active projects: "
+                    f"{active_runtime_projects}"
+                )
+
+            stored = await DomainConfigStore(self.pg).load(
+                self.user_name,
+                project_id,
+            )
+            actual_version = stored.version
+            if actual_version != expected_domain_version:
+                raise DomainConfigConflict(expected_domain_version, actual_version)
+
+            domain = stored.compile()
+            result = await self.resources.knowledge_store.reclassify_historical_entities(
+                user_name=self.user_name,
+                project_id=project_id,
+                domain=domain,
+                batch_size=batch_size,
+                max_entities=max_entities,
+            )
+            summary = result.to_dict()
+            summary["projection_rebuilt"] = False
+            summary["search_index_rebuilt"] = False
+            if result.updated:
+                summary["projection"] = (
+                    await self.resources.knowledge_store.rebuild_project_projection(
+                        project_id,
+                        self.user_name,
+                    )
+                )
+                summary["projection_rebuilt"] = True
+
+                rows = await self.pg.fetch_all(
+                    """
+                    SELECT project_id
+                    FROM public.projects
+                    WHERE user_name = %(user_name)s
+                      AND status IN ('active', 'archived')
+                    ORDER BY project_id
+                    """,
+                    {"user_name": self.user_name},
+                )
+                summary["search_index"] = (
+                    await self.resources.knowledge_store.rebuild_project_search_indexes(
+                        project_id,
+                        self.user_name,
+                        [row["project_id"] for row in rows],
+                    )
+                )
+                summary["search_index_rebuilt"] = True
+            return summary
+
+    async def preview_historical_relationship_normalization(
+        self,
+        project_id: str,
+        *,
+        limit: int | None = 1000,
+    ) -> dict:
+        """Preview deterministic historical relationship normalization."""
+
+        async with self._maintenance_lock:
+            await self._require_domain_project(project_id, allow_archived=True)
+            stored = await DomainConfigStore(self.pg).load(
+                self.user_name,
+                project_id,
+            )
+            return await self.resources.knowledge_store.preview_historical_relationship_normalization(
+                user_name=self.user_name,
+                project_id=project_id,
+                domain=stored.compile(),
+                limit=limit,
+            )
+
+    async def normalize_historical_relationships(
+        self,
+        project_id: str,
+        *,
+        expected_domain_version: int,
+        batch_size: int = 100,
+        max_relationships: int | None = None,
+    ) -> dict:
+        """Apply explicit, bounded historical relationship normalization.
+
+        This operation only rewrites already-persisted unrecognized
+        relationships after an immutable domain-version check. It never runs
+        automatically during domain activation.
+        """
+
+        if (
+            not isinstance(expected_domain_version, int)
+            or isinstance(expected_domain_version, bool)
+            or expected_domain_version < 0
+        ):
+            raise ValueError("expected_domain_version must be a non-negative integer")
+
+        async with self._maintenance_lock:
+            await self._require_domain_project(project_id, allow_archived=True)
+            active_runtime_projects = [
+                active_id
+                for active_id, state in self.active_projects.items()
+                if state.active_runtime_sessions_count > 0
+            ]
+            if active_runtime_projects:
+                raise RuntimeError(
+                    "Historical relationship normalization requires all project "
+                    "runtimes to be inactive; active projects: "
+                    f"{active_runtime_projects}"
+                )
+
+            stored = await DomainConfigStore(self.pg).load(
+                self.user_name,
+                project_id,
+            )
+            if stored.version != expected_domain_version:
+                raise DomainConfigConflict(expected_domain_version, stored.version)
+
+            result = await self.resources.knowledge_store.normalize_historical_relationships(
+                user_name=self.user_name,
+                project_id=project_id,
+                domain=stored.compile(),
+                batch_size=batch_size,
+                max_relationships=max_relationships,
+            )
+            summary = result.to_dict()
+            summary["projection_rebuilt"] = False
+            if result.updated:
+                summary["projection"] = (
+                    await self.resources.knowledge_store.rebuild_project_projection(
+                        project_id,
+                        self.user_name,
+                    )
+                )
+                summary["projection_rebuilt"] = True
+            return summary
+
     async def release_project(self, project_id: str):
         """Release runtime project state when an active session closes."""
         async with self._maintenance_lock:
@@ -772,6 +1188,28 @@ class ProjectManager:
                 await state.shutdown()
                 del self.active_projects[project_id]
                 logger.info(f"Released ProjectState for project_id: {project_id}")
+
+    async def shutdown(self) -> None:
+        """Stop every remaining project runtime before shared resources close."""
+
+        async with self._maintenance_lock:
+            if self._closed and not self.active_projects:
+                return
+            self._closed = True
+            states = list(self.active_projects.values())
+            self.active_projects.clear()
+            for state in states:
+                state.active_runtime_sessions_count = 0
+
+        results = await asyncio.gather(
+            *(state.shutdown() for state in states),
+            return_exceptions=True,
+        )
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures:
+            raise RuntimeError(
+                f"Failed to shut down {len(failures)} project runtime(s)"
+            ) from failures[0]
 
     async def _verify_user_entity(self, entities: EntityResolver) -> None:
         user_id = await entities.get_id(self.user_name)
@@ -883,21 +1321,11 @@ class ProjectManager:
             write_to_graph=_dlq_write_callback,
             redis_client=self.resources.redis,
             settings=dlq_cfg,
-            checkpoint_interval=self.dev_settings.ingestion.checkpoint_interval,
         )
         scheduler.register(dlq_job)
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
         )
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                lambda config: dlq_job.update_checkpoint_interval(
-                    config.checkpoint_interval
-                ),
-                "developer_settings.ingestion",
-            )
-        )
-
         cleaner_job = EntityCleanupJob(
             user_name=self.user_name,
             knowledge_store=self.resources.knowledge_store,

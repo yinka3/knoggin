@@ -4,6 +4,7 @@ import psycopg
 import pytest
 
 from core.project.project_manager import ProjectManager
+from tests.fixtures.factories import make_domain_config
 
 
 async def _install_scope_insert_failure(client):
@@ -60,6 +61,7 @@ async def test_project_creation_rolls_back_when_scope_insert_fails(
         with pytest.raises(psycopg.Error, match="forced project scope insert failure"):
             await manager.create_project(
                 "Atomic project",
+                domain_config=make_domain_config(version=0),
                 allowed_projects=["project-1"],
             )
     finally:
@@ -80,8 +82,14 @@ async def test_scope_replacement_rolls_back_when_new_scope_insert_fails(
 ):
     await real_postgres_client.execute(
         """
-        INSERT INTO projects (project_id, user_name, name)
-        VALUES ('project-3', 'ada', 'Project 3')
+        INSERT INTO projects (
+            project_id, user_name, name, topic_config, domain_config
+        )
+        VALUES (
+            'project-3', 'ada', 'Project 3',
+            '{"Identity":{"active":true,"labels":["person"],"aliases":[]},"General":{"active":true,"labels":["concept"],"aliases":[]}}'::jsonb,
+            '{"version":1,"topics":{"Identity":{"description":"","active":true},"General":{"description":"","active":true}},"entity_types":{"Identity":{"topic":"Identity","description":"","labels":["person"]},"Concept":{"topic":"General","description":"","labels":["concept"]}},"relationships":{}}'::jsonb
+        )
         """
     )
     await real_postgres_client.execute(

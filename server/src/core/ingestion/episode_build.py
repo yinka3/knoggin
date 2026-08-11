@@ -20,6 +20,7 @@ from common.schema.episode_output import (
     LLMEpisodeDecision,
 )
 from common.utils.local_references import build_local_id_maps, resolve_local_id
+from core.ingestion.episode_policy import EpisodeGenerationPolicy
 
 
 @dataclass(slots=True)
@@ -28,12 +29,14 @@ class EpisodeBuild:
 
     project_id: str
     session_id: str
+    policy: EpisodeGenerationPolicy
     messages: list[dict]
     entity_ids_by_message: dict[int, list[int]]
     relationship_ids_by_message: dict[int, list[str]]
     entity_catalog: list[dict]
     relationship_catalog: list[dict]
     prior_episodes: list[Episode]
+    build_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     local_message_ids: dict[int, str] = field(default_factory=dict)
     message_ids_by_local: dict[str, int] = field(default_factory=dict)
     local_entity_ids: dict[int, str] = field(default_factory=dict)
@@ -58,6 +61,7 @@ class EpisodeBuild:
         *,
         project_id: str,
         session_id: str,
+        policy: EpisodeGenerationPolicy,
         messages: list[dict],
         entity_ids_by_message: dict[int, list[int]],
         relationship_ids_by_message: dict[int, list[str]],
@@ -70,6 +74,7 @@ class EpisodeBuild:
         return cls(
             project_id=project_id,
             session_id=session_id,
+            policy=policy,
             messages=[dict(message) for message in messages],
             entity_ids_by_message={
                 message_id: list(entity_ids)
@@ -80,7 +85,9 @@ class EpisodeBuild:
                 for message_id, relationship_ids in relationship_ids_by_message.items()
             },
             entity_catalog=[dict(entity) for entity in entity_catalog],
-            relationship_catalog=[dict(relationship) for relationship in relationship_catalog],
+            relationship_catalog=[
+                dict(relationship) for relationship in relationship_catalog
+            ],
             prior_episodes=list(prior_episodes),
         )
 
@@ -157,7 +164,9 @@ class EpisodeBuild:
             raise ValueError("EpisodeBuild source message IDs must be unique")
         expected_message_ids = set(message_ids)
         if set(self.entity_ids_by_message) != expected_message_ids:
-            raise ValueError("EpisodeBuild entity references must cover source messages")
+            raise ValueError(
+                "EpisodeBuild entity references must cover source messages"
+            )
         if set(self.relationship_ids_by_message) != expected_message_ids:
             raise ValueError(
                 "EpisodeBuild relationship references must cover source messages"
@@ -280,12 +289,7 @@ class EpisodeBuild:
                     "Episode decision consolidation target must be a prior candidate"
                 )
 
-    def create_episode(
-        self,
-        *,
-        max_message_count: int,
-        max_age_hours: Optional[float],
-    ) -> Optional[Episode]:
+    def create_episode(self) -> Optional[Episode]:
         """Build the strict persisted episode after all decisions are resolved."""
 
         self._require_active()
@@ -312,8 +316,8 @@ class EpisodeBuild:
             if self._exceeds_consolidation_limits(
                 target_episode,
                 message_count=len(messages),
-                max_message_count=max_message_count,
-                max_age_hours=max_age_hours,
+                max_message_count=self.policy.max_message_count,
+                max_age_hours=self.policy.max_age_hours,
             ):
                 should_create = True
                 self.consolidation_limit_hit = True
@@ -358,6 +362,7 @@ class EpisodeBuild:
                     not should_create and self.decision.action == "consolidate"
                 ),
                 "consolidation_limit_hit": self.consolidation_limit_hit,
+                "episode_policy": self.policy.metadata(),
             },
         )
         return self.final_episode
@@ -479,7 +484,9 @@ class EpisodeBuild:
                 {
                     **influence.model_dump(),
                     "message_id": int(
-                        resolve_local_id(influence.message_id, self.message_ids_by_local)
+                        resolve_local_id(
+                            influence.message_id, self.message_ids_by_local
+                        )
                     ),
                 }
                 for influence in output.message_influences
@@ -538,7 +545,8 @@ class EpisodeBuild:
             )
 
         central_relationship_ids = [
-            relationship.relationship_id for relationship in output.central_relationships
+            relationship.relationship_id
+            for relationship in output.central_relationships
         ]
         if len(central_relationship_ids) != len(set(central_relationship_ids)):
             raise ValueError(

@@ -317,7 +317,12 @@ class EntityResolver:
         }
 
     async def get_candidate_ids(
-        self, mention: str, precomputed_embedding: List[float] = None
+        self,
+        mention: str,
+        precomputed_embedding: List[float] = None,
+        *,
+        candidate_fuzzy_threshold: int | None = None,
+        candidate_vector_threshold: float | None = None,
     ) -> List[EntityCandidate]:
 
         if not mention:
@@ -325,6 +330,16 @@ class EntityResolver:
 
         candidates: Dict[int, EntityCandidate] = {}
         mention_lower = mention.strip().casefold()
+        fuzzy_threshold = (
+            self.candidate_fuzzy_threshold
+            if candidate_fuzzy_threshold is None
+            else candidate_fuzzy_threshold
+        )
+        vector_threshold = (
+            self.candidate_vector_threshold
+            if candidate_vector_threshold is None
+            else candidate_vector_threshold
+        )
 
         with self._lock:
             exact_ids = self._index.get_entity_ids_for_name(mention_lower)
@@ -341,7 +356,7 @@ class EntityResolver:
                 mention_lower,
                 choices,
                 limit=50,
-                score_cutoff=self.candidate_fuzzy_threshold,
+                score_cutoff=fuzzy_threshold,
                 scorer=scorer,
             )
 
@@ -378,7 +393,7 @@ class EntityResolver:
                     await self.knowledge_store.search_entities_by_embedding(
                         vector,
                         limit=5,
-                        score_threshold=self.candidate_vector_threshold,
+                        score_threshold=vector_threshold,
                         visible_project_ids=self.readable_project_ids,
                     )
                 )

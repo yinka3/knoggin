@@ -7,9 +7,10 @@ from core.ingestion.checkpoint import commit_ingestion_checkpoint
 from core.ingestion.dlq_payload import DLQPayload
 from core.ingestion.services import pipeline_service
 from core.ingestion.services.pipeline_service import IngestionPipeline
-from infrastructure.work_record import WorkRecord
 from infrastructure.redis_client import RedisKeys
+from infrastructure.work_record import WorkRecord
 from tests.fixtures.fakes import FakeRedis
+from tests.fixtures.ingestion import ingestion_policy
 
 
 def _graph_committed_batch() -> IngestionBatch:
@@ -19,6 +20,7 @@ def _graph_committed_batch() -> IngestionBatch:
         session_id="session-1",
         messages=[{"id": 7, "message": "Ada met Grace."}],
         session_text="[USER]: Ada met Grace.",
+        policy=ingestion_policy(),
         batch_id="batch-1",
     )
     batch.validate_input()
@@ -35,8 +37,12 @@ def _graph_committed_batch() -> IngestionBatch:
     batch.complete()
     batch.mark_message_logs_handled()
     batch.mark_candidate_suggestions_handled()
+    graph_work = WorkRecord.for_graph_write(
+        batch.scope,
+        batch_id=batch.work_unit.id,
+    )
     batch.set_graph_write_buffers(
-        graph_work_unit=WorkRecord.for_graph_write(batch.scope),
+        graph_work_unit=graph_work,
         safe_entity_ids=set(),
         graph_alias_updates=[],
         entity_writes=[],
@@ -48,6 +54,8 @@ def _graph_committed_batch() -> IngestionBatch:
         dirty_entity_ids=set(),
     )
     batch.seal_for_commit()
+    graph_work.mark_running()
+    graph_work.mark_skipped("No graph writes")
     batch.mark_graph_committed()
     return batch
 
@@ -55,15 +63,21 @@ def _graph_committed_batch() -> IngestionBatch:
 @pytest.mark.ingestion
 @pytest.mark.no_network
 def test_dlq_payload_restores_checkpoint_only_replay_state():
-    payload = DLQPayload.from_ingestion_batch(_graph_committed_batch())
+    batch = _graph_committed_batch()
+    payload = DLQPayload.from_ingestion_batch(batch)
 
     replay = payload.to_ingestion_batch()
 
-    assert payload.schema_version == 2
+    assert payload.schema_version == 3
     assert IngestionMilestone.GRAPH_COMMITTED in replay.milestones
     assert replay.sealed is True
     assert replay.stage is IngestionStage.GRAPH_COMMITTED
+    assert replay.policy == batch.policy
 
+    with pytest.raises(ValueError, match="recorded checkpoint commit result"):
+        replay.mark_checkpoint_committed()
+
+    replay.record_checkpoint_progress(current_count=1)
     replay.mark_checkpoint_committed()
 
     assert replay.stage is IngestionStage.COMMITTED
@@ -106,22 +120,15 @@ async def test_checkpoint_commit_is_idempotent_and_retains_counter_progress():
     batch = _graph_committed_batch()
     redis = FakeRedis()
 
-    first = await commit_ingestion_checkpoint(
-        redis,
-        batch,
-        checkpoint_interval=4,
-    )
+    first = await commit_ingestion_checkpoint(redis, batch)
     replay = DLQPayload.from_ingestion_batch(batch).to_ingestion_batch()
-    second = await commit_ingestion_checkpoint(
-        redis,
-        replay,
-        checkpoint_interval=4,
-    )
+    second = await commit_ingestion_checkpoint(redis, replay)
 
     assert first.count_before_reset == 1
     assert first.current_count == 1
     assert second == first
-    assert replay.checkpoint_interval == 4
+    assert replay.checkpoint_interval == replay.policy.checkpoint_interval
     assert replay.checkpoint_count == 1
     assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
     assert redis.strings[RedisKeys.last_processed("ada", "session-1")] == "7"
+    assert redis.evals[0][1][5] == batch.policy.checkpoint_interval

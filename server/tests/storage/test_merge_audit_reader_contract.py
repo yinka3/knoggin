@@ -13,6 +13,7 @@ async def test_merge_audit_reader_reads_candidate_snapshot():
             [{"message_id": 7, "entity_id": 2}],
             [{"episode_id": "episode-1", "entity_id": 2}],
             [{"relationship_id": "rel-1"}],
+            [{"observation_id": 1, "relationship_id": "rel-1"}],
             [{"episode_id": "episode-1", "relationship_id": "rel-1"}],
             [{"parent_id": 9, "child_id": 2}],
         ]
@@ -26,6 +27,9 @@ async def test_merge_audit_reader_reads_candidate_snapshot():
         "message_refs": [{"message_id": 7, "entity_id": 2}],
         "episode_entities": [{"episode_id": "episode-1", "entity_id": 2}],
         "relationships": [{"relationship_id": "rel-1"}],
+        "relationship_observations": [
+            {"observation_id": 1, "relationship_id": "rel-1"}
+        ],
         "episode_relationships": [
             {"episode_id": "episode-1", "relationship_id": "rel-1"}
         ],
@@ -33,7 +37,7 @@ async def test_merge_audit_reader_reads_candidate_snapshot():
     }
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1
-    assert len(client.calls) == 7
+    assert len(client.calls) == 8
     assert (
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
         in client.calls[0][1]
@@ -42,8 +46,9 @@ async def test_merge_audit_reader_reads_candidate_snapshot():
     assert "FROM message_entity_refs" in client.calls[2][1]
     assert "FROM episode_entities" in client.calls[3][1]
     assert "FROM relationships r" in client.calls[4][1]
-    assert "FROM episode_relationships" in client.calls[5][1]
-    assert "FROM hierarchy_edges h" in client.calls[6][1]
+    assert "FROM relationship_observations observation" in client.calls[5][1]
+    assert "FROM episode_relationships" in client.calls[6][1]
+    assert "FROM hierarchy_edges h" in client.calls[7][1]
 
 
 class MutatingMergeAuditReader(MergeAuditReader):
@@ -65,11 +70,12 @@ class MutatingMergeAuditReader(MergeAuditReader):
                     project_id,
                     entity_a_id,
                     entity_b_id,
-                    relationship_type
+                    relationship_type,
+                    observed_relationship_label
                 )
                 VALUES (
                     'project-1:2:3:related', 'ada', 'project-1', 2, 3,
-                    'related'
+                    'related', 'related'
                 )
                 """
             )

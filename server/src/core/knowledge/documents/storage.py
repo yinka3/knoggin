@@ -11,7 +11,11 @@ import tree_sitter_bash
 import tree_sitter_c
 import tree_sitter_c_sharp
 import tree_sitter_cpp
-import tree_sitter_dockerfile
+
+try:
+    import tree_sitter_dockerfile
+except ImportError:  # pragma: no cover - dependency is declared by the server
+    tree_sitter_dockerfile = None
 import tree_sitter_go
 import tree_sitter_java
 import tree_sitter_javascript
@@ -104,12 +108,16 @@ _NOTEBOOK_CELL_HEADER = re.compile(
     r"^\[\[KNOGGIN_NOTEBOOK_CELL index=(\d+) type=(code|markdown)\]\]$",
     re.MULTILINE,
 )
+_DOCKERFILE_INSTRUCTION_PATTERN = re.compile(r"^([A-Za-z]+)(?:\s|$)")
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _DOCX_HEADING_STYLE = re.compile(r"^Heading ([1-9])$", re.IGNORECASE)
 _TEXT_CHUNK_TARGET_CHARS = CHUNK_SIZE_TOKENS * 4
 
-def _dockerfile_language() -> Language:
+def _dockerfile_language() -> Optional[Language]:
     """Load the Dockerfile grammar while isolating its legacy handle warning."""
+    language_factory = getattr(tree_sitter_dockerfile, "language", None)
+    if language_factory is None:
+        return None
     # tree-sitter-dockerfile 0.2.0 still exports an integer language handle.
     # Remove this narrow filter once it adopts Tree-sitter's capsule-based API.
     with warnings.catch_warnings():
@@ -118,7 +126,7 @@ def _dockerfile_language() -> Language:
             message="int argument support is deprecated",
             category=DeprecationWarning,
         )
-        return Language(tree_sitter_dockerfile.language())
+        return Language(language_factory())
 
 
 # Languages are immutable and safe to share. Parsers are created per call
@@ -128,7 +136,6 @@ _TREE_SITTER_LANGUAGES = {
     ".c": Language(tree_sitter_c.language()),
     ".cpp": Language(tree_sitter_cpp.language()),
     ".cs": Language(tree_sitter_c_sharp.language()),
-    ".dockerfile": _dockerfile_language(),
     ".go": Language(tree_sitter_go.language()),
     ".h": Language(tree_sitter_c.language()),
     ".hpp": Language(tree_sitter_cpp.language()),
@@ -145,6 +152,9 @@ _TREE_SITTER_LANGUAGES = {
     ".yml": Language(tree_sitter_yaml.language()),
     ".zsh": Language(tree_sitter_bash.language()),
 }
+_DOCKERFILE_LANGUAGE = _dockerfile_language()
+if _DOCKERFILE_LANGUAGE is not None:
+    _TREE_SITTER_LANGUAGES[".dockerfile"] = _DOCKERFILE_LANGUAGE
 _TREE_SITTER_SYMBOL_TYPES = {
     "bash": {"function_definition"},
     "c": {
@@ -795,9 +805,12 @@ def _split_code_with_regex(text: str, language: str) -> List[DocumentChunk]:
         raise ValueError("Document produced no non-empty chunks")
     boundaries = []
     for index, line in enumerate(lines):
-        match = _SYMBOL_PATTERN.match(line) if line == line.lstrip() else None
+        if language == "dockerfile":
+            match = _DOCKERFILE_INSTRUCTION_PATTERN.match(line)
+        else:
+            match = _SYMBOL_PATTERN.match(line) if line == line.lstrip() else None
         if match:
-            boundaries.append((index, match.group(1)))
+            boundaries.append((index, match.group(1).upper() if language == "dockerfile" else match.group(1)))
     return _split_code_sections(text, language, boundaries)
 
 

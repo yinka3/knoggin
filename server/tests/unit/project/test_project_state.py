@@ -28,6 +28,7 @@ async def test_project_state_shutdown_unsubscribes_and_stops_scheduler():
     state.add_config_unsubscriber(lambda: calls.append("second"))
 
     await state.shutdown()
+    await state.shutdown()
 
     assert calls == ["first", "second"]
     assert state.config_unsubscribers == []
@@ -55,3 +56,22 @@ async def test_project_state_shutdown_cancels_tracked_community_task():
 
     assert cancelled.is_set()
     assert task.cancelled()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_project_state_rejects_missing_domain_configuration():
+    state = make_project_state()
+
+    class EmptyDomainStore:
+        async def load(self, user_name, project_id):
+            assert (user_name, project_id) == ("ada", "project-1")
+            return None
+
+    state.domain_config_store = EmptyDomainStore()
+
+    with pytest.raises(
+        RuntimeError,
+        match="domain configuration is required",
+    ):
+        await state.load_domain_config()

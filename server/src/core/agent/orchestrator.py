@@ -308,12 +308,14 @@ class Orchestrator:
             topic_config=context.project.topic_config,
             search_config=search_cfg,
             document_service=context.document_service,
+            workspace_service=getattr(context.project, "workspace_service", None),
             document_focus=document_focus,
             knowledge_store=context.knowledge_store,
             postgres=context.resources.postgres,
             redis=context.redis_client,
             agent_id=agent_id,
             episode_settings=config.developer_settings.jobs.episode,
+            health_service=getattr(context.resources, "health_service", None),
             topic_refresh_callback=(
                 context.project.refresh_topic_mappings if context.project else None
             ),

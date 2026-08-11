@@ -41,6 +41,7 @@ class CommunityTools(Tools):
             topic_config=base_tools.topic_config,
             search_config=base_tools.search_cfg,
             document_service=getattr(base_tools, "document_service", None),
+            workspace_service=getattr(base_tools, "workspace_service", None),
             document_focus=getattr(base_tools, "document_focus", None),
             knowledge_store=base_tools.knowledge_store,
             postgres=base_tools.postgres,

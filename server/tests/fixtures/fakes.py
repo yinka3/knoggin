@@ -612,7 +612,38 @@ class FakePostgresClient:
             "description": None,
             "access_mode": "open",
             "status": status,
-            "topic_config": {},
+            "topic_config": {
+                "Identity": {
+                    "active": True,
+                    "labels": ["person"],
+                    "aliases": [],
+                },
+                "General": {
+                    "active": True,
+                    "labels": ["concept"],
+                    "aliases": [],
+                },
+            },
+            "domain_config": {
+                "version": 1,
+                "topics": {
+                    "Identity": {"description": "", "active": True},
+                    "General": {"description": "", "active": True},
+                },
+                "entity_types": {
+                    "Identity": {
+                        "topic": "Identity",
+                        "description": "",
+                        "labels": ["person"],
+                    },
+                    "Concept": {
+                        "topic": "General",
+                        "description": "",
+                        "labels": ["concept"],
+                    },
+                },
+                "relationships": {},
+            },
             "created_at": self._now(),
             "updated_at": self._now(),
             "archived_at": None,
@@ -648,6 +679,9 @@ class FakePostgresClient:
                 "topic_config": json.loads(params["topic_config"])
                 if isinstance(params.get("topic_config"), str)
                 else params.get("topic_config", {}),
+                "domain_config": json.loads(params["domain_config"])
+                if isinstance(params.get("domain_config"), str)
+                else params.get("domain_config", {}),
                 "created_at": now,
                 "updated_at": now,
                 "archived_at": None,
@@ -762,6 +796,9 @@ class FakePostgresClient:
                 "topic_config": json.loads(params["topic_config"])
                 if isinstance(params.get("topic_config"), str)
                 else params.get("topic_config", {}),
+                "domain_config": json.loads(params["domain_config"])
+                if isinstance(params.get("domain_config"), str)
+                else params.get("domain_config", {}),
                 "created_at": now,
                 "updated_at": now,
                 "archived_at": None,
@@ -859,10 +896,18 @@ class FakePostgresClient:
             row = self.projects.get(params.get("project_id"))
             if not row:
                 return
-            for field in ("name", "description", "status", "topic_config"):
+            for field in (
+                "name",
+                "description",
+                "status",
+                "topic_config",
+                "domain_config",
+            ):
                 if field in params:
                     value = params[field]
-                    if field == "topic_config" and isinstance(value, str):
+                    if field in {"topic_config", "domain_config"} and isinstance(
+                        value, str
+                    ):
                         value = json.loads(value)
                     row[field] = value
             if "archived_at = now()" in normalized:
@@ -1004,22 +1049,29 @@ class FakeProjectManager:
     def __init__(self, project_state=None):
         self.project_state = project_state
         self.acquire_calls: list[tuple[str, str]] = []
-        self.acquire_topic_configs = []
         self.release_calls: list[str] = []
         self.add_session_calls: list[tuple[str, str]] = []
         self.remove_session_calls: list[tuple[str, str]] = []
 
-    async def acquire_project_for_session(
-        self, project_id, session_id, topics_config=None
-    ):
+    async def acquire_project_for_session(self, project_id, session_id):
         self.acquire_calls.append((project_id, session_id))
-        self.acquire_topic_configs.append(topics_config)
         if self.project_state is not None:
             return self.project_state
         return object()
 
     async def release_project(self, project_id):
         self.release_calls.append(project_id)
+
+    @asynccontextmanager
+    async def project_runtime(self, project_id, session_id):
+        project_state = await self.acquire_project_for_session(
+            project_id,
+            session_id,
+        )
+        try:
+            yield project_state
+        finally:
+            await self.release_project(project_id)
 
     async def add_session(self, project_id, session_id):
         self.add_session_calls.append((project_id, session_id))

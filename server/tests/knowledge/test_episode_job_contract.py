@@ -8,6 +8,7 @@ from common.schema.episode_output import (
 )
 from common.schema.settings import EpisodeSettings, IngestionSettings
 from core.ingestion.jobs.episode_job import EpisodeJob
+from core.ingestion.ports import EmbeddingEncoder, EpisodeStore, StructuredGenerator
 from infrastructure.job.base import JobContext
 
 
@@ -184,6 +185,17 @@ class ConsolidatingEpisodeStore(WritingEpisodeStore):
         ]
 
 
+def test_episode_job_fakes_match_their_narrow_runtime_protocols():
+    decision = LLMEpisodeDecision(
+        action="skip",
+        skip_reason="No durable memory.",
+    )
+
+    assert isinstance(ConsolidatingEpisodeStore(), EpisodeStore)
+    assert isinstance(FakeEpisodeLLM(decision), StructuredGenerator)
+    assert isinstance(FakeEmbeddingService(), EmbeddingEncoder)
+
+
 @pytest.mark.no_network
 async def test_episode_job_derives_target_window_from_ingestion_batches():
     job = EpisodeJob(
@@ -193,9 +205,9 @@ async def test_episode_job_derives_target_window_from_ingestion_batches():
     )
 
     assert job.name == "episode"
-    assert job.target_message_count == 24
-    assert job.max_message_count == 24
-    assert job.prior_episode_candidate_count == 3
+    assert job.policy.target_message_count == 24
+    assert job.policy.max_message_count == 24
+    assert job.policy.prior_episode_candidate_count == 3
     assert (
         await job.should_run(JobContext(user_name="ada", project_id="project-1"))
         is False
@@ -253,7 +265,7 @@ async def test_episode_job_builds_full_candidate_context_and_bounds_prior_episod
         ingestion_settings=IngestionSettings(batch_size=8),
     )
 
-    context = await job.load_candidate_context(
+    context = await job.load_candidate_build(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
@@ -460,6 +472,9 @@ async def test_episode_job_embeds_the_current_narrative_before_writing():
     assert result.episode_source_message_count == 2
     assert result.entity_link_count == 0
     assert result.relationship_link_count == 0
+    assert persisted_episode.generator_metadata["episode_policy"] == (
+        result.policy.metadata()
+    )
 
 
 @pytest.mark.no_network
@@ -512,6 +527,7 @@ async def test_episode_job_emits_operational_episode_metrics(monkeypatch):
         "relationship_link_count": 1,
         "consolidation_limit_hit": False,
         "episode_at_max_size": False,
+        "policy_version": job.policy.version,
         "processing_latency_ms": processed[3]["processing_latency_ms"],
     }
     assert processed[3]["processing_latency_ms"] >= 0
@@ -577,6 +593,69 @@ async def test_episode_job_emits_validation_metrics_for_invalid_ids(monkeypatch)
             },
         ),
     ]
+
+
+@pytest.mark.no_network
+async def test_episode_job_keeps_the_admitted_policy_after_settings_change():
+    initial = LLMEpisodeDecision(
+        action="consolidate",
+        target_episode_id="ep2",
+        summary="The storage discussion continued.",
+        message_influences=[
+            {"message_id": "m1", "influence_weight": 0.8},
+            {"message_id": "m2", "influence_weight": 0.5},
+        ],
+    )
+    regenerated = LLMEpisodeConsolidation(
+        summary="The storage discussion continued with a stable episode policy.",
+        message_influences=[
+            {"message_id": "m1", "influence_weight": 0.2},
+            {"message_id": "m2", "influence_weight": 0.95},
+            {"message_id": "m3", "influence_weight": 0.55},
+        ],
+    )
+
+    class SettingsUpdatingLLM(SequenceEpisodeLLM):
+        async def generate_structured(self, **kwargs):
+            if not self.calls:
+                job.update_settings(
+                    EpisodeSettings(
+                        batch_multiple=1,
+                        max_message_count=2,
+                        prior_episode_candidate_count=1,
+                    ),
+                    IngestionSettings(batch_size=1),
+                )
+            return await super().generate_structured(**kwargs)
+
+    store = ConsolidatingEpisodeStore()
+    llm = SettingsUpdatingLLM(initial, regenerated)
+    job = EpisodeJob(
+        knowledge_store=store,
+        settings=EpisodeSettings(
+            batch_multiple=3,
+            max_message_count=4,
+            prior_episode_candidate_count=3,
+        ),
+        ingestion_settings=IngestionSettings(batch_size=1),
+        llm=llm,
+        embedding_service=FakeEmbeddingService(),
+    )
+    admitted_policy = job.policy
+
+    result = await job.process_next_window(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert result is not None
+    assert result.policy is admitted_policy
+    assert result.outcome_action == "consolidate"
+    assert job.policy.max_message_count == 2
+    assert store.writes[0][0].generator_metadata["episode_policy"] == (
+        admitted_policy.metadata()
+    )
 
 
 @pytest.mark.no_network

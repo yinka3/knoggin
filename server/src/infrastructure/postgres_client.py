@@ -108,6 +108,41 @@ class PostgresClient:
         if pool is not None:
             await pool.close()
 
+    def pool_snapshot(self) -> dict[str, bool | int]:
+        """Return a bounded, read-only snapshot of pool state.
+
+        ``get_stats`` is an in-process counter read and does not perform SQL or
+        alter pool state. Only the small allowlist below is returned; in
+        particular, the configured DSN is never exposed to callers.
+        """
+
+        snapshot: dict[str, bool | int] = {
+            "connected": self._pool is not None,
+            "pool_min": self.min_size,
+            "pool_max": self.max_size,
+            "pool_size": 0,
+            "pool_available": 0,
+            "requests_waiting": 0,
+            "stats_available": False,
+        }
+        pool = self._pool
+        get_stats = getattr(pool, "get_stats", None) if pool is not None else None
+        if not callable(get_stats):
+            return snapshot
+        try:
+            stats = get_stats()
+        except Exception:
+            return snapshot
+        if not isinstance(stats, Mapping):
+            return snapshot
+
+        for key in ("pool_size", "pool_available", "requests_waiting"):
+            value = stats.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                snapshot[key] = value
+        snapshot["stats_available"] = True
+        return snapshot
+
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[psycopg.AsyncCursor]:
         """Yield a cursor inside a managed connection and transaction."""

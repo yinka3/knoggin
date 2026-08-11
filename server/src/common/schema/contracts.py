@@ -8,8 +8,10 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    model_validator,
 )
 
+from common.conf.relationship_config import normalize_observed_relationship
 from common.schema.immutable import FrozenDict
 
 
@@ -51,6 +53,8 @@ class ExtractionTrace(BaseModel):
     relationships_seen: int = 0
     relationships_accepted: int = 0
     relationships_rejected: int = 0
+    relationships_recognized: int = 0
+    relationships_unrecognized: int = 0
     user_relationships_seen: int = 0
     user_relationships_accepted: int = 0
     user_relationships_rejected: int = 0
@@ -64,9 +68,43 @@ class RelationshipObservation(BaseModel):
     entity_a_name: str = Field(..., min_length=1)
     entity_b_name: str = Field(..., min_length=1)
     relationship_type: str = Field(..., min_length=1)
+    observed_label: Optional[str] = None
+    canonical_type: Optional[str] = None
+    domain_status: Literal["recognized", "unrecognized"] = "unrecognized"
+    source_type: Optional[str] = None
+    target_type: Optional[str] = None
+    symmetric: bool = False
     confidence: float = Field(1.0, ge=0.0, le=1.0)
     context: Optional[str] = None
     identity_rooted: bool = False
+
+    @model_validator(mode="after")
+    def normalize_relationship_fields(self):
+        observed = normalize_observed_relationship(
+            self.observed_label or self.relationship_type
+        )
+        self.observed_label = observed
+        if self.canonical_type is not None:
+            self.canonical_type = self.canonical_type.strip()
+            if not self.canonical_type:
+                self.canonical_type = None
+        self.relationship_type = self.canonical_type or observed
+        self.domain_status = (
+            "recognized" if self.canonical_type is not None else "unrecognized"
+        )
+        return self
+
+    @property
+    def source_entity_name(self) -> str:
+        """Directional source alias for the relationship contract."""
+
+        return self.entity_a_name
+
+    @property
+    def target_entity_name(self) -> str:
+        """Directional target alias for the relationship contract."""
+
+        return self.entity_b_name
 
 
 def normalize_relationship_type(value: object) -> str:
@@ -114,8 +152,10 @@ def relationship_identity(
     entity_a_id: int,
     entity_b_id: int,
     relationship_type: object,
+    *,
+    symmetric: bool = True,
 ) -> str:
-    """Build the durable identity for one typed relationship observation."""
+    """Build a typed relationship identity with explicit symmetry semantics."""
 
     if not isinstance(project_id, str) or not project_id.strip():
         raise ValueError("relationship identity requires a project_id")
@@ -129,7 +169,10 @@ def relationship_identity(
         or entity_a_id == entity_b_id
     ):
         raise ValueError("relationship identity requires distinct positive entity IDs")
-    a_id, b_id = sorted((entity_a_id, entity_b_id))
+    if symmetric:
+        a_id, b_id = sorted((entity_a_id, entity_b_id))
+    else:
+        a_id, b_id = entity_a_id, entity_b_id
     relationship_key = normalize_relationship_type(relationship_type)
     return f"{project_id}:{a_id}:{b_id}:{relationship_key}"
 
@@ -207,6 +250,12 @@ class RelationshipWrite:
     message_id: int
     confidence: float
     context: Optional[str] = None
+    observed_label: Optional[str] = None
+    canonical_type: Optional[str] = None
+    domain_status: Literal["recognized", "unrecognized"] = "unrecognized"
+    source_type: Optional[str] = None
+    target_type: Optional[str] = None
+    symmetric: bool = False
 
     def __post_init__(self) -> None:
         _require_positive_id(self.entity_a_id, "RelationshipWrite.entity_a_id")
@@ -214,19 +263,45 @@ class RelationshipWrite:
         if self.entity_a_id == self.entity_b_id:
             raise ValueError("RelationshipWrite requires distinct positive entity IDs")
         _require_positive_id(self.message_id, "RelationshipWrite.message_id")
-        entity_a_id, entity_b_id = sorted((self.entity_a_id, self.entity_b_id))
-        object.__setattr__(self, "entity_a_id", entity_a_id)
-        object.__setattr__(self, "entity_b_id", entity_b_id)
+        if self.symmetric:
+            entity_a_id, entity_b_id = sorted((self.entity_a_id, self.entity_b_id))
+            object.__setattr__(self, "entity_a_id", entity_a_id)
+            object.__setattr__(self, "entity_b_id", entity_b_id)
         object.__setattr__(
             self,
             "relationship_type",
             normalize_relationship_type(self.relationship_type),
         )
+        observed = self.observed_label or self.relationship_type
+        object.__setattr__(
+            self,
+            "observed_label",
+            normalize_observed_relationship(observed),
+        )
+        if self.canonical_type is not None:
+            canonical = self.canonical_type.strip()
+            object.__setattr__(self, "canonical_type", canonical or None)
+        if self.canonical_type is not None:
+            object.__setattr__(self, "domain_status", "recognized")
+        else:
+            object.__setattr__(self, "domain_status", "unrecognized")
         object.__setattr__(self, "confidence", _require_confidence(self.confidence))
         if self.context is not None:
             if not isinstance(self.context, str):
                 raise ValueError("RelationshipWrite.context must be a string or None")
             object.__setattr__(self, "context", self.context.strip() or None)
+
+    @property
+    def source_entity_id(self) -> int:
+        """Directional source alias used by the domain relationship contract."""
+
+        return self.entity_a_id
+
+    @property
+    def target_entity_id(self) -> int:
+        """Directional target alias used by the domain relationship contract."""
+
+        return self.entity_b_id
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

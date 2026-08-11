@@ -47,6 +47,7 @@ class DocumentReader:
                 project_id,
                 session_id,
                 visibility_scope,
+                ownership_mode,
                 display_name,
                 last_synced_at,
                 last_manifest_candidate_count,
@@ -70,6 +71,115 @@ class DocumentReader:
         )
         return rows[0] if rows else None
 
+    async def fetch_managed_workspace_source(self) -> Optional[Dict]:
+        """Return the one project-owned managed workspace source, if present."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT
+                source_id,
+                project_id,
+                session_id,
+                visibility_scope,
+                ownership_mode,
+                display_name,
+                last_synced_at,
+                last_manifest_candidate_count,
+                last_manifest_included_count,
+                last_manifest_excluded_count,
+                last_manifest_excluded_reason_counts,
+                created_at,
+                updated_at
+            FROM public.document_workspace_sources
+            WHERE project_id = %s
+              AND ownership_mode = 'managed_project_workspace'
+            ORDER BY created_at ASC, source_id ASC
+            LIMIT 1
+            """,
+            (self._project_id,),
+        )
+        return rows[0] if rows else None
+
+    async def list_managed_workspace_documents(
+        self,
+        *,
+        path_prefix: Optional[str],
+        limit: int,
+    ) -> List[Dict]:
+        """List managed workspace files without exposing other projects."""
+        query = """
+            SELECT
+                pd.document_id,
+                pd.project_id,
+                pd.session_id,
+                pd.visibility_scope,
+                pd.source_kind,
+                pd.original_name,
+                pd.relative_path,
+                pd.extension,
+                pd.size_bytes,
+                pd.content_hash,
+                pd.status,
+                pd.created_at,
+                pd.updated_at,
+                pd.indexed_at,
+                pd.error_message,
+                0::INTEGER AS chunk_count
+            FROM public.project_documents AS pd
+            JOIN public.document_workspace_sources AS ws
+              ON ws.source_id = pd.source_id
+             AND ws.project_id = pd.project_id
+            WHERE pd.project_id = %s
+              AND ws.ownership_mode = 'managed_project_workspace'
+        """
+        params: list = [self._project_id]
+        if path_prefix is not None:
+            escaped = self._escape_like(path_prefix)
+            query += " AND (pd.relative_path = %s OR pd.relative_path LIKE %s ESCAPE '\\')"
+            params.extend([path_prefix, f"{escaped}/%"])
+        query += " ORDER BY pd.relative_path ASC, pd.document_id ASC LIMIT %s"
+        params.append(limit)
+        return await self._client.fetch_all(query, tuple(params))
+
+    async def fetch_managed_workspace_file(
+        self,
+        *,
+        relative_path: str,
+    ) -> Optional[Dict]:
+        """Fetch one managed file and its raw UTF-8 bytes."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT
+                pd.document_id,
+                pd.project_id,
+                pd.session_id,
+                pd.visibility_scope,
+                pd.source_kind,
+                pd.original_name,
+                pd.relative_path,
+                pd.extension,
+                pd.size_bytes,
+                pd.content_hash,
+                pd.status,
+                pd.created_at,
+                pd.updated_at,
+                pd.indexed_at,
+                pd.error_message,
+                dc.content
+            FROM public.project_documents AS pd
+            JOIN public.document_workspace_sources AS ws
+              ON ws.source_id = pd.source_id
+             AND ws.project_id = pd.project_id
+            JOIN public.document_content AS dc
+              ON dc.document_id = pd.document_id
+            WHERE pd.project_id = %s
+              AND ws.ownership_mode = 'managed_project_workspace'
+              AND pd.relative_path = %s
+            LIMIT 1
+            """,
+            (self._project_id, relative_path),
+        )
+        return rows[0] if rows else None
+
     async def fetch_workspace_indexing_status(
         self,
         *,
@@ -84,6 +194,7 @@ class DocumentReader:
                 ws.project_id,
                 ws.session_id,
                 ws.visibility_scope,
+                ws.ownership_mode,
                 ws.display_name,
                 ws.last_synced_at,
                 ws.last_manifest_candidate_count,

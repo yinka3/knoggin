@@ -10,6 +10,7 @@ from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.profile import EntityProfile
 from tests.fixtures.factories import make_topic_config
+from tests.fixtures.ingestion import ingestion_policy
 
 MESSAGES = [
     {
@@ -91,6 +92,21 @@ class FakeLLM:
         return self.response
 
 
+class RecordingGLiNER:
+    def __init__(self):
+        self.calls = []
+
+    def predict_entities(self, text, labels, *, threshold):
+        self.calls.append(
+            {
+                "text": text,
+                "labels": labels,
+                "threshold": threshold,
+            }
+        )
+        return []
+
+
 def make_topic_config_with_tools():
     return TopicConfig(
         {
@@ -108,15 +124,13 @@ def make_entity(
     name,
     *,
     msg_id="m1",
-    typ="project",
-    topic="General",
+    typ="Tools",
     confidence=0.95,
 ):
     return NERMention(
         msg_id=msg_id,
         name=name,
         type=typ,
-        topic=topic,
         confidence=confidence,
     )
 
@@ -146,9 +160,10 @@ def make_processor(
     async def get_profile(entity_id):
         return profiles.get(entity_id)
 
+    policy_topics = topic_config or make_topic_config_with_tools()
     processor = TextProcessor(
         llm=llm,
-        topic_config=topic_config or make_topic_config_with_tools(),
+        topic_config=policy_topics,
         get_known_aliases=lambda: known_aliases,
         get_alias_version=lambda: alias_version,
         get_profile=get_profile,
@@ -161,7 +176,11 @@ def make_processor(
         FakeMatcher(known_matches),
         known_aliases,
     )
-    processor.run_gliner = lambda text: list(gliner_matches.get(text, []))
+    processor.run_gliner = lambda text, _policy: list(gliner_matches.get(text, []))
+    processor._test_policy = ingestion_policy(
+        text_processor=TextProcessorSettings(llm_ner=llm_ner),
+        topics=policy_topics,
+    )
     return processor, llm
 
 
@@ -172,6 +191,7 @@ async def extract(processor, *, messages=None, trace=None, issues=None):
         session_id="session-1",
         messages=MESSAGES if messages is None else messages,
         session_text="",
+        policy=processor._test_policy,
     )
     if trace is not None:
         batch.trace = trace
@@ -225,6 +245,28 @@ def test_build_phrase_matcher_reuses_cache_until_alias_version_changes(monkeypat
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+def test_gliner_uses_the_threshold_captured_by_the_batch_policy():
+    processor, _ = make_processor()
+    recorder = RecordingGLiNER()
+    processor._gliner = recorder
+    processor.gliner_threshold = 0.99
+    policy = ingestion_policy(
+        text_processor=TextProcessorSettings(gliner_threshold=0.23),
+        topics=make_topic_config_with_tools(),
+    )
+
+    assert TextProcessor.run_gliner(processor, "Ada", policy) == []
+    assert recorder.calls == [
+        {
+            "text": "Ada",
+            "labels": list(policy.domain.labels),
+            "threshold": 0.23,
+        }
+    ]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_extract_mentions_empty_messages_returns_empty():
     processor, llm = make_processor()
     trace = ExtractionTrace()
@@ -248,7 +290,7 @@ async def test_extract_mentions_known_aliases_are_highest_priority():
 
     result = await extract(processor, trace=trace, issues=[])
 
-    assert (1, "Bob", "person", "Identity") in result
+    assert (1, "Bob", "Identity", "Identity") in result
     assert trace.known_mentions == 1
 
 
@@ -263,7 +305,7 @@ async def test_extract_mentions_known_alias_dedupes_duplicate_matches():
 
     result = await extract(processor, trace=ExtractionTrace(), issues=[])
 
-    assert result.count((1, "Bob", "person", "Identity")) == 1
+    assert result.count((1, "Bob", "Identity", "Identity")) == 1
 
 
 @pytest.mark.ingestion
@@ -292,7 +334,7 @@ async def test_extract_mentions_gliner_accepts_valid_labeled_mentions():
 
     result = await extract(processor, trace=trace, issues=[])
 
-    assert (1, "Linear", "tool", "Tools") in result
+    assert (1, "Linear", "Tools", "Tools") in result
     assert trace.gliner_raw_mentions == 1
     assert trace.gliner_accepted_mentions == 1
 
@@ -325,7 +367,7 @@ async def test_extract_mentions_gliner_skips_spans_covered_by_known_aliases():
 
     result = await extract(processor, trace=trace, issues=[])
 
-    assert result.count((1, "Bob", "person", "Identity")) == 1
+    assert result.count((1, "Bob", "Identity", "Identity")) == 1
     assert trace.gliner_raw_mentions == 1
     assert trace.gliner_accepted_mentions == 0
 
@@ -359,8 +401,8 @@ async def test_extract_mentions_llm_disabled_returns_known_and_gliner_only():
     result = await extract(processor, trace=trace, issues=[])
 
     assert result == [
-        (1, "Bob", "person", "Identity"),
-        (1, "Linear", "tool", "Tools"),
+        (1, "Bob", "Identity", "Identity"),
+        (1, "Linear", "Tools", "Tools"),
     ]
     assert llm.calls == []
     assert trace.fallbacks == []
@@ -379,7 +421,7 @@ async def test_extract_mentions_llm_failure_falls_back_and_records_issue():
 
     result = await extract(processor, trace=trace, issues=issues)
 
-    assert result == [(1, "Linear", "tool", "Tools")]
+    assert result == [(1, "Linear", "Tools", "Tools")]
     assert trace.fallbacks == [
         {
             "stage": "ner",
@@ -404,7 +446,7 @@ async def test_extract_mentions_empty_llm_result_records_known_gliner_fallback()
 
     result = await extract(processor, trace=trace, issues=issues)
 
-    assert result == [(1, "Linear", "tool", "Tools")]
+    assert result == [(1, "Linear", "Tools", "Tools")]
     assert trace.fallbacks == []
     assert issues == []
 
@@ -414,7 +456,7 @@ async def test_extract_mentions_empty_llm_result_records_known_gliner_fallback()
 async def test_extract_mentions_accepts_valid_llm_mentions():
     processor, _ = make_processor(
         llm_response=NERResult(
-            mentions=[make_entity("Linear", msg_id="m2", typ="tool", topic="Tools")]
+            mentions=[make_entity("Linear", msg_id="m2", typ="Tools")]
         ),
         llm_ner=True,
     )
@@ -422,7 +464,7 @@ async def test_extract_mentions_accepts_valid_llm_mentions():
 
     result = await extract(processor, trace=trace, issues=[])
 
-    assert (2, "Linear", "tool", "Tools") in result
+    assert (2, "Linear", "Tools", "Tools") in result
     assert trace.llm_mentions_seen == 1
     assert trace.llm_mentions_accepted == 1
 
@@ -436,7 +478,7 @@ async def test_extract_mentions_resolves_local_llm_msg_id_to_real_message_id():
     ]
     processor, llm = make_processor(
         llm_response=NERResult(
-            mentions=[make_entity("Linear", msg_id="m2", typ="tool", topic="Tools")]
+            mentions=[make_entity("Linear", msg_id="m2", typ="Tools")]
         ),
         llm_ner=True,
     )
@@ -448,7 +490,7 @@ async def test_extract_mentions_resolves_local_llm_msg_id_to_real_message_id():
         issues=[],
     )
 
-    assert result == [(99, "Linear", "tool", "Tools")]
+    assert result == [(99, "Linear", "Tools", "Tools")]
     assert "[MSG m1]" in llm.calls[0]["user"]
     assert "[MSG m2]" in llm.calls[0]["user"]
     assert "[MSG 41]" not in llm.calls[0]["user"]
@@ -465,8 +507,26 @@ def test_ner_result_requires_a_local_message_reference():
                     {
                         "msg_id": 1,
                         "name": "Linear",
-                        "type": "tool",
-                        "topic": "Tools",
+                        "type": "Tools",
+                        "confidence": 0.95,
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+def test_ner_result_rejects_model_supplied_topic():
+    with pytest.raises(ValidationError):
+        NERResult.model_validate(
+            {
+                "mentions": [
+                    {
+                        "msg_id": "m1",
+                        "name": "Linear",
+                        "type": "Tools",
+                        "topic": "Wrong Topic",
                         "confidence": 0.95,
                     }
                 ]
@@ -520,7 +580,7 @@ async def test_extract_mentions_rejects_duplicate_llm_mentions_already_covered()
         profiles={101: make_profile("Alice")},
         known_matches={MESSAGES[0]["message"]: ["Alice"]},
         llm_response=NERResult(
-            mentions=[make_entity("Alice", msg_id="m1", typ="person", topic="Identity")]
+            mentions=[make_entity("Alice", msg_id="m1", typ="Identity")]
         ),
         llm_ner=True,
     )
@@ -529,7 +589,7 @@ async def test_extract_mentions_rejects_duplicate_llm_mentions_already_covered()
 
     result = await extract(processor, trace=trace, issues=issues)
 
-    assert result == [(1, "Alice", "person", "Identity")]
+    assert result == [(1, "Alice", "Identity", "Identity")]
     assert trace.llm_mentions_rejected == 1
     assert [issue.code for issue in issues] == ["duplicate_mention"]
 
@@ -562,7 +622,6 @@ async def test_extract_mentions_rejects_invalid_llm_entity():
                     "Mystery",
                     msg_id="m1",
                     typ="concept",
-                    topic="ImpossibleTopic",
                 )
             ]
         ),

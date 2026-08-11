@@ -5,7 +5,7 @@ import pytest
 from common.schema.settings import DeveloperSettings, RootConfig
 from core.project.state import ProjectState
 from core.session.boot import SessionFactory
-from tests.fixtures.factories import make_topic_config
+from tests.fixtures.factories import make_domain_config, make_topic_config
 from tests.fixtures.fakes import (
     FakeKnowledgeStore,
     FakePipeline,
@@ -103,6 +103,7 @@ def assembler_harness(monkeypatch):
         redis_client=resources.redis,
         postgres_client=resources.postgres,
         embedding_service=resources.embedding,
+        domain_config=make_domain_config(),
         readable_project_ids=["project-1"],
         batch_processor=shared_processor,
     )

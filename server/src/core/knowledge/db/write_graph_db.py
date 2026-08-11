@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import asdict
 from typing import Optional
 
@@ -15,10 +16,11 @@ from common.schema.contracts import (
     SkippedRelationship,
 )
 from common.scoping import IDENTITY_ENTITY_ID
+from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
 from core.ingestion.batch import IngestionBatch
+from core.ingestion.ports import IngestionGraphPersistence
 from core.knowledge.entity.resolver import EntityResolver
-from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
 from infrastructure.work_record import WorkRecord
 
@@ -33,13 +35,15 @@ def _normalize_embedding(value) -> Optional[list[float]]:
 
 async def prepare_ingestion_batch_graph_writes(
     batch: IngestionBatch,
-    knowledge_store: KnowledgeStore,
+    knowledge_store: IngestionGraphPersistence,
     entities: EntityResolver,
 ) -> None:
     """Fill one completed ingestion batch with its owned graph-write commands."""
 
     if not isinstance(batch, IngestionBatch):
-        raise TypeError("prepare_ingestion_batch_graph_writes requires an IngestionBatch")
+        raise TypeError(
+            "prepare_ingestion_batch_graph_writes requires an IngestionBatch"
+        )
     scope = batch.scope
     entity_ids = batch.entity_ids
     new_entity_ids = set(batch.new_entity_ids)
@@ -179,6 +183,12 @@ async def prepare_ingestion_batch_graph_writes(
                 message_id=msg_id,
                 confidence=observation.confidence,
                 context=observation.context,
+                observed_label=observation.observed_label,
+                canonical_type=observation.canonical_type,
+                domain_status=observation.domain_status,
+                source_type=observation.source_type,
+                target_type=observation.target_type,
+                symmetric=observation.symmetric,
             )
         )
 
@@ -233,7 +243,7 @@ async def _execute_graph_write_buffers(
     dirty_entity_ids: set[int],
     zombie_entity_ids: set[int],
     skipped_relationships: list[SkippedRelationship],
-    knowledge_store: KnowledgeStore,
+    knowledge_store: IngestionGraphPersistence,
     redis_client: aioredis.Redis = None,
 ) -> GraphWriteSummary:
     """Persist one already-prepared set of graph write buffers."""
@@ -293,13 +303,40 @@ async def _execute_graph_write_buffers(
 
 async def write_ingestion_batch_to_graph(
     batch: IngestionBatch,
-    knowledge_store: KnowledgeStore,
+    knowledge_store: IngestionGraphPersistence,
+    entities: EntityResolver,
+    redis_client: aioredis.Redis = None,
+) -> GraphWriteSummary:
+    """Persist one sealed batch under its diagnostic correlation scope."""
+
+    with diagnostic_scope(
+        user_name=batch.scope.user_name,
+        project_id=batch.scope.project_id,
+        session_id=batch.scope.session_id,
+        ingestion_batch_id=batch.batch_id,
+        work_id=batch.work_unit.id,
+    ):
+        return await _write_ingestion_batch_to_graph(
+            batch,
+            knowledge_store,
+            entities,
+            redis_client=redis_client,
+        )
+
+
+async def _write_ingestion_batch_to_graph(
+    batch: IngestionBatch,
+    knowledge_store: IngestionGraphPersistence,
     entities: EntityResolver,
     redis_client: aioredis.Redis = None,
 ) -> GraphWriteSummary:
     """Prepare and persist graph buffers directly from one ingestion aggregate."""
 
-    await prepare_ingestion_batch_graph_writes(batch, knowledge_store, entities)
+    try:
+        await prepare_ingestion_batch_graph_writes(batch, knowledge_store, entities)
+    except asyncio.CancelledError:
+        batch.cancel_work("Ingestion cancelled while preparing graph writes")
+        raise
     batch.seal_for_commit()
     batch.require_sealed_for_commit()
     graph_work = batch.graph_work_unit
@@ -336,6 +373,9 @@ async def write_ingestion_batch_to_graph(
             knowledge_store=knowledge_store,
             redis_client=redis_client,
         )
+    except asyncio.CancelledError:
+        batch.cancel_work("Ingestion cancelled while writing graph data")
+        raise
     except Exception as exc:
         graph_work.mark_failed(str(exc))
         raise
@@ -350,7 +390,7 @@ async def write_ingestion_batch_to_graph(
 
 async def write_batch_callback(
     batch: IngestionBatch,
-    knowledge_store: KnowledgeStore,
+    knowledge_store: IngestionGraphPersistence,
     entities: EntityResolver,
     session_id: str,
     project_id: str,

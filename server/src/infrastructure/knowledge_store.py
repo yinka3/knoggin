@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
+from common.conf.domain_config import CompiledDomain
 from common.schema.contracts import (
     CandidateSuggestion,
     EntityWrite,
@@ -25,18 +26,37 @@ from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
+from core.knowledge.db.readers.relationship_observation_reader import (
+    RelationshipObservationReader,
+)
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.search_index_rebuilder import SearchIndexer
 from core.knowledge.db.tool_queries import ToolQueries
 from core.knowledge.db.writers.candidate_suggestion_writer import (
     CandidateSuggestionWriter,
 )
+from core.knowledge.db.writers.entity_reclassification_writer import (
+    EntityReclassificationWriter,
+    HistoricalReclassificationResult,
+)
 from core.knowledge.db.writers.entity_writer import EntityWriter
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
+from core.knowledge.db.writers.relationship_advisory_writer import (
+    RelationshipAdvisoryWriter,
+)
+from core.knowledge.db.writers.relationship_reclassification_writer import (
+    HistoricalRelationshipReclassificationResult,
+    RelationshipReclassificationWriter,
+)
 from core.knowledge.db.writers.retention_writer import RetentionWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from core.knowledge.relationship_advisories import (
+    AdvisoryThresholds,
+    RelationshipAdvisory,
+    RelationshipAdvisoryDecision,
+)
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
@@ -58,6 +78,12 @@ class KnowledgeStore:
         self._postgres_client = postgres_client
         self._id_allocator = IdAllocator(self._postgres_client)
         self._entity_writer = EntityWriter(self._postgres_client)
+        self._entity_reclassification_writer = EntityReclassificationWriter(
+            self._postgres_client
+        )
+        self._relationship_reclassification_writer = RelationshipReclassificationWriter(
+            self._postgres_client
+        )
         self._episode_writer = EpisodeWriter(self._postgres_client)
         self._candidate_suggestion_writer = CandidateSuggestionWriter(
             self._postgres_client
@@ -65,12 +91,18 @@ class KnowledgeStore:
         self._graph_writer = GraphWriter(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._retention_writer = RetentionWriter(self._postgres_client)
+        self._relationship_advisory_writer = RelationshipAdvisoryWriter(
+            self._postgres_client
+        )
         self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
         self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
+        self._relationship_observation_reader = RelationshipObservationReader(
+            self._postgres_client
+        )
         self._tools = ToolQueries(self._postgres_client)
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._search_index_rebuilder = SearchIndexer(
@@ -490,6 +522,72 @@ class KnowledgeStore:
     async def cleanup_null_entities(self, *, project_id: str) -> List[int]:
         return await self._entity_writer.cleanup_null_entities(project_id=project_id)
 
+    async def preview_historical_reclassification(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        domain: CompiledDomain,
+        limit: int | None = None,
+    ) -> Dict:
+        plan = await self._entity_reclassification_writer.preview(
+            user_name=user_name,
+            project_id=project_id,
+            domain=domain,
+            limit=limit,
+        )
+        return plan.to_dict()
+
+    async def reclassify_historical_entities(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        domain: CompiledDomain,
+        batch_size: int = 100,
+        max_entities: int | None = None,
+    ) -> HistoricalReclassificationResult:
+        return await self._entity_reclassification_writer.reclassify(
+            user_name=user_name,
+            project_id=project_id,
+            domain=domain,
+            batch_size=batch_size,
+            max_entities=max_entities,
+        )
+
+    async def preview_historical_relationship_normalization(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        domain: CompiledDomain,
+        limit: int | None = None,
+    ) -> Dict:
+        plan = await self._relationship_reclassification_writer.preview(
+            user_name=user_name,
+            project_id=project_id,
+            domain=domain,
+            limit=limit,
+        )
+        return plan.to_dict()
+
+    async def normalize_historical_relationships(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        domain: CompiledDomain,
+        batch_size: int = 100,
+        max_relationships: int | None = None,
+    ) -> HistoricalRelationshipReclassificationResult:
+        return await self._relationship_reclassification_writer.reclassify(
+            user_name=user_name,
+            project_id=project_id,
+            domain=domain,
+            batch_size=batch_size,
+            max_relationships=max_relationships,
+        )
+
     async def delete_entity(self, entity_id: int, *, project_id: str) -> bool:
         return await self._entity_writer.delete_entity(entity_id, project_id=project_id)
 
@@ -633,6 +731,44 @@ class KnowledgeStore:
             user_name=user_name,
             session_id=session_id,
             project_id=project_id,
+        )
+
+    async def get_relationship_advisories(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        thresholds: AdvisoryThresholds | None = None,
+    ) -> list[RelationshipAdvisory]:
+        """Derive actionable unknown-relationship suggestions from evidence."""
+
+        return await self._relationship_observation_reader.get_advisories(
+            user_name=user_name,
+            project_id=project_id,
+            thresholds=thresholds,
+        )
+
+    async def apply_relationship_advisory_action(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        pattern_key: str,
+        action: str,
+        relationship_type: str | None = None,
+        note: str | None = None,
+        decided_by: str | None = None,
+    ) -> RelationshipAdvisoryDecision:
+        """Persist one explicit advisory decision without changing the domain."""
+
+        return await self._relationship_advisory_writer.apply_action(
+            user_name=user_name,
+            project_id=project_id,
+            pattern_key=pattern_key,
+            action=action,
+            relationship_type=relationship_type,
+            note=note,
+            decided_by=decided_by,
         )
 
     async def get_recent_project_messages(

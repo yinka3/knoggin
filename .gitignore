@@ -94,6 +94,9 @@ redis_data/
 tmp/
 data/
 
+# Local Nia Brooks benchmark bundle (corpus, evaluation suite, and reports)
+/benchmark_nia_brooks/
+
 # IDEs and Editors
 .vscode/
 .idea/

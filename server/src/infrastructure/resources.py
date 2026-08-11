@@ -58,6 +58,7 @@ class ResourceManager:
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
+        self.health_service: Optional[Any] = None
 
     @classmethod
     async def initialize(cls, num_workers: int | None = None) -> "ResourceManager":
@@ -264,7 +265,9 @@ class ResourceManager:
 
     def work_snapshot(self) -> dict[str, object]:
         """Return local scheduler health without requiring an API endpoint."""
+        pool_snapshot = getattr(getattr(self, "postgres", None), "pool_snapshot", None)
         return {
+            "postgres": pool_snapshot() if callable(pool_snapshot) else None,
             "background_work": (
                 self.background_work.snapshot() if self.background_work else None
             ),

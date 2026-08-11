@@ -9,7 +9,6 @@ import redis.asyncio as aioredis
 from core.ingestion.batch import IngestionBatch
 from infrastructure.redis_client import RedisKeys
 
-
 CHECKPOINT_COMMIT_TTL_SECONDS = 7 * 24 * 60 * 60
 
 _COMMIT_CHECKPOINT_SCRIPT = """
@@ -50,15 +49,12 @@ class CheckpointCommit:
 async def commit_ingestion_checkpoint(
     redis: aioredis.Redis,
     batch: IngestionBatch,
-    *,
-    checkpoint_interval: int,
 ) -> CheckpointCommit:
     """Atomically commit one batch's cursor and checkpoint exactly once."""
 
-    if not isinstance(checkpoint_interval, int) or checkpoint_interval <= 0:
-        raise ValueError("checkpoint_interval must be a positive integer")
     if not batch.messages:
         raise ValueError("Checkpoint commit requires batch messages")
+    checkpoint_interval = batch.policy.checkpoint_interval
 
     last_id = max(int(message["id"]) for message in batch.messages)
     scope = batch.scope
@@ -80,7 +76,6 @@ async def commit_ingestion_checkpoint(
     count = int(response[0])
     reached = bool(int(response[1]))
     batch.record_checkpoint_progress(
-        checkpoint_interval=checkpoint_interval,
         current_count=0 if reached else count,
     )
     return CheckpointCommit(count_before_reset=count, threshold_reached=reached)

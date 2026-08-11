@@ -76,10 +76,20 @@ async def _reset_storage_db(client: PostgresClient):
     )
     await client.execute(
         """
-        INSERT INTO projects (project_id, user_name, name)
+        INSERT INTO projects (
+            project_id, user_name, name, topic_config, domain_config
+        )
         VALUES
-            ('project-1', 'ada', 'Project 1'),
-            ('project-2', 'ada', 'Project 2')
+            (
+                'project-1', 'ada', 'Project 1',
+                '{"Identity":{"active":true,"labels":["person"],"aliases":[]},"General":{"active":true,"labels":["concept"],"aliases":[]}}'::jsonb,
+                '{"version":1,"topics":{"Identity":{"description":"","active":true},"General":{"description":"","active":true}},"entity_types":{"Identity":{"topic":"Identity","description":"","labels":["person"]},"Concept":{"topic":"General","description":"","labels":["concept"]}},"relationships":{}}'::jsonb
+            ),
+            (
+                'project-2', 'ada', 'Project 2',
+                '{"Identity":{"active":true,"labels":["person"],"aliases":[]},"General":{"active":true,"labels":["concept"],"aliases":[]}}'::jsonb,
+                '{"version":1,"topics":{"Identity":{"description":"","active":true},"General":{"description":"","active":true}},"entity_types":{"Identity":{"topic":"Identity","description":"","labels":["person"]},"Concept":{"topic":"General","description":"","labels":["concept"]}},"relationships":{}}'::jsonb
+            )
         ON CONFLICT (project_id) DO NOTHING;
         """
     )

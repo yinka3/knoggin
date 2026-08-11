@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Optional
 
+from common.conf.domain_config import DomainConfig
 from common.conf.manager import ConfigManager
 from common.schema.primitives import Message
 from common.utils.time_utils import get_now_iso
@@ -65,6 +67,7 @@ class OnboardingService:
     async def create_project_quickstart(
         self,
         name: str,
+        domain_config: DomainConfig | Mapping[str, Any],
         description: Optional[str] = None,
         kickoff_note: Optional[str] = None,
         context_notes: Optional[list[str]] = None,
@@ -84,6 +87,7 @@ class OnboardingService:
         project_description = _clean_optional(description)
         project = await self.project_manager.create_project(
             project_name,
+            domain_config=domain_config,
             description=project_description,
         )
         ctx = await self.session_manager.create_session(

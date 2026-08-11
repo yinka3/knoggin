@@ -23,6 +23,17 @@ def session_manager():
     return manager, resources, project_manager, active_sessions
 
 
+async def activate_runtime_session(manager, project_manager, context):
+    """Install a fully acquired runtime for tests that bypass session creation."""
+    runtime = project_manager.project_runtime(
+        context.project_id,
+        context.session_id,
+    )
+    await runtime.__aenter__()
+    manager.active_sessions[context.session_id] = context
+    manager._project_runtime_contexts[context.session_id] = runtime
+
+
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_create_session_requires_project_id_without_side_effects(
@@ -50,7 +61,6 @@ async def test_create_session_stores_metadata_and_active_context(
     monkeypatch.setattr(Session, "create", fake_create)
 
     ctx = await manager.create_session(
-        topics_config={"General": {"active": True}},
         model="test-model",
         agent_id="agent-1",
         enabled_tools=["search"],
@@ -60,7 +70,6 @@ async def test_create_session_stores_metadata_and_active_context(
     assert ctx.session_id in active_sessions
     assert active_sessions[ctx.session_id] is ctx
     assert project_manager.acquire_calls == [("project-1", ctx.session_id)]
-    assert project_manager.acquire_topic_configs == [{"General": {"active": True}}]
 
     raw = await resources.redis.hget(RedisKeys.sessions("ada"), ctx.session_id)
     metadata = json.loads(raw)
@@ -85,7 +94,6 @@ async def test_create_session_releases_project_state_when_context_create_fails(
 
     with pytest.raises(RuntimeError, match="boom"):
         await manager.create_session(
-            topics_config={"General": {"active": True}},
             project_id="project-1",
         )
 
@@ -254,7 +262,7 @@ async def test_close_session_releases_project_and_shuts_context_down(
 ):
     manager, resources, project_manager, active_sessions = session_manager
     ctx = FakeSession(session_id="session-1", project_id="project-1")
-    active_sessions["session-1"] = ctx
+    await activate_runtime_session(manager, project_manager, ctx)
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
         "session-1",
@@ -299,8 +307,8 @@ async def test_shutdown_deactivates_every_runtime_session(monkeypatch, session_m
     manager, _, project_manager, active_sessions = session_manager
     first = FakeSession(session_id="session-1", project_id="project-1")
     second = FakeSession(session_id="session-2", project_id="project-2")
-    active_sessions[first.session_id] = first
-    active_sessions[second.session_id] = second
+    await activate_runtime_session(manager, project_manager, first)
+    await activate_runtime_session(manager, project_manager, second)
     unregister_calls = []
 
     class FakeEmitter:
@@ -330,7 +338,7 @@ async def test_delete_session_data_does_not_remove_project_documents(
     ctx = FakeSession(session_id="session-1", project_id="project-1")
     project_document_service = object()
     ctx.document_service = project_document_service
-    active_sessions["session-1"] = ctx
+    await activate_runtime_session(manager, project_manager, ctx)
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
         "session-1",
@@ -373,11 +381,12 @@ async def test_delete_session_keeps_redis_state_when_durable_deletion_fails(
     monkeypatch,
     session_manager,
 ):
-    manager, resources, _, active_sessions = session_manager
-    active_sessions["session-1"] = FakeSession(
+    manager, resources, project_manager, _ = session_manager
+    context = FakeSession(
         session_id="session-1",
         project_id="project-1",
     )
+    await activate_runtime_session(manager, project_manager, context)
     memory_key = RedisKeys.session_memory("ada", "session-1", "notes")
     await resources.redis.set(memory_key, "keep until durable delete succeeds")
 

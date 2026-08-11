@@ -185,6 +185,41 @@ class AgeProjectionWriter:
             (json.dumps({"batch": list(canonical_topics.values())}),),
         )
 
+    async def project_entity_domain(self, cur, entities: List[Dict]) -> None:
+        """Update type and timestamp properties for explicit reclassification."""
+
+        if not entities:
+            return
+
+        batch = []
+        for entity in entities:
+            entity_id = int(entity["id"])
+            project_id = str(entity["project_id"])
+            entity_type = str(entity["type"]).strip()
+            if not entity_type or not project_id:
+                raise ValueError("Reclassified entity projection fields are required")
+            batch.append(
+                {
+                    "id": entity_id,
+                    "project_id": project_id,
+                    "type": entity_type,
+                    "last_updated": int(entity["last_updated"]),
+                }
+            )
+
+        cypher = """
+        UNWIND $batch AS data
+        MATCH (e:Entity {id: data.id})
+        WHERE e.project_id = data.project_id
+        SET e.type = data.type,
+            e.last_updated = data.last_updated
+        RETURN count(e)
+        """
+        await cur.execute(
+            self._build_cypher(cypher),
+            (json.dumps({"batch": batch}),),
+        )
+
     async def project_relationships(self, cur, relationships: List[Dict]) -> None:
         if not relationships:
             return
@@ -198,6 +233,10 @@ class AgeProjectionWriter:
         MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
             r.relationship_type = rel.relationship_type,
+            r.canonical_relationship_type = rel.canonical_relationship_type,
+            r.observed_relationship_label = rel.observed_relationship_label,
+            r.domain_status = rel.domain_status,
+            r.symmetric = rel.symmetric,
             r.weight = CASE
                 WHEN rel.evidence_ref IN coalesce(r.message_ids, [])
                     THEN coalesce(r.weight, 0)
@@ -280,6 +319,10 @@ class AgeProjectionWriter:
         MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
             r.relationship_type = rel.relationship_type,
+            r.canonical_relationship_type = rel.canonical_relationship_type,
+            r.observed_relationship_label = rel.observed_relationship_label,
+            r.domain_status = rel.domain_status,
+            r.symmetric = rel.symmetric,
             r.weight = rel.weight,
             r.confidence = rel.confidence,
             r.last_seen = rel.last_seen,

@@ -8,6 +8,7 @@ from enum import IntEnum
 from time import perf_counter
 from typing import Awaitable, Callable, Optional, TypeVar
 
+from common.schema.health import sanitize_health_details
 from infrastructure.work_record import WorkRecord
 
 ResultT = TypeVar("ResultT")
@@ -265,6 +266,11 @@ class ModelWorkCoordinator:
                 name: dict(metrics) for name, metrics in self._work_by_name.items()
             },
         }
+
+    def snapshot_for_health(self) -> dict[str, object]:
+        """Return a bounded public projection of the internal metrics."""
+
+        return sanitize_health_details(self.snapshot())
 
     async def shutdown(self) -> None:
         if self._closed:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Set, Tuple
@@ -8,6 +9,8 @@ import redis.asyncio as aioredis
 from loguru import logger
 from wordfreq import word_frequency
 
+from common.conf.domain_config import CompiledDomain
+from common.conf.relationship_config import normalize_relationship
 from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
 from common.schema.contracts import (
@@ -16,8 +19,13 @@ from common.schema.contracts import (
     ValidationIssue,
 )
 from common.schema.extraction_output import ConnectionsResult
-from common.schema.settings import EntityResolutionSettings
+from common.schema.settings import (
+    EntityResolutionSettings,
+    IngestionSettings,
+    TextProcessorSettings,
+)
 from common.utils.core_utils import format_vp02_input
+from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
 from common.utils.local_references import build_local_id_maps, resolve_local_id
 from common.utils.time_utils import get_now_unix
@@ -30,6 +38,7 @@ from core.ingestion.dlq_state import (
     ensure_dlq_id,
     serialize_dlq_entry,
 )
+from core.ingestion.policy import IngestionPolicy
 from core.ingestion.prompts import get_connection_reasoning_prompt
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.profile import EntityProfile
@@ -65,6 +74,7 @@ class IngestionPipeline:
         user_name: str,
         topic_config: TopicConfig,
         get_next_ent_id,
+        compiled_domain: CompiledDomain,
         resolution_threshold: Optional[float] = None,
         common_word_frequency_threshold: Optional[float] = None,
         sparse_context_verbs: Optional[List[str]] = None,
@@ -81,6 +91,11 @@ class IngestionPipeline:
         self.executor = cpu_executor
         self.user_name = user_name
         self.topic_config = topic_config
+        if not isinstance(compiled_domain, CompiledDomain):
+            raise TypeError(
+                "IngestionPipeline requires an active CompiledDomain"
+            )
+        self.compiled_domain = compiled_domain
         self._get_next_ent_id = get_next_ent_id
         er_defaults = EntityResolutionSettings()
         self.resolution_threshold = (
@@ -102,6 +117,7 @@ class IngestionPipeline:
             )
             if verb and verb.strip()
         }
+
     @property
     def get_next_ent_id(self):
         if self._get_next_ent_id is None:
@@ -115,6 +131,13 @@ class IngestionPipeline:
     def refresh_topic_mappings(self) -> None:
         if hasattr(self.processor, "refresh_topic_mappings"):
             self.processor.refresh_topic_mappings()
+
+    def set_compiled_domain(self, compiled_domain: CompiledDomain) -> None:
+        """Install the next immutable domain snapshot for future batches."""
+
+        if not isinstance(compiled_domain, CompiledDomain):
+            raise TypeError("compiled_domain must be a CompiledDomain")
+        self.compiled_domain = compiled_domain
 
     def update_settings(self, config) -> None:
         if isinstance(config, EntityResolutionSettings):
@@ -161,8 +184,34 @@ class IngestionPipeline:
     def _normalize_name(name: str) -> str:
         return (name or "").strip().casefold()
 
+    def capture_policy(self, ingestion: IngestionSettings) -> IngestionPolicy:
+        """Freeze all current ingestion rules for one newly opened batch."""
+
+        return IngestionPolicy.capture(
+            ingestion=ingestion,
+            text_processor=TextProcessorSettings(
+                gliner_threshold=self.processor.gliner_threshold,
+                vp01_min_confidence=self.processor.vp01_min_confidence,
+                llm_ner=self.processor.llm_ner,
+            ),
+            entity_resolution=EntityResolutionSettings(
+                candidate_fuzzy_threshold=self.entities.candidate_fuzzy_threshold,
+                candidate_vector_threshold=self.entities.candidate_vector_threshold,
+                resolution_threshold=self.resolution_threshold,
+                common_word_frequency_threshold=self.common_word_frequency_threshold,
+                sparse_context_verbs=sorted(self.sparse_context_verbs),
+            ),
+            topic_config=self.topic_config,
+            compiled_domain=self.compiled_domain,
+        )
+
     def open_batch(
-        self, messages: List[Dict], session_text: str, *, session_id: str
+        self,
+        messages: List[Dict],
+        session_text: str,
+        *,
+        session_id: str,
+        policy: IngestionPolicy,
     ) -> IngestionBatch:
         """Allocate the aggregate that the worker owns through persistence."""
         if not session_id:
@@ -174,6 +223,7 @@ class IngestionPipeline:
             session_id=session_id,
             messages=messages,
             session_text=session_text,
+            policy=policy,
         )
 
     async def process(self, batch: IngestionBatch) -> None:
@@ -185,13 +235,29 @@ class IngestionPipeline:
         if batch.scope.project_id != self.project_id:
             raise ValueError("IngestionBatch project_id does not match this pipeline")
 
-        with logger.contextualize(
-            user=self.user_name,
-            session=batch.scope.session_id,
-            component="IngestionPipeline",
+        with (
+            diagnostic_scope(
+                user_name=batch.scope.user_name,
+                project_id=batch.scope.project_id,
+                session_id=batch.scope.session_id,
+                ingestion_batch_id=batch.batch_id,
+                work_id=batch.work_unit.id,
+            ),
+            logger.contextualize(
+                user=self.user_name,
+                session=batch.scope.session_id,
+                component="IngestionPipeline",
+            ),
         ):
             batch.work_unit.mark_running()
-            batch.validate_input()
+            try:
+                batch.validate_input()
+            except Exception as exc:
+                logger.error(f"Batch input validation failed: {exc}")
+                batch.fail(exc)
+                batch.work_unit.issues = list(batch.issues)
+                batch.work_unit.mark_failed(batch.error)
+                return
 
             if not batch.messages:
                 batch.work_unit.mark_skipped("No messages")
@@ -226,7 +292,7 @@ class IngestionPipeline:
                 mentions = [mention for mention in mentions if mention[1]]
                 if not mentions:
                     batch.work_unit.issues = list(batch.issues)
-                    batch.work_unit.mark_succeeded("No mentions found")
+                    batch.work_unit.metadata["semantic_summary"] = "No mentions found"
                     batch.complete()
                     return
 
@@ -237,8 +303,7 @@ class IngestionPipeline:
                     "resolution_complete",
                     {
                         "new": len(batch.new_entity_ids),
-                        "existing": len(batch.entity_ids)
-                        - len(batch.new_entity_ids),
+                        "existing": len(batch.entity_ids) - len(batch.new_entity_ids),
                         "aliases_added": len(batch.alias_updated_ids),
                     },
                 )
@@ -314,6 +379,12 @@ class IngestionPipeline:
                             "relationships_rejected": (
                                 batch.trace.relationships_rejected
                             ),
+                            "relationships_recognized": (
+                                batch.trace.relationships_recognized
+                            ),
+                            "relationships_unrecognized": (
+                                batch.trace.relationships_unrecognized
+                            ),
                             "user_relationships_seen": (
                                 batch.trace.user_relationships_seen
                             ),
@@ -328,11 +399,14 @@ class IngestionPipeline:
                         },
                     },
                 )
-                batch.work_unit.mark_succeeded(
+                batch.work_unit.metadata["semantic_summary"] = (
                     f"{len(batch.entity_ids)} entities, "
                     f"{total_pairs + total_user_pairs} relationships"
                 )
                 batch.complete()
+            except asyncio.CancelledError:
+                batch.cancel_work("Ingestion processing cancelled")
+                raise
             except Exception as exc:
                 logger.error(f"Batch processing failed: {exc}")
                 batch.fail(exc)
@@ -343,36 +417,49 @@ class IngestionPipeline:
         self,
         batch: IngestionBatch,
     ) -> List[Tuple[int, str, str, str]]:
-        """Run NER against one aggregate and normalize its accepted topics."""
+        """Run NER and derive each accepted mention's topic from its type."""
 
         mentions = await self.processor.extract_mentions(batch)
+        domain = batch.policy.domain
 
         normalized_mentions = []
         for msg_id, text, typ, topic in mentions:
-            norm_topic = self.topic_config.normalize_topic(topic)
-            if norm_topic is None:
+            canonical_type = domain.canonical_entity_type(
+                typ
+            ) or domain.resolve_entity_type(typ)
+            norm_topic = domain.topic_for_entity_type(canonical_type or "")
+            if canonical_type is None or norm_topic is None:
                 self._record_issue(
                     batch.issues,
                     stage="mentions",
-                    code="invalid_topic",
-                    message="Mention topic could not be resolved",
+                    code="invalid_entity_type",
+                    message="Mention entity type is not active in the domain",
                     item_ref=text,
-                    metadata={"topic": topic, "msg_id": msg_id},
+                    metadata={
+                        "type": typ,
+                        "topic": topic,
+                        "msg_id": msg_id,
+                    },
                 )
                 continue
 
-            if norm_topic not in self.topic_config.active_topics:
+            if topic and topic.strip().casefold() != norm_topic.casefold():
                 self._record_issue(
                     batch.issues,
                     stage="mentions",
-                    code="inactive_topic",
-                    message="Mention topic is inactive",
+                    code="derived_topic_override",
+                    message="Mention topic was replaced by the domain-derived topic",
+                    severity="info",
                     item_ref=text,
-                    metadata={"topic": norm_topic, "msg_id": msg_id},
+                    metadata={
+                        "type": canonical_type,
+                        "supplied_topic": topic,
+                        "derived_topic": norm_topic,
+                        "msg_id": msg_id,
+                    },
                 )
-                continue
 
-            normalized_mentions.append((msg_id, text, typ, norm_topic))
+            normalized_mentions.append((msg_id, text, canonical_type, norm_topic))
 
         return normalized_mentions
 
@@ -385,6 +472,7 @@ class IngestionPipeline:
 
         messages = batch.messages
         session_id = batch.scope.session_id
+        policy = batch.policy
         async with self.entities.resolution_lock:
             msg_text_map = {m["id"]: m["message"] for m in messages}
 
@@ -409,7 +497,7 @@ class IngestionPipeline:
                 if entry is None:
                     continue
 
-                dedupe_key = self._mention_dedupe_key(name, typ, topic)
+                dedupe_key = self._mention_dedupe_key(name, typ, topic, policy)
                 ent_id = None
 
                 # Candidate match
@@ -422,12 +510,17 @@ class IngestionPipeline:
                         base_score = candidate.score
                         profile = await self.entities.get_profile(candidate_id)
                         compatibility = (
-                            self._is_schema_compatible(typ, topic, profile)
+                            self._is_schema_compatible(
+                                typ,
+                                topic,
+                                profile,
+                                policy,
+                            )
                             if profile
                             else "missing_profile"
                         )
                         can_consider = (
-                            base_score >= self.resolution_threshold
+                            base_score >= policy.resolution_threshold
                             and profile
                             and self._is_profile_visible(profile)
                         )
@@ -439,8 +532,9 @@ class IngestionPipeline:
                             message_text,
                             profile,
                             candidate_id,
-                            compatibility,
-                            candidate,
+                            policy=policy,
+                            compatibility=compatibility,
+                            candidate=candidate,
                         ):
                             ent_id = candidate_id
 
@@ -487,6 +581,7 @@ class IngestionPipeline:
                                     base_score=base_score,
                                     compatibility=compatibility,
                                     message_text=message_text,
+                                    policy=policy,
                                 )
                             )
 
@@ -550,6 +645,7 @@ class IngestionPipeline:
         batch: IngestionBatch,
         mentions: List[Tuple[int, str, str, str]],
     ) -> List[Optional[Tuple[str, object]]]:
+        policy = batch.policy
         unique_names = list({name for _, name, _, _ in mentions if name})
         embedding_map = {}
         if unique_names:
@@ -576,7 +672,7 @@ class IngestionPipeline:
                 entries.append(None)
                 continue
 
-            dedupe_key = self._mention_dedupe_key(name, typ, topic)
+            dedupe_key = self._mention_dedupe_key(name, typ, topic, policy)
             if dedupe_key in seen_by_dedupe_key:
                 entries.append(seen_by_dedupe_key[dedupe_key])
                 continue
@@ -584,6 +680,8 @@ class IngestionPipeline:
             candidates = await self.entities.get_candidate_ids(
                 name,
                 precomputed_embedding=embedding_map.get(name),
+                candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
+                candidate_vector_threshold=policy.candidate_vector_threshold,
             )
             entry = ("candidates", candidates) if candidates else ("new", None)
             seen_by_dedupe_key[dedupe_key] = entry
@@ -599,11 +697,16 @@ class IngestionPipeline:
         message_text: str,
         profile: EntityProfile,
         candidate_id: int,
+        *,
+        policy: IngestionPolicy,
         compatibility: Optional[str] = None,
         candidate=None,
     ) -> bool:
         compatibility = compatibility or self._is_schema_compatible(
-            mention_type, mention_topic, profile
+            mention_type,
+            mention_topic,
+            profile,
+            policy,
         )
         if compatibility == "incompatible":
             return False
@@ -616,8 +719,9 @@ class IngestionPipeline:
             message_text,
             profile,
             candidate_id,
-            compatibility,
-            candidate,
+            policy=policy,
+            compatibility=compatibility,
+            candidate=candidate,
         )
 
         if evidence == "strong":
@@ -625,7 +729,12 @@ class IngestionPipeline:
 
         if evidence == "medium":
             return self._has_positive_entity_context(
-                name, mention_type, message_text, profile, compatibility
+                name,
+                mention_type,
+                message_text,
+                profile,
+                compatibility,
+                policy,
             )
 
         if compatibility != "compatible":
@@ -637,6 +746,7 @@ class IngestionPipeline:
             profile,
             compatibility,
             candidate_id,
+            policy,
         )
 
     def _is_profile_visible(self, profile: EntityProfile) -> bool:
@@ -646,12 +756,19 @@ class IngestionPipeline:
         return profile.project_id in readable_project_ids
 
     def _mention_dedupe_key(
-        self, name: str, mention_type: str, topic: str
+        self,
+        name: str,
+        mention_type: str,
+        topic: str,
+        policy: IngestionPolicy,
     ) -> Tuple[str, str, str]:
-        normalized_topic = self.topic_config.normalize_topic(topic)
+        normalized_topic = policy.domain.normalize_topic(topic)
+        canonical_type = policy.domain.canonical_entity_type(mention_type) or (
+            policy.domain.resolve_entity_type(mention_type)
+        )
         return (
             name.strip().casefold(),
-            (mention_type or "").strip().casefold(),
+            (canonical_type or mention_type or "").strip().casefold(),
             (normalized_topic or "").casefold(),
         )
 
@@ -662,6 +779,8 @@ class IngestionPipeline:
         message_text: str,
         profile: EntityProfile,
         candidate_id: int,
+        *,
+        policy: IngestionPolicy,
         compatibility: str,
         candidate=None,
     ) -> str:
@@ -698,8 +817,16 @@ class IngestionPipeline:
         if not exact_name:
             return "weak" if candidate is not None else "none"
 
-        if self._is_common_word_mention(name) and not self._has_positive_entity_context(
-            name, mention_type, message_text, profile, compatibility
+        if self._is_common_word_mention(
+            name,
+            policy,
+        ) and not self._has_positive_entity_context(
+            name,
+            mention_type,
+            message_text,
+            profile,
+            compatibility,
+            policy,
         ):
             return "weak"
 
@@ -728,9 +855,10 @@ class IngestionPipeline:
         base_score: float,
         compatibility: str,
         message_text: str,
+        policy: IngestionPolicy,
     ) -> CandidateSuggestion:
         reasons = ["candidate_rejected"]
-        if base_score < self.resolution_threshold:
+        if base_score < policy.resolution_threshold:
             reasons.append("below_resolution_threshold")
         if compatibility == "compatible":
             reasons.append("schema_compatible")
@@ -738,9 +866,9 @@ class IngestionPipeline:
             reasons.append("schema_incompatible")
         elif compatibility == "neutral":
             reasons.append("schema_neutral")
-        if self._is_sparse_context(mention, message_text, mention_type):
+        if self._is_sparse_context(mention, message_text, mention_type, policy):
             reasons.append("sparse_context_risk")
-        if self._is_common_word_mention(mention):
+        if self._is_common_word_mention(mention, policy):
             reasons.append("common_word_risk")
 
         return CandidateSuggestion(
@@ -754,41 +882,61 @@ class IngestionPipeline:
             reasons=list(dict.fromkeys(reasons)),
         )
 
-    def _label_topics(self, label: str) -> Set[str]:
-        if not label:
-            return set()
+    def _label_topics(self, label: str, policy: IngestionPolicy) -> Set[str]:
+        entity_type = policy.domain.canonical_entity_type(label) or (
+            policy.domain.resolve_entity_type(label)
+        )
+        topic = policy.domain.topic_for_entity_type(entity_type)
+        return {topic} if topic is not None else set()
 
-        label_lower = label.strip().lower()
-        if not label_lower:
-            return set()
-
-        topics = set()
-        for topic_name, config in self.topic_config.raw.items():
-            if not config.active:
-                continue
-            labels = {configured.lower() for configured in config.labels}
-            if label_lower in labels:
-                topics.add(topic_name)
-        return topics
-
-    def _normalize_resolution_topic(self, topic: str) -> Optional[str]:
+    def _normalize_resolution_topic(
+        self,
+        topic: str,
+        policy: IngestionPolicy,
+    ) -> Optional[str]:
         if not topic:
             return None
 
-        normalized = self.topic_config.normalize_topic(topic.strip())
+        normalized = policy.domain.normalize_topic(topic.strip())
         return normalized
 
     def _is_schema_compatible(
-        self, mention_type: str, mention_topic: str, profile: EntityProfile
+        self,
+        mention_type: str,
+        mention_topic: str,
+        profile: EntityProfile,
+        policy: IngestionPolicy,
     ) -> str:
-        mention_type_lower = (mention_type or "").strip().lower()
-        profile_type_lower = (profile.entity_type or "").strip().lower()
+        mention_type_lower = (
+            (
+                policy.domain.canonical_entity_type(mention_type)
+                or policy.domain.resolve_entity_type(mention_type)
+                or mention_type
+            )
+            .strip()
+            .lower()
+        )
+        profile_type_lower = (
+            (
+                policy.domain.canonical_entity_type(profile.entity_type or "")
+                or policy.domain.resolve_entity_type(profile.entity_type or "")
+                or (profile.entity_type or "")
+            )
+            .strip()
+            .lower()
+        )
 
         if mention_type_lower and mention_type_lower == profile_type_lower:
             return "compatible"
 
-        mention_topic_normalized = self._normalize_resolution_topic(mention_topic)
-        profile_topic_normalized = self._normalize_resolution_topic(profile.topic or "")
+        mention_topic_normalized = self._normalize_resolution_topic(
+            mention_topic,
+            policy,
+        )
+        profile_topic_normalized = self._normalize_resolution_topic(
+            profile.topic or "",
+            policy,
+        )
         if (
             mention_topic_normalized
             and profile_topic_normalized
@@ -797,8 +945,8 @@ class IngestionPipeline:
         ):
             return "compatible"
 
-        mention_label_topics = self._label_topics(mention_type_lower)
-        profile_label_topics = self._label_topics(profile_type_lower)
+        mention_label_topics = self._label_topics(mention_type_lower, policy)
+        profile_label_topics = self._label_topics(profile_type_lower, policy)
         if mention_label_topics and profile_label_topics:
             if mention_label_topics & profile_label_topics:
                 return "compatible"
@@ -807,7 +955,11 @@ class IngestionPipeline:
         return "neutral"
 
     def _is_sparse_context(
-        self, name: str, message_text: str, mention_type: str
+        self,
+        name: str,
+        message_text: str,
+        mention_type: str,
+        policy: IngestionPolicy,
     ) -> bool:
         name_tokens = self._word_tokens(name)
         if len(name_tokens) != 1:
@@ -828,11 +980,11 @@ class IngestionPipeline:
         content_tokens = [
             token
             for token in context_tokens
-            if token not in self.sparse_context_verbs and len(token) > 2
+            if token not in policy.sparse_context_verbs and len(token) > 2
         ]
         return len(content_tokens) <= 1
 
-    def _is_common_word_mention(self, name: str) -> bool:
+    def _is_common_word_mention(self, name: str, policy: IngestionPolicy) -> bool:
         tokens = self._word_tokens(name)
         if len(tokens) != 1:
             return False
@@ -841,7 +993,7 @@ class IngestionPipeline:
         if len(token) <= 2:
             return False
 
-        return word_frequency(token, "en") >= self.common_word_frequency_threshold
+        return word_frequency(token, "en") >= policy.common_word_frequency_threshold
 
     def _has_positive_entity_context(
         self,
@@ -850,6 +1002,7 @@ class IngestionPipeline:
         message_text: str,
         profile: EntityProfile,
         compatibility: str,
+        policy: IngestionPolicy,
     ) -> bool:
         if compatibility != "compatible":
             return False
@@ -860,11 +1013,13 @@ class IngestionPipeline:
             mention_type_lower and mention_type_lower == profile_type_lower
         )
         label_topic_overlap = bool(
-            self._label_topics(mention_type_lower)
-            & self._label_topics(profile_type_lower)
+            self._label_topics(mention_type_lower, policy)
+            & self._label_topics(profile_type_lower, policy)
         )
         return (type_matches or label_topic_overlap) and self._has_rich_context(
-            name, message_text
+            name,
+            message_text,
+            policy,
         )
 
     def _has_contextual_support(
@@ -874,6 +1029,7 @@ class IngestionPipeline:
         profile: EntityProfile,
         compatibility: str,
         candidate_id: int,
+        policy: IngestionPolicy,
     ) -> bool:
         canonical = profile.canonical_name or ""
         mentions = self.entities.get_mentions_for_id(candidate_id)
@@ -881,10 +1037,17 @@ class IngestionPipeline:
             return True
 
         return compatibility == "compatible" and self._has_rich_context(
-            name, message_text
+            name,
+            message_text,
+            policy,
         )
 
-    def _has_rich_context(self, name: str, message_text: str) -> bool:
+    def _has_rich_context(
+        self,
+        name: str,
+        message_text: str,
+        policy: IngestionPolicy,
+    ) -> bool:
         name_tokens = set(self._word_tokens(name))
         context_tokens = [
             token
@@ -894,7 +1057,7 @@ class IngestionPipeline:
         content_tokens = [
             token
             for token in context_tokens
-            if token not in self.sparse_context_verbs and len(token) > 2
+            if token not in policy.sparse_context_verbs and len(token) > 2
         ]
         return len(content_tokens) >= 3
 
@@ -917,11 +1080,12 @@ class IngestionPipeline:
     async def _build_connection_candidates(
         self,
         batch: IngestionBatch,
-    ) -> Tuple[List[Dict], Set[str], Dict[str, set], Dict[str, str]]:
+    ) -> Tuple[List[Dict], Set[str], Dict[str, set], Dict[str, str], Dict[str, str]]:
         candidates = []
         valid_entity_names = set()
         entity_source_msgs_by_name: Dict[str, set] = {}
         canonical_name_by_name: Dict[str, str] = {}
+        entity_type_by_name: Dict[str, str] = {}
 
         for ent_id in batch.entity_ids:
             profile = await self.entities.get_profile(ent_id)
@@ -949,6 +1113,7 @@ class IngestionPipeline:
                 valid_entity_names.add(normalized)
                 entity_source_msgs_by_name[normalized] = source_msgs
                 canonical_name_by_name[normalized] = canonical_name
+                entity_type_by_name[normalized] = profile.entity_type
 
             candidates.append(
                 {
@@ -964,6 +1129,7 @@ class IngestionPipeline:
             valid_entity_names,
             entity_source_msgs_by_name,
             canonical_name_by_name,
+            entity_type_by_name,
         )
 
     async def _extract_connections(
@@ -990,6 +1156,7 @@ class IngestionPipeline:
             valid_entity_names,
             entity_source_msgs_by_name,
             canonical_name_by_name,
+            entity_type_by_name,
         ) = await self._build_connection_candidates(batch)
 
         if not candidates:
@@ -1006,6 +1173,7 @@ class IngestionPipeline:
             session_text,
             user_name=self.user_name,
             message_local_ids=message_local_ids,
+            relationship_block=batch.policy.domain.relationship_block,
         )
 
         await emit(
@@ -1171,17 +1339,32 @@ class IngestionPipeline:
                     },
                 )
                 continue
+            source_type = entity_type_by_name.get(entity_a_key)
+            target_type = entity_type_by_name.get(entity_b_key)
+            normalization = normalize_relationship(
+                batch.policy.domain,
+                conn.relationship,
+                source_type=source_type,
+                target_type=target_type,
+            )
             relationship_key = (
                 actual_msg_id,
-                tuple(
-                    sorted(
-                        (
-                            self._normalize_name(canonical_a),
-                            self._normalize_name(canonical_b),
+                (
+                    tuple(
+                        sorted(
+                            (
+                                self._normalize_name(canonical_a),
+                                self._normalize_name(canonical_b),
+                            )
                         )
                     )
+                    if normalization.symmetric
+                    else (
+                        self._normalize_name(canonical_a),
+                        self._normalize_name(canonical_b),
+                    )
                 ),
-                self._normalize_name(conn.relationship),
+                normalization.persistence_type,
             )
             if relationship_key in seen_relationships:
                 if trace is not None:
@@ -1206,12 +1389,22 @@ class IngestionPipeline:
                     message_id=actual_msg_id,
                     entity_a_name=canonical_a,
                     entity_b_name=canonical_b,
-                    relationship_type=conn.relationship,
+                    relationship_type=normalization.persistence_type,
+                    observed_label=normalization.observed_label,
+                    canonical_type=normalization.canonical_type,
+                    domain_status=normalization.domain_status,
+                    source_type=normalization.source_type,
+                    target_type=normalization.target_type,
+                    symmetric=normalization.symmetric,
                     confidence=conn.confidence,
                     context=conn.context or conn.relationship,
                 )
             )
             if trace is not None:
+                if normalization.domain_status == "recognized":
+                    trace.relationships_recognized += 1
+                else:
+                    trace.relationships_unrecognized += 1
                 trace.relationships_accepted += 1
 
         seen_user_connections = set()
@@ -1311,10 +1504,18 @@ class IngestionPipeline:
                     item_ref=f"user->{conn.entity_name}",
                 )
                 continue
+            source_type = batch.policy.domain.canonical_entity_type("Identity")
+            target_type = entity_type_by_name.get(entity_name_key)
+            normalization = normalize_relationship(
+                batch.policy.domain,
+                conn.relationship,
+                source_type=source_type,
+                target_type=target_type,
+            )
             user_relationship_key = (
                 actual_msg_id,
                 self._normalize_name(canonical_entity_name),
-                self._normalize_name(conn.relationship),
+                normalization.persistence_type,
             )
             if user_relationship_key in seen_user_connections:
                 if trace is not None:
@@ -1338,18 +1539,58 @@ class IngestionPipeline:
                     message_id=actual_msg_id,
                     entity_a_name=self.user_name,
                     entity_b_name=canonical_entity_name,
-                    relationship_type=conn.relationship,
+                    relationship_type=normalization.persistence_type,
+                    observed_label=normalization.observed_label,
+                    canonical_type=normalization.canonical_type,
+                    domain_status=normalization.domain_status,
+                    source_type=normalization.source_type,
+                    target_type=normalization.target_type,
+                    symmetric=normalization.symmetric,
                     confidence=conn.confidence,
                     context=conn.context or conn.relationship,
                     identity_rooted=True,
                 )
             )
             if trace is not None:
+                if normalization.domain_status == "recognized":
+                    trace.relationships_recognized += 1
+                else:
+                    trace.relationships_unrecognized += 1
                 trace.user_relationships_accepted += 1
 
         return observations
 
     async def move_to_dead_letter(
+        self,
+        messages: List[Dict],
+        error: str,
+        stage: str = "processing",
+        session_text: str = None,
+        batch: IngestionBatch | None = None,
+        attempt: int = 1,
+        *,
+        session_id: str,
+    ) -> bool:
+        """Store failed work with its diagnostic correlation scope attached."""
+
+        with diagnostic_scope(
+            user_name=self.user_name,
+            project_id=self.project_id,
+            session_id=session_id,
+            ingestion_batch_id=batch.batch_id if batch is not None else None,
+            work_id=batch.work_unit.id if batch is not None else None,
+        ):
+            return await self._move_to_dead_letter_scoped(
+                messages,
+                error,
+                stage=stage,
+                session_text=session_text,
+                batch=batch,
+                attempt=attempt,
+                session_id=session_id,
+            )
+
+    async def _move_to_dead_letter_scoped(
         self,
         messages: List[Dict],
         error: str,
@@ -1381,13 +1622,17 @@ class IngestionPipeline:
         if stage in ["processing", "message_log"] and session_text is not None:
             entry["session_text"] = session_text
 
-        if stage in [
-            "graph_write",
-            "message_log",
-            "candidate_suggestions",
-            "checkpoint",
-            "processing",
-        ] and batch is not None:
+        if (
+            stage
+            in [
+                "graph_write",
+                "message_log",
+                "candidate_suggestions",
+                "checkpoint",
+                "processing",
+            ]
+            and batch is not None
+        ):
             payload = DLQPayload.from_ingestion_batch(batch)
             entry["batch_result"] = payload.model_dump(mode="json")
 

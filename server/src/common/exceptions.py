@@ -38,6 +38,18 @@ class StorageUnavailableError(KnogginError):
         )
 
 
+class WorkspaceConflictError(KnogginError, ValueError):
+    """Raised when an optimistic-concurrency workspace write is stale."""
+
+    def __init__(self, message: str = "Workspace file changed", details: Optional[Dict] = None):
+        KnogginError.__init__(
+            self,
+            message,
+            code="workspace_conflict",
+            details=details,
+        )
+
+
 class LLMError(KnogginError):
     """Base class for LLM request and response failures."""
 

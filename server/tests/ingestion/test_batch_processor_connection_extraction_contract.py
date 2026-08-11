@@ -1,5 +1,6 @@
 import pytest
 
+from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMProviderError
 from common.schema.contracts import (
     ExtractionTrace,
@@ -11,6 +12,7 @@ from common.schema.extraction_output import (
 )
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.pipeline_service import IngestionPipeline
+from tests.fixtures.ingestion import ingestion_policy
 from tests.ingestion.test_batch_processor_entity_resolution_contract import (
     MESSAGES,
     make_harness,
@@ -88,6 +90,7 @@ async def extract(
     messages=None,
     trace=None,
     issues=None,
+    compiled_domain=None,
 ):
     if entity_ids is None:
         entity_ids = [101, 102, 103]
@@ -100,6 +103,7 @@ async def extract(
         session_id="session-1",
         messages=MESSAGES if messages is None else messages,
         session_text="[USER]: prior context",
+        policy=ingestion_policy(compiled_domain=compiled_domain),
     )
     batch.entity_ids = entity_ids
     batch.entity_message_map = entity_msg_map
@@ -131,6 +135,61 @@ async def test_extract_connections_no_entity_ids_skips_llm():
     assert trace.relationships_seen == 0
     assert trace.user_relationships_seen == 0
     assert issues == []
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_connections_normalizes_configured_and_unknown_relationships():
+    domain = DomainConfig.from_mapping(
+        {
+            "version": 1,
+            "topics": {"Work": {}},
+            "entity_types": {
+                "Project": {"topic": "Work", "labels": ["project"]},
+                "Technology": {"topic": "Work", "labels": ["technology"]},
+            },
+            "relationships": {
+                "USES": {
+                    "source_types": ["Project"],
+                    "target_types": ["Technology"],
+                }
+            },
+        }
+    ).compile()
+    response = ConnectionsResult(
+        connections=[relationship(name="uses")],
+    )
+    processor, entities = make_processor(response)
+    await seed_entity(
+        entities,
+        101,
+        "Alice",
+        entity_type="Project",
+        topic="Work",
+    )
+    await seed_entity(
+        entities,
+        102,
+        "Robert Chen",
+        entity_type="Technology",
+        topic="Work",
+    )
+
+    trace = ExtractionTrace()
+    observations = await extract(
+        processor,
+        entity_ids=[101, 102],
+        entity_msg_map={101: [1], 102: [1]},
+        trace=trace,
+        issues=[],
+        compiled_domain=domain,
+    )
+
+    assert observations[0].canonical_type == "USES"
+    assert observations[0].observed_label == "uses"
+    assert observations[0].domain_status == "recognized"
+    assert observations[0].relationship_type == "USES"
+    assert trace.relationships_recognized == 1
 
 
 @pytest.mark.ingestion
@@ -378,6 +437,22 @@ async def test_extract_connections_rejects_self_relationship():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_extract_connections_rejects_duplicate_relationship():
+    domain = DomainConfig.from_mapping(
+        {
+            "version": 1,
+            "topics": {"Identity": {}},
+            "entity_types": {
+                "Person": {"topic": "Identity", "labels": ["person"]},
+            },
+            "relationships": {
+                "WORKS_WITH": {
+                    "source_types": ["Person"],
+                    "target_types": ["Person"],
+                    "symmetric": True,
+                }
+            },
+        }
+    ).compile()
     response = ConnectionsResult(
         connections=[
             relationship(),
@@ -393,6 +468,7 @@ async def test_extract_connections_rejects_duplicate_relationship():
         processor,
         trace=trace,
         issues=issues,
+        compiled_domain=domain,
     )
 
     assert observations[0].entity_a_name == "Alice"

@@ -16,6 +16,7 @@ from common.schema.agent_stream import (
     StreamToolCall,
     StreamUsage,
 )
+from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now
@@ -108,20 +109,26 @@ class AgentExecutor:
     ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
         """Run one agent execution and discard its model-only UUID handles."""
 
-        try:
-            async for event in self._execute_run(
-                user_timezone=user_timezone,
-                model=model,
-                enabled_tools=enabled_tools,
-                simulated_date=simulated_date,
-                agent_temperature=agent_temperature,
-                agent_brain=agent_brain,
-                agent_directives=agent_directives,
-                client_tools=client_tools,
-            ):
-                yield event
-        finally:
-            self.ctx.release()
+        with diagnostic_scope(
+            user_name=self.ctx.user_name,
+            project_id=self.ctx.project_id,
+            session_id=self.ctx.session_id,
+            agent_run_id=self.ctx.run_id,
+        ):
+            try:
+                async for event in self._execute_run(
+                    user_timezone=user_timezone,
+                    model=model,
+                    enabled_tools=enabled_tools,
+                    simulated_date=simulated_date,
+                    agent_temperature=agent_temperature,
+                    agent_brain=agent_brain,
+                    agent_directives=agent_directives,
+                    client_tools=client_tools,
+                ):
+                    yield event
+            finally:
+                self.ctx.release()
 
     async def _execute_run(
         self,
@@ -150,6 +157,7 @@ class AgentExecutor:
         document_focus_context = format_document_focus_context(
             getattr(self.tools, "document_focus", None)
         )
+        project_context = await self._load_project_context()
 
         a_directives = agent_directives or ""
 
@@ -160,10 +168,7 @@ class AgentExecutor:
         needs_final_synthesis = False
 
         while self.ctx.attempt_count < self.ctx.limits.max_attempts:
-            if (
-                self.ctx.consecutive_errors
-                >= self.ctx.limits.max_consecutive_errors
-            ):
+            if self.ctx.consecutive_errors >= self.ctx.limits.max_consecutive_errors:
                 yield self._terminal_error()
                 return
 
@@ -173,11 +178,7 @@ class AgentExecutor:
             current_model = None
             current_reasoning = None
 
-            if (
-                self.ctx.attempt_count == 1
-                or needs_replanning
-                or needs_final_synthesis
-            ):
+            if self.ctx.attempt_count == 1 or needs_replanning or needs_final_synthesis:
                 # Architect Mode: Strategic planning or final synthesis
                 current_mode_name = "Architect"
                 current_model = model or self.llm.agent_model
@@ -221,6 +222,7 @@ class AgentExecutor:
                 agent_brain or "",
                 last_result,
                 client_tools,
+                project_context=project_context,
             ):
                 event_type = event["event"]
                 data = event["data"]
@@ -401,6 +403,7 @@ class AgentExecutor:
         agent_brain: str,
         last_result: Optional[List[Dict]],
         client_tools: Optional[List[Dict]] = None,
+        project_context: str = "",
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
         active_schemas = get_tool_schemas(enabled_tools)
@@ -419,6 +422,7 @@ class AgentExecutor:
             document_focus_context=document_focus_context,
             agent_directives=directives,
             agent_brain=agent_brain,
+            project_context=project_context,
             runtime_instructions=runtime_instructions,
             active_topics=self.ctx.active_topics,
             is_community=self.ctx.is_community,
@@ -449,8 +453,8 @@ class AgentExecutor:
                 tools=active_schemas,
                 model=model or self.llm.agent_model,
                 temperature=temp,
-                reasoning=reasoning,
-            ):
+            reasoning=reasoning,
+        ):
                 if event["event"] == "tool_calls":
                     saw_tool_calls = True
                     yield event
@@ -477,6 +481,26 @@ class AgentExecutor:
                     "message": f"LLM API failure: {str(e)}",
                 },
             }
+
+    async def _load_project_context(self) -> str:
+        """Load canonical project context without making it a run blocker."""
+        workspace_service = getattr(self.tools, "workspace_service", None)
+        reader = getattr(workspace_service, "read_project_context", None)
+        if reader is None:
+            return ""
+        try:
+            content = await reader()
+        except FileNotFoundError:
+            return ""
+        except Exception as exc:
+            logger.warning(
+                "AgentExecutor: project context unavailable ({})",
+                type(exc).__name__,
+            )
+            return ""
+        if not isinstance(content, str):
+            return ""
+        return content
 
     def _parse_tool_calls(
         self,
@@ -581,9 +605,7 @@ class AgentExecutor:
                 if self.ctx.tool_limit_reached(call.name, self.ctx.limits):
                     error_message = f"Tool '{call.name}' has reached its call limit"
                     self.ctx.note_nonfatal_error(error_message)
-                    results_out.append(
-                        {"tool": call.name, "error": error_message}
-                    )
+                    results_out.append({"tool": call.name, "error": error_message})
                     yield {
                         "event": "tool_error",
                         "data": {
@@ -599,9 +621,7 @@ class AgentExecutor:
                         f"Duplicate call to '{call.name}' with same arguments"
                     )
                     self.ctx.note_nonfatal_error(error_message)
-                    results_out.append(
-                        {"tool": call.name, "error": error_message}
-                    )
+                    results_out.append({"tool": call.name, "error": error_message})
                     yield {
                         "event": "tool_error",
                         "data": {
@@ -623,9 +643,7 @@ class AgentExecutor:
                 if call.args.get("_parse_error"):
                     error_message = f"Failed to parse arguments for '{call.name}'"
                     self.ctx.note_nonfatal_error(error_message)
-                    results_out.append(
-                        {"tool": call.name, "error": error_message}
-                    )
+                    results_out.append({"tool": call.name, "error": error_message})
                     yield {
                         "event": "tool_error",
                         "data": {
@@ -763,13 +781,9 @@ class AgentExecutor:
             if response.sources_consulted is not None
             else self.ctx.source_candidates
         )
-        usage = (
-            response.usage if response.usage is not None else dict(self.ctx.usage)
-        )
+        usage = response.usage if response.usage is not None else dict(self.ctx.usage)
         sources = (
-            response.sources
-            if response.sources is not None
-            else list(self.ctx.sources)
+            response.sources if response.sources is not None else list(self.ctx.sources)
         )
         event = {
             "event": "response",
@@ -828,8 +842,7 @@ class AgentExecutor:
         evidence_ctx = ""
         if self.ctx.profiles:
             evidence_ctx += (
-                "\nProfiles FOUND:\n"
-                f"{format_entity_results(self.ctx.profiles)}\n"
+                f"\nProfiles FOUND:\n{format_entity_results(self.ctx.profiles)}\n"
             )
         if self.ctx.messages:
             evidence_ctx += (

@@ -6,7 +6,7 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.schema.contracts import ExecutionScope
-from common.schema.settings import DLQSettings, IngestionSettings
+from common.schema.settings import DLQSettings
 from common.utils.events import emit
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_unix
@@ -23,6 +23,7 @@ from core.ingestion.dlq_state import (
     ensure_dlq_id,
     serialize_dlq_entry,
 )
+from core.ingestion.policy import IngestionPolicy
 from core.ingestion.services.pipeline_service import (
     IngestionPipeline,
 )
@@ -86,7 +87,6 @@ class DLQReplayJob(BaseJob):
         ],
         redis_client: aioredis.Redis,
         settings: DLQSettings,
-        checkpoint_interval: int = IngestionSettings().checkpoint_interval,
     ):
         self.entities = entities
         self.processor = processor
@@ -96,13 +96,7 @@ class DLQReplayJob(BaseJob):
             )
         self.write_to_graph = write_to_graph
         self.redis = redis_client
-        self.update_checkpoint_interval(checkpoint_interval)
         self.update_settings(settings)
-
-    def update_checkpoint_interval(self, checkpoint_interval: int) -> None:
-        if not isinstance(checkpoint_interval, int) or checkpoint_interval <= 0:
-            raise ValueError("checkpoint_interval must be a positive integer")
-        self.checkpoint_interval = checkpoint_interval
 
     @property
     def name(self) -> str:
@@ -369,18 +363,20 @@ class DLQReplayJob(BaseJob):
     async def _emit_replay_unit_finished(
         self, ctx: JobContext, replay_unit: WorkRecord
     ) -> None:
+        terminal_status = replay_unit.require_terminal_status()
         await emit(
             ctx.project_id,
             "job",
             "dlq_work_unit_finished",
-            replay_unit.snapshot(),
+            {
+                **replay_unit.snapshot(),
+                "terminal_outcome": terminal_status.value,
+            },
             verbose_only=True,
         )
 
     @staticmethod
-    def _set_replay_attempt(
-        result: IngestionBatch, attempt: int
-    ) -> None:
+    def _set_replay_attempt(result: IngestionBatch, attempt: int) -> None:
         result.work_unit.attempt = attempt
 
     @staticmethod
@@ -388,9 +384,7 @@ class DLQReplayJob(BaseJob):
         payload = DLQPayload.model_validate(payload_data)
         return payload.to_ingestion_batch()
 
-    def _validate_replay_batch(
-        self, result: IngestionBatch
-    ) -> IngestionBatch:
+    def _validate_replay_batch(self, result: IngestionBatch) -> IngestionBatch:
         """
         Filter out stale entity IDs (e.g. phantom entities purged after a failed write),
         forcing the DLQ to fall back to a safer full reprocessing retry.
@@ -433,11 +427,7 @@ class DLQReplayJob(BaseJob):
             raise ValueError("Checkpoint replay requires a graph-committed batch")
         if not batch.messages:
             raise ValueError("Checkpoint replay requires batch messages")
-        await commit_ingestion_checkpoint(
-            self.redis,
-            batch,
-            checkpoint_interval=batch.checkpoint_interval or self.checkpoint_interval,
-        )
+        await commit_ingestion_checkpoint(self.redis, batch)
         batch.mark_checkpoint_committed()
 
     async def _retry_graph_write(self, entry: dict, ctx: JobContext) -> bool:
@@ -499,6 +489,9 @@ class DLQReplayJob(BaseJob):
             self._attach_replay_unit(result, replay_unit)
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
+        finally:
+            if result is not None:
+                result.release()
 
     async def _retry_message_log(self, entry: dict, ctx: JobContext) -> bool:
         """Retry saving message logs and subsequently the graph write."""
@@ -559,10 +552,11 @@ class DLQReplayJob(BaseJob):
             self._attach_replay_unit(result, replay_unit)
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
+        finally:
+            if result is not None:
+                result.release()
 
-    async def _retry_candidate_suggestions(
-        self, entry: dict, ctx: JobContext
-    ) -> bool:
+    async def _retry_candidate_suggestions(self, entry: dict, ctx: JobContext) -> bool:
         """Retry suggestions, then finish the remaining durable lifecycle."""
 
         replay_unit = self._replay_work_unit(entry, ctx)
@@ -590,6 +584,9 @@ class DLQReplayJob(BaseJob):
             self._attach_replay_unit(result, replay_unit)
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
+        finally:
+            if result is not None:
+                result.release()
 
     async def _save_candidate_suggestions_for_replay(
         self, result: IngestionBatch
@@ -666,20 +663,27 @@ class DLQReplayJob(BaseJob):
         try:
             messages = entry.get("messages", [])
             session_text = entry.get("session_text", "")
+            batch_payload = entry.get("batch_result")
 
             if not messages:
                 logger.warning("DLQ: No messages in entry, skipping")
                 replay_unit.mark_skipped("No messages")
                 await self._emit_replay_unit_finished(ctx, replay_unit)
                 return True
+            if not batch_payload:
+                raise ValueError("DLQ processing replay requires a batch policy")
+
+            policy = IngestionPolicy.from_dict(
+                DLQPayload.model_validate(batch_payload).policy
+            )
 
             result = self.processor.open_batch(
                 messages,
                 session_text,
                 session_id=replay_unit.scope.session_id,
+                policy=policy,
             )
             await self.processor.process(result)
-            result.set_checkpoint_policy(self.checkpoint_interval)
             self._refresh_replay_scope(replay_unit, entry, ctx, result)
             self._set_replay_attempt(result, entry.get("attempt", 1))
 
@@ -696,8 +700,7 @@ class DLQReplayJob(BaseJob):
             graph_error = await self._write_replay_graph_if_needed(result)
             if graph_error:
                 logger.warning(
-                    "DLQ: Reprocessing succeeded but graph write failed: "
-                    f"{graph_error}"
+                    f"DLQ: Reprocessing succeeded but graph write failed: {graph_error}"
                 )
                 replay_unit.mark_failed(graph_error)
                 self._attach_replay_unit(result, replay_unit)
@@ -736,6 +739,9 @@ class DLQReplayJob(BaseJob):
             self._attach_replay_unit(result, replay_unit)
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
+        finally:
+            if result is not None:
+                result.release()
 
     async def _retry_checkpoint(self, entry: dict, ctx: JobContext) -> bool:
         """Retry only the final durable checkpoint after a graph commit."""
@@ -759,6 +765,9 @@ class DLQReplayJob(BaseJob):
             self._attach_replay_unit(result, replay_unit)
             await self._emit_replay_unit_finished(ctx, replay_unit)
             return False
+        finally:
+            if result is not None:
+                result.release()
 
     async def execute(self, ctx: JobContext) -> JobResult:
         dlq_key = RedisKeys.dlq(ctx.user_name, ctx.project_id)

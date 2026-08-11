@@ -412,7 +412,7 @@ async def test_lease_release_requires_matching_owner_token():
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_job_cancellation_releases_lease(monkeypatch):
-    capture_events(monkeypatch)
+    events = capture_events(monkeypatch)
     redis = FakeRedis()
     scheduler = Scheduler("ada", "project-1", redis)
     job = ControlledJob(blocker=asyncio.Event())
@@ -425,6 +425,26 @@ async def test_job_cancellation_releases_lease(monkeypatch):
     assert await redis.get(
         RedisKeys.job_lease("ada", "project-1", job.name)
     ) is None
+    assert [event[2] for event in events] == ["started", "cancelled"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_job_policy_is_captured_before_lease_acquisition():
+    redis = FakeRedis()
+    scheduler = Scheduler("ada", "project-1", redis)
+    scheduler.JOB_EXECUTION_TIMEOUT = 45
+    scheduler.LEASE_GRACE_SECONDS = 7
+    policy = scheduler._capture_job_policy()
+    scheduler.JOB_EXECUTION_TIMEOUT = 1
+
+    await scheduler._acquire_lease(
+        context(),
+        ControlledJob(),
+        policy=policy,
+    )
+
+    assert redis.expirations[-1][1] == 52
 
 
 @pytest.mark.runtime

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Optional
+from typing import Any, Optional, assert_never
 from uuid import uuid4
 
 from common.schema.contracts import (
@@ -89,6 +89,7 @@ class WorkRecord:
             user_name=scope.user_name,
             project_id=scope.project_id,
             session_id=scope.session_id,
+            parent_id=batch_id,
             priority=priority,
             graph_write_expected=True,
             stage="graph_write",
@@ -194,7 +195,9 @@ class WorkRecord:
         self._finish()
 
     def defer(self, summary: Optional[str] = None) -> None:
-        self._require_transition({WorkStatus.PENDING, WorkStatus.RUNNING}, WorkStatus.DEFERRED)
+        self._require_transition(
+            {WorkStatus.PENDING, WorkStatus.RUNNING}, WorkStatus.DEFERRED
+        )
         self.status = WorkStatus.DEFERRED
         self.summary = summary
         self._finish()
@@ -215,11 +218,37 @@ class WorkRecord:
     mark_skipped = skip
     mark_cancelled = cancel
 
+    def require_terminal_status(self) -> WorkStatus:
+        """Return the terminal result or reject work that is still in progress.
+
+        Keeping every enum member explicit makes new statuses visible to static
+        analysis and prevents callers from treating an active record as a result.
+        """
+
+        match self.status:
+            case WorkStatus.SUCCEEDED:
+                return WorkStatus.SUCCEEDED
+            case WorkStatus.FAILED:
+                return WorkStatus.FAILED
+            case WorkStatus.DEFERRED:
+                return WorkStatus.DEFERRED
+            case WorkStatus.SKIPPED:
+                return WorkStatus.SKIPPED
+            case WorkStatus.CANCELLED:
+                return WorkStatus.CANCELLED
+            case WorkStatus.PENDING:
+                raise RuntimeError("Work is pending and has no terminal outcome")
+            case WorkStatus.RUNNING:
+                raise RuntimeError("Work is running and has no terminal outcome")
+            case unexpected:
+                assert_never(unexpected)
+
     def add_model_work_summary(self, child: "WorkRecord") -> None:
         """Record a child operation produced by the live workflow."""
 
         if not isinstance(child, WorkRecord):
             raise TypeError("child must be a WorkRecord")
+        child.require_terminal_status()
         summaries = self.metadata.setdefault("model_work", [])
         summaries.append(
             {

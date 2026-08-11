@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS public.projects (
     access_mode TEXT NOT NULL DEFAULT 'open',
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'archived', 'deleted')),
-    topic_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    topic_config JSONB NOT NULL,
+    domain_config JSONB NOT NULL
+        CHECK (jsonb_typeof(domain_config) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     archived_at TIMESTAMPTZ,
@@ -20,6 +22,16 @@ CREATE TABLE IF NOT EXISTS public.projects (
     last_activity_at TIMESTAMPTZ,
     UNIQUE (user_name, project_id)
 );
+
+ALTER TABLE public.projects
+ADD COLUMN IF NOT EXISTS domain_config JSONB NOT NULL
+    CHECK (jsonb_typeof(domain_config) = 'object');
+
+ALTER TABLE public.projects
+ALTER COLUMN domain_config DROP DEFAULT;
+
+ALTER TABLE public.projects
+ALTER COLUMN topic_config DROP DEFAULT;
 
 CREATE TABLE IF NOT EXISTS public.project_read_scopes (
     user_name TEXT NOT NULL,
@@ -197,21 +209,32 @@ CREATE TABLE IF NOT EXISTS public.relationships (
     entity_b_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
         ON DELETE CASCADE,
     relationship_type TEXT NOT NULL CHECK (btrim(relationship_type) <> ''),
+    canonical_relationship_type TEXT,
+    observed_relationship_label TEXT NOT NULL
+        CHECK (btrim(observed_relationship_label) <> ''),
+    domain_status TEXT NOT NULL DEFAULT 'unrecognized'
+        CHECK (domain_status IN ('recognized', 'unrecognized')),
+    CONSTRAINT relationships_domain_status_consistent
+        CHECK (
+            (domain_status = 'recognized')
+            = (canonical_relationship_type IS NOT NULL)
+        ),
+    symmetric BOOLEAN NOT NULL DEFAULT FALSE,
     weight INTEGER NOT NULL DEFAULT 1,
     confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     context TEXT,
     last_seen_ms BIGINT,
     CONSTRAINT relationships_distinct_entities
         CHECK (entity_a_id <> entity_b_id),
-    CONSTRAINT relationships_ordered_endpoints
-        CHECK (entity_a_id < entity_b_id),
     CONSTRAINT relationships_identity_matches_fields
         CHECK (
             relationship_id = format(
                 '%s:%s:%s:%s',
                 project_id,
-                entity_a_id,
-                entity_b_id,
+                CASE WHEN symmetric THEN LEAST(entity_a_id, entity_b_id)
+                     ELSE entity_a_id END,
+                CASE WHEN symmetric THEN GREATEST(entity_a_id, entity_b_id)
+                     ELSE entity_b_id END,
                 lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
             )
         ),
@@ -228,6 +251,124 @@ ON public.relationships(entity_a_id);
 
 CREATE INDEX IF NOT EXISTS relationships_entity_b_idx
 ON public.relationships(entity_b_id);
+
+-- One row per extracted relationship phrase and message. This preserves
+-- source wording and endpoint types without turning advisories into graph
+-- authority; relationship_evidence_refs remains the aggregate edge's compact
+-- message-reference index.
+CREATE TABLE IF NOT EXISTS public.relationship_observations (
+    observation_id BIGSERIAL PRIMARY KEY,
+    relationship_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    user_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    message_id BIGINT NOT NULL,
+    source_entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
+        ON DELETE CASCADE,
+    target_entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
+        ON DELETE CASCADE,
+    source_type TEXT,
+    target_type TEXT,
+    observed_relationship_label TEXT NOT NULL
+        CHECK (btrim(observed_relationship_label) <> ''),
+    canonical_relationship_type TEXT,
+    domain_status TEXT NOT NULL DEFAULT 'unrecognized'
+        CHECK (domain_status IN ('recognized', 'unrecognized')),
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    context TEXT,
+    observed_at_ms BIGINT NOT NULL,
+    CONSTRAINT relationship_observations_distinct_entities
+        CHECK (source_entity_id <> target_entity_id),
+    CONSTRAINT relationship_observations_relationship_fk
+        FOREIGN KEY (relationship_id, project_id)
+        REFERENCES public.relationships(relationship_id, project_id)
+        ON DELETE CASCADE,
+    CONSTRAINT relationship_observations_message_fk
+        FOREIGN KEY (user_name, session_id, message_id, project_id)
+        REFERENCES public.messages(user_name, session_id, message_id, project_id)
+        ON DELETE CASCADE,
+    CONSTRAINT relationship_observations_domain_status_consistent
+        CHECK (
+            (domain_status = 'recognized')
+            = (canonical_relationship_type IS NOT NULL)
+        ),
+    CONSTRAINT relationship_observations_unique_evidence
+        UNIQUE (
+            project_id,
+            user_name,
+            session_id,
+            message_id,
+            source_entity_id,
+            target_entity_id,
+            observed_relationship_label
+        )
+);
+
+CREATE INDEX IF NOT EXISTS relationship_observations_pattern_idx
+ON public.relationship_observations(
+    project_id,
+    user_name,
+    domain_status,
+    observed_relationship_label,
+    source_type,
+    target_type
+);
+
+CREATE INDEX IF NOT EXISTS relationship_observations_relationship_idx
+ON public.relationship_observations(relationship_id, project_id);
+
+-- Durable advisory disposition. Evidence remains in relationship_observations;
+-- this table stores only the current user decision for each pattern.
+CREATE TABLE IF NOT EXISTS public.relationship_advisories (
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    pattern_key TEXT NOT NULL,
+    disposition TEXT NOT NULL DEFAULT 'pending'
+        CHECK (disposition IN ('pending', 'accepted', 'dismissed', 'suppressed')),
+    proposed_relationship_type TEXT,
+    last_action TEXT
+        CHECK (last_action IS NULL OR last_action IN (
+            'accept', 'edit', 'dismiss', 'reopen', 'suppress', 'merge'
+        )),
+    decision_note TEXT,
+    decided_by TEXT,
+    decision_at TIMESTAMPTZ,
+    revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_name, project_id, pattern_key),
+    CONSTRAINT relationship_advisories_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS public.relationship_advisory_decisions (
+    decision_id BIGSERIAL PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    pattern_key TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN (
+        'accept', 'edit', 'dismiss', 'reopen', 'suppress', 'merge'
+    )),
+    proposed_relationship_type TEXT,
+    decision_note TEXT,
+    decided_by TEXT,
+    revision BIGINT NOT NULL CHECK (revision >= 1),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT relationship_advisory_decisions_state_fk
+        FOREIGN KEY (user_name, project_id, pattern_key)
+        REFERENCES public.relationship_advisories(
+            user_name, project_id, pattern_key
+        ) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS relationship_advisories_disposition_idx
+ON public.relationship_advisories(user_name, project_id, disposition);
+
+CREATE INDEX IF NOT EXISTS relationship_advisory_decisions_pattern_idx
+ON public.relationship_advisory_decisions(
+    user_name, project_id, pattern_key, created_at
+);
 
 CREATE TABLE IF NOT EXISTS public.relationship_evidence_refs (
     relationship_id TEXT NOT NULL,
@@ -350,6 +491,16 @@ CREATE TABLE IF NOT EXISTS public.episodes (
 ALTER TABLE public.relationships
 ADD COLUMN IF NOT EXISTS relationship_type TEXT;
 
+ALTER TABLE public.relationships
+ADD COLUMN IF NOT EXISTS canonical_relationship_type TEXT,
+ADD COLUMN IF NOT EXISTS observed_relationship_label TEXT,
+ADD COLUMN IF NOT EXISTS domain_status TEXT NOT NULL DEFAULT 'unrecognized',
+ADD COLUMN IF NOT EXISTS symmetric BOOLEAN NOT NULL DEFAULT FALSE;
+
+UPDATE public.relationships
+SET observed_relationship_label = relationship_type
+WHERE observed_relationship_label IS NULL;
+
 DO $$
 BEGIN
     IF EXISTS (
@@ -357,12 +508,15 @@ BEGIN
         FROM public.relationships
         WHERE relationship_type IS NULL
            OR btrim(relationship_type) = ''
-           OR entity_a_id >= entity_b_id
+           OR observed_relationship_label IS NULL
+           OR btrim(observed_relationship_label) = ''
            OR relationship_id <> format(
                '%s:%s:%s:%s',
                project_id,
-               entity_a_id,
-               entity_b_id,
+               CASE WHEN symmetric THEN LEAST(entity_a_id, entity_b_id)
+                    ELSE entity_a_id END,
+               CASE WHEN symmetric THEN GREATEST(entity_a_id, entity_b_id)
+                    ELSE entity_b_id END,
                lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
            )
     ) THEN
@@ -373,15 +527,8 @@ BEGIN
     ALTER TABLE public.relationships
     ALTER COLUMN relationship_type SET NOT NULL;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationships_ordered_endpoints'
-          AND conrelid = 'public.relationships'::regclass
-    ) THEN
-        ALTER TABLE public.relationships
-        ADD CONSTRAINT relationships_ordered_endpoints
-        CHECK (entity_a_id < entity_b_id);
-    END IF;
+    ALTER TABLE public.relationships
+    DROP CONSTRAINT IF EXISTS relationships_ordered_endpoints;
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
@@ -394,8 +541,10 @@ BEGIN
             relationship_id = format(
                 '%s:%s:%s:%s',
                 project_id,
-                entity_a_id,
-                entity_b_id,
+                CASE WHEN symmetric THEN LEAST(entity_a_id, entity_b_id)
+                     ELSE entity_a_id END,
+                CASE WHEN symmetric THEN GREATEST(entity_a_id, entity_b_id)
+                     ELSE entity_b_id END,
                 lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
             )
         );
@@ -1428,6 +1577,7 @@ CREATE TABLE IF NOT EXISTS public.document_workspace_sources (
     project_id TEXT NOT NULL,
     session_id TEXT,
     visibility_scope TEXT NOT NULL,
+    ownership_mode TEXT NOT NULL DEFAULT 'external_sync',
     display_name TEXT NOT NULL,
     last_synced_at TIMESTAMPTZ,
     last_manifest_candidate_count INTEGER NOT NULL DEFAULT 0,
@@ -1438,6 +1588,14 @@ CREATE TABLE IF NOT EXISTS public.document_workspace_sources (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT document_workspace_sources_visibility_scope_check
         CHECK (visibility_scope IN ('project', 'session')),
+    CONSTRAINT document_workspace_sources_ownership_mode_check
+        CHECK (
+            ownership_mode IN ('external_sync', 'managed_project_workspace')
+            AND (
+                ownership_mode = 'external_sync'
+                OR (visibility_scope = 'project' AND session_id IS NULL)
+            )
+        ),
     CONSTRAINT document_workspace_sources_session_visibility_check
         CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
     CONSTRAINT document_workspace_sources_manifest_counts_check
@@ -1450,6 +1608,19 @@ CREATE TABLE IF NOT EXISTS public.document_workspace_sources (
 
 ALTER TABLE public.document_workspace_sources
     ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
+ALTER TABLE public.document_workspace_sources
+    ADD COLUMN IF NOT EXISTS ownership_mode TEXT NOT NULL DEFAULT 'external_sync';
+ALTER TABLE public.document_workspace_sources
+    DROP CONSTRAINT IF EXISTS document_workspace_sources_ownership_mode_check;
+ALTER TABLE public.document_workspace_sources
+    ADD CONSTRAINT document_workspace_sources_ownership_mode_check
+    CHECK (
+        ownership_mode IN ('external_sync', 'managed_project_workspace')
+        AND (
+            ownership_mode = 'external_sync'
+            OR (visibility_scope = 'project' AND session_id IS NULL)
+        )
+    );
 ALTER TABLE public.document_workspace_sources
     ADD COLUMN IF NOT EXISTS last_manifest_candidate_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE public.document_workspace_sources
@@ -1477,6 +1648,10 @@ ON public.document_workspace_sources(
     visibility_scope,
     session_id
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS document_workspace_sources_managed_project_unique
+ON public.document_workspace_sources(project_id)
+WHERE ownership_mode = 'managed_project_workspace';
 
 CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
     project_id TEXT PRIMARY KEY,

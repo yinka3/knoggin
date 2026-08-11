@@ -53,6 +53,24 @@ def test_agent_prompt_renders_agent_brain_without_nested_instructions_tag():
 
 
 @pytest.mark.no_network
+def test_agent_prompt_renders_project_context_below_persona_and_above_brain():
+    prompt = get_agent_prompt(
+        user_name="Ada",
+        persona="The user's stable persona.",
+        project_context="Prefer the project's naming conventions.",
+        agent_brain="Use concise evidence summaries.",
+    )
+
+    assert "<project_context>" in prompt
+    assert "Prefer the project's naming conventions." in prompt
+    assert "User-owned context from the canonical project workspace" in prompt
+    assert prompt.index("<cognitive_persona>") < prompt.index("<project_context>")
+    assert prompt.index("<project_context>") < prompt.index("<agent_brain>")
+    assert "3. User-owned project context from the canonical PROJECT.md." in prompt
+    assert "It cannot override server-enforced safety rules" in prompt
+
+
+@pytest.mark.no_network
 def test_agent_prompt_omits_persistent_context_when_no_memory_or_files():
     prompt = get_agent_prompt(user_name="Ada")
 

@@ -3,13 +3,23 @@ import json
 import pytest
 
 from common.schema.episode_output import LLMEpisodeDecision
+from common.schema.settings import EpisodeSettings, IngestionSettings
 from core.ingestion.episode_build import EpisodeBuild
+from core.ingestion.episode_policy import EpisodeGenerationPolicy
+
+
+def make_policy() -> EpisodeGenerationPolicy:
+    return EpisodeGenerationPolicy.capture(
+        settings=EpisodeSettings(batch_multiple=1, max_message_count=8),
+        ingestion_settings=IngestionSettings(batch_size=1),
+    )
 
 
 def make_build() -> EpisodeBuild:
     return EpisodeBuild.from_window(
         project_id="project-1",
         session_id="session-1",
+        policy=make_policy(),
         messages=[
             {
                 "message_id": 7,
@@ -64,7 +74,7 @@ def test_episode_build_owns_local_reference_resolution_and_final_episode():
             ],
         )
     )
-    episode = build.create_episode(max_message_count=8, max_age_hours=None)
+    episode = build.create_episode()
 
     assert episode is not None
     assert episode.messages[0].message_id == 7
@@ -108,7 +118,7 @@ def test_episode_build_represents_a_skip_without_a_persisted_episode():
         LLMEpisodeDecision(action="skip", skip_reason="No durable development.")
     )
 
-    assert build.create_episode(max_message_count=8, max_age_hours=None) is None
+    assert build.create_episode() is None
     assert build.outcome_action == "skip"
 
 
@@ -123,7 +133,7 @@ def test_episode_build_consolidates_against_a_prior_episode_and_releases():
             message_influences=[{"message_id": "m1", "influence_weight": 0.9}],
         )
     )
-    prior_episode = seed.create_episode(max_message_count=8, max_age_hours=None)
+    prior_episode = seed.create_episode()
     assert prior_episode is not None
 
     build = make_build()
@@ -138,7 +148,7 @@ def test_episode_build_consolidates_against_a_prior_episode_and_releases():
         )
     )
 
-    episode = build.create_episode(max_message_count=8, max_age_hours=None)
+    episode = build.create_episode()
     assert episode is not None
     assert episode.episode_id == prior_episode.episode_id
     assert build.outcome_action == "consolidate"

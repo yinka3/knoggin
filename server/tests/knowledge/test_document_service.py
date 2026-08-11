@@ -14,7 +14,7 @@ from common.schema.document import (
     FolderUploadEntry,
     WorkspaceSyncChanges,
 )
-from core.knowledge.documents import DocumentService
+from core.knowledge.documents import DocumentIndexPolicy, DocumentService
 from core.knowledge.documents import (
     storage as storage_module,
 )
@@ -141,6 +141,29 @@ class MemoryPostgres:
             ]
             self.contents.pop(document_id, None)
             return [dict(row)]
+        if (
+            query.lstrip().startswith("UPDATE public.project_documents")
+            and "document_id = ANY(%s)" in query
+            and "status = 'indexing'" in query
+        ):
+            updated_at, project_id, document_ids = params
+            updated = []
+            for row in self.rows:
+                if (
+                    row["project_id"] == project_id
+                    and row["document_id"] in document_ids
+                    and row["status"] == "indexing"
+                ):
+                    row.update(
+                        {
+                            "status": "queued",
+                            "indexed_at": None,
+                            "error_message": None,
+                            "updated_at": updated_at,
+                        }
+                    )
+                    updated.append({"document_id": row["document_id"]})
+            return updated
         if (
             query.lstrip().startswith("UPDATE public.project_documents")
             and "status = 'indexing'" in query
@@ -1587,7 +1610,9 @@ async def test_workspace_batch_prepares_files_with_bounded_concurrency(
             active -= 1
 
     service._run_blocking = tracked_to_thread
-    service._workspace_prepare_concurrency = 2
+    service._indexing_policy = DocumentIndexPolicy.capture(
+        workspace_prepare_concurrency=2,
+    )
     source = await service.create_workspace_source(display_name="knoggin")
     await service.sync_workspace_source(
         source_id=source["source_id"],
@@ -2395,6 +2420,56 @@ async def test_index_document_preserves_code_location_metadata(document_harness)
         "File: src/indexer.py\nLanguage: python\nSymbol: build_index\n\ndef build_index(path):\n    return path",
         "File: src/indexer.py\nLanguage: python\nSymbol: Searcher\n\nclass Searcher:\n    pass",
     ]]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_index_document_uses_its_captured_embedding_batch_policy(
+    document_harness,
+):
+    service, _ = document_harness
+    uploaded = await service.add_document(
+        content=(
+            b"import os\n\n"
+            b"def build_index(path):\n"
+            b"    return path\n\n"
+            b"class Searcher:\n"
+            b"    pass\n"
+        ),
+        original_name="indexer.py",
+    )
+    policy = DocumentIndexPolicy.capture(embedding_chunk_batch_size=1)
+
+    await service.index_document(
+        document_id=uploaded["document_id"],
+        policy=policy,
+    )
+
+    assert len(service._embedding.calls) == 3
+    assert all(len(call) == 1 for call in service._embedding.calls)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_document_index_releases_its_durable_claim(document_harness):
+    service, postgres = document_harness
+    uploaded = await service.add_document(content=b"alpha", original_name="notes.md")
+    started = asyncio.Event()
+
+    async def wait_for_cancellation(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    service._run_blocking = wait_for_cancellation
+    task = asyncio.create_task(service.index_document(document_id=uploaded["document_id"]))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert postgres.rows[0]["status"] == "queued"
+    assert postgres.rows[0]["error_message"] is None
 
 
 @pytest.mark.storage

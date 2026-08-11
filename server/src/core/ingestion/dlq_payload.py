@@ -16,13 +16,14 @@ from core.ingestion.batch import (
     IngestionMilestone,
     IngestionStage,
 )
+from core.ingestion.policy import IngestionPolicy
 from infrastructure.work_record import WorkRecord
 
 
 class DLQPayload(BaseModel):
     """The only serialized ingestion replay representation for this release."""
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     batch_id: str
     batch_stage: str
     sealed: bool = False
@@ -33,6 +34,7 @@ class DLQPayload(BaseModel):
     session_text: str = ""
     scope: ExecutionScope
     work_record: Dict[str, Any]
+    policy: Dict[str, Any]
     trace: ExtractionTrace = Field(default_factory=ExtractionTrace)
     issues: List[ValidationIssue] = Field(default_factory=list)
     entity_ids: List[int] = Field(default_factory=list)
@@ -64,6 +66,7 @@ class DLQPayload(BaseModel):
             session_text=batch.session_text,
             scope=batch.scope,
             work_record=batch.work_unit.snapshot(),
+            policy=batch.policy.to_dict(),
             trace=batch.trace,
             issues=list(batch.issues),
             entity_ids=list(batch.entity_ids),
@@ -96,6 +99,7 @@ class DLQPayload(BaseModel):
             session_id=self.scope.session_id,
             messages=self.messages,
             session_text=self.session_text,
+            policy=IngestionPolicy.from_dict(self.policy),
             batch_id=self.batch_id,
         )
         batch.work_unit = WorkRecord.from_snapshot(self.work_record)
@@ -109,7 +113,8 @@ class DLQPayload(BaseModel):
             for entity_id, message_ids in self.entity_message_map.items()
         }
         batch.alias_updates = {
-            entity_id: list(aliases) for entity_id, aliases in self.alias_updates.items()
+            entity_id: list(aliases)
+            for entity_id, aliases in self.alias_updates.items()
         }
         batch.candidate_suggestions = [
             CandidateSuggestion.from_dict(item) for item in self.candidate_suggestions

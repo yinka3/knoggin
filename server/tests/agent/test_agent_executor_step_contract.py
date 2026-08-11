@@ -43,6 +43,35 @@ def make_executor(llm):
 
 
 @pytest.mark.no_network
+async def test_executor_loads_missing_or_unreadable_project_context_non_fatally():
+    executor = make_executor(StreamingLLM())
+    assert await executor._load_project_context() == ""
+
+    async def fail_reader():
+        raise RuntimeError("workspace unavailable")
+
+    executor.tools.workspace_service = SimpleNamespace(
+        read_project_context=fail_reader
+    )
+    assert await executor._load_project_context() == ""
+
+
+@pytest.mark.no_network
+async def test_executor_loads_canonical_project_context_directly():
+    executor = make_executor(StreamingLLM())
+
+    async def read_context():
+        return "# Project\nUse the repository conventions."
+
+    executor.tools.workspace_service = SimpleNamespace(
+        read_project_context=read_context
+    )
+    assert await executor._load_project_context() == (
+        "# Project\nUse the repository conventions."
+    )
+
+
+@pytest.mark.no_network
 async def test_step_forwards_standard_stream_events(monkeypatch):
     chunks = [
         {"event": "token", "data": {"content": "I should search first. "}},

@@ -23,6 +23,7 @@ from common.utils.core_utils import (
 from common.utils.events import emit
 from common.utils.local_references import build_local_id_maps, resolve_local_id
 from core.ingestion.batch import IngestionBatch
+from core.ingestion.policy import IngestionPolicy
 from core.ingestion.prompts import ner_prompt
 from core.knowledge.entity.profile import EntityProfile
 from infrastructure.llm_client import LLMService
@@ -40,8 +41,9 @@ class TextProcessor:
     invalid, duplicate, inactive-topic, ambiguous, and low-confidence mentions.
 
     This class does not create or resolve graph entities. Its job is to identify
-    mention candidates with enough structured context for IngestionPipeline to
-    decide whether to reuse an existing entity or create a new one.
+    mention candidates with a canonical domain entity type and derived topic so
+    IngestionPipeline can decide whether to reuse an existing entity or create
+    a new one.
     """
 
     def __init__(
@@ -147,13 +149,19 @@ class TextProcessor:
         self._phrase_matcher_cache = (matcher, aliases)
         return self._phrase_matcher_cache
 
-    def run_gliner(self, text: str) -> List[Tuple[str, str]]:
-        all_labels = list(self._label_to_topics.keys())
+    def run_gliner(
+        self,
+        text: str,
+        policy: IngestionPolicy,
+    ) -> List[Tuple[str, str]]:
+        all_labels = list(policy.domain.labels)
         if not all_labels:
             return []
 
         entities = self._gliner.predict_entities(
-            text, all_labels, threshold=self.gliner_threshold
+            text,
+            all_labels,
+            threshold=policy.gliner_threshold,
         )
 
         filtered = []
@@ -192,23 +200,35 @@ class TextProcessor:
 
         return [(e["text"], e["label"]) for e in filtered]
 
-    def _assign_topic(self, label: str) -> Tuple[Optional[str], bool]:
+    def _assign_topic(
+        self,
+        label: str,
+        policy: IngestionPolicy,
+    ) -> Tuple[Optional[str], bool]:
         """
-        Assign topic from label.
+        Derive a topic from a configured extraction label.
         Returns: (topic or None, is_ambiguous)
         """
         if not label:
             return None, False
 
-        label_lower = label.casefold()
-        topics = self._label_to_topics.get(label_lower, [])
+        entity_type = policy.domain.resolve_entity_type(label)
+        topic = policy.domain.topic_for_entity_type(entity_type or "")
+        return topic, False
 
-        if len(topics) == 1:
-            return topics[0], False
-        elif len(topics) > 1:
-            return None, True
-        else:
-            return None, False
+    @staticmethod
+    def _validate_domain_mention(
+        name: str,
+        entity_type: str,
+        policy: IngestionPolicy,
+        *,
+        label: Optional[str] = None,
+    ) -> bool:
+        """Validate a mention after its type/topic came from the domain."""
+
+        if not policy.domain.is_active_entity_type(entity_type):
+            return False
+        return validate_entity(name, "", policy.topics, label=label or entity_type)
 
     async def extract_mentions(
         self,
@@ -226,6 +246,7 @@ class TextProcessor:
         trace = batch.trace
         issues = batch.issues
         work_record = batch.work_unit
+        policy = batch.policy
 
         trace.entity_model = getattr(self.llm_client, "extraction_model", None)
         trace.entity_prompt = "VEGAPUNK-01"
@@ -284,7 +305,7 @@ class TextProcessor:
             results = []
             for msg in messages:
                 msg_id = msg["id"]
-                extractions = self.run_gliner(msg["message"])
+                extractions = self.run_gliner(msg["message"], policy)
                 for span, label in extractions:
                     results.append((msg_id, span, label))
             return results
@@ -323,12 +344,16 @@ class TextProcessor:
                 )
                 continue
 
+            canonical_type = policy.domain.canonical_entity_type(
+                profile.entity_type
+            ) or policy.domain.resolve_entity_type(profile.entity_type)
+            derived_topic = policy.domain.topic_for_entity_type(canonical_type or "")
             resolved.append(
                 (
                     msg_id,
                     span_text,
-                    profile.entity_type,
-                    profile.topic,
+                    canonical_type or profile.entity_type,
+                    derived_topic or profile.topic,
                 )
             )
 
@@ -339,25 +364,24 @@ class TextProcessor:
             if is_covered(span_text, covered_texts[msg_id]):
                 continue
 
-            topic, is_ambiguous = self._assign_topic(label)
-            if topic is None and not is_ambiguous:
+            entity_type = policy.domain.resolve_entity_type(label)
+            topic = policy.domain.topic_for_entity_type(entity_type or "")
+            if entity_type is None or topic is None:
                 gliner_filtered.add(span_text.casefold())
                 continue
 
-            if not validate_entity(
-                span_text, topic or "", self.topic_config, label=label
+            if not self._validate_domain_mention(
+                span_text,
+                entity_type,
+                policy,
+                label=label,
             ):
                 gliner_filtered.add(span_text.casefold())
                 continue
 
-            if is_ambiguous:
-                covered_texts[msg_id].add(span_text.casefold())
-                topics = self._label_to_topics.get(label.casefold(), [])
-                ambiguous.append((msg_id, span_text, label, topics))
-            else:
-                covered_texts[msg_id].add(span_text.casefold())
-                gliner_accepted_count += 1
-                resolved.append((msg_id, span_text, label, topic))
+            covered_texts[msg_id].add(span_text.casefold())
+            gliner_accepted_count += 1
+            resolved.append((msg_id, span_text, entity_type, topic))
 
         trace.gliner_accepted_mentions = gliner_accepted_count
 
@@ -371,7 +395,7 @@ class TextProcessor:
 
         output: List[Tuple[int, str, str, str]] = list(resolved)
 
-        if not self.llm_ner:
+        if not policy.llm_ner:
             await emit(
                 session_id,
                 "pipeline",
@@ -395,7 +419,7 @@ class TextProcessor:
             gliner_ents,
             ambiguous,
             covered_texts,
-            self.topic_config.label_block,
+            policy.domain.label_block,
             message_local_ids,
         )
 
@@ -475,26 +499,32 @@ class TextProcessor:
                     )
                     continue
 
-                if entity.confidence < self.vp01_min_confidence:
+                if entity.confidence < policy.vp01_min_confidence:
                     trace.llm_mentions_rejected += 1
                     record_issue(
                         code="low_confidence",
                         message=(
                             f"VP-01 entity '{entity.name}' below confidence "
-                            f"threshold {self.vp01_min_confidence}"
+                            f"threshold {policy.vp01_min_confidence}"
                         ),
                         severity="info",
                         item_ref=entity.name,
                         metadata={
                             "confidence": entity.confidence,
-                            "threshold": self.vp01_min_confidence,
+                            "threshold": policy.vp01_min_confidence,
                             "msg_id": entity.msg_id,
                         },
                     )
                     continue
 
-                if validate_entity(
-                    entity.name, entity.topic, self.topic_config, label=entity.type
+                canonical_type = policy.domain.canonical_entity_type(entity.type)
+                derived_topic = policy.domain.topic_for_entity_type(
+                    canonical_type or ""
+                )
+                if canonical_type and derived_topic and self._validate_domain_mention(
+                    entity.name,
+                    canonical_type,
+                    policy,
                 ):
                     if is_covered(entity.name, covered_texts.get(actual_msg_id, set())):
                         trace.llm_mentions_rejected += 1
@@ -509,7 +539,7 @@ class TextProcessor:
                         )
                         continue
                     output.append(
-                        (actual_msg_id, entity.name, entity.type, entity.topic)
+                        (actual_msg_id, entity.name, canonical_type, derived_topic)
                     )
                     vp01_count += 1
                     trace.llm_mentions_accepted += 1
@@ -522,7 +552,7 @@ class TextProcessor:
                         metadata={
                             "msg_id": actual_msg_id,
                             "type": entity.type,
-                            "topic": entity.topic,
+                            "topic": derived_topic,
                         },
                     )
         await emit(

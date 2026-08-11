@@ -9,7 +9,7 @@ from core.project.project_manager import ProjectManager
 from core.session.context import Session
 from core.session.session_manager import SessionManager
 from infrastructure.redis_client import RedisKeys
-from tests.fixtures.factories import make_project_state
+from tests.fixtures.factories import make_domain_config, make_project_state
 from tests.fixtures.fakes import (
     FakeConfigValue,
     FakeConsumer,
@@ -23,7 +23,10 @@ from tests.fixtures.fakes import (
 async def test_session_create_add_history_and_close_flow(monkeypatch):
     resources = FakeResources()
     project_manager = ProjectManager(resources, user_name="ada")
-    project = await project_manager.create_project("Research")
+    project = await project_manager.create_project(
+        "Research",
+        domain_config=make_domain_config(version=0),
+    )
     active_sessions = {}
     manager = SessionManager(
         resources=resources,
@@ -38,11 +41,7 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     )
     project_state = make_project_state(project["id"], redis=resources.redis)
 
-    async def fake_get_or_start_project(
-        project_id,
-        initial_topics_config=None,
-        project_metadata=None,
-    ):
+    async def fake_get_or_start_project(project_id, project_metadata=None):
         project_state.active_runtime_sessions_count += 1
         project_manager.active_projects[project_id] = project_state
         return project_state
@@ -86,7 +85,6 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: emitter))
 
     ctx = await manager.create_session(
-        topics_config={"General": {"active": True}},
         model="test-model",
         project_id=project["id"],
     )
@@ -143,7 +141,10 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
             return {"projects": 1}
 
     project_manager._project_deletion_writer = FakeAggregateDeletionWriter()
-    project = await project_manager.create_project("Scratch")
+    project = await project_manager.create_project(
+        "Scratch",
+        domain_config=make_domain_config(version=0),
+    )
     session_id = "session-1"
     active_sessions = {session_id: FakeSession(session_id, project["id"])}
     manager = SessionManager(
@@ -152,6 +153,11 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
         active_sessions=active_sessions,
         project_manager=project_manager,
     )
+    class FakeRuntime:
+        async def __aexit__(self, *_args):
+            return False
+
+    manager._project_runtime_contexts[session_id] = FakeRuntime()
 
     await project_manager.add_session(project["id"], session_id)
     await resources.redis.hset(

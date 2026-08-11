@@ -160,6 +160,25 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
                 ],
             }
         ],
+        "relationship_observations": [
+            {
+                "relationship_id": "project-1:2:9",
+                "project_id": "project-1",
+                "user_name": "ada",
+                "session_id": "session-1",
+                "message_id": 1,
+                "source_entity_id": 2,
+                "target_entity_id": 9,
+                "source_type": "Person",
+                "target_type": "Project",
+                "observed_relationship_label": "worked with",
+                "canonical_relationship_type": None,
+                "domain_status": "unrecognized",
+                "confidence": 0.8,
+                "context": "context",
+                "observed_at_ms": 120,
+            }
+        ],
         "episode_relationships": [
             {
                 "episode_id": "episode-1",
@@ -196,6 +215,7 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
     assert "INSERT INTO episode_entities" in executed_sql
     assert "INSERT INTO relationships" in executed_sql
     assert "INSERT INTO relationship_evidence_refs" in executed_sql
+    assert "INSERT INTO relationship_observations" in executed_sql
     assert "INSERT INTO episode_relationships" in executed_sql
     assert "INSERT INTO hierarchy_edges" in executed_sql
     assert "rollback_status = 'rolled_back'" in executed_sql

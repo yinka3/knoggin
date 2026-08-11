@@ -6,7 +6,8 @@ from common.schema.contracts import AliasUpdate, EntityWrite, SkippedRelationshi
 from core.ingestion.batch import IngestionBatch, IngestionMilestone, IngestionStage
 from core.ingestion.services import pipeline_service
 from core.ingestion.services.pipeline_service import IngestionPipeline
-from infrastructure.work_record import WorkRecord
+from infrastructure.work_record import WorkRecord, WorkStatus
+from tests.fixtures.ingestion import ingestion_policy
 
 
 def open_batch(**overrides) -> IngestionBatch:
@@ -16,6 +17,7 @@ def open_batch(**overrides) -> IngestionBatch:
         "session_id": "session-1",
         "messages": [{"id": 7, "message": "Ada met Grace."}],
         "session_text": "[USER]: Ada met Grace.",
+        "policy": ingestion_policy(),
         "batch_id": "batch-1",
     }
     payload.update(overrides)
@@ -124,8 +126,12 @@ def test_ingestion_batch_seals_and_commits_only_after_graph_preparation():
     batch.complete()
     batch.mark_message_logs_handled()
     batch.mark_candidate_suggestions_handled()
+    graph_work = WorkRecord.for_graph_write(
+        batch.scope,
+        batch_id=batch.work_unit.id,
+    )
     batch.set_graph_write_buffers(
-        graph_work_unit=WorkRecord.for_graph_write(batch.scope),
+        graph_work_unit=graph_work,
         safe_entity_ids=set(),
         graph_alias_updates=[],
         entity_writes=[],
@@ -138,10 +144,21 @@ def test_ingestion_batch_seals_and_commits_only_after_graph_preparation():
     )
 
     batch.seal_for_commit()
+    with pytest.raises(ValueError, match="succeeded or skipped"):
+        batch.mark_graph_committed()
+
+    graph_work.mark_running()
+    graph_work.mark_skipped("No graph writes")
     batch.mark_graph_committed()
+
+    with pytest.raises(ValueError, match="recorded checkpoint commit result"):
+        batch.mark_checkpoint_committed()
+
+    batch.record_checkpoint_progress(current_count=3)
     batch.mark_checkpoint_committed()
 
     assert batch.stage is IngestionStage.COMMITTED
+    assert graph_work.parent_id == batch.work_unit.id
     assert batch.milestones == {
         IngestionMilestone.MESSAGE_LOGS_HANDLED,
         IngestionMilestone.CANDIDATE_SUGGESTIONS_HANDLED,
@@ -237,6 +254,51 @@ async def test_pipeline_process_mutates_the_supplied_ingestion_batch(monkeypatch
     assert batch.entity_ids == [2]
     assert batch.new_entity_ids == {2}
     assert batch.entity_message_map == {2: [7]}
+    assert batch.work_unit.status is WorkStatus.RUNNING
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_pipeline_cancellation_marks_parent_work_and_propagates(monkeypatch):
+    pipeline = object.__new__(IngestionPipeline)
+    pipeline.user_name = "ada"
+    pipeline.project_id = "project-1"
+
+    async def cancel_extraction(*_args):
+        raise asyncio.CancelledError
+
+    async def emit_nothing(*_args, **_kwargs):
+        return None
+
+    pipeline._extract_mentions = cancel_extraction
+    monkeypatch.setattr(pipeline_service, "emit", emit_nothing)
+    batch = open_batch()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.process(batch)
+
+    assert batch.work_unit.status is WorkStatus.CANCELLED
+    assert batch.work_unit.summary == "Ingestion processing cancelled"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+def test_ingestion_batch_cancellation_marks_active_child_and_parent_work():
+    batch = open_batch()
+    batch.work_unit.mark_running()
+    graph_work = WorkRecord.for_graph_write(
+        batch.scope,
+        batch_id=batch.work_unit.id,
+    )
+    graph_work.mark_running()
+    batch.graph_work_unit = graph_work
+
+    batch.cancel_work("Session shutdown")
+
+    assert batch.work_unit.status is WorkStatus.CANCELLED
+    assert graph_work.status is WorkStatus.CANCELLED
+    assert batch.work_unit.summary == "Session shutdown"
+    assert graph_work.summary == "Session shutdown"
 
 
 @pytest.mark.ingestion

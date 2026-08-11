@@ -2,16 +2,19 @@ import sys
 
 from loguru import logger
 
+from common.utils.diagnostic_context import inject_diagnostic_scope
+
 
 def setup_logging(log_level="INFO", log_file="knoggin.log", colorize=False):
     logger.remove()
+    logger.configure(patcher=inject_diagnostic_scope)
 
     if colorize:
-        stdout_fmt = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{module}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+        stdout_fmt = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | {extra[diagnostic_scope]} | <cyan>{module}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
     else:
-        stdout_fmt = "{time:YYYY-MM-DD HH:mm:ss} - {file}:{line} - {level} - {message}"
+        stdout_fmt = "{time:YYYY-MM-DD HH:mm:ss} - {extra[diagnostic_scope]} - {file}:{line} - {level} - {message}"
 
-    file_fmt = "{time:YYYY-MM-DD HH:mm:ss} - {file}:{line} - {level} - {message}"
+    file_fmt = "{time:YYYY-MM-DD HH:mm:ss} - {extra[diagnostic_scope]} - {file}:{line} - {level} - {message}"
 
     logger.add(
         sys.stdout,

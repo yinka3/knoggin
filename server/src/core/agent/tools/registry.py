@@ -14,10 +14,12 @@ from common.schema.tool_schema import (
     get_schema_capability,
 )
 from core.agent.tools.graph import GraphTools
+from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
 from core.agent.tools.topic_tools import TopicTools
+from core.agent.tools.workspace import WorkspaceTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 
@@ -30,11 +32,12 @@ FEATURE_TOOL_LAYERS = frozenset(
     {
         "feature_external",
         "feature_project_admin",
+        "feature_project_workspace",
         "feature_maintenance",
         "feature_community",
     }
 )
-RUNTIME_TOOL_LAYERS = frozenset({"runtime_special"})
+RUNTIME_TOOL_LAYERS = frozenset({"runtime_special", "runtime_health"})
 VALID_TOOL_LAYERS = CORE_TOOL_LAYERS | FEATURE_TOOL_LAYERS | RUNTIME_TOOL_LAYERS
 
 BASE_TOOL_SCHEMA_BY_NAME = {
@@ -154,6 +157,29 @@ def _maintenance_runtime_instructions(ctx, active_tool_names: frozenset[str]) ->
     return "\n".join(lines)
 
 
+def _health_runtime_instructions(ctx, active_tool_names: frozenset[str]) -> str:
+    del ctx
+    health_tools = sorted(
+        active_tool_names
+        & {
+            "get_engine_health",
+            "get_resource_health",
+            "get_ingestion_health",
+            "get_background_health",
+        }
+    )
+    if not health_tools:
+        return ""
+    return (
+        "[SYSTEM NOTICE: Runtime health tools are read-only diagnostics. "
+        "Use them only when the user asks about Knoggin health, availability, "
+        "capacity, or delays; do not use them for ordinary project questions. "
+        "Each health tool is intentionally limited to one call per run. "
+        "Health results may describe runtime state but do not authorize any "
+        "administrative or mutating action.]"
+    )
+
+
 def _maintenance_candidate_for_tool(ctx, tool_name: str):
     from core.agent.maintenance import find_candidate_for_tool
 
@@ -261,6 +287,26 @@ TOOL_MODULES = {
         tools=frozenset({"web_search", "news_search"}),
         default_limits=(("web_search", 8), ("news_search", 8)),
     ),
+    "feature_project_workspace": ToolModule(
+        name="feature_project_workspace",
+        layer="feature_project_workspace",
+        tools=frozenset(
+            {
+                "list_workspace_files",
+                "read_workspace_file",
+                "create_workspace_file",
+                "update_workspace_file",
+                "append_workspace_file",
+            }
+        ),
+        default_limits=(
+            ("list_workspace_files", 4),
+            ("read_workspace_file", 4),
+            ("create_workspace_file", 2),
+            ("update_workspace_file", 2),
+            ("append_workspace_file", 2),
+        ),
+    ),
     "feature_project_admin": ToolModule(
         name="feature_project_admin",
         layer="feature_project_admin",
@@ -307,6 +353,25 @@ TOOL_MODULES = {
         layer="runtime_special",
         tools=SPECIAL_TOOL_NAMES,
         default_limits=(("request_replanning", 2),),
+    ),
+    "runtime_health": ToolModule(
+        name="runtime_health",
+        layer="runtime_health",
+        tools=frozenset(
+            {
+                "get_engine_health",
+                "get_resource_health",
+                "get_ingestion_health",
+                "get_background_health",
+            }
+        ),
+        default_limits=(
+            ("get_engine_health", 1),
+            ("get_resource_health", 1),
+            ("get_ingestion_health", 1),
+            ("get_background_health", 1),
+        ),
+        runtime_instructions=_health_runtime_instructions,
     ),
 }
 
@@ -749,7 +814,15 @@ def validate_registry_contract() -> None:
             )
 
 
-class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
+class Tools(
+    SearchTools,
+    GraphTools,
+    MemoryTools,
+    TopicTools,
+    MaintenanceTools,
+    HealthTools,
+    WorkspaceTools,
+):
     def __init__(
         self,
         user_name: str,
@@ -765,6 +838,8 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         agent_id: Optional[str] = None,
         topic_refresh_callback=None,
         episode_settings: Optional[EpisodeSettings] = None,
+        health_service=None,
+        workspace_service=None,
     ):
         if knowledge_store is None or postgres is None or redis is None:
             raise ValueError(
@@ -782,6 +857,7 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         self.readable_project_ids = entities.readable_project_ids
         self.topic_config = topic_config
         self.document_service = document_service
+        self.workspace_service = workspace_service
         self.document_focus = document_focus
         self.active_topics = topic_config.active_topics if topic_config else None
         self.search_cfg = search_config or {}
@@ -791,6 +867,7 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         self.topic_refresh_callback = topic_refresh_callback
         self.tool_authorization: Optional[ToolPermissions] = None
         self.active_tool_schemas: Dict[str, dict] = {}
+        self.health_service = health_service
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
 

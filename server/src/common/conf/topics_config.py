@@ -203,8 +203,11 @@ class TopicConfig:
         raw = rows[0].get("topic_config")
         if isinstance(raw, str):
             raw = safe_json_loads(raw, {})
-        if not raw:
-            return cls.seed()
+        if raw is None or raw == {} or raw == "":
+            raise ValueError(
+                f"Project {project_id} has no persisted topic projection; "
+                "create it from an active DomainConfig"
+            )
         try:
             return cls(raw)
         except Exception as exc:

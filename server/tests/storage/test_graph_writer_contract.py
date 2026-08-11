@@ -3,7 +3,6 @@ import json
 import pytest
 
 from common.scoping import IDENTITY_ENTITY_ID
-from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -697,7 +696,11 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     hierarchy_rewrite_call = next(
         call
         for call in client.calls
-        if call[0] == "execute" and "WITH rewritten AS" in call[1]
+        if (
+            call[0] == "execute"
+            and "WITH rewritten AS" in call[1]
+            and "FROM hierarchy_edges" in call[1]
+        )
     )
     assert "LIMIT 1" not in hierarchy_rewrite_call[1]
     assert hierarchy_rewrite_call[2] == (

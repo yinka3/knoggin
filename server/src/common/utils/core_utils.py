@@ -218,14 +218,16 @@ async def fetch_conversation_turns(
         else:
             ts_str = ""
 
-        results.append({
-            "message_id": row["message_id"],
-            "role": row["role"],
-            "content": row["content"],
-            "timestamp": ts_str,
-            "user_msg_id": row.get("user_msg_id"),
-            "metadata": meta or {},
-        })
+        results.append(
+            {
+                "message_id": row["message_id"],
+                "role": row["role"],
+                "content": row["content"],
+                "timestamp": ts_str,
+                "user_msg_id": row.get("user_msg_id"),
+                "metadata": meta or {},
+            }
+        )
 
     return results
 
@@ -240,7 +242,7 @@ def format_vp01_input(
     message_local_ids: Dict[int, str],
 ) -> str:
     lines = []
-    lines.append("## Label Schema\n")
+    lines.append("## Domain Schema\n")
     lines.append(label_block)
 
     lines.append("\n## Messages\n")
@@ -300,6 +302,7 @@ def format_vp02_input(
     session_context: str,
     message_local_ids: Dict[int, str],
     user_name: Optional[str] = None,
+    relationship_block: str = "",
 ) -> str:
     lines = []
 
@@ -323,6 +326,9 @@ def format_vp02_input(
     else:
         lines.append("(none)")
 
+    lines.append("\n## Configured Canonical Relationships")
+    lines.append(relationship_block or "(none configured)")
+
     lines.append("\n## Messages")
     valid_msg_ids = [message_local_ids[msg["id"]] for msg in messages]
     lines.append(f"Valid msg_id values: {valid_msg_ids}")
@@ -333,9 +339,7 @@ def format_vp02_input(
                 label = "USER" if msg.get("role") == "user" else "AGENT"
 
             content = msg.get("message") or msg.get("content") or msg.get("text") or ""
-            lines.append(
-                f'[MSG {message_local_ids[msg["id"]]}] [{label}]: "{content}"'
-            )
+            lines.append(f'[MSG {message_local_ids[msg["id"]]}] [{label}]: "{content}"')
     else:
         lines.append("(none)")
 

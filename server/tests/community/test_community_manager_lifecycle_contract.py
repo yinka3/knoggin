@@ -11,6 +11,7 @@ from core.community.community_manager import (
     COMMUNITY_ENABLED_TOOLS,
     CommunityManager,
 )
+from core.community.policy import CommunityDiscussionAdmissionOutcome
 from tests.fixtures.fakes import FakePostgresClient, FakeRedis
 
 
@@ -243,9 +244,10 @@ async def test_trigger_discussion_creates_discussion_and_cleans_up_after_error(
             "agent_ids": ["agent-1", "missing-agent"],
         }
 
-    async def run_loop(discussion_id, topic, agent_ids):
+    async def run_loop(discussion_id, topic, agent_ids, *, policy):
         assert topic == "Profile stability"
         assert agent_ids == ["agent-1"]
+        assert policy.max_turns == 3
         assert await redis.get(manager._active_discussion_key()) == discussion_id
         raise RuntimeError("loop failed")
 
@@ -349,6 +351,73 @@ async def test_concurrent_aac_triggers_only_seed_one_discussion(monkeypatch):
     release_first_seed.set()
     await first_trigger
     assert await redis.get(first._active_discussion_key()) is None
+
+
+@pytest.mark.no_network
+async def test_discussion_task_keeps_the_admitted_policy_when_config_changes(
+    monkeypatch,
+):
+    root = root_config(max_turns=3)
+    monkeypatch.setattr(
+        "core.community.community_manager.ConfigManager.get",
+        staticmethod(lambda: SimpleNamespace(config=root)),
+    )
+    patch_events(monkeypatch)
+    resources = make_resources()
+    await save_agent(resources.postgres, "agent-1", name="Analyst")
+    manager = CommunityManager(make_project_state(), "ada", resources)
+    captured = {}
+
+    async def seed_discussion():
+        return {"topic": "Policy stability", "agent_ids": ["agent-1"]}
+
+    async def run_loop(_discussion_id, _topic, _agent_ids, *, policy):
+        captured["policy"] = policy
+
+    manager._seed_discussion = seed_discussion
+    manager._run_loop = run_loop
+
+    admission = await manager.trigger_discussion()
+    task = manager._discussion_task
+    root.developer_settings.community.max_turns = 9
+    await task
+
+    assert admission.outcome is CommunityDiscussionAdmissionOutcome.STARTED
+    assert captured["policy"].max_turns == 3
+    assert admission.policy_version == captured["policy"].version
+
+
+@pytest.mark.no_network
+async def test_discussion_cleanup_survives_community_event_failures(monkeypatch):
+    patch_manager_config(monkeypatch)
+    resources = make_resources()
+    await save_agent(resources.postgres, "agent-1", name="Analyst")
+    manager = CommunityManager(make_project_state(), "ada", resources)
+
+    async def failing_events(*_args):
+        raise RuntimeError("event service unavailable")
+
+    async def seed_discussion():
+        return {"topic": "Cleanup", "agent_ids": ["agent-1"]}
+
+    async def run_loop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "core.community.community_manager.emit_community",
+        failing_events,
+    )
+    manager._seed_discussion = seed_discussion
+    manager._run_loop = run_loop
+
+    admission = await manager.trigger_discussion()
+    await manager._discussion_task
+
+    assert admission.outcome is CommunityDiscussionAdmissionOutcome.STARTED
+    assert await resources.redis.get(manager._active_discussion_key()) is None
+    assert resources.knowledge_store.community.closed == [
+        (admission.discussion_id, "ada", "project-1")
+    ]
 
 
 @pytest.mark.no_network
@@ -528,9 +597,9 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
     assert agent_ctx.is_community is True
     assert agent_ctx.user_query == "Community Discussion Topic: Profile stability"
     assert agent_ctx.scope.session_id == "aac-disc-1"
-    assert agent_ctx.agent.config.id == "agent-1"
-    assert agent_ctx.agent.name == "Analyst"
-    assert "Careful analyst" in agent_ctx.agent.persona
+    assert agent_ctx.agent_config.id == "agent-1"
+    assert agent_ctx.agent_name == "Analyst"
+    assert "Careful analyst" in agent_ctx.persona
     assert agent_ctx.current_participants == ["agent-1", "agent-2"]
     assert agent_ctx.history == [{"role": "assistant", "content": "previous"}]
 

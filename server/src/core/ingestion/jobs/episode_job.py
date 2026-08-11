@@ -13,17 +13,17 @@ from common.schema.settings import (
     EpisodeSettings,
     IngestionSettings,
 )
+from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
 from core.ingestion.episode_build import EpisodeBuild
+from core.ingestion.episode_policy import EpisodeGenerationPolicy
+from core.ingestion.ports import EmbeddingEncoder, EpisodeStore, StructuredGenerator
 from core.ingestion.prompts import (
     get_episode_consolidation_prompt,
     get_episode_generation_prompt,
 )
 from core.knowledge.episode_embedding import build_episode_embedding_text
-from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.job.base import BaseJob, JobContext, JobResult
-from infrastructure.knowledge_store import KnowledgeStore
-from infrastructure.llm_client import LLMService
 
 
 class EpisodeJob(BaseJob):
@@ -31,11 +31,11 @@ class EpisodeJob(BaseJob):
 
     def __init__(
         self,
-        knowledge_store: KnowledgeStore,
+        knowledge_store: EpisodeStore,
         settings: EpisodeSettings,
         ingestion_settings: IngestionSettings,
-        llm: LLMService | None = None,
-        embedding_service: EmbeddingService | None = None,
+        llm: StructuredGenerator | None = None,
+        embedding_service: EmbeddingEncoder | None = None,
         session_ids_provider: Optional[Callable[[], Awaitable[list[str]]]] = None,
     ) -> None:
         self.knowledge_store = knowledge_store
@@ -53,43 +53,42 @@ class EpisodeJob(BaseJob):
         settings: EpisodeSettings,
         ingestion_settings: IngestionSettings,
     ) -> None:
-        target_message_count = ingestion_settings.batch_size * settings.batch_multiple
-        if settings.max_message_count < target_message_count:
-            raise ValueError(
-                "Episode max_message_count must be at least the target window size"
-            )
-
-        self.enabled = settings.enabled
-        self.batch_multiple = settings.batch_multiple
-        self.target_message_count = target_message_count
-        self.max_message_count = settings.max_message_count
-        self.max_age_hours = settings.max_age_hours
-        self.max_sessions_per_run = settings.max_sessions_per_run
-        self.prior_episode_candidate_count = settings.prior_episode_candidate_count
+        self._policy = EpisodeGenerationPolicy.capture(
+            settings=settings,
+            ingestion_settings=ingestion_settings,
+        )
         self.retrieval_episode_limit = settings.retrieval_episode_limit
         logger.info(
             "EpisodeJob settings updated: "
-            f"target_messages={self.target_message_count}, "
-            f"max_messages={self.max_message_count}, "
-            f"max_sessions={self.max_sessions_per_run}"
+            f"target_messages={self._policy.target_message_count}, "
+            f"max_messages={self._policy.max_message_count}, "
+            f"max_sessions={self._policy.max_sessions_per_run}"
         )
+
+    @property
+    def policy(self) -> EpisodeGenerationPolicy:
+        """The policy that will be captured by the next admitted operation."""
+
+        return self._policy
 
     async def should_run(self, ctx: JobContext) -> bool:
         """Run when any durable project session has one ready episode window."""
 
+        policy = self._policy
         if (
-            not self.enabled
+            not policy.enabled
             or self.llm is None
             or self.embedding_service is None
             or self.session_ids_provider is None
         ):
             return False
         session_ids = await self.session_ids_provider()
-        for session_id in session_ids[: self.max_sessions_per_run]:
+        for session_id in session_ids[: policy.max_sessions_per_run]:
             window = await self.load_next_window(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
                 session_id=session_id,
+                policy=policy,
             )
             if window:
                 return True
@@ -101,9 +100,11 @@ class EpisodeJob(BaseJob):
         user_name: str,
         project_id: str,
         session_id: str,
+        policy: EpisodeGenerationPolicy | None = None,
     ) -> list[dict]:
         """Load one complete candidate window for a specific conversation."""
 
+        execution_policy = policy or self._policy
         checkpoint = await self.knowledge_store.get_episode_checkpoint(
             user_name=user_name,
             project_id=project_id,
@@ -114,7 +115,7 @@ class EpisodeJob(BaseJob):
             project_id=project_id,
             session_id=session_id,
             checkpoint=checkpoint,
-            message_count=self.target_message_count,
+            message_count=execution_policy.target_message_count,
         )
 
     async def load_candidate_build(
@@ -123,13 +124,16 @@ class EpisodeJob(BaseJob):
         user_name: str,
         project_id: str,
         session_id: str,
+        policy: EpisodeGenerationPolicy | None = None,
     ) -> EpisodeBuild | None:
         """Load one eligible window into its workflow-owned aggregate."""
 
+        execution_policy = policy or self._policy
         messages = await self.load_next_window(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
+            policy=execution_policy,
         )
         if not messages:
             return None
@@ -158,10 +162,12 @@ class EpisodeJob(BaseJob):
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
+            policy=execution_policy,
         )
         return EpisodeBuild.from_window(
             project_id=project_id,
             session_id=session_id,
+            policy=execution_policy,
             messages=messages,
             entity_ids_by_message=entity_ids_by_message,
             relationship_ids_by_message=relationship_ids_by_message,
@@ -238,6 +244,7 @@ class EpisodeJob(BaseJob):
         user_name: str,
         project_id: str,
         session_id: str,
+        policy: EpisodeGenerationPolicy,
     ) -> list[Episode]:
         """Keep the immediate prior episode plus the highest-overlap matches."""
 
@@ -254,7 +261,7 @@ class EpisodeJob(BaseJob):
                 user_name=user_name,
                 project_id=project_id,
                 session_id=session_id,
-                limit=self.prior_episode_candidate_count,
+                limit=policy.prior_episode_candidate_count,
             )
 
         selected = []
@@ -264,7 +271,7 @@ class EpisodeJob(BaseJob):
                 continue
             selected.append(episode)
             seen_episode_ids.add(episode.episode_id)
-            if len(selected) == self.prior_episode_candidate_count:
+            if len(selected) == policy.prior_episode_candidate_count:
                 break
         return selected
 
@@ -277,10 +284,12 @@ class EpisodeJob(BaseJob):
     ) -> EpisodeDecision | None:
         """Generate one grounded episode decision for a ready candidate window."""
 
+        policy = self._policy
         build = await self.load_candidate_build(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
+            policy=policy,
         )
         if build is None:
             return None
@@ -299,14 +308,15 @@ class EpisodeJob(BaseJob):
 
         if self.llm is None:
             raise RuntimeError("EpisodeJob requires an LLM to generate a decision")
-        build.prepare_local_references()
-        output = await self.llm.generate_structured(
-            response_model=LLMEpisodeDecision,
-            system=get_episode_generation_prompt(user_name),
-            user=build.generation_payload(),
-            temperature=0.0,
-        )
-        return build.apply_llm_decision(output)
+        with diagnostic_scope(episode_build_id=build.build_id):
+            build.prepare_local_references()
+            output = await self.llm.generate_structured(
+                response_model=LLMEpisodeDecision,
+                system=get_episode_generation_prompt(user_name),
+                user=build.generation_payload(),
+                temperature=0.0,
+            )
+            return build.apply_llm_decision(output)
 
     async def process_next_window(
         self,
@@ -314,6 +324,30 @@ class EpisodeJob(BaseJob):
         user_name: str,
         project_id: str,
         session_id: str,
+        policy: EpisodeGenerationPolicy | None = None,
+    ) -> EpisodeBuild | None:
+        """Generate and persist one session window with scoped diagnostics."""
+
+        execution_policy = policy or self._policy
+        with diagnostic_scope(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        ):
+            return await self._process_next_window_scoped(
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                policy=execution_policy,
+            )
+
+    async def _process_next_window_scoped(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        policy: EpisodeGenerationPolicy,
     ) -> EpisodeBuild | None:
         """Generate and persist one episode window in its owning aggregate."""
 
@@ -321,6 +355,7 @@ class EpisodeJob(BaseJob):
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
+            policy=policy,
         )
         if build is None:
             return None
@@ -343,10 +378,7 @@ class EpisodeJob(BaseJob):
             raise
         try:
             window_message_ids = build.message_ids
-            episode = build.create_episode(
-                max_message_count=self.max_message_count,
-                max_age_hours=self.max_age_hours,
-            )
+            episode = build.create_episode()
             if (
                 episode is not None
                 and decision.action == "consolidate"
@@ -358,6 +390,7 @@ class EpisodeJob(BaseJob):
                     user_name=user_name,
                     project_id=project_id,
                     session_id=session_id,
+                    policy=policy,
                 )
                 builds.append(build)
                 decision = await self._regenerate_consolidation_for_build(
@@ -365,19 +398,17 @@ class EpisodeJob(BaseJob):
                     build,
                     user_name=user_name,
                 )
-                episode = build.create_episode(
-                    max_message_count=self.max_message_count,
-                    max_age_hours=self.max_age_hours,
-                )
+                episode = build.create_episode()
             if episode is not None:
                 episode = await self._embed_build_episode(build)
-            persisted = await self.knowledge_store.write_episode_window(
-                episode,
-                window_message_ids,
-                user_name=user_name,
-                project_id=project_id,
-                session_id=session_id,
-            )
+            with diagnostic_scope(episode_build_id=build.build_id):
+                persisted = await self.knowledge_store.write_episode_window(
+                    episode,
+                    window_message_ids,
+                    user_name=user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                )
             if not persisted:
                 return None
             build.mark_persisted()
@@ -385,7 +416,9 @@ class EpisodeJob(BaseJob):
         except ValueError as exc:
             await self._emit_validation_failure(
                 exc,
-                stage="consolidation" if decision.action == "consolidate" else "episode",
+                stage="consolidation"
+                if decision.action == "consolidate"
+                else "episode",
                 user_name=user_name,
                 project_id=project_id,
                 session_id=session_id,
@@ -404,6 +437,7 @@ class EpisodeJob(BaseJob):
         user_name: str,
         project_id: str,
         session_id: str,
+        policy: EpisodeGenerationPolicy,
     ) -> EpisodeBuild:
         """Load a replacement aggregate containing the full consolidation source."""
 
@@ -466,6 +500,7 @@ class EpisodeJob(BaseJob):
         return EpisodeBuild.from_window(
             project_id=project_id,
             session_id=session_id,
+            policy=policy,
             messages=messages,
             entity_ids_by_message=entity_ids_by_message,
             relationship_ids_by_message=relationship_ids_by_message,
@@ -487,17 +522,18 @@ class EpisodeJob(BaseJob):
             raise RuntimeError("EpisodeJob requires an LLM to regenerate an episode")
         if not target_episode_id:
             raise ValueError("Episode consolidation requires a target episode ID")
-        build.prepare_local_references()
-        output = await self.llm.generate_structured(
-            response_model=LLMEpisodeConsolidation,
-            system=get_episode_consolidation_prompt(user_name),
-            user=build.consolidation_payload(target_episode_id),
-            temperature=0.0,
-        )
-        return build.apply_llm_consolidation(
-            output,
-            target_episode_id=target_episode_id,
-        )
+        with diagnostic_scope(episode_build_id=build.build_id):
+            build.prepare_local_references()
+            output = await self.llm.generate_structured(
+                response_model=LLMEpisodeConsolidation,
+                system=get_episode_consolidation_prompt(user_name),
+                user=build.consolidation_payload(target_episode_id),
+                temperature=0.0,
+            )
+            return build.apply_llm_consolidation(
+                output,
+                target_episode_id=target_episode_id,
+            )
 
     async def _embed_build_episode(self, build: EpisodeBuild) -> Episode:
         """Attach the embedding to the aggregate-owned final episode."""
@@ -506,12 +542,15 @@ class EpisodeJob(BaseJob):
             raise RuntimeError("EpisodeJob requires an embedding service")
         if build.final_episode is None:
             raise ValueError("EpisodeBuild has no episode to embed")
-        embeddings = await self.embedding_service.encode(
-            [build_episode_embedding_text(build.final_episode)]
-        )
-        if len(embeddings) != 1:
-            raise RuntimeError("Episode embedding service returned an invalid result")
-        return build.attach_embedding(embeddings[0])
+        with diagnostic_scope(episode_build_id=build.build_id):
+            embeddings = await self.embedding_service.encode(
+                [build_episode_embedding_text(build.final_episode)]
+            )
+            if len(embeddings) != 1:
+                raise RuntimeError(
+                    "Episode embedding service returned an invalid result"
+                )
+            return build.attach_embedding(embeddings[0])
 
     @staticmethod
     async def _emit_validation_failure(
@@ -564,9 +603,22 @@ class EpisodeJob(BaseJob):
             )
 
     async def execute(self, ctx: JobContext) -> JobResult:
+        policy = self._policy
+        with diagnostic_scope(
+            user_name=ctx.user_name,
+            project_id=ctx.project_id,
+        ):
+            return await self._execute_scoped(ctx, policy=policy)
+
+    async def _execute_scoped(
+        self,
+        ctx: JobContext,
+        *,
+        policy: EpisodeGenerationPolicy,
+    ) -> JobResult:
         """Process one ready window in each bounded project-session slice."""
 
-        if not self.enabled:
+        if not policy.enabled:
             return JobResult(success=True, summary="EpisodeJob is disabled")
         if self.llm is None:
             return JobResult(success=False, summary="EpisodeJob has no LLM")
@@ -584,13 +636,14 @@ class EpisodeJob(BaseJob):
         outcomes = []
         failures = []
         session_ids = await self.session_ids_provider()
-        for session_id in session_ids[: self.max_sessions_per_run]:
+        for session_id in session_ids[: policy.max_sessions_per_run]:
             started_at = perf_counter()
             try:
                 outcome = await self.process_next_window(
                     user_name=ctx.user_name,
                     project_id=ctx.project_id,
                     session_id=session_id,
+                    policy=policy,
                 )
             except Exception as exc:
                 failures.append(session_id)
@@ -606,6 +659,7 @@ class EpisodeJob(BaseJob):
                         "processing_latency_ms": round(
                             (perf_counter() - started_at) * 1000, 3
                         ),
+                        "policy_version": policy.version,
                         "error": str(exc),
                     },
                 )
@@ -631,8 +685,10 @@ class EpisodeJob(BaseJob):
                     "relationship_link_count": outcome.relationship_link_count,
                     "consolidation_limit_hit": outcome.consolidation_limit_hit,
                     "episode_at_max_size": (
-                        outcome.episode_source_message_count >= self.max_message_count
+                        outcome.episode_source_message_count
+                        >= policy.max_message_count
                     ),
+                    "policy_version": policy.version,
                     "processing_latency_ms": round(
                         (perf_counter() - started_at) * 1000, 3
                     ),

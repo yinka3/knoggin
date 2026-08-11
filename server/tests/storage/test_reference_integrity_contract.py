@@ -47,9 +47,13 @@ async def test_relationship_evidence_requires_a_scoped_message_and_cascades(
         """
         INSERT INTO relationships (
             relationship_id, user_name, project_id,
-            entity_a_id, entity_b_id, relationship_type
+            entity_a_id, entity_b_id, relationship_type,
+            observed_relationship_label
         )
-        VALUES ('project-1:2:3:related', 'ada', 'project-1', 2, 3, 'related')
+        VALUES (
+            'project-1:2:3:related', 'ada', 'project-1', 2, 3,
+            'related', 'related'
+        )
         """
     )
 
@@ -61,9 +65,7 @@ async def test_relationship_evidence_requires_a_scoped_message_and_cascades(
         VALUES ('project-1:2:3:related', 'project-1', 'ada', 'session-1', 101)
         """
     )
-    await real_postgres_client.execute(
-        "DELETE FROM messages WHERE message_id = 101"
-    )
+    await real_postgres_client.execute("DELETE FROM messages WHERE message_id = 101")
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM relationship_evidence_refs"
     ) == {"count": 0}

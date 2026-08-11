@@ -66,12 +66,15 @@ class GraphWriter:
         entity_a_id: int,
         entity_b_id: int,
         relationship_type: str,
+        *,
+        symmetric: bool = True,
     ) -> str:
         return relationship_identity(
             project_id,
             entity_a_id,
             entity_b_id,
             relationship_type,
+            symmetric=symmetric,
         )
 
     @staticmethod
@@ -129,6 +132,28 @@ class GraphWriter:
                     "message_ids": evidence_refs,
                 }
             )
+            if any(
+                key in row
+                for key in (
+                    "canonical_relationship_type",
+                    "observed_relationship_label",
+                    "domain_status",
+                    "symmetric",
+                )
+            ):
+                params[-1].update(
+                    {
+                        "canonical_relationship_type": row.get(
+                            "canonical_relationship_type"
+                        ),
+                        "observed_relationship_label": row.get(
+                            "observed_relationship_label"
+                        )
+                        or normalize_relationship_type(row["relationship_type"]),
+                        "domain_status": row.get("domain_status") or "unrecognized",
+                        "symmetric": bool(row.get("symmetric", False)),
+                    }
+                )
         return params
 
     @staticmethod
@@ -756,6 +781,14 @@ class GraphWriter:
                         )
                         await cur.execute(
                             """
+                            DELETE FROM relationship_observations
+                            WHERE relationship_id = %s
+                              AND project_id = %s
+                            """,
+                            (old_relationship_id, project_id),
+                        )
+                        await cur.execute(
+                            """
                             DELETE FROM relationships
                             WHERE relationship_id = %s
                             """,
@@ -763,12 +796,19 @@ class GraphWriter:
                         )
                         continue
 
-                    new_a, new_b = sorted((primary_id, target_id))
+                    symmetric = bool(rel.get("symmetric", False))
+                    if symmetric:
+                        new_a, new_b = sorted((primary_id, target_id))
+                    elif rel["entity_a_id"] == secondary_id:
+                        new_a, new_b = primary_id, target_id
+                    else:
+                        new_a, new_b = target_id, primary_id
                     new_relationship_id = self._relationship_id(
                         project_id,
                         new_a,
                         new_b,
                         rel["relationship_type"],
+                        symmetric=symmetric,
                     )
                     await cur.execute(
                         """
@@ -779,12 +819,19 @@ class GraphWriter:
                             entity_a_id,
                             entity_b_id,
                             relationship_type,
+                            canonical_relationship_type,
+                            observed_relationship_label,
+                            domain_status,
+                            symmetric,
                             weight,
                             confidence,
                             context,
                             last_seen_ms
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s
+                        )
                         ON CONFLICT (relationship_id) DO UPDATE SET
                             weight = relationships.weight + EXCLUDED.weight,
                             confidence = GREATEST(
@@ -795,6 +842,16 @@ class GraphWriter:
                                 EXCLUDED.relationship_type,
                                 relationships.relationship_type
                             ),
+                            canonical_relationship_type = COALESCE(
+                                EXCLUDED.canonical_relationship_type,
+                                relationships.canonical_relationship_type
+                            ),
+                            observed_relationship_label = COALESCE(
+                                EXCLUDED.observed_relationship_label,
+                                relationships.observed_relationship_label
+                            ),
+                            domain_status = EXCLUDED.domain_status,
+                            symmetric = EXCLUDED.symmetric,
                             context = COALESCE(
                                 EXCLUDED.context,
                                 relationships.context
@@ -811,6 +868,11 @@ class GraphWriter:
                             new_a,
                             new_b,
                             rel.get("relationship_type"),
+                            rel.get("canonical_relationship_type"),
+                            rel.get("observed_relationship_label")
+                            or rel.get("relationship_type"),
+                            rel.get("domain_status") or "unrecognized",
+                            bool(rel.get("symmetric", False)),
                             rel["weight"],
                             rel["confidence"],
                             rel["context"],
@@ -837,6 +899,114 @@ class GraphWriter:
                         ) DO NOTHING
                         """,
                         (new_relationship_id, project_id, old_relationship_id),
+                    )
+                    await cur.execute(
+                        """
+                        WITH rewritten AS (
+                            SELECT
+                                project_id,
+                                user_name,
+                                session_id,
+                                message_id,
+                                CASE
+                                    WHEN source_entity_id = %s THEN %s
+                                    ELSE source_entity_id
+                                END AS rewritten_source_id,
+                                CASE
+                                    WHEN target_entity_id = %s THEN %s
+                                    ELSE target_entity_id
+                                END AS rewritten_target_id,
+                                source_type,
+                                target_type,
+                                observed_relationship_label,
+                                canonical_relationship_type,
+                                domain_status,
+                                confidence,
+                                context,
+                                observed_at_ms
+                            FROM relationship_observations
+                            WHERE relationship_id = %s
+                              AND project_id = %s
+                        )
+                        INSERT INTO relationship_observations (
+                            relationship_id,
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            source_entity_id,
+                            target_entity_id,
+                            source_type,
+                            target_type,
+                            observed_relationship_label,
+                            canonical_relationship_type,
+                            domain_status,
+                            confidence,
+                            context,
+                            observed_at_ms
+                        )
+                        SELECT
+                            %s,
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            CASE WHEN %s
+                                THEN LEAST(rewritten_source_id, rewritten_target_id)
+                                ELSE rewritten_source_id
+                            END,
+                            CASE WHEN %s
+                                THEN GREATEST(rewritten_source_id, rewritten_target_id)
+                                ELSE rewritten_target_id
+                            END,
+                            source_type,
+                            target_type,
+                            observed_relationship_label,
+                            canonical_relationship_type,
+                            domain_status,
+                            confidence,
+                            context,
+                            observed_at_ms
+                        FROM rewritten
+                        ON CONFLICT (
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            source_entity_id,
+                            target_entity_id,
+                            observed_relationship_label
+                        ) DO UPDATE SET
+                            relationship_id = EXCLUDED.relationship_id,
+                            canonical_relationship_type = COALESCE(
+                                EXCLUDED.canonical_relationship_type,
+                                relationship_observations.canonical_relationship_type
+                            ),
+                            domain_status = EXCLUDED.domain_status,
+                            confidence = GREATEST(
+                                relationship_observations.confidence,
+                                EXCLUDED.confidence
+                            ),
+                            context = COALESCE(
+                                EXCLUDED.context,
+                                relationship_observations.context
+                            ),
+                            observed_at_ms = GREATEST(
+                                relationship_observations.observed_at_ms,
+                                EXCLUDED.observed_at_ms
+                            )
+                        """,
+                        (
+                            secondary_id,
+                            primary_id,
+                            secondary_id,
+                            primary_id,
+                            old_relationship_id,
+                            project_id,
+                            new_relationship_id,
+                            bool(rel.get("symmetric", False)),
+                            bool(rel.get("symmetric", False)),
+                        ),
                     )
                     await cur.execute(
                         """
@@ -913,6 +1083,14 @@ class GraphWriter:
                             WHERE relationship_id = %s
                             """,
                             (old_relationship_id,),
+                        )
+                        await cur.execute(
+                            """
+                            DELETE FROM relationship_observations
+                            WHERE relationship_id = %s
+                              AND project_id = %s
+                            """,
+                            (old_relationship_id, project_id),
                         )
                         await cur.execute(
                             """
@@ -1000,6 +1178,10 @@ class GraphWriter:
                         rel.entity_a_id,
                         rel.entity_b_id,
                         rel.relationship_type,
+                        rel.canonical_relationship_type,
+                        rel.observed_relationship_label,
+                        rel.domain_status,
+                        rel.symmetric,
                         rel.weight,
                         rel.confidence,
                         rel.context,

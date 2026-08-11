@@ -134,6 +134,24 @@ class MergeAuditReader:
             """,
             (user_name, user_name, project_id, list(ids), list(ids)),
         )
+        relationship_observations = await self._fetch_all(
+            cur,
+            """
+            SELECT observation.*
+            FROM relationship_observations observation
+            JOIN relationships relationship
+              ON relationship.relationship_id = observation.relationship_id
+             AND relationship.project_id = observation.project_id
+            WHERE relationship.user_name = %s
+              AND relationship.project_id = %s
+              AND (
+                  relationship.entity_a_id = ANY(%s)
+                  OR relationship.entity_b_id = ANY(%s)
+              )
+            ORDER BY observation.observation_id
+            """,
+            (user_name, project_id, list(ids), list(ids)),
+        )
         episode_relationships = await self._fetch_all(
             cur,
             """
@@ -181,6 +199,7 @@ class MergeAuditReader:
             "message_refs": message_refs,
             "episode_entities": episode_entities,
             "relationships": relationships,
+            "relationship_observations": relationship_observations,
             "episode_relationships": episode_relationships,
             "hierarchy": hierarchy,
         }

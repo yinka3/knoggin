@@ -6,6 +6,7 @@ import pytest
 from common.scoping import IDENTITY_SCOPE
 from core.project.project_manager import ProjectManager, ProjectStatus
 from infrastructure.redis_client import RedisKeys
+from tests.fixtures.factories import make_domain_config
 from tests.fixtures.fakes import FakeRedis
 
 
@@ -85,6 +86,36 @@ def make_manager(postgres):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_project_runtime_releases_its_lease_when_session_work_fails(
+    monkeypatch,
+):
+    manager = make_manager(RecordingPostgres())
+    project_state = SimpleNamespace(project_id="project-1")
+    calls = []
+
+    async def acquire(project_id, session_id):
+        calls.append(("acquire", project_id, session_id))
+        return project_state
+
+    async def release(project_id):
+        calls.append(("release", project_id))
+
+    monkeypatch.setattr(manager, "acquire_project_for_session", acquire)
+    monkeypatch.setattr(manager, "release_project", release)
+
+    with pytest.raises(RuntimeError, match="session startup failed"):
+        async with manager.project_runtime("project-1", "session-1") as state:
+            assert state is project_state
+            raise RuntimeError("session startup failed")
+
+    assert calls == [
+        ("acquire", "project-1", "session-1"),
+        ("release", "project-1"),
+    ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_create_project_persists_metadata_and_default_topics(monkeypatch):
     postgres = RecordingPostgres(
         [
@@ -97,7 +128,10 @@ async def test_create_project_persists_metadata_and_default_topics(monkeypatch):
         lambda: "project-1",
     )
 
-    result = await manager.create_project("  Research  ")
+    result = await manager.create_project(
+        "  Research  ",
+        domain_config=make_domain_config(version=0),
+    )
 
     insert = next(
         call
@@ -107,6 +141,7 @@ async def test_create_project_persists_metadata_and_default_topics(monkeypatch):
     assert insert[2]["name"] == "Research"
     assert insert[2]["status"] == ProjectStatus.ACTIVE.value
     assert insert[2]["topic_config"]
+    assert insert[2]["domain_config"]
     assert result["id"] == "project-1"
     assert "topic_config" not in result
     assert postgres.transaction_enters == 1
@@ -119,7 +154,33 @@ async def test_create_project_rejects_empty_name_without_db_access():
     postgres = RecordingPostgres()
 
     with pytest.raises(ValueError, match="non-empty project name"):
-        await make_manager(postgres).create_project("   ")
+        await make_manager(postgres).create_project(
+            "   ",
+            domain_config=make_domain_config(version=0),
+        )
+
+    assert postgres.calls == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_create_project_requires_a_complete_identity_domain():
+    postgres = RecordingPostgres()
+    manager = make_manager(postgres)
+
+    with pytest.raises(ValueError, match="at least one topic"):
+        await manager.create_project("Research", domain_config={})
+
+    with pytest.raises(ValueError, match="active 'Identity' topic"):
+        await manager.create_project(
+            "Research",
+            domain_config={
+                "topics": {"General": {"active": True}},
+                "entity_types": {
+                    "Concept": {"topic": "General", "labels": ["concept"]}
+                },
+            },
+        )
 
     assert postgres.calls == []
 

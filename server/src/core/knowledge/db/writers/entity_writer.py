@@ -90,9 +90,7 @@ class EntityWriter:
                 existing["project_id"] != IDENTITY_SCOPE
                 or self._normalized_identity_value(existing["user_name"])
                 != canonical_key
-                or self._normalized_identity_value(
-                    existing["canonical_name"]
-                )
+                or self._normalized_identity_value(existing["canonical_name"])
                 != canonical_key
             ):
                 raise RuntimeError(
@@ -187,9 +185,7 @@ class EntityWriter:
         if not isinstance(scope, ExecutionScope):
             raise TypeError("write_batch requires an ExecutionScope")
         user_name = require_scope_value(scope.user_name, "user_name", "graph write")
-        session_id = require_scope_value(
-            scope.session_id, "session_id", "graph write"
-        )
+        session_id = require_scope_value(scope.session_id, "session_id", "graph write")
         project_id = self._require_project_id(scope.project_id, "graph write")
         now_ms = self._current_time_ms()
 
@@ -201,8 +197,7 @@ class EntityWriter:
                         raise TypeError("entities must be EntityWrite instances")
                     if entity.entity_id == IDENTITY_ENTITY_ID:
                         raise ValueError(
-                            "Identity entity writes must use "
-                            "ensure_identity_entity"
+                            "Identity entity writes must use ensure_identity_entity"
                         )
 
                     entity_params.append(
@@ -335,7 +330,7 @@ class EntityWriter:
                                 )
                                 VALUES (%s, %s, %s, %s, %s::vector)
                             """,
-                            (
+                                (
                                     entity.entity_id,
                                     entity.canonical_name,
                                     user_name,
@@ -360,7 +355,7 @@ class EntityWriter:
                                     project_id = EXCLUDED.project_id,
                                     embedding = EXCLUDED.embedding
                             """,
-                            (
+                                (
                                     entity.entity_id,
                                     entity.canonical_name,
                                     user_name,
@@ -395,6 +390,7 @@ class EntityWriter:
                         relationship.entity_a_id,
                         relationship.entity_b_id,
                         relationship.relationship_type,
+                        symmetric=relationship.symmetric,
                     )
                     evidence_ref = {
                         "user_name": user_name,
@@ -410,13 +406,17 @@ class EntityWriter:
                             entity_a_id,
                             entity_b_id,
                             relationship_type,
+                            canonical_relationship_type,
+                            observed_relationship_label,
+                            domain_status,
+                            symmetric,
                             weight,
                             confidence,
                             context,
                             last_seen_ms
                         )
                         SELECT
-                            %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
                         WHERE EXISTS (
                             SELECT 1
                             FROM entities
@@ -444,6 +444,16 @@ class EntityWriter:
                                 EXCLUDED.relationship_type,
                                 relationships.relationship_type
                             ),
+                            canonical_relationship_type = COALESCE(
+                                EXCLUDED.canonical_relationship_type,
+                                relationships.canonical_relationship_type
+                            ),
+                            observed_relationship_label = COALESCE(
+                                EXCLUDED.observed_relationship_label,
+                                relationships.observed_relationship_label
+                            ),
+                            domain_status = EXCLUDED.domain_status,
+                            symmetric = EXCLUDED.symmetric,
                             weight = relationships.weight + CASE
                                 WHEN EXISTS (
                                     SELECT 1
@@ -476,6 +486,10 @@ class EntityWriter:
                             relationship.entity_a_id,
                             relationship.entity_b_id,
                             relationship.relationship_type,
+                            relationship.canonical_type,
+                            relationship.observed_label,
+                            relationship.domain_status,
+                            relationship.symmetric,
                             relationship.confidence,
                             relationship.context,
                             now_ms,
@@ -548,6 +562,75 @@ class EntityWriter:
                         ),
                     )
 
+                    await cur.execute(
+                        """
+                        INSERT INTO relationship_observations (
+                            relationship_id,
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            source_entity_id,
+                            target_entity_id,
+                            source_type,
+                            target_type,
+                            observed_relationship_label,
+                            canonical_relationship_type,
+                            domain_status,
+                            confidence,
+                            context,
+                            observed_at_ms
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            source_entity_id,
+                            target_entity_id,
+                            observed_relationship_label
+                        ) DO UPDATE SET
+                            canonical_relationship_type = COALESCE(
+                                EXCLUDED.canonical_relationship_type,
+                                relationship_observations.canonical_relationship_type
+                            ),
+                            domain_status = EXCLUDED.domain_status,
+                            confidence = GREATEST(
+                                relationship_observations.confidence,
+                                EXCLUDED.confidence
+                            ),
+                            context = COALESCE(
+                                EXCLUDED.context,
+                                relationship_observations.context
+                            ),
+                            observed_at_ms = GREATEST(
+                                relationship_observations.observed_at_ms,
+                                EXCLUDED.observed_at_ms
+                            )
+                        """,
+                        (
+                            relationship_id,
+                            project_id,
+                            user_name,
+                            session_id,
+                            evidence_ref["message_id"],
+                            relationship.source_entity_id,
+                            relationship.target_entity_id,
+                            relationship.source_type,
+                            relationship.target_type,
+                            relationship.observed_label,
+                            relationship.canonical_type,
+                            relationship.domain_status,
+                            relationship.confidence,
+                            relationship.context,
+                            now_ms,
+                        ),
+                    )
+
                     rel_params.append(
                         {
                             "relationship_id": relationship_id,
@@ -555,6 +638,10 @@ class EntityWriter:
                             "entity_a_id": relationship.entity_a_id,
                             "entity_b_id": relationship.entity_b_id,
                             "relationship_type": relationship.relationship_type,
+                            "canonical_relationship_type": relationship.canonical_type,
+                            "observed_relationship_label": relationship.observed_label,
+                            "domain_status": relationship.domain_status,
+                            "symmetric": relationship.symmetric,
                             "evidence_ref": json.dumps(evidence_ref),
                             "confidence": relationship.confidence,
                             "context": relationship.context,
@@ -578,14 +665,11 @@ class EntityWriter:
         session_id = require_scope_value(
             scope.session_id, "session_id", "message-entity write"
         )
-        project_id = self._require_project_id(
-            scope.project_id, "message-entity write"
-        )
+        project_id = self._require_project_id(scope.project_id, "message-entity write")
         if any(not isinstance(reference, MessageEntityRef) for reference in references):
             raise TypeError("message_entity_refs must be MessageEntityRef instances")
         normalized_references = {
-            (reference.message_id, reference.entity_id)
-            for reference in references
+            (reference.message_id, reference.entity_id) for reference in references
         }
         if any(
             message_id <= 0 or entity_id <= 0
@@ -606,9 +690,7 @@ class EntityWriter:
             """,
             (message_ids, user_name, session_id, project_id),
         )
-        scoped_message_ids = {
-            int(row["message_id"]) for row in await cur.fetchall()
-        }
+        scoped_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
         if scoped_message_ids != set(message_ids):
             raise ValueError("Message-entity references include messages outside scope")
 
@@ -621,9 +703,7 @@ class EntityWriter:
             """,
             (entity_ids, project_id, IDENTITY_ENTITY_ID),
         )
-        scoped_entity_ids = {
-            int(row["entity_id"]) for row in await cur.fetchall()
-        }
+        scoped_entity_ids = {int(row["entity_id"]) for row in await cur.fetchall()}
         if scoped_entity_ids != set(entity_ids):
             raise ValueError("Message-entity references include entities outside scope")
 
@@ -671,9 +751,8 @@ class EntityWriter:
                 )
             eligibility_by_message_id[message_id] = EpisodeEligibility(
                 message_id=message_id,
-                episode_type=eligibility.episode_type or (
-                    prior.episode_type if prior else None
-                ),
+                episode_type=eligibility.episode_type
+                or (prior.episode_type if prior else None),
             )
         normalized_message_ids = sorted(eligibility_by_message_id)
         if any(message_id <= 0 for message_id in normalized_message_ids):
@@ -690,9 +769,7 @@ class EntityWriter:
             """,
             (normalized_message_ids, user_name, session_id, project_id),
         )
-        scoped_message_ids = {
-            int(row["message_id"]) for row in await cur.fetchall()
-        }
+        scoped_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
         if scoped_message_ids != set(normalized_message_ids):
             raise ValueError("Episode-eligible messages include messages outside scope")
 

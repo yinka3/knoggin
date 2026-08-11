@@ -38,9 +38,13 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
             """
             INSERT INTO relationships (
                 relationship_id, user_name, project_id,
-                entity_a_id, entity_b_id, relationship_type, weight
+                entity_a_id, entity_b_id, relationship_type,
+                observed_relationship_label, weight
             )
-            VALUES ('project-1:2:3:zero', 'ada', 'project-1', 2, 3, 'zero', 0)
+            VALUES (
+                'project-1:2:3:zero', 'ada', 'project-1', 2, 3,
+                'zero', 'zero', 0
+            )
             """
         )
     with pytest.raises(CheckViolation, match="relationships_confidence_range_check"):
@@ -48,22 +52,24 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
             """
             INSERT INTO relationships (
                 relationship_id, user_name, project_id,
-                entity_a_id, entity_b_id, relationship_type, confidence
+                entity_a_id, entity_b_id, relationship_type,
+                observed_relationship_label, confidence
             )
             VALUES (
                 'project-1:2:3:confidence', 'ada', 'project-1', 2, 3,
-                'confidence', 1.1
+                'confidence', 'confidence', 1.1
             )
             """
         )
-    with pytest.raises(CheckViolation, match="relationship endpoints"):
+    with pytest.raises(CheckViolation, match="relationships_identity_matches_fields"):
         await real_postgres_client.execute(
             """
             INSERT INTO relationships (
                 relationship_id, user_name, project_id,
-                entity_a_id, entity_b_id, relationship_type
+                entity_a_id, entity_b_id, relationship_type,
+                observed_relationship_label
             )
-            VALUES ('project-1:2:4:scope', 'ada', 'project-1', 2, 4, 'scope')
+            VALUES ('project-1:4:2:scope', 'ada', 'project-1', 2, 4, 'scope', 'scope')
             """
         )
 
@@ -71,9 +77,13 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
         """
         INSERT INTO relationships (
             relationship_id, user_name, project_id,
-            entity_a_id, entity_b_id, relationship_type
+            entity_a_id, entity_b_id, relationship_type,
+            observed_relationship_label
         )
-        VALUES ('project-1:1:2:knows', 'ada', 'project-1', 1, 2, 'knows')
+        VALUES (
+            'project-1:1:2:knows', 'ada', 'project-1', 1, 2,
+            'knows', 'knows'
+        )
         """
     )
     assert await real_postgres_client.fetch_one(
@@ -88,9 +98,13 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
             """
             INSERT INTO relationships (
                 relationship_id, user_name, project_id,
-                entity_a_id, entity_b_id, relationship_type
+                entity_a_id, entity_b_id, relationship_type,
+                observed_relationship_label
             )
-            VALUES ('project-1:1:2:knows', 'ada', 'project-1', 2, 3, 'mentors')
+            VALUES (
+                'project-1:1:2:knows', 'ada', 'project-1', 2, 3,
+                'mentors', 'mentors'
+            )
             """
         )
 
