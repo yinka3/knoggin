@@ -597,9 +597,9 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
     assert agent_ctx.is_community is True
     assert agent_ctx.user_query == "Community Discussion Topic: Profile stability"
     assert agent_ctx.scope.session_id == "aac-disc-1"
-    assert agent_ctx.agent_config.id == "agent-1"
-    assert agent_ctx.agent_name == "Analyst"
-    assert "Careful analyst" in agent_ctx.persona
+    assert agent_ctx.agent.config.id == "agent-1"
+    assert agent_ctx.agent.name == "Analyst"
+    assert "Careful analyst" in agent_ctx.agent.persona
     assert agent_ctx.current_participants == ["agent-1", "agent-2"]
     assert agent_ctx.history == [{"role": "assistant", "content": "previous"}]
 

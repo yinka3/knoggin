@@ -1,31 +1,20 @@
-<<<<<<< HEAD
 import asyncio
-=======
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
 import json
+from types import MethodType
 
 import pytest
 
-<<<<<<< HEAD
-from common.schema.contracts import CandidateSuggestion
-from common.schema.settings import IngestionSettings
-=======
 from common.schema.ingestion.contracts import CandidateSuggestion
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
+from common.schema.settings import IngestionSettings
 from core.ingestion.batch import IngestionBatch, IngestionMilestone
 from core.ingestion.jobs.dlq_job import DLQReplayJob
 from core.ingestion.services import batch_consumer
 from core.ingestion.services.batch_consumer import IngestionWorker
-<<<<<<< HEAD
 from infrastructure.job.base import JobContext
+from infrastructure.redis_client import RedisKeys
 from infrastructure.work_record import WorkRecord, WorkStatus
 from tests.fixtures.fakes import FakeRedis
 from tests.fixtures.ingestion import ingestion_policy
-=======
-from infrastructure.redis_client import RedisKeys
-from infrastructure.work_record import WorkRecord
-from tests.fixtures.fakes import FakeRedis
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
 
 
 class _KnowledgeStore:
@@ -69,8 +58,9 @@ class _FailingLtrimRedis(FakeRedis):
 
 
 class _DrainProcessor(_Processor):
-    def __init__(self, outcome: str):
+    def __init__(self, outcome: str, *, dlq_success: bool = True):
         self.outcome = outcome
+        self.dlq_success = dlq_success
         self.batch = None
         self.dlq_call = None
         self.dlq_message_ids = None
@@ -113,22 +103,15 @@ class _DrainProcessor(_Processor):
     async def move_to_dead_letter(self, *args, **kwargs):
         self.dlq_call = (args, kwargs)
         self.dlq_message_ids = [message["id"] for message in args[0]]
-        return True
+        return self.dlq_success
 
 
 def _drain_worker(processor: _DrainProcessor) -> IngestionWorker:
-    worker = object.__new__(IngestionWorker)
-    worker.user_name = "ada"
-    worker.session_id = "session-1"
-    worker.processor = processor
-    worker.redis = FakeRedis()
-    worker.batch_size = 1
-    worker.session_window = 10
-    worker.checkpoint_interval = 4
-    worker.settings = IngestionSettings(checkpoint_interval=4)
-
     async def get_session_context(_window, _before_message_id):
         return []
+
+    async def write_to_graph(_batch):
+        return True, None
 
     async def durable_stage(_batch):
         return True, False
@@ -136,12 +119,85 @@ def _drain_worker(processor: _DrainProcessor) -> IngestionWorker:
     async def checkpoint_stage(_batch):
         return None
 
-    worker.get_session_context = get_session_context
+    worker = IngestionWorker(
+        user_name="ada",
+        session_id="session-1",
+        knowledge_store=object(),
+        processor=processor,
+        redis=FakeRedis(),
+        get_session_context=get_session_context,
+        write_to_graph=write_to_graph,
+        settings=IngestionSettings(batch_size=1, checkpoint_interval=4),
+    )
     worker._save_message_logs_or_dlq = durable_stage
     worker._save_candidate_suggestions_or_dlq = durable_stage
     worker._write_graph_or_dlq = durable_stage
     worker._mark_batch_processed = checkpoint_stage
     return worker
+
+
+def _checkpoint_worker(
+    redis: FakeRedis,
+    processor: _DrainProcessor,
+) -> IngestionWorker:
+    """Build a real checkpoint path while keeping extraction deterministic."""
+
+    worker = _drain_worker(processor)
+    worker.redis = redis
+    worker._processed_batches = 0
+    original_process = worker._process_messages
+
+    async def process(batch):
+        worker._processed_batches += 1
+        await original_process(batch)
+
+    async def save_message_logs(batch):
+        batch.mark_message_logs_handled()
+        return True, False
+
+    async def save_candidate_suggestions(batch):
+        batch.mark_candidate_suggestions_handled()
+        return True, False
+
+    async def write_graph(batch):
+        graph_work = WorkRecord.for_graph_write(
+            batch.scope, batch_id=batch.work_unit.id
+        )
+        batch.set_graph_write_buffers(
+            graph_work_unit=graph_work,
+            safe_entity_ids=set(),
+            graph_alias_updates=[],
+            entity_writes=[],
+            relationship_writes=[],
+            message_entity_refs=[],
+            eligible_messages=[],
+            skipped_relationships=[],
+            zombie_entity_ids=set(),
+            dirty_entity_ids=set(),
+        )
+        batch.seal_for_commit()
+        graph_work.mark_running()
+        graph_work.mark_skipped("No graph writes")
+        batch.mark_graph_committed()
+        return True, None
+
+    worker._process_messages = process
+    worker._save_message_logs_or_dlq = save_message_logs
+    worker._save_candidate_suggestions_or_dlq = save_candidate_suggestions
+    worker.write_to_graph = write_graph
+    worker._write_graph_or_dlq = MethodType(IngestionWorker._write_graph_or_dlq, worker)
+    worker._mark_batch_processed = MethodType(
+        IngestionWorker._mark_batch_processed,
+        worker,
+    )
+    return worker
+
+
+async def _queue_one_message(worker: IngestionWorker) -> None:
+    await worker.redis.rpush(
+        worker._buffer_key,
+        json.dumps({"id": 7, "message": "Ada met Grace.", "role": "user"}),
+    )
 
 
 def _completed_batch(*, policy=None) -> IngestionBatch:
@@ -219,7 +275,6 @@ async def test_consumer_dlqs_failed_suggestions_without_marking_them_handled(
     assert IngestionMilestone.CANDIDATE_SUGGESTIONS_HANDLED not in batch.milestones
     assert processor.dlq_call is not None
     assert processor.dlq_call[1]["stage"] == "candidate_suggestions"
-<<<<<<< HEAD
     assert batch.work_unit.status is WorkStatus.FAILED
     assert "CANDIDATE_SUGGESTION_SAVE_FAILED" in (batch.work_unit.summary or "")
 
@@ -336,94 +391,10 @@ async def test_graph_write_uses_the_timeout_captured_by_the_batch(monkeypatch):
 
     assert await worker._write_graph_or_dlq(batch) == (True, False)
     assert observed_timeouts == [12.5]
-=======
-
-
-def _worker_batch(messages, session_text):
-    batch = IngestionBatch.open(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        messages=messages,
-        session_text=session_text,
-    )
-    batch.validate_input()
-    batch.mark_extracted()
-    batch.set_resolution(
-        entity_ids=[],
-        new_entity_ids=set(),
-        alias_updated_ids=set(),
-        entity_message_map={},
-        alias_updates={},
-        candidate_suggestions=[],
-    )
-    batch.set_relationship_observations([])
-    batch.complete()
-    return batch
-
-
-def _configure_worker(redis, processor, monkeypatch):
-    class Store:
-        async def save_message_logs(self, _rows):
-            return True
-
-    worker = object.__new__(IngestionWorker)
-    worker.user_name = "ada"
-    worker.session_id = "session-1"
-    worker.processor = processor
-    worker.knowledge_store = Store()
-    worker.redis = redis
-    worker.batch_size = 1
-    worker.batch_timeout = 30
-    worker.checkpoint_interval = 4
-    worker.session_window = 24
-    worker._processed_batches = 0
-
-    async def context(_window, _before_message_id):
-        return []
-
-    async def process(messages, session_text):
-        worker._processed_batches += 1
-        return _worker_batch(messages, session_text)
-
-    async def write_graph(batch):
-        batch.set_graph_write_buffers(
-            graph_work_unit=WorkRecord.for_graph_write(batch.scope),
-            safe_entity_ids=set(),
-            graph_alias_updates=[],
-            entity_writes=[],
-            relationship_writes=[],
-            message_entity_refs=[],
-            eligible_messages=[],
-            skipped_relationships=[],
-            zombie_entity_ids=set(),
-            dirty_entity_ids=set(),
-        )
-        batch.seal_for_commit()
-        batch.mark_graph_committed()
-        return True, None
-
-    async def emit_nothing(*_args, **_kwargs):
-        return None
-
-    worker.get_session_context = context
-    worker._process_messages = process
-    worker.write_to_graph = write_graph
-    monkeypatch.setattr(batch_consumer, "emit", emit_nothing)
-    return worker
-
-
-async def _queue_one_message(worker):
-    await worker.redis.rpush(
-        worker._buffer_key,
-        json.dumps({"id": 7, "message": "Ada met Grace.", "role": "user"}),
-    )
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-<<<<<<< HEAD
 async def test_drain_releases_batch_after_durable_processing(monkeypatch):
     async def emit_nothing(*_args, **_kwargs):
         return None
@@ -441,22 +412,10 @@ async def test_drain_releases_batch_after_durable_processing(monkeypatch):
     assert processor.batch.released is True
     assert processor.batch.messages == []
     assert processor.batch.session_text == ""
-=======
-async def test_checkpoint_failure_dlqs_and_cleans_buffer(monkeypatch):
-    redis = _FailingCheckpointRedis()
-    processor = _DLQProcessor()
-    worker = _configure_worker(redis, processor, monkeypatch)
-    await _queue_one_message(worker)
-
-    assert await worker._drain_buffer(flush_partial=True) is False
-    assert await redis.llen(worker._buffer_key) == 0
-    assert processor.dlq_call[1]["stage"] == "checkpoint"
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-<<<<<<< HEAD
 async def test_drain_releases_batch_after_dlq_handoff(monkeypatch):
     async def emit_nothing(*_args, **_kwargs):
         return None
@@ -473,22 +432,10 @@ async def test_drain_releases_batch_after_dlq_handoff(monkeypatch):
     assert processor.dlq_call is not None
     assert processor.dlq_message_ids == [7]
     assert processor.batch.released is True
-=======
-async def test_checkpoint_failure_leaves_buffer_when_dlq_write_fails(monkeypatch):
-    redis = _FailingCheckpointRedis()
-    processor = _DLQProcessor(dlq_success=False)
-    worker = _configure_worker(redis, processor, monkeypatch)
-    await _queue_one_message(worker)
-
-    assert await worker._drain_buffer(flush_partial=True) is False
-    assert await redis.llen(worker._buffer_key) == 1
-    assert processor.dlq_call[1]["stage"] == "checkpoint"
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-<<<<<<< HEAD
 async def test_drain_releases_batch_after_cancellation(monkeypatch):
     async def emit_nothing(*_args, **_kwargs):
         return None
@@ -505,6 +452,56 @@ async def test_drain_releases_batch_after_cancellation(monkeypatch):
 
     assert processor.batch.released is True
     assert processor.batch.work_unit.status is WorkStatus.CANCELLED
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_checkpoint_failure_dlqs_and_cleans_buffer():
+    redis = _FailingCheckpointRedis()
+    processor = _DrainProcessor("succeeded")
+    worker = _checkpoint_worker(redis, processor)
+    await _queue_one_message(worker)
+
+    assert await worker._drain_buffer(flush_partial=True) is False
+    assert await redis.llen(worker._buffer_key) == 0
+    assert processor.dlq_call is not None
+    assert processor.dlq_call[1]["stage"] == "checkpoint"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_checkpoint_failure_leaves_buffer_when_dlq_write_fails():
+    redis = _FailingCheckpointRedis()
+    processor = _DrainProcessor("succeeded", dlq_success=False)
+    worker = _checkpoint_worker(redis, processor)
+    await _queue_one_message(worker)
+
+    assert await worker._drain_buffer(flush_partial=True) is False
+    assert await redis.llen(worker._buffer_key) == 1
+    assert processor.dlq_call is not None
+    assert processor.dlq_call[1]["stage"] == "checkpoint"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_buffer_cleanup_failure_retries_without_double_checkpoint():
+    redis = _FailingLtrimRedis()
+    processor = _DrainProcessor("succeeded")
+    worker = _checkpoint_worker(redis, processor)
+    await _queue_one_message(worker)
+
+    with pytest.raises(RuntimeError, match="buffer cleanup unavailable"):
+        await worker._drain_buffer(flush_partial=True)
+
+    assert await redis.llen(worker._buffer_key) == 1
+    assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
+
+    redis.fail_ltrim = False
+    assert await worker._drain_buffer(flush_partial=True) is False
+
+    assert worker._processed_batches == 2
+    assert await redis.llen(worker._buffer_key) == 0
+    assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
 
 
 @pytest.mark.ingestion
@@ -540,23 +537,3 @@ async def test_dlq_checkpoint_retry_releases_hydrated_batch():
 
     assert success is True
     assert batch.released is True
-=======
-async def test_buffer_cleanup_failure_retries_without_double_checkpoint(monkeypatch):
-    redis = _FailingLtrimRedis()
-    processor = _DLQProcessor()
-    worker = _configure_worker(redis, processor, monkeypatch)
-    await _queue_one_message(worker)
-
-    with pytest.raises(RuntimeError, match="buffer cleanup unavailable"):
-        await worker._drain_buffer(flush_partial=True)
-
-    assert await redis.llen(worker._buffer_key) == 1
-    assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
-
-    redis.fail_ltrim = False
-    assert await worker._drain_buffer(flush_partial=True) is False
-
-    assert worker._processed_batches == 2
-    assert await redis.llen(worker._buffer_key) == 0
-    assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094

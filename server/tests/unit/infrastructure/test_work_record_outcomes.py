@@ -1,6 +1,6 @@
 import pytest
 
-from common.schema.contracts import ExecutionScope
+from common.schema.ingestion.contracts import ExecutionScope
 from infrastructure.work_record import WorkRecord, WorkStatus
 
 

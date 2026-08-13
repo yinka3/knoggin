@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -5,6 +6,7 @@ import pytest
 
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
+from common.utils.core_utils import fetch_conversation_turns
 from core.session.context import Session
 from infrastructure.redis_client import RedisKeys
 from tests.fixtures.factories import make_project_state
@@ -25,6 +27,43 @@ def _pasted_source_candidate():
         agent_run_id="run-1",
         result_position=0,
     )
+
+
+def _response_event(content, *, sources_consulted=None):
+    data = {
+        "content": content,
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 5,
+            "total_tokens": 8,
+            "approximate": False,
+        },
+        "sources": None,
+    }
+    if sources_consulted:
+        data["sources_consulted"] = sources_consulted
+    return {"event": "response", "data": data}
+
+
+class _FakeTurnOrchestrator:
+    def __init__(self, handler):
+        self.handler = handler
+        self.calls = []
+
+    async def run_stream(self, **kwargs):
+        self.calls.append(kwargs)
+        async for event in self.handler(kwargs):
+            yield event
+
+
+async def _collect_turn(ctx, message, orchestrator):
+    return [
+        event
+        async for event in ctx.run_agent_stream(
+            message,
+            orchestrator=orchestrator,
+        )
+    ]
 
 
 @pytest.fixture
@@ -52,6 +91,24 @@ async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
 
     with pytest.raises(RuntimeError, match="not fully initialized"):
         await ctx.add(Message(content="hello"))
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_conversation_history_can_exclude_the_current_first_message():
+    resources = FakeResources()
+
+    await fetch_conversation_turns(
+        resources.postgres,
+        "ada",
+        "session-1",
+        num_turns=10,
+        up_to_msg_id=0,
+    )
+
+    _, query, params = resources.postgres.calls[-1]
+    assert "message_id <= %(up_to_msg_id)s" in query
+    assert params["up_to_msg_id"] == 0
 
 
 @pytest.mark.runtime
@@ -310,9 +367,7 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
         calls.append((message, candidates))
         return []
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = (
-        save_atomically
-    )
+    resources.knowledge_store.save_assistant_message_with_source_refs = save_atomically
 
     await ctx.add_assistant_turn(
         "hello from assistant",
@@ -443,3 +498,203 @@ async def test_context_assistant_turn_failure_rolls_back_redis_and_raises(
     assert resources.redis.zsets[recent_key] == {}
     assert resources.redis.hashes[content_key] == {}
     assert attempts == 3
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_agent_stream_persists_the_final_answer_and_sources_before_response(
+    context,
+):
+    ctx, resources = context
+    history_calls = []
+    persisted = False
+    source_handoffs = []
+
+    async def history(limit, up_to_msg_id=None):
+        history_calls.append((limit, up_to_msg_id))
+        return [{"role": "assistant", "content": "A prior durable answer."}]
+
+    async def persist_assistant(message, candidates):
+        nonlocal persisted
+        source_handoffs.append((message, candidates))
+        resources.knowledge_store.saved_message_logs.append([message])
+        persisted = True
+        return candidates
+
+    async def handler(kwargs):
+        candidate = _pasted_source_candidate().model_copy(
+            update={"source_message_id": kwargs["user_message_id"]}
+        )
+        yield {"event": "token", "data": {"content": "Temporary text"}}
+        yield _response_event(
+            "Durable final answer",
+            sources_consulted=[candidate.model_dump(mode="json")],
+        )
+
+    ctx.get_conversation_context = history
+    resources.knowledge_store.save_assistant_message_with_source_refs = (
+        persist_assistant
+    )
+    orchestrator = _FakeTurnOrchestrator(handler)
+    events = []
+
+    async for event in ctx.run_agent_stream(
+        Message(content="What did we decide?"),
+        orchestrator=orchestrator,
+    ):
+        if event["event"] == "response":
+            assert persisted is True
+        events.append(event)
+
+    assert [event["event"] for event in events] == ["token", "response"]
+    assert history_calls == [(100, 0)]
+    assert orchestrator.calls[0]["user_query"] == "What did we decide?"
+    assert orchestrator.calls[0]["conversation_history"] == [
+        {"role": "assistant", "content": "A prior durable answer."}
+    ]
+    assert orchestrator.calls[0]["user_message_id"] == 1
+    assistant_message, candidates = source_handoffs[0]
+    assert assistant_message["content"] == "Durable final answer"
+    assert assistant_message["user_msg_id"] == 1
+    assert assistant_message["metadata"] == {
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 5,
+            "total_tokens": 8,
+            "approximate": False,
+        }
+    }
+    assert candidates[0].source_message_id == 1
+    assert ctx.agent_run_snapshot() == {
+        "state": "completed",
+        "active": False,
+        "queued_message_ids": [],
+        "queue_paused": False,
+    }
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_agent_stream_serializes_accepted_turns_in_fifo_order(context):
+    ctx, _ = context
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    active_runs = 0
+    max_active_runs = 0
+
+    async def handler(kwargs):
+        nonlocal active_runs, max_active_runs
+        active_runs += 1
+        max_active_runs = max(max_active_runs, active_runs)
+        try:
+            if kwargs["user_query"] == "first":
+                first_started.set()
+                await release_first.wait()
+            yield _response_event(f"answer to {kwargs['user_query']}")
+        finally:
+            active_runs -= 1
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    first = asyncio.create_task(
+        _collect_turn(ctx, Message(content="first"), orchestrator)
+    )
+    await first_started.wait()
+    second = asyncio.create_task(
+        _collect_turn(ctx, Message(content="second"), orchestrator)
+    )
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert [call["user_query"] for call in orchestrator.calls] == ["first"]
+    assert ctx.agent_run_snapshot()["queued_message_ids"] == [1, 2]
+
+    release_first.set()
+    first_events, second_events = await asyncio.gather(first, second)
+
+    assert [call["user_query"] for call in orchestrator.calls] == ["first", "second"]
+    assert max_active_runs == 1
+    assert first_events[-1]["data"]["content"] == "answer to first"
+    assert second_events[-1]["data"]["content"] == "answer to second"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_failed_run_pauses_the_next_accepted_turn_until_resumed(context):
+    ctx, _ = context
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "first":
+            first_started.set()
+            await release_first.wait()
+            yield {"event": "error", "data": {"message": "agent failed"}}
+            return
+        yield _response_event("answer to second")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    first = asyncio.create_task(
+        _collect_turn(ctx, Message(content="first"), orchestrator)
+    )
+    await first_started.wait()
+    second = asyncio.create_task(
+        _collect_turn(ctx, Message(content="second"), orchestrator)
+    )
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+    release_first.set()
+    assert (await first) == [{"event": "error", "data": {"message": "agent failed"}}]
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert [call["user_query"] for call in orchestrator.calls] == ["first"]
+    assert ctx.agent_run_snapshot() == {
+        "state": "failed",
+        "active": False,
+        "queued_message_ids": [2],
+        "queue_paused": True,
+    }
+
+    assert await ctx.resume_agent_queue() is True
+    second_events = await second
+
+    assert [call["user_query"] for call in orchestrator.calls] == ["first", "second"]
+    assert second_events[-1]["data"]["content"] == "answer to second"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_cancel_active_agent_run_keeps_only_the_durable_user_turn(context):
+    ctx, resources = context
+    started = asyncio.Event()
+    never_finish = asyncio.Event()
+
+    async def handler(_kwargs):
+        started.set()
+        await never_finish.wait()
+        yield _response_event("This must never be persisted")
+
+    task = asyncio.create_task(
+        _collect_turn(
+            ctx,
+            Message(content="cancel this run"),
+            _FakeTurnOrchestrator(handler),
+        )
+    )
+    await started.wait()
+
+    assert await ctx.cancel_active_agent_run() is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [
+        batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs
+    ] == ["user"]
+    assert ctx.agent_run_snapshot() == {
+        "state": "cancelled",
+        "active": False,
+        "queued_message_ids": [],
+        "queue_paused": True,
+    }

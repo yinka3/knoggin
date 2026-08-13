@@ -3,7 +3,7 @@ import hashlib
 import pytest
 
 from common.exceptions import ToolExecutionError
-from common.schema.tool_schema import (
+from common.schema.agent.tool_contracts import (
     REVERSIBLE_WRITE_CAPABILITY,
     TOOL_SCHEMAS_BY_NAME,
     get_schema_capability,
@@ -28,11 +28,17 @@ class FakeWorkspaceService:
 
     async def create_file(self, path, content):
         self.calls.append(("create", path, content))
-        return {"relative_path": path, "content_hash": hashlib.sha256(content.encode()).hexdigest()}
+        return {
+            "relative_path": path,
+            "content_hash": hashlib.sha256(content.encode()).hexdigest(),
+        }
 
     async def update_file(self, path, content, *, expected_content_hash):
         self.calls.append(("update", path, content, expected_content_hash))
-        return {"relative_path": path, "content_hash": hashlib.sha256(content.encode()).hexdigest()}
+        return {
+            "relative_path": path,
+            "content_hash": hashlib.sha256(content.encode()).hexdigest(),
+        }
 
     async def append_file(self, path, content, *, expected_content_hash):
         self.calls.append(("append", path, content, expected_content_hash))
@@ -163,7 +169,10 @@ async def test_workspace_schema_registry_limits_and_bounds():
     }
     assert expected <= set(TOOL_SCHEMAS_BY_NAME)
     for name in expected - {"list_workspace_files", "read_workspace_file"}:
-        assert get_schema_capability(TOOL_SCHEMAS_BY_NAME[name]) == REVERSIBLE_WRITE_CAPABILITY
+        assert (
+            get_schema_capability(TOOL_SCHEMAS_BY_NAME[name])
+            == REVERSIBLE_WRITE_CAPABILITY
+        )
 
     limits = get_default_tool_limits()
     assert {name: limits[name] for name in expected} == {
@@ -175,10 +184,13 @@ async def test_workspace_schema_registry_limits_and_bounds():
     }
 
     schema = TOOL_SCHEMAS_BY_NAME["create_workspace_file"]
-    assert validate_tool_arguments(
-        schema,
-        {"path": "notes.md", "content": "ok"},
-    ) == []
+    assert (
+        validate_tool_arguments(
+            schema,
+            {"path": "notes.md", "content": "ok"},
+        )
+        == []
+    )
     assert validate_tool_arguments(
         schema,
         {"path": "notes.md", "content": ""},

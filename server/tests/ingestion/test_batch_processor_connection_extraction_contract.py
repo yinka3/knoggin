@@ -156,7 +156,7 @@ async def test_extract_connections_normalizes_configured_and_unknown_relationshi
             },
         }
     ).compile()
-    response = ConnectionsResult(
+    response = RelationshipExtraction(
         connections=[relationship(name="uses")],
     )
     processor, entities = make_processor(response)
@@ -437,7 +437,6 @@ async def test_extract_connections_rejects_self_relationship():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_extract_connections_rejects_duplicate_relationship():
-<<<<<<< HEAD
     domain = DomainConfig.from_mapping(
         {
             "version": 1,
@@ -454,10 +453,7 @@ async def test_extract_connections_rejects_duplicate_relationship():
             },
         }
     ).compile()
-    response = ConnectionsResult(
-=======
     response = RelationshipExtraction(
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
         connections=[
             relationship(),
             relationship(entity_a="Robert Chen", entity_b="Alice"),
@@ -486,7 +482,9 @@ async def test_extract_connections_rejects_duplicate_relationship():
 @pytest.mark.ingestion
 @pytest.mark.no_network
 async def test_extract_connections_rejects_invalid_user_connection_msg_id():
-    response = RelationshipExtraction(user_connections=[user_relationship(msg_id="m999")])
+    response = RelationshipExtraction(
+        user_connections=[user_relationship(msg_id="m999")]
+    )
     processor, entities = make_processor(response)
     await seed_connection_entities(entities)
     trace = ExtractionTrace()

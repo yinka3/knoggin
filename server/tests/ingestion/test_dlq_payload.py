@@ -20,12 +20,8 @@ def _graph_committed_batch(batch_id="batch-1") -> IngestionBatch:
         session_id="session-1",
         messages=[{"id": 7, "message": "Ada met Grace."}],
         session_text="[USER]: Ada met Grace.",
-<<<<<<< HEAD
         policy=ingestion_policy(),
-        batch_id="batch-1",
-=======
         batch_id=batch_id,
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
     )
     batch.validate_input()
     batch.mark_extracted()
@@ -135,9 +131,7 @@ async def test_checkpoint_commit_is_idempotent_and_retains_counter_progress():
     assert replay.checkpoint_count == 1
     assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
     assert redis.strings[RedisKeys.last_processed("ada", "session-1")] == "7"
-<<<<<<< HEAD
     assert redis.evals[0][1][5] == batch.policy.checkpoint_interval
-=======
 
 
 @pytest.mark.ingestion
@@ -147,17 +141,8 @@ async def test_checkpoint_commit_is_idempotent_for_a_fresh_retry_batch():
     retry_batch = _graph_committed_batch("batch-2")
     redis = FakeRedis()
 
-    first = await commit_ingestion_checkpoint(
-        redis,
-        first_batch,
-        checkpoint_interval=4,
-    )
-    retry = await commit_ingestion_checkpoint(
-        redis,
-        retry_batch,
-        checkpoint_interval=4,
-    )
+    first = await commit_ingestion_checkpoint(redis, first_batch)
+    retry = await commit_ingestion_checkpoint(redis, retry_batch)
 
     assert retry == first
     assert redis.strings[RedisKeys.checkpoint("ada", "session-1")] == "1"
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094

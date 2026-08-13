@@ -1,7 +1,7 @@
 import pytest
 
 from common.conf.domain_config import DomainConfig
-from common.schema.contracts import relationship_identity
+from common.schema.ingestion.contracts import relationship_identity
 from core.knowledge.relationship_reclassification import (
     plan_relationship_reclassification,
 )
@@ -111,9 +111,7 @@ def test_relationship_reclassification_uses_symmetric_identity():
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_relationship_reclassification_counts_already_normalized_rows_unchanged():
-    canonical_id = relationship_identity(
-        "demo", 10, 20, "DEPLOYS_TO", symmetric=False
-    )
+    canonical_id = relationship_identity("demo", 10, 20, "DEPLOYS_TO", symmetric=False)
     plan = plan_relationship_reclassification(
         [
             relationship_row(

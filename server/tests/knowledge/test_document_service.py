@@ -50,8 +50,7 @@ class MemoryPostgres:
         return row["project_id"] == project_id and (
             row["visibility_scope"] == "project"
             or (
-                row["visibility_scope"] == "session"
-                and row["session_id"] == session_id
+                row["visibility_scope"] == "session" and row["session_id"] == session_id
             )
         )
 
@@ -68,9 +67,7 @@ class MemoryPostgres:
             self.scan_settings[project_id] = {
                 "project_id": project_id,
                 "settings": json.loads(settings),
-                "created_at": (
-                    existing["created_at"] if existing else created_at
-                ),
+                "created_at": (existing["created_at"] if existing else created_at),
                 "updated_at": updated_at,
             }
             return 1
@@ -91,26 +88,26 @@ class MemoryPostgres:
             )
             if source is None:
                 return []
-            rows = [
-                row
-                for row in self.rows
-                if row.get("source_id") == source_id
-            ]
+            rows = [row for row in self.rows if row.get("source_id") == source_id]
             source.update(
                 {
                     "document_count": len(rows),
                     "queued_count": sum(row["status"] == "queued" for row in rows),
-                    "indexing_count": sum(
-                        row["status"] == "indexing" for row in rows
-                    ),
-                    "indexed_count": sum(
-                        row["status"] == "indexed" for row in rows
-                    ),
+                    "indexing_count": sum(row["status"] == "indexing" for row in rows),
+                    "indexed_count": sum(row["status"] == "indexed" for row in rows),
                     "failed_count": sum(row["status"] == "failed" for row in rows),
                 }
             )
             return [source]
         if "FROM public.document_workspace_sources" in query:
+            if "ownership_mode = 'managed_project_workspace'" in query:
+                (project_id,) = params
+                return [
+                    deepcopy(source)
+                    for source in self.workspace_sources
+                    if source["project_id"] == project_id
+                    and source.get("ownership_mode") == "managed_project_workspace"
+                ]
             source_id, project_id, session_id = params
             return [
                 deepcopy(source)
@@ -118,6 +115,36 @@ class MemoryPostgres:
                 if source["source_id"] == source_id
                 and self._visible(source, project_id, session_id)
             ]
+        if (
+            "FROM public.project_documents AS pd" in query
+            and "JOIN public.document_workspace_sources AS ws" in query
+            and "ownership_mode = 'managed_project_workspace'" in query
+        ):
+            project_id = params[0]
+            managed_source_ids = {
+                source["source_id"]
+                for source in self.workspace_sources
+                if source["project_id"] == project_id
+                and source.get("ownership_mode") == "managed_project_workspace"
+            }
+            rows = [
+                row
+                for row in self.rows
+                if row["project_id"] == project_id
+                and row.get("source_id") in managed_source_ids
+            ]
+            if "pd.relative_path = %s" in query:
+                rows = [row for row in rows if row["relative_path"] == params[1]]
+            results = []
+            for row in rows:
+                result = deepcopy(row)
+                if "JOIN public.document_content AS dc" in query:
+                    content = self.contents.get(row["document_id"])
+                    if content is None:
+                        continue
+                    result["content"] = content
+                results.append(result)
+            return results[: params[-1] if "LIMIT %s" in query else None]
         if query.lstrip().startswith("DELETE FROM public.project_documents"):
             if self.delete_error is not None:
                 raise self.delete_error
@@ -135,9 +162,7 @@ class MemoryPostgres:
                 return []
             self.rows.remove(row)
             self.chunks = [
-                chunk
-                for chunk in self.chunks
-                if chunk["document_id"] != document_id
+                chunk for chunk in self.chunks if chunk["document_id"] != document_id
             ]
             self.contents.pop(document_id, None)
             return [dict(row)]
@@ -229,7 +254,10 @@ class MemoryPostgres:
                 ):
                     source_rows.setdefault(
                         row["source_id"],
-                        {"source_id": row["source_id"], "session_id": row["session_id"]},
+                        {
+                            "source_id": row["source_id"],
+                            "session_id": row["session_id"],
+                        },
                     )
             return list(source_rows.values())[:limit]
         if (
@@ -265,10 +293,7 @@ class MemoryPostgres:
                 deepcopy(folder)
                 for folder in reversed(self.folders)
                 if self._visible(folder, project_id, session_id)
-                and (
-                    scope is None
-                    or folder["visibility_scope"] == scope
-                )
+                and (scope is None or folder["visibility_scope"] == scope)
             ]
             return folders[:limit]
         if "dc.extracted_text" in query:
@@ -349,14 +374,11 @@ class MemoryPostgres:
         ):
             return deepcopy(self.search_results)
         if "LIMIT 2" in query and (
-            "pd.document_id = %s" in query
-            or "pd.relative_path = %s" in query
+            "pd.document_id = %s" in query or "pd.relative_path = %s" in query
         ):
             selector_value, project_id, session_id = params
             selector_key = (
-                "document_id"
-                if "pd.document_id = %s" in query
-                else "relative_path"
+                "document_id" if "pd.document_id = %s" in query else "relative_path"
             )
             results = []
             for row in reversed(self.rows):
@@ -387,10 +409,7 @@ class MemoryPostgres:
             for row in self.rows
             if self._visible(row, project_id, session_id)
             and (scope is None or row["visibility_scope"] == scope)
-            and (
-                folder_root_id is None
-                or row.get("folder_root_id") == folder_root_id
-            )
+            and (folder_root_id is None or row.get("folder_root_id") == folder_root_id)
             and (
                 path_prefix is None
                 or row["relative_path"] == path_prefix
@@ -401,8 +420,7 @@ class MemoryPostgres:
         for row in reversed(rows):
             result = dict(row)
             result["chunk_count"] = sum(
-                chunk["document_id"] == row["document_id"]
-                for chunk in self.chunks
+                chunk["document_id"] == row["document_id"] for chunk in self.chunks
             )
             results.append(result)
         return results
@@ -421,8 +439,7 @@ class MemoryCopy:
     async def write_row(self, row):
         if (
             self.postgres.transaction_error_at_chunk is not None
-            and len(self.postgres.chunks)
-            == self.postgres.transaction_error_at_chunk
+            and len(self.postgres.chunks) == self.postgres.transaction_error_at_chunk
         ):
             raise RuntimeError("chunk insert failed")
         (
@@ -489,21 +506,29 @@ class MemoryCursor:
         normalized = " ".join(query.split())
 
         if normalized.startswith("INSERT INTO public.document_workspace_sources"):
-            (
-                source_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                display_name,
-                created_at,
-                updated_at,
-            ) = params
+            if "managed_project_workspace" in normalized:
+                source_id, project_id, display_name, created_at, updated_at = params
+                session_id = None
+                visibility_scope = "project"
+                ownership_mode = "managed_project_workspace"
+            else:
+                (
+                    source_id,
+                    project_id,
+                    session_id,
+                    visibility_scope,
+                    display_name,
+                    created_at,
+                    updated_at,
+                ) = params
+                ownership_mode = "external_sync"
             self.postgres.workspace_sources.append(
                 {
                     "source_id": source_id,
                     "project_id": project_id,
                     "session_id": session_id,
                     "visibility_scope": visibility_scope,
+                    "ownership_mode": ownership_mode,
                     "display_name": display_name,
                     "last_synced_at": None,
                     "last_manifest_candidate_count": 0,
@@ -561,13 +586,20 @@ class MemoryCursor:
             and "document_workspace_sources" in normalized
             and "FOR UPDATE" in normalized
         ):
-            source_id, project_id, session_id = params
+            if "managed_project_workspace" in normalized:
+                source_id, project_id = params
+                session_id = None
+                ownership_mode = "managed_project_workspace"
+            else:
+                source_id, project_id, session_id = params
+                ownership_mode = "external_sync"
             self.result = next(
                 (
                     {"source_id": source["source_id"]}
                     for source in self.postgres.workspace_sources
                     if source["source_id"] == source_id
                     and self.postgres._visible(source, project_id, session_id)
+                    and source.get("ownership_mode") == ownership_mode
                 ),
                 None,
             )
@@ -784,9 +816,7 @@ class MemoryCursor:
             self.result = None
             return
 
-        if normalized.startswith(
-            "INSERT INTO public.document_folder_uploads"
-        ):
+        if normalized.startswith("INSERT INTO public.document_folder_uploads"):
             if len(params) == 15:
                 (
                     folder_root_id,
@@ -839,9 +869,7 @@ class MemoryCursor:
                     "excluded_count": excluded_count,
                     "excluded_bytes": excluded_bytes,
                     "excluded_directory_count": excluded_directory_count,
-                    "excluded_reason_counts": json.loads(
-                        excluded_reason_counts
-                    ),
+                    "excluded_reason_counts": json.loads(excluded_reason_counts),
                     "scan_settings": json.loads(scan_settings),
                     "created_at": created_at,
                     "indexed_at": indexed_at,
@@ -850,24 +878,38 @@ class MemoryCursor:
             self.result = None
             return
 
-        if normalized.startswith(
-            "INSERT INTO public.project_documents"
-        ):
+        if normalized.startswith("INSERT INTO public.project_documents"):
             if "'workspace'" in normalized:
-                (
-                    document_id,
-                    project_id,
-                    session_id,
-                    visibility_scope,
-                    source_id,
-                    original_name,
-                    relative_path,
-                    extension,
-                    size_bytes,
-                    content_hash,
-                    created_at,
-                    updated_at,
-                ) = params
+                if len(params) == 10:
+                    (
+                        document_id,
+                        project_id,
+                        source_id,
+                        original_name,
+                        relative_path,
+                        extension,
+                        size_bytes,
+                        content_hash,
+                        created_at,
+                        updated_at,
+                    ) = params
+                    session_id = None
+                    visibility_scope = "project"
+                else:
+                    (
+                        document_id,
+                        project_id,
+                        session_id,
+                        visibility_scope,
+                        source_id,
+                        original_name,
+                        relative_path,
+                        extension,
+                        size_bytes,
+                        content_hash,
+                        created_at,
+                        updated_at,
+                    ) = params
                 existing = next(
                     (
                         row
@@ -1049,9 +1091,7 @@ class MemoryCursor:
         if "SET status = 'indexed'" in normalized:
             indexed_at, updated_at, document_id = params
             row = next(
-                row
-                for row in self.postgres.rows
-                if row["document_id"] == document_id
+                row for row in self.postgres.rows if row["document_id"] == document_id
             )
             row.update(
                 {
@@ -1067,9 +1107,7 @@ class MemoryCursor:
         if "SET status = 'failed'" in normalized:
             error_message, updated_at, document_id = params
             row = next(
-                row
-                for row in self.postgres.rows
-                if row["document_id"] == document_id
+                row for row in self.postgres.rows if row["document_id"] == document_id
             )
             if row["status"] != "indexed":
                 row.update(
@@ -1303,7 +1341,9 @@ def test_docx_chunks_preserve_paragraph_ranges_and_heading_paths(monkeypatch):
         SimpleNamespace(text="Overview", style=SimpleNamespace(name="Heading 1")),
         SimpleNamespace(text="The introduction.", style=SimpleNamespace(name="Normal")),
         SimpleNamespace(text="Risks", style=SimpleNamespace(name="Heading 2")),
-        SimpleNamespace(text="Mitigate dependency risk.", style=SimpleNamespace(name="Normal")),
+        SimpleNamespace(
+            text="Mitigate dependency risk.", style=SimpleNamespace(name="Normal")
+        ),
     ]
     monkeypatch.setattr(
         storage_module,
@@ -1346,7 +1386,9 @@ def test_notebook_cells_become_retrievable_chunks():
     )
     chunks = storage_module.split_document(text, extension=".ipynb")
 
-    assert [(chunk.chunk_kind, chunk.symbol_name, chunk.content) for chunk in chunks] == [
+    assert [
+        (chunk.chunk_kind, chunk.symbol_name, chunk.content) for chunk in chunks
+    ] == [
         ("notebook_markdown", "cell 1", "# Overview\nNotes"),
         ("notebook_code", "cell 2", "print('hello')"),
     ]
@@ -1471,9 +1513,7 @@ async def test_workspace_delta_sync_updates_only_named_paths(document_harness):
         "src/a.py",
         "src/c.py",
     }
-    updated_a = next(
-        row for row in postgres.rows if row["relative_path"] == "src/a.py"
-    )
+    updated_a = next(row for row in postgres.rows if row["relative_path"] == "src/a.py")
     assert updated_a["document_id"] == original_a_id
     assert postgres.contents[original_a_id] == b"updated"
     assert postgres.workspace_sources[0]["last_manifest_candidate_count"] == 2
@@ -1581,10 +1621,12 @@ async def test_workspace_batch_embeds_chunks_across_files(document_harness):
         session_id=None,
     )
 
-    assert service._embedding.calls == [[
-        "File: src/a.py\nLanguage: python\n\nfirst",
-        "File: src/b.py\nLanguage: python\n\nsecond",
-    ]]
+    assert service._embedding.calls == [
+        [
+            "File: src/a.py\nLanguage: python\n\nfirst",
+            "File: src/b.py\nLanguage: python\n\nsecond",
+        ]
+    ]
     assert {row["status"] for row in postgres.rows} == {"indexed"}
     assert sum(call[0] == "cursor.copy" for call in postgres.calls) == 1
 
@@ -1656,9 +1698,7 @@ async def test_workspace_indexing_status_reports_manifest_and_live_progress(
     assert queued["last_manifest_candidate_count"] == 2
     assert queued["last_manifest_included_count"] == 1
     assert queued["last_manifest_excluded_count"] == 1
-    assert queued["last_manifest_excluded_reason_counts"] == {
-        "default_file_ignore": 1
-    }
+    assert queued["last_manifest_excluded_reason_counts"] == {"default_file_ignore": 1}
 
     await service._index_workspace_source_batch(
         source_id=source["source_id"],
@@ -1834,7 +1874,9 @@ async def test_repeated_uploads_create_separate_records(document_harness):
         "\x00bad.txt",
     ],
 )
-async def test_add_document_rejects_unsafe_relative_paths(document_harness, relative_path):
+async def test_add_document_rejects_unsafe_relative_paths(
+    document_harness, relative_path
+):
     service, postgres = document_harness
 
     with pytest.raises(ValueError):
@@ -1915,7 +1957,9 @@ async def test_list_documents_normalizes_database_timestamps(document_harness):
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_get_document_info_resolves_visible_document_without_storage_key(document_harness):
+async def test_get_document_info_resolves_visible_document_without_storage_key(
+    document_harness,
+):
     service, _ = document_harness
     uploaded = await service.add_document(
         content=b"alpha\nbeta",
@@ -1966,7 +2010,9 @@ async def test_get_document_info_enforces_visibility_and_reference_rules():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_relative_path_lookup_requires_document_id_when_uploads_repeat(document_harness):
+async def test_relative_path_lookup_requires_document_id_when_uploads_repeat(
+    document_harness,
+):
     service, _ = document_harness
     first = await service.add_document(
         content=b"first",
@@ -1982,9 +2028,9 @@ async def test_relative_path_lookup_requires_document_id_when_uploads_repeat(doc
     with pytest.raises(ValueError, match="Multiple visible uploads"):
         await service.get_document_info(relative_path="docs/notes.txt")
 
-    assert (
-        await service.get_document_info(document_id=first["document_id"])
-    )["document_id"] == first["document_id"]
+    assert (await service.get_document_info(document_id=first["document_id"]))[
+        "document_id"
+    ] == first["document_id"]
 
 
 @pytest.mark.storage
@@ -2078,7 +2124,9 @@ async def test_read_document_validates_ranges_and_character_limit(
         "core.knowledge.documents.service.MAX_READ_CHARACTERS",
         8,
     )
-    result = await service.read_document(document_id=uploaded["document_id"], end_line=1)
+    result = await service.read_document(
+        document_id=uploaded["document_id"], end_line=1
+    )
     assert result["content"] == "1: 01234"
     assert result["truncated"] is True
 
@@ -2097,9 +2145,7 @@ async def test_delete_document_permanently_removes_metadata_chunks_and_bytes(
         def split_text(self, text):
             return [text]
 
-    monkeypatch.setattr(
-        storage_module, "SentenceSplitter", OneChunkSplitter
-    )
+    monkeypatch.setattr(storage_module, "SentenceSplitter", OneChunkSplitter)
     first = await service.add_document(
         content=b"same content",
         original_name="notes.txt",
@@ -2415,11 +2461,13 @@ async def test_index_document_preserves_code_location_metadata(document_harness)
         ("src/indexer.py", "python", "code", "build_index", 3, 5),
         ("src/indexer.py", "python", "code", "Searcher", 6, 7),
     ]
-    assert service._embedding.calls == [[
-        "File: src/indexer.py\nLanguage: python\n\nimport os",
-        "File: src/indexer.py\nLanguage: python\nSymbol: build_index\n\ndef build_index(path):\n    return path",
-        "File: src/indexer.py\nLanguage: python\nSymbol: Searcher\n\nclass Searcher:\n    pass",
-    ]]
+    assert service._embedding.calls == [
+        [
+            "File: src/indexer.py\nLanguage: python\n\nimport os",
+            "File: src/indexer.py\nLanguage: python\nSymbol: build_index\n\ndef build_index(path):\n    return path",
+            "File: src/indexer.py\nLanguage: python\nSymbol: Searcher\n\nclass Searcher:\n    pass",
+        ]
+    ]
 
 
 @pytest.mark.storage
@@ -2461,7 +2509,9 @@ async def test_cancelled_document_index_releases_its_durable_claim(document_harn
         await asyncio.Event().wait()
 
     service._run_blocking = wait_for_cancellation
-    task = asyncio.create_task(service.index_document(document_id=uploaded["document_id"]))
+    task = asyncio.create_task(
+        service.index_document(document_id=uploaded["document_id"])
+    )
     await started.wait()
     task.cancel()
 
@@ -2607,7 +2657,9 @@ async def test_read_document_reports_csv_data_rows_not_physical_file_lines(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_records_document_parser_errors(monkeypatch, document_harness):
+async def test_index_document_records_document_parser_errors(
+    monkeypatch, document_harness
+):
     service, postgres = document_harness
 
     def fail_pdf_parse(buf):
@@ -2696,7 +2748,9 @@ async def test_index_document_validates_embedding_count_and_dimension(document_h
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_transaction_locks_parent_and_rechecks_indexed_state(document_harness):
+async def test_index_transaction_locks_parent_and_rechecks_indexed_state(
+    document_harness,
+):
     service, postgres = document_harness
     uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
 
@@ -2761,13 +2815,11 @@ async def test_accept_folder_indexes_selected_subset_atomically(
     assert len(postgres.chunks) == 2
     assert all(row["source_kind"] == "folder_upload" for row in postgres.rows)
     assert all(
-        row["folder_root_id"] == result["folder_root_id"]
-        for row in postgres.rows
+        row["folder_root_id"] == result["folder_root_id"] for row in postgres.rows
     )
     # bytes are stored in the DB, not on disk
     assert all(
-        postgres.contents.get(row["document_id"]) is not None
-        for row in postgres.rows
+        postgres.contents.get(row["document_id"]) is not None for row in postgres.rows
     )
 
 
@@ -2789,9 +2841,7 @@ async def test_project_scan_settings_round_trip_defaults_reset_and_isolation():
 
     assert defaults == FolderScanSettings()
     assert saved.include_hidden is True
-    assert (await project_one.get_scan_settings()).blocked_extensions == {
-        ".foo"
-    }
+    assert (await project_one.get_scan_settings()).blocked_extensions == {".foo"}
     assert await project_two.get_scan_settings() == FolderScanSettings()
     assert postgres.scan_settings["project-1"]["created_at"]
     assert postgres.scan_settings["project-1"]["updated_at"]
@@ -2810,9 +2860,7 @@ async def test_preview_uses_saved_settings_and_explicit_settings_do_not_persist(
     document_harness,
 ):
     service, _ = document_harness
-    await service.save_scan_settings(
-        FolderScanSettings(blocked_extensions={".foo"})
-    )
+    await service.save_scan_settings(FolderScanSettings(blocked_extensions={".foo"}))
     entries = [
         FolderUploadEntry(relative_path="notes.txt", content=b"notes"),
         FolderUploadEntry(relative_path="debug.foo", content=b"debug"),
@@ -2828,12 +2876,11 @@ async def test_preview_uses_saved_settings_and_explicit_settings_do_not_persist(
         settings=FolderScanSettings(blocked_extensions=set()),
     )
 
-    assert [entry.relative_path for entry in saved_preview.included] == [
-        "notes.txt"
-    ]
-    assert {
-        entry.relative_path for entry in explicit_preview.included
-    } == {"debug.foo", "notes.txt"}
+    assert [entry.relative_path for entry in saved_preview.included] == ["notes.txt"]
+    assert {entry.relative_path for entry in explicit_preview.included} == {
+        "debug.foo",
+        "notes.txt",
+    }
     assert (await service.get_scan_settings()).blocked_extensions == {".foo"}
 
 
@@ -2857,9 +2904,7 @@ async def test_accept_folder_without_selection_accepts_all_eligible_documents(
         "SentenceSplitter",
         OneChunkSplitter,
     )
-    await service.save_scan_settings(
-        FolderScanSettings(blocked_extensions={".foo"})
-    )
+    await service.save_scan_settings(FolderScanSettings(blocked_extensions={".foo"}))
 
     result = await service.accept_folder(
         folder_name="repo",
@@ -2899,9 +2944,7 @@ async def test_repeated_folder_acceptance_creates_independent_batches(
         "SentenceSplitter",
         OneChunkSplitter,
     )
-    entries = [
-        FolderUploadEntry(relative_path="notes.txt", content=b"notes")
-    ]
+    entries = [FolderUploadEntry(relative_path="notes.txt", content=b"notes")]
 
     first = await service.accept_folder(
         folder_name="repo",
@@ -2915,10 +2958,7 @@ async def test_repeated_folder_acceptance_creates_independent_batches(
     )
 
     assert first["folder_root_id"] != second["folder_root_id"]
-    assert (
-        first["documents"][0]["document_id"]
-        != second["documents"][0]["document_id"]
-    )
+    assert first["documents"][0]["document_id"] != second["documents"][0]["document_id"]
     assert len(postgres.folders) == 2
     assert len(postgres.rows) == 2
 

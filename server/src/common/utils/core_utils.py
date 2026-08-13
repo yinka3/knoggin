@@ -185,7 +185,7 @@ async def fetch_conversation_turns(
     """
     params = {"user_name": user_name, "session_id": session_id, "limit": num_turns}
 
-    if up_to_msg_id:
+    if up_to_msg_id is not None:
         query += " AND message_id <= %(up_to_msg_id)s "
         params["up_to_msg_id"] = up_to_msg_id
 

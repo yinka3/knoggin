@@ -2,7 +2,7 @@ import pytest
 
 from common.conf.domain_config import DomainConfig
 from common.conf.relationship_config import normalize_relationship
-from common.schema.contracts import (
+from common.schema.ingestion.contracts import (
     RelationshipObservation,
     RelationshipWrite,
     relationship_identity,

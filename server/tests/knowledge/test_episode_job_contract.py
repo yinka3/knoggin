@@ -265,11 +265,7 @@ async def test_episode_job_builds_full_candidate_context_and_bounds_prior_episod
         ingestion_settings=IngestionSettings(batch_size=8),
     )
 
-<<<<<<< HEAD
-    context = await job.load_candidate_build(
-=======
     context = await job.load_build(
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
         user_name="ada",
         project_id="project-1",
         session_id="session-1",

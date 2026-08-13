@@ -4,11 +4,12 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.schema.agent.stream import PublicAgentStreamEvent
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
@@ -17,7 +18,7 @@ from common.utils.core_utils import (
 )
 from common.utils.events import EventEmitter, emit
 from common.utils.tasks import BackgroundTaskGroup
-from common.utils.time_utils import parse_iso_time_or_now
+from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.batch_consumer import IngestionWorker
 from core.ingestion.services.pipeline_service import IngestionPipeline
@@ -65,6 +66,15 @@ class Session:
         self.task_group = BackgroundTaskGroup("SessionTasks")
         self.config_unsubscribers: List = []
         self._message_add_lock = asyncio.Lock()
+        # Conversation turns are accepted independently, but only the oldest
+        # accepted turn may advance the session's agent state at a time.
+        self._agent_submission_lock = asyncio.Lock()
+        self._agent_queue_condition = asyncio.Condition()
+        self._agent_run_queue: list[tuple[object, int]] = []
+        self._active_agent_task: Optional[asyncio.Task] = None
+        self._agent_run_state = "idle"
+        self._agent_queue_paused = False
+        self._agent_runs_closed = False
 
     @property
     def current_config(self) -> RootConfig:
@@ -114,6 +124,218 @@ class Session:
 
         async with self._message_add_lock:
             return await self._add_user_message(msg)
+
+    def agent_run_snapshot(self) -> dict[str, object]:
+        """Return the bounded, session-owned state of agent execution."""
+
+        return {
+            "state": self._agent_run_state,
+            "active": self._active_agent_task is not None
+            and not self._active_agent_task.done(),
+            "queued_message_ids": [
+                message_id for _, message_id in self._agent_run_queue
+            ],
+            "queue_paused": self._agent_queue_paused,
+        }
+
+    async def resume_agent_queue(self) -> bool:
+        """Permit the next already-accepted turn after an interrupted run.
+
+        The caller represents the user or a higher-level interaction policy.
+        The session itself never advances queued work automatically after a
+        failed, cancelled, or clarification-only run.
+        """
+
+        async with self._agent_queue_condition:
+            if (
+                self._agent_runs_closed
+                or self._active_agent_task is not None
+                or not self._agent_queue_paused
+                or not self._agent_run_queue
+            ):
+                return False
+            self._agent_queue_paused = False
+            self._agent_run_state = "idle"
+            self._agent_queue_condition.notify_all()
+            return True
+
+    async def cancel_active_agent_run(self) -> bool:
+        """Cancel only this session's active agent execution, if any."""
+
+        async with self._agent_queue_condition:
+            task = self._active_agent_task
+        if task is None or task.done() or task is asyncio.current_task():
+            return False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return True
+
+    async def run_agent_stream(
+        self,
+        message: Message,
+        *,
+        orchestrator: Any = None,
+        user_timezone: Optional[str] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
+        pasted_text_spans: Optional[List[Dict]] = None,
+    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
+        """Run the canonical server-owned message-to-answer workflow.
+
+        The user message becomes durable before it can wait behind an active
+        run. Streamed tokens remain transient; a final ``response`` is exposed
+        only after the assistant message and its consulted sources commit.
+        """
+
+        ticket = object()
+        queued = False
+        running = False
+        outcome = "failed"
+        task: Optional[asyncio.Task] = None
+
+        try:
+            # Serialize acceptance enough to preserve FIFO queue order without
+            # blocking an unrelated session or a currently running agent.
+            async with self._agent_submission_lock:
+                if self._agent_runs_closed:
+                    raise RuntimeError("Session is shutting down")
+                accepted = await self.add(message)
+                async with self._agent_queue_condition:
+                    self._agent_run_queue.append((ticket, accepted.id))
+                    queued = True
+                    self._agent_queue_condition.notify_all()
+
+            task = asyncio.current_task()
+            if task is None:
+                raise RuntimeError("Agent stream must run in an asyncio task")
+
+            async with self._agent_queue_condition:
+                while True:
+                    if self._agent_runs_closed:
+                        raise RuntimeError("Session is shutting down")
+                    is_head = (
+                        bool(self._agent_run_queue)
+                        and self._agent_run_queue[0][0] is ticket
+                    )
+                    if (
+                        is_head
+                        and self._active_agent_task is None
+                        and not self._agent_queue_paused
+                    ):
+                        self._active_agent_task = task
+                        self._agent_run_state = "running"
+                        running = True
+                        break
+                    await self._agent_queue_condition.wait()
+
+            history = await self.get_conversation_context(
+                self.current_config.developer_settings.limits.conversation_context_turns,
+                up_to_msg_id=accepted.id - 1,
+            )
+            if orchestrator is None:
+                from core.agent.orchestrator import Orchestrator
+
+                orchestrator = Orchestrator()
+
+            response_seen = False
+            async for event in orchestrator.run_stream(
+                user_query=accepted.content.strip(),
+                user_name=self.user_name,
+                session_id=self.session_id,
+                context=self,
+                user_timezone=user_timezone,
+                model=model or self.model,
+                agent_id=agent_id,
+                enabled_tools=enabled_tools,
+                conversation_history=history,
+                user_message_id=accepted.id,
+                pasted_text_spans=pasted_text_spans,
+            ):
+                if event["event"] == "response":
+                    if response_seen:
+                        raise RuntimeError(
+                            "Agent stream emitted multiple final responses"
+                        )
+                    response_seen = True
+                    response = event["data"]
+                    await self.add_assistant_turn(
+                        content=response["content"],
+                        timestamp=get_now(),
+                        metadata=self._assistant_response_metadata(response),
+                        user_msg_id=accepted.id,
+                        source_candidates=self._response_source_candidates(response),
+                    )
+                    outcome = "completed"
+                elif event["event"] == "clarification":
+                    outcome = "awaiting_input"
+                elif event["event"] == "error":
+                    outcome = "failed"
+                yield event
+
+            if not response_seen and outcome == "failed":
+                logger.error(
+                    "Agent stream ended without a final response for session {}",
+                    self.session_id,
+                )
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except Exception:
+            outcome = "failed"
+            logger.exception(
+                "Canonical agent turn failed for session {}", self.session_id
+            )
+            yield {
+                "event": "error",
+                "data": {
+                    "message": "The response could not be completed or saved. Please try again."
+                },
+            }
+        finally:
+            async with self._agent_queue_condition:
+                if queued:
+                    self._agent_run_queue = [
+                        entry
+                        for entry in self._agent_run_queue
+                        if entry[0] is not ticket
+                    ]
+                if running and self._active_agent_task is task:
+                    self._active_agent_task = None
+                if running:
+                    self._agent_run_state = outcome
+                    if outcome != "completed":
+                        self._agent_queue_paused = True
+                self._agent_queue_condition.notify_all()
+
+    @staticmethod
+    def _assistant_response_metadata(response: Dict[str, Any]) -> dict:
+        """Persist server-owned response metadata, not client presentation state."""
+
+        metadata = {"usage": response["usage"]}
+        if response.get("fallback"):
+            metadata["fallback"] = True
+        return metadata
+
+    @staticmethod
+    def _response_source_candidates(
+        response: Dict[str, Any],
+    ) -> List[SourceReferenceCandidate]:
+        """Recover strict source candidates from the validated agent event."""
+
+        raw_candidates = response.get("sources_consulted", [])
+        if raw_candidates is None:
+            return []
+        if not isinstance(raw_candidates, list):
+            raise ValueError("Agent response sources_consulted must be a list")
+        return [
+            SourceReferenceCandidate.model_validate(candidate)
+            for candidate in raw_candidates
+        ]
 
     async def _add_user_message(self, msg: Message) -> Message:
         """Durably accept and idempotently enqueue one user message."""
@@ -482,6 +704,11 @@ class Session:
         await pipe.execute()
 
     async def shutdown(self):
+        async with self._agent_queue_condition:
+            self._agent_runs_closed = True
+            self._agent_queue_condition.notify_all()
+        await self.cancel_active_agent_run()
+
         for unsubscribe in self.config_unsubscribers:
             unsubscribe()
         self.config_unsubscribers.clear()

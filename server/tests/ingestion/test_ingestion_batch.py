@@ -10,14 +10,10 @@ from common.schema.ingestion.contracts import (
 from core.ingestion.batch import IngestionBatch, IngestionMilestone, IngestionStage
 from core.ingestion.services import pipeline_service
 from core.ingestion.services.pipeline_service import IngestionPipeline
-<<<<<<< HEAD
-from infrastructure.work_record import WorkRecord, WorkStatus
-from tests.fixtures.ingestion import ingestion_policy
-=======
 from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.entity.resolver import EntityCandidate
-from infrastructure.work_record import WorkRecord
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
+from infrastructure.work_record import WorkRecord, WorkStatus
+from tests.fixtures.ingestion import ingestion_policy
 
 
 def open_batch(**overrides) -> IngestionBatch:

@@ -1,6 +1,6 @@
 from typing import Any
 
-from common.schema.contracts import CandidateSuggestion, ExecutionScope
+from common.schema.ingestion.contracts import CandidateSuggestion, ExecutionScope
 from core.ingestion.ports import IngestionGraphPersistence, IngestionPersistence
 
 

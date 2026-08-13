@@ -455,13 +455,8 @@ async def test_extract_mentions_empty_llm_result_records_known_gliner_fallback()
 @pytest.mark.no_network
 async def test_extract_mentions_accepts_valid_llm_mentions():
     processor, _ = make_processor(
-<<<<<<< HEAD
-        llm_response=NERResult(
-            mentions=[make_entity("Linear", msg_id="m2", typ="Tools")]
-=======
         llm_response=EntityExtraction(
-            mentions=[make_entity("Linear", msg_id="m2", typ="tool", topic="Tools")]
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
+            mentions=[make_entity("Linear", msg_id="m2", typ="Tools")]
         ),
         llm_ner=True,
     )
@@ -482,13 +477,8 @@ async def test_extract_mentions_resolves_local_llm_msg_id_to_real_message_id():
         {**MESSAGES[1], "id": 99},
     ]
     processor, llm = make_processor(
-<<<<<<< HEAD
-        llm_response=NERResult(
-            mentions=[make_entity("Linear", msg_id="m2", typ="Tools")]
-=======
         llm_response=EntityExtraction(
-            mentions=[make_entity("Linear", msg_id="m2", typ="tool", topic="Tools")]
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
+            mentions=[make_entity("Linear", msg_id="m2", typ="Tools")]
         ),
         llm_ner=True,
     )
@@ -529,7 +519,7 @@ def test_ner_result_requires_a_local_message_reference():
 @pytest.mark.no_network
 def test_ner_result_rejects_model_supplied_topic():
     with pytest.raises(ValidationError):
-        NERResult.model_validate(
+        EntityExtraction.model_validate(
             {
                 "mentions": [
                     {
@@ -589,13 +579,8 @@ async def test_extract_mentions_rejects_duplicate_llm_mentions_already_covered()
         known_aliases={"alice": 101},
         profiles={101: make_profile("Alice")},
         known_matches={MESSAGES[0]["message"]: ["Alice"]},
-<<<<<<< HEAD
-        llm_response=NERResult(
-            mentions=[make_entity("Alice", msg_id="m1", typ="Identity")]
-=======
         llm_response=EntityExtraction(
-            mentions=[make_entity("Alice", msg_id="m1", typ="person", topic="Identity")]
->>>>>>> a3bae29b2bb0e50845e24f6919a397b396a54094
+            mentions=[make_entity("Alice", msg_id="m1", typ="Identity")]
         ),
         llm_ner=True,
     )
