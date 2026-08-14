@@ -208,12 +208,11 @@ SourceStatus = Literal["available", "search_result_snippet"]
 
 
 class SourceConsulted(BaseModel):
-    """Stable response projection for one source consulted by an answer."""
+    """Stable engine provenance for one source consulted by an answer."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     source_kind: SourceKind
-    display_label: str = Field(min_length=1)
     locator: SourceLocator
     excerpt: str = Field(min_length=1)
     document_id: str | None = None

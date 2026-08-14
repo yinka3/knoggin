@@ -1,4 +1,8 @@
-"""Internal and public agent stream-event contracts."""
+"""Internal agent execution-event contracts.
+
+The application facade owns the SDK contract; FastAPI owns the UI HTTP
+and SSE projection.
+"""
 
 from typing import (
     Annotated,
@@ -159,7 +163,10 @@ class ErrorEvent(_StrictStreamDict):
     data: ErrorData
 
 
-PublicAgentStreamEvent = Union[
+# These events are engine-internal. The application facade wraps them in
+# SDK events, and FastAPI projects browser-safe HTTP/SSE events. Neither
+# boundary serializes this union directly.
+AgentExecutionEvent = Union[
     TokenEvent,
     ThinkingEvent,
     ToolStartEvent,
@@ -170,13 +177,23 @@ PublicAgentStreamEvent = Union[
     ErrorEvent,
 ]
 
-AgentStreamEvent = Union[InternalAgentStreamEvent, PublicAgentStreamEvent]
+AgentStreamEvent = Union[InternalAgentStreamEvent, AgentExecutionEvent]
+
+# Temporary compatibility alias for existing engine tests. This name is no
+# longer used by the execution path and is intentionally not an API contract.
+PublicAgentStreamEvent = AgentExecutionEvent
 
 
-_public_agent_stream_event_adapter = TypeAdapter(PublicAgentStreamEvent)
+_agent_execution_event_adapter = TypeAdapter(AgentExecutionEvent)
+
+
+def validate_agent_execution_event(event: object) -> Dict[str, Any]:
+    """Validate one event inside the engine execution boundary."""
+
+    return _agent_execution_event_adapter.validate_python(event)
 
 
 def validate_public_agent_stream_event(event: object) -> Dict[str, Any]:
-    """Validate an event once as it leaves the agent subsystem."""
+    """Compatibility alias for older tests; not used by the API boundary."""
 
-    return _public_agent_stream_event_adapter.validate_python(event)
+    return validate_agent_execution_event(event)

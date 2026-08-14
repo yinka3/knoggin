@@ -9,10 +9,11 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.agent.stream import PublicAgentStreamEvent
+from common.schema.agent.stream import AgentExecutionEvent
+from common.schema.document import DocumentFocus
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
-from common.schema.source.references import SourceReferenceCandidate
+from common.schema.source.references import SourceReference, SourceReferenceCandidate
 from common.utils.core_utils import (
     fetch_conversation_turns,
 )
@@ -183,8 +184,10 @@ class Session:
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
+        document_focus: Optional[DocumentFocus] = None,
         pasted_text_spans: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
+        idempotency_key: Optional[str] = None,
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Run the canonical server-owned message-to-answer workflow.
 
         The user message becomes durable before it can wait behind an active
@@ -204,6 +207,8 @@ class Session:
             async with self._agent_submission_lock:
                 if self._agent_runs_closed:
                     raise RuntimeError("Session is shutting down")
+                if idempotency_key:
+                    message.metadata["idempotency_key"] = idempotency_key
                 accepted = await self.add(message)
                 async with self._agent_queue_condition:
                     self._agent_run_queue.append((ticket, accepted.id))
@@ -252,6 +257,7 @@ class Session:
                 model=model or self.model,
                 agent_id=agent_id,
                 enabled_tools=enabled_tools,
+                request_document_focus=document_focus,
                 conversation_history=history,
                 user_message_id=accepted.id,
                 pasted_text_spans=pasted_text_spans,
@@ -263,13 +269,17 @@ class Session:
                         )
                     response_seen = True
                     response = event["data"]
-                    await self.add_assistant_turn(
+                    commit = await self.add_assistant_turn(
                         content=response["content"],
                         timestamp=get_now(),
                         metadata=self._assistant_response_metadata(response),
                         user_msg_id=accepted.id,
                         source_candidates=self._response_source_candidates(response),
                     )
+                    response = dict(response)
+                    response["assistant_message_id"] = commit["message_id"]
+                    response["source_ref_ids"] = commit["source_ref_ids"]
+                    event = {"event": "response", "data": response}
                     outcome = "completed"
                 elif event["event"] == "clarification":
                     outcome = "awaiting_input"
@@ -342,10 +352,17 @@ class Session:
 
         msg.timestamp = self._normalize_timestamp(msg.timestamp)
 
-        # Deterministic ID: same content + session + timestamp_ns = same ID
+        idempotency_key = str(msg.metadata.get("idempotency_key", "")).strip()
+        # Prefer the application request key for retries. Keep the existing
+        # content/timestamp fallback for internal callers that do not provide
+        # an application idempotency key.
         timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
         content_hash = hashlib.sha256(
-            f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}".encode()
+            (
+                f"{self.session_id}:request:{idempotency_key}"
+                if idempotency_key
+                else f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}"
+            ).encode()
         ).hexdigest()[:12]
 
         dedup_key = RedisKeys.message_dedup(
@@ -390,6 +407,7 @@ class Session:
                 content=msg.content.strip(),
                 timestamp=msg.timestamp,
                 user_msg_id=msg.id,
+                metadata=msg.metadata,
             )
             await self._enqueue_user_message(msg)
             await self.redis_client.set(
@@ -500,7 +518,7 @@ class Session:
                     "session_id": self.session_id,
                     "project_id": self.project_id,
                     "timestamp": msg.timestamp.timestamp() * 1000,
-                    "metadata": {},
+                    "metadata": msg.metadata,
                     "user_msg_id": msg.id,
                 }
             ]
@@ -535,7 +553,7 @@ class Session:
         metadata: Optional[dict] = None,
         user_msg_id: Optional[int] = None,
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
-    ):
+    ) -> dict[str, Any]:
         """Add assistant turn to conversation log."""
         if metadata is None:
             metadata = {}
@@ -552,7 +570,7 @@ class Session:
         )
 
         try:
-            await self._persist_assistant_message_log(
+            source_references = await self._persist_assistant_message_log(
                 message_id,
                 content,
                 timestamp,
@@ -570,6 +588,14 @@ class Session:
                 )
             raise
         await self.refresh_session_ttls()
+        return {
+            "message_id": message_id,
+            "source_ref_ids": [
+                reference.source_ref_id
+                for reference in source_references
+                if getattr(reference, "source_ref_id", None)
+            ],
+        }
 
     async def _delete_conversation_message(self, message_id: int) -> None:
         """Remove all staged Postgres and Redis state for one canonical message."""
@@ -611,7 +637,7 @@ class Session:
         metadata: Optional[dict] = None,
         user_msg_id: Optional[int] = None,
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
-    ):
+    ) -> List[SourceReference]:
         """Write an assistant message log, raising after bounded retries."""
         max_retries = 3
 
@@ -632,13 +658,13 @@ class Session:
                 ]
 
                 if source_candidates:
-                    await self.knowledge_store.save_assistant_message_with_source_refs(
+                    return await self.knowledge_store.save_assistant_message_with_source_refs(
                         agent_msg_batch[0],
                         source_candidates,
                     )
                 else:
                     await self.knowledge_store.save_message_logs(agent_msg_batch)
-                return
+                    return []
 
             except Exception as e:
                 if attempt < max_retries - 1:

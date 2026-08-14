@@ -245,7 +245,6 @@ async def test_reader_returns_only_message_scope_references_in_stable_order():
     )
 
     assert references[0].locator.page == 2
-    assert references[0].display_label == "report.pdf"
     assert references[0].source_status == "available"
     assert references[0].contributing_message_id == 101
     query, params = client.calls[0][1], client.calls[0][2]
@@ -269,7 +268,6 @@ async def test_reader_marks_web_results_as_search_result_snippets():
         session_id="session-1",
     )
 
-    assert references[0].display_label == "Release note"
     assert references[0].source_status == "search_result_snippet"
     assert references[0].canonical_url == "https://example.test/release"
 
@@ -314,7 +312,6 @@ async def test_reader_returns_one_assistant_answer_with_sources_consulted():
 
     assert answer is not None
     assert answer.content == "Answer"
-    assert answer.sources_consulted[0].display_label == "report.pdf"
     assert answer.sources_consulted[0].contributing_message_id == 101
     assert "message.role = 'assistant'" in client.calls[0][1]
 

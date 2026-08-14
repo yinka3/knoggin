@@ -10,9 +10,9 @@ from loguru import logger
 
 from common.exceptions import ConfigurationError, LLMError, ToolExecutionError
 from common.schema.agent.stream import (
+    AgentExecutionEvent,
     ErrorEvent,
     InternalAgentStreamEvent,
-    PublicAgentStreamEvent,
     ResponseEvent,
     StreamToolCall,
     StreamUsage,
@@ -105,7 +105,7 @@ class AgentExecutor:
         agent_brain: Optional[str] = None,
         agent_directives: Optional[str] = None,
         client_tools: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Run one agent execution and discard its model-only UUID handles."""
 
         with diagnostic_scope(
@@ -139,7 +139,7 @@ class AgentExecutor:
         agent_brain: Optional[str] = None,
         agent_directives: Optional[str] = None,
         client_tools: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Runs the reasoning loop and yields events."""
 
         # Prepare environment

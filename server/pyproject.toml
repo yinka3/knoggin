@@ -70,7 +70,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["api*", "common*", "core*", "infrastructure*", "log*"]
+include = ["api*", "application*", "common*", "core*", "infrastructure*", "log*"]
 
 [tool.uvicorn]
 reload-exclude = ["redis_data", "*.log"]

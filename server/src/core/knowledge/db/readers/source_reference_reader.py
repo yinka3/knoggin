@@ -82,7 +82,7 @@ class SourceReferenceReader:
         project_id: str,
         session_id: str,
     ) -> AssistantMessageWithSources | None:
-        """Read one owned assistant response with its source presentation."""
+        """Read one owned assistant response with its source provenance."""
 
         if message_id <= 0:
             raise ValueError("message_id must be positive")
@@ -220,18 +220,14 @@ class SourceReferenceReader:
     @staticmethod
     def _present_reference(reference: SourceReference) -> SourceConsulted:
         if reference.source_kind in {"pdf_document", "text_document"}:
-            display_label = str(reference.metadata["document_name"])
             source_status = "available"
         elif reference.source_kind == "user_pasted_text":
-            display_label = f"Pasted text from message {reference.source_message_id}"
             source_status = "available"
         else:
-            display_label = str(reference.metadata["title"])
             source_status = "search_result_snippet"
 
         return SourceConsulted(
             source_kind=reference.source_kind,
-            display_label=display_label,
             locator=reference.locator,
             excerpt=reference.excerpt,
             document_id=reference.document_id,

@@ -140,7 +140,6 @@ async def test_episode_serialization_includes_separate_sources_consulted():
             return [
                 {
                     "source_kind": "web_search_result",
-                    "display_label": "Release note",
                     "locator": {
                         "kind": "search_result",
                         "provider": "serper",
@@ -171,7 +170,6 @@ async def test_episode_serialization_includes_separate_sources_consulted():
     assert consulted == [
         {
             "source_kind": "web_search_result",
-            "display_label": "Release note",
             "locator": {
                 "kind": "search_result",
                 "provider": "serper",

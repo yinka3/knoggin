@@ -7,8 +7,8 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.schema.agent.stream import (
-    PublicAgentStreamEvent,
-    validate_public_agent_stream_event,
+    AgentExecutionEvent,
+    validate_agent_execution_event,
 )
 from common.schema.document import (
     DocumentFocus,
@@ -17,11 +17,6 @@ from common.schema.document import (
     parse_document_focus,
 )
 from common.utils.json_utils import safe_json_loads
-from common.utils.time_utils import get_now_iso
-from core.agent.document_selection import (
-    DocumentSelectionError,
-    parse_document_path_command,
-)
 from core.agent.executor import AgentExecutor
 from core.agent.maintenance import build_maintenance_candidates
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
@@ -68,7 +63,8 @@ class Orchestrator:
         client_tools: Optional[List[Dict]] = None,
         user_message_id: Optional[int] = None,
         pasted_text_spans: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
+        request_document_focus: Optional[DocumentFocus] = None,
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """
         Main entry point for agent execution. Uses modular helpers for initialization.
         """
@@ -76,14 +72,8 @@ class Orchestrator:
         try:
             incoming_user_query = user_query
             run_id = str(uuid.uuid4())
-            document_command = parse_document_path_command(user_query)
-            request_document_focus = None
-            if document_command is not None:
-                request_document_focus = await self._resolve_request_document_focus(
-                    context,
-                    document_command.relative_path,
-                )
-                user_query = document_command.remaining_query
+            if request_document_focus is not None:
+                request_document_focus = parse_document_focus(request_document_focus)
 
             # Configuration
             config = ConfigManager.get().config
@@ -194,19 +184,11 @@ class Orchestrator:
                 agent_directives=agent_directives,
                 client_tools=client_tools,
             ):
-                yield validate_public_agent_stream_event(event)
+                yield validate_agent_execution_event(event)
 
-        except DocumentSelectionError as exc:
-            logger.info("Document selection rejected: {}", exc)
-            yield validate_public_agent_stream_event(
-                {
-                    "event": "error",
-                    "data": {"message": str(exc)},
-                }
-            )
         except Exception as e:
             logger.exception(f"Orchestrator error: {e}")
-            yield validate_public_agent_stream_event(
+            yield validate_agent_execution_event(
                 {
                     "event": "error",
                     "data": {"message": PUBLIC_AGENT_ERROR_MESSAGE},
@@ -218,39 +200,6 @@ class Orchestrator:
                     await tools.close()
                 except Exception:
                     logger.exception("Failed to close agent tools")
-
-    async def _resolve_request_document_focus(
-        self,
-        context: Session,
-        relative_path: str,
-    ) -> DocumentFocus:
-        """Resolve one user-entered path through the current visibility scope."""
-        if context.document_service is None:
-            raise DocumentSelectionError(
-                "No project document service is available for this request"
-            )
-        try:
-            document = await context.document_service.get_document_info(
-                session_id=context.session_id,
-                relative_path=relative_path,
-            )
-            target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
-                document_id=document["document_id"],
-            )
-        except FileNotFoundError as exc:
-            raise DocumentSelectionError(
-                f"Document path '/{relative_path}' is not visible in this project"
-            ) from exc
-        except ValueError as exc:
-            raise DocumentSelectionError(
-                f"Document path '/{relative_path}' is ambiguous; select one document"
-            ) from exc
-        return create_document_focus(
-            mode="request",
-            created_at=get_now_iso(),
-            **target,
-        )
 
     async def _resolve_agent_identity(
         self,
