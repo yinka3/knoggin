@@ -1,4 +1,4 @@
-"""FastAPI entry point for the Knoggin public HTTP and SSE API."""
+"""FastAPI entry point for Knoggin's UI HTTP and SSE API."""
 
 from __future__ import annotations
 
@@ -12,20 +12,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from loguru import logger
 
-from api.contracts import (
+from knoggin import Knoggin, Turn
+
+from .contracts import (
     MessageCreateRequest,
     ProjectCreateRequest,
     SessionCreateRequest,
     document_focus_to_sdk,
 )
-from api.projection import (
+from .projection import (
     event_response,
     project_response,
     run_response,
     session_response,
 )
-from application.contracts import Turn
-from application.service import Knoggin
+from .runs import RunManager
 
 
 @asynccontextmanager
@@ -34,9 +35,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         user_name=os.environ.get("KNOGGIN_USER_NAME", "local")
     )
     app.state.knoggin = knoggin
+    app.state.runs = RunManager(knoggin)
     try:
         yield
     finally:
+        await app.state.runs.close()
         await knoggin.close()
 
 
@@ -145,7 +148,7 @@ def _router() -> APIRouter:
         if not body.content.strip():
             return _error("INVALID_MESSAGE", "content is required", 400, request_id)
         try:
-            run = await request.app.state.knoggin.submit_turn(
+            run = await request.app.state.runs.submit_turn(
                 session_id=session_id,
                 turn=Turn(
                     content=body.content,
@@ -176,7 +179,7 @@ def _router() -> APIRouter:
     @router.get("/runs/{run_id}")
     async def get_run(run_id: str, request: Request) -> JSONResponse:
         try:
-            return JSONResponse(run_response(request.app.state.knoggin.get_run(run_id)))
+            return JSONResponse(run_response(request.app.state.runs.get_run(run_id)))
         except LookupError:
             return _error(
                 "RUN_NOT_FOUND",
@@ -188,7 +191,7 @@ def _router() -> APIRouter:
     @router.delete("/runs/{run_id}")
     async def cancel_run(run_id: str, request: Request) -> JSONResponse:
         try:
-            run = await request.app.state.knoggin.cancel_run(run_id)
+            run = await request.app.state.runs.cancel(run_id)
             return JSONResponse(run_response(run))
         except LookupError:
             return _error(
@@ -201,8 +204,8 @@ def _router() -> APIRouter:
     @router.get("/runs/{run_id}/events", response_model=None)
     async def run_events(run_id: str, request: Request) -> Response:
         try:
-            request.app.state.knoggin.get_run(run_id)
-            stream = request.app.state.knoggin.subscribe_events(run_id)
+            request.app.state.runs.get_run(run_id)
+            stream = request.app.state.runs.subscribe_events(run_id)
         except LookupError:
             return _error(
                 "RUN_NOT_FOUND",

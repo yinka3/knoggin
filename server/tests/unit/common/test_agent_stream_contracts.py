@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from common.schema.agent.stream import validate_public_agent_stream_event
+from common.schema.agent.stream import validate_agent_execution_event
 
 USAGE = {
     "prompt_tokens": 1,
@@ -48,7 +48,6 @@ USAGE = {
             "data": {
                 "content": "The roadmap is ready.",
                 "usage": USAGE,
-                "sources": [],
                 "sources_consulted": [],
             },
         },
@@ -59,15 +58,15 @@ USAGE = {
         {"event": "error", "data": {"message": "The agent stopped."}},
     ],
 )
-def test_public_stream_boundary_accepts_every_declared_event_shape(event):
-    assert validate_public_agent_stream_event(event) == event
+def test_engine_stream_boundary_accepts_every_declared_event_shape(event):
+    assert validate_agent_execution_event(event) == event
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_public_stream_boundary_rejects_malformed_or_uncorrelated_events():
+def test_engine_stream_boundary_rejects_malformed_or_uncorrelated_events():
     with pytest.raises(ValidationError):
-        validate_public_agent_stream_event(
+        validate_agent_execution_event(
             {
                 "event": "tool_error",
                 "data": {"tool": "search_messages", "error": "Timed out"},
@@ -75,13 +74,12 @@ def test_public_stream_boundary_rejects_malformed_or_uncorrelated_events():
         )
 
     with pytest.raises(ValidationError):
-        validate_public_agent_stream_event(
+        validate_agent_execution_event(
             {
                 "event": "response",
                 "data": {
                     "content": "Answer",
                     "usage": USAGE,
-                    "sources": None,
                     "unexpected": True,
                 },
             }

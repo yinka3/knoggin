@@ -1,6 +1,6 @@
-from api.contracts import MessageCreateRequest, document_focus_to_sdk
-from api.main import create_app
-from application.contracts import DocumentFocusSubtree
+from knoggin import DocumentFocusSubtree
+from knoggin_app_api.contracts import MessageCreateRequest, document_focus_to_sdk
+from knoggin_app_api.main import create_app
 
 
 def test_fastapi_app_exposes_the_first_public_api_slice():

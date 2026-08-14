@@ -133,7 +133,6 @@ class ToolErrorEvent(_StrictStreamDict):
 class ResponseData(_StrictStreamDict):
     content: str
     usage: StreamUsage
-    sources: Optional[List[Dict[str, Any]]]
     sources_consulted: NotRequired[List[Dict[str, Any]]]
     fallback: NotRequired[StrictBool]
 
@@ -179,11 +178,6 @@ AgentExecutionEvent = Union[
 
 AgentStreamEvent = Union[InternalAgentStreamEvent, AgentExecutionEvent]
 
-# Temporary compatibility alias for existing engine tests. This name is no
-# longer used by the execution path and is intentionally not an API contract.
-PublicAgentStreamEvent = AgentExecutionEvent
-
-
 _agent_execution_event_adapter = TypeAdapter(AgentExecutionEvent)
 
 
@@ -191,9 +185,3 @@ def validate_agent_execution_event(event: object) -> Dict[str, Any]:
     """Validate one event inside the engine execution boundary."""
 
     return _agent_execution_event_adapter.validate_python(event)
-
-
-def validate_public_agent_stream_event(event: object) -> Dict[str, Any]:
-    """Compatibility alias for older tests; not used by the API boundary."""
-
-    return validate_agent_execution_event(event)

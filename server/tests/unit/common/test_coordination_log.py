@@ -225,7 +225,7 @@ def test_coordination_log_write_failure_does_not_raise(monkeypatch):
 
 
 @pytest.mark.no_network
-async def test_debug_emitter_persists_approved_events_and_delivers_to_subscribers(
+async def test_engine_emitter_persists_approved_events(
     monkeypatch,
 ):
     persisted = []
@@ -234,7 +234,7 @@ async def test_debug_emitter_persists_approved_events_and_delivers_to_subscriber
         lambda fields: persisted.append(fields),
     )
     emitter = EventEmitter()
-    queue = await emitter.subscribe("project-1")
+    monkeypatch.setattr("common.utils.events.get_now_iso", lambda: "2026-08-14T00:00:00Z")
 
     await emitter.emit(
         "project-1",
@@ -249,11 +249,9 @@ async def test_debug_emitter_persists_approved_events_and_delivers_to_subscriber
         },
     )
 
-    delivered = await queue.get()
-    assert delivered.event == "merge_queue_marked"
     assert persisted == [
         {
-            "ts": delivered.ts,
+            "ts": "2026-08-14T00:00:00Z",
             "label": "RECOVERY",
             "retention": "recovery",
             "component": "job",

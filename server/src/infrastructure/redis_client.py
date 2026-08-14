@@ -176,7 +176,6 @@ class RedisKeys:
             "dlq_parked",
             "dlq_completed",
             "community_discussion_active",
-            "community_pubsub_channel",
             "dirty_entities",
         }
     )
@@ -405,7 +404,3 @@ class RedisKeys:
     @staticmethod
     def community_agent_memory(user_name: str, agent_id: str) -> str:
         return f"community:{user_name}:agent_memory:{agent_id}"
-
-    @staticmethod
-    def community_pubsub_channel() -> str:
-        return "community:events"

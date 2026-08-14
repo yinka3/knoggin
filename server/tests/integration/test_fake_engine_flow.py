@@ -69,12 +69,6 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         ):
             self.emit_calls.append((session_id, component, event, data, verbose_only))
 
-        async def cleanup_scope(self, session_id):
-            pass
-
-        def unregister_session(self, project_id, session_id):
-            self.unregister_calls.append((project_id, session_id))
-
     emitter = FakeEmitter()
     monkeypatch.setattr(
         project_manager,
@@ -109,7 +103,6 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
 
     assert await manager.close_session(ctx.session_id) is True
     assert active_sessions == {}
-    assert emitter.unregister_calls == [(project["id"], ctx.session_id)]
     assert project["id"] not in project_manager.active_projects
 
     metadata = json.loads(

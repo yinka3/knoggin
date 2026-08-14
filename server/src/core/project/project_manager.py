@@ -250,16 +250,6 @@ class ProjectManager:
             meta = dict(row)
             meta["id"] = meta.pop("project_id")
             meta["allowed_projects"] = meta["allowed_projects"] or []
-            # Convert datetime to isoformat
-            for time_field in [
-                "created_at",
-                "updated_at",
-                "archived_at",
-                "deleted_at",
-                "last_activity_at",
-            ]:
-                if meta.get(time_field):
-                    meta[time_field] = meta[time_field].isoformat()
             for private_field in ("topic_config", "domain_config"):
                 meta.pop(private_field, None)
             projects.append(meta)
@@ -284,15 +274,6 @@ class ProjectManager:
         meta = dict(rows[0])
         meta["id"] = meta.pop("project_id")
         meta["allowed_projects"] = meta["allowed_projects"] or []
-        for time_field in [
-            "created_at",
-            "updated_at",
-            "archived_at",
-            "deleted_at",
-            "last_activity_at",
-        ]:
-            if meta.get(time_field):
-                meta[time_field] = meta[time_field].isoformat()
         for private_field in ("topic_config", "domain_config"):
             meta.pop(private_field, None)
         return meta

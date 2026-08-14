@@ -4,7 +4,6 @@ from typing import Callable, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.utils.events import EventEmitter
 from core.ingestion.services.batch_consumer import IngestionWorker
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.project.state import ProjectState
@@ -88,9 +87,6 @@ class SessionFactory:
 
         # Sessions share the project-owned document boundary.
         ctx.document_service = project_state.document_service
-
-        # Register session to emitter for project event propagation
-        EventEmitter.get().register_session(project_state.project_id, session_id)
 
         return ctx
 

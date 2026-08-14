@@ -1,19 +1,9 @@
-"""Stable local application contracts consumed by the Python SDK."""
+"""Programmatic contracts exposed by the Python SDK."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Literal, TypeAlias
-
-RunStatus = Literal[
-    "queued",
-    "running",
-    "awaiting_input",
-    "completed",
-    "failed",
-    "cancelled",
-]
+from typing import Any, TypeAlias
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,11 +62,7 @@ class Turn:
 
 @dataclass(frozen=True, slots=True)
 class SourceProvenance:
-    """Programmatic provenance for one source consulted by an answer.
-
-    This intentionally excludes presentation fields such as a citation label.
-    The FastAPI application derives those for the browser from source metadata.
-    """
+    """Programmatic provenance for one source consulted by an answer."""
 
     source_ref_id: str | None
     source_kind: str
@@ -142,34 +128,8 @@ def _optional_positive_int(value: Any) -> int | None:
 
 @dataclass(frozen=True, slots=True)
 class SessionHandle:
-    """A session created through the application facade."""
+    """A session created through the SDK."""
 
     session_id: str
     project_id: str
     model: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class RunSnapshot:
-    """Current state of one SDK-owned agent run."""
-
-    run_id: str
-    session_id: str
-    status: RunStatus
-    created_at: datetime
-    completed_at: datetime | None
-    result: dict[str, Any] | None
-    error: dict[str, Any] | None
-    sources: tuple[SourceProvenance, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class RunEvent:
-    """An SDK event, independent of HTTP/SSE presentation details."""
-
-    run_id: str
-    session_id: str
-    event: str
-    sequence: int
-    timestamp: datetime
-    data: dict[str, Any]

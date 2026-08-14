@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from api.projection import event_response
-from application.contracts import RunEvent
+from knoggin_app_api.projection import event_response, project_response
+from knoggin_app_api.runs import RunEvent
 
 
 def _event(event: str, data: dict) -> RunEvent:
@@ -17,6 +17,20 @@ def _event(event: str, data: dict) -> RunEvent:
 
 def test_ui_projection_hides_sdk_reasoning():
     assert event_response(_event("thinking", {"content": "local reasoning"})) is None
+
+
+def test_project_projection_serializes_engine_timestamps_for_json():
+    projected = project_response(
+        {
+            "id": "project-1",
+            "name": "Research",
+            "created_at": datetime(2026, 8, 14, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 8, 14, 1, tzinfo=timezone.utc),
+        }
+    )
+
+    assert projected["createdAt"] == "2026-08-14T00:00:00+00:00"
+    assert projected["updatedAt"] == "2026-08-14T01:00:00+00:00"
 
 
 def test_ui_projection_allowlists_tool_arguments():

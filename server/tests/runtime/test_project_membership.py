@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -200,6 +201,19 @@ async def test_list_projects_normalizes_postgres_rows():
     ]
     assert all("topic_config" not in project for project in projects)
     assert all(project["allowed_projects"] == [] for project in projects)
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_list_projects_preserves_native_timestamps_for_programmatic_callers():
+    created_at = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+    row = project_row()
+    row["created_at"] = created_at
+    postgres = RecordingPostgres([[row]])
+
+    projects = await make_manager(postgres).list_projects()
+
+    assert projects[0]["created_at"] is created_at
 
 
 @pytest.mark.runtime

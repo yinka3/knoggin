@@ -28,14 +28,6 @@ class RecordingConfigManager:
         return unsubscribe
 
 
-class RecordingEmitter:
-    def __init__(self):
-        self.registered_sessions = []
-
-    def register_session(self, project_id, session_id):
-        self.registered_sessions.append((project_id, session_id))
-
-
 class RecordingIngestionPipeline:
     instances = []
 
@@ -76,7 +68,6 @@ def assembler_harness(monkeypatch):
     RecordingIngestionWorker.instances = []
 
     config_manager = RecordingConfigManager()
-    emitter = RecordingEmitter()
     resources = FakeResources(knowledge_store=FakeKnowledgeStore())
     entities = object()
     pipeline = FakePipeline()
@@ -113,17 +104,12 @@ def assembler_harness(monkeypatch):
         staticmethod(lambda: config_manager),
     )
     monkeypatch.setattr(
-        "core.session.boot.EventEmitter.get",
-        staticmethod(lambda: emitter),
-    )
-    monkeypatch.setattr(
         "core.session.boot.IngestionWorker",
         RecordingIngestionWorker,
     )
     return SimpleNamespace(
         assembler=SessionFactory("ada", resources),
         config_manager=config_manager,
-        emitter=emitter,
         project_state=project_state,
         resources=resources,
         batch_processor=shared_processor,
@@ -183,7 +169,6 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert harness.config_manager.subscriptions == [
         (consumer.update_settings, "developer_settings.ingestion")
     ]
-    assert harness.emitter.registered_sessions == [("project-1", "session-1")]
 
 
 @pytest.mark.runtime

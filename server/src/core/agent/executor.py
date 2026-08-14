@@ -104,7 +104,7 @@ class AgentExecutor:
         agent_temperature: float = 0.7,
         agent_brain: Optional[str] = None,
         agent_directives: Optional[str] = None,
-        client_tools: Optional[List[Dict]] = None,
+        additional_tool_schemas: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Run one agent execution and discard its model-only UUID handles."""
 
@@ -123,7 +123,7 @@ class AgentExecutor:
                     agent_temperature=agent_temperature,
                     agent_brain=agent_brain,
                     agent_directives=agent_directives,
-                    client_tools=client_tools,
+                    additional_tool_schemas=additional_tool_schemas,
                 ):
                     yield event
             finally:
@@ -138,7 +138,7 @@ class AgentExecutor:
         agent_temperature: float = 0.7,
         agent_brain: Optional[str] = None,
         agent_directives: Optional[str] = None,
-        client_tools: Optional[List[Dict]] = None,
+        additional_tool_schemas: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Runs the reasoning loop and yields events."""
 
@@ -220,7 +220,7 @@ class AgentExecutor:
                 agent_temperature,
                 agent_brain or "",
                 last_result,
-                client_tools,
+                additional_tool_schemas,
                 project_context=project_context,
             ):
                 event_type = event["event"]
@@ -278,7 +278,6 @@ class AgentExecutor:
                         response = self._wrap_final_response(
                             content=content,
                             usage=dict(self.ctx.usage),
-                            sources=list(self.ctx.sources),
                             sources_consulted=list(self.ctx.source_candidates),
                         )
 
@@ -401,13 +400,13 @@ class AgentExecutor:
         temp: float,
         agent_brain: str,
         last_result: Optional[List[Dict]],
-        client_tools: Optional[List[Dict]] = None,
+        additional_tool_schemas: Optional[List[Dict]] = None,
         project_context: str = "",
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
         active_schemas = get_tool_schemas(enabled_tools)
-        if client_tools:
-            active_schemas = active_schemas + client_tools
+        if additional_tool_schemas:
+            active_schemas = active_schemas + additional_tool_schemas
 
         active_tool_names = get_active_tool_names(active_schemas)
         runtime_instructions = get_runtime_instructions(self.ctx, active_tool_names)
@@ -779,7 +778,6 @@ class AgentExecutor:
         *,
         content: str,
         usage: StreamUsage,
-        sources: List[Dict],
         sources_consulted: List[SourceReferenceCandidate],
     ) -> ResponseEvent:
         event: ResponseEvent = {
@@ -787,7 +785,6 @@ class AgentExecutor:
             "data": {
                 "content": content,
                 "usage": usage,
-                "sources": sources or None,
             },
         }
         if sources_consulted:
@@ -813,7 +810,6 @@ class AgentExecutor:
                 "data": {
                     "content": content,
                     "usage": dict(self.ctx.usage),
-                    "sources": list(self.ctx.sources) or None,
                     "fallback": True,
                 },
             }

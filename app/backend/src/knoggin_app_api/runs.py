@@ -1,35 +1,53 @@
-"""Local application facade shared by the Python SDK and FastAPI adapters."""
+"""In-memory run resources owned by the UI-specific FastAPI backend."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Literal
 from uuid import uuid4
 
 from loguru import logger
 
-from application.contracts import (
-    DocumentFocus,
-    DocumentFocusDocument,
-    DocumentFocusFolderUpload,
-    DocumentFocusSubtree,
-    RunEvent,
-    RunSnapshot,
-    RunStatus,
-    SessionHandle,
-    SourceProvenance,
-    Turn,
-    source_provenance_from_response,
-)
-from common.schema.document import DocumentFocus as EngineDocumentFocus
-from common.schema.document import create_document_focus
-from common.schema.primitives import Message
-from common.utils.time_utils import get_now_iso
-from core.runtime import ApplicationRuntime
+from knoggin import Knoggin, SourceProvenance, Turn, source_provenance_from_response
 
+
+RunStatus = Literal[
+    "queued",
+    "running",
+    "awaiting_input",
+    "completed",
+    "failed",
+    "cancelled",
+]
 _TERMINAL_STATUSES = {"awaiting_input", "completed", "failed", "cancelled"}
+
+
+@dataclass(frozen=True, slots=True)
+class RunSnapshot:
+    """Current state of one UI API run resource."""
+
+    run_id: str
+    session_id: str
+    status: RunStatus
+    created_at: datetime
+    completed_at: datetime | None
+    result: dict[str, Any] | None
+    error: dict[str, Any] | None
+    sources: tuple[SourceProvenance, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RunEvent:
+    """One UI API run event before its HTTP/SSE projection."""
+
+    run_id: str
+    session_id: str
+    event: str
+    sequence: int
+    timestamp: datetime
+    data: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -54,11 +72,11 @@ class _RunRecord:
             del self.events[:-256]
 
 
-class _RunManager:
-    """Own in-process run tasks without choosing an HTTP representation."""
+class RunManager:
+    """Adapt direct SDK streams into UI API run resources and SSE replay."""
 
-    def __init__(self, runtime: ApplicationRuntime):
-        self.runtime = runtime
+    def __init__(self, knoggin: Knoggin):
+        self.knoggin = knoggin
         self.runs: dict[str, _RunRecord] = {}
         self._idempotent_runs: dict[tuple[str, str], str] = {}
         self._closed = False
@@ -73,22 +91,20 @@ class _RunManager:
         session_id = session_id.strip()
         if not session_id:
             raise ValueError("session_id is required")
-        content = turn.content.strip()
-
         idempotency_key = (idempotency_key or "").strip() or None
         if idempotency_key:
             existing_run_id = self._idempotent_runs.get((session_id, idempotency_key))
             if existing_run_id:
                 return self.get_run(existing_run_id)
 
-        context = await self.runtime.sessions.get_or_resume_session(session_id)
-        if context is None:
-            raise LookupError("session_not_found")
+        stream = await self.knoggin.open_turn_stream(
+            session_id=session_id,
+            turn=turn,
+            idempotency_key=idempotency_key,
+        )
 
-        document_focus = await _resolve_document_focus(context, turn.document_focus)
-
-        # A session lookup awaits. Recheck afterwards so concurrent SDK calls
-        # with one idempotency key cannot both create a run.
+        # Opening a stream can await session and document-scope resolution.
+        # Recheck afterwards so concurrent retries still map to one UI run.
         if idempotency_key:
             existing_run_id = self._idempotent_runs.get((session_id, idempotency_key))
             if existing_run_id:
@@ -103,16 +119,8 @@ class _RunManager:
         if idempotency_key:
             self._idempotent_runs[(session_id, idempotency_key)] = run.run_id
         run.task = asyncio.create_task(
-            self._run_turn(
-                run,
-                context,
-                content,
-                model=turn.model,
-                agent_id=turn.agent_id,
-                enabled_tools=list(turn.enabled_tools) if turn.enabled_tools else None,
-                document_focus=document_focus,
-            ),
-            name=f"knoggin-run-{run.run_id}",
+            self._run_turn(run, stream),
+            name=f"knoggin-ui-run-{run.run_id}",
         )
         self._emit(run, "run_queued", {})
         return self._snapshot(run)
@@ -120,29 +128,12 @@ class _RunManager:
     async def _run_turn(
         self,
         run: _RunRecord,
-        context: Any,
-        content: str,
-        *,
-        model: str | None,
-        agent_id: str | None,
-        enabled_tools: list[str] | None,
-        document_focus: EngineDocumentFocus | None,
+        stream: AsyncIterator[dict[str, Any]],
     ) -> None:
         run.status = "running"
         self._emit(run, "run_started", {})
         try:
-            message = Message(
-                content=content,
-                metadata={"idempotency_key": run.idempotency_key or ""},
-            )
-            async for event in context.run_agent_stream(
-                message,
-                model=model,
-                agent_id=agent_id,
-                enabled_tools=enabled_tools,
-                document_focus=document_focus,
-                idempotency_key=run.idempotency_key,
-            ):
+            async for event in stream:
                 self._record_engine_event(run, event)
 
             if run.status == "running":
@@ -156,7 +147,7 @@ class _RunManager:
             self._emit(run, "run_cancelled", {})
             raise
         except Exception:
-            logger.exception("Local SDK run {} failed", run.run_id)
+            logger.exception("UI API run {} failed", run.run_id)
             run.status = "failed"
             run.error = {"code": "RUN_FAILED"}
             run.completed_at = datetime.now(timezone.utc)
@@ -265,134 +256,3 @@ class _RunManager:
             error=dict(run.error) if run.error is not None else None,
             sources=run.sources,
         )
-
-
-async def _resolve_document_focus(
-    context: Any,
-    focus: DocumentFocus | None,
-) -> EngineDocumentFocus | None:
-    """Resolve an SDK selection through the session's visible documents."""
-
-    if focus is None:
-        return None
-    if context.document_service is None:
-        raise ValueError("No project document service is available for this request")
-
-    try:
-        if isinstance(focus, DocumentFocusDocument):
-            target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
-                document_id=focus.document_id,
-            )
-        elif isinstance(focus, DocumentFocusSubtree):
-            target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
-                folder_root_id=focus.folder_root_id,
-                path_prefix=focus.path_prefix,
-            )
-        elif isinstance(focus, DocumentFocusFolderUpload):
-            target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
-                folder_root_id=focus.folder_root_id,
-            )
-        else:
-            raise TypeError("document_focus has an unsupported type")
-    except FileNotFoundError as exc:
-        raise ValueError(
-            "The selected document focus is not visible in this session"
-        ) from exc
-
-    return create_document_focus(
-        mode="request",
-        created_at=get_now_iso(),
-        **target,
-    )
-
-
-class Knoggin:
-    """Canonical application surface for an installed Knoggin."""
-
-    def __init__(self, runtime: ApplicationRuntime):
-        self.runtime = runtime
-        self._runs = _RunManager(runtime)
-        self._closed = False
-
-    @classmethod
-    async def start(
-        cls,
-        *,
-        user_name: str,
-        num_workers: Optional[int] = None,
-    ) -> "Knoggin":
-        runtime = await ApplicationRuntime.start(
-            user_name=user_name,
-            num_workers=num_workers,
-        )
-        return cls(runtime)
-
-    async def get_engine_health(self) -> dict[str, Any]:
-        snapshot = await self.runtime.health_service.get_engine_health()
-        return snapshot.model_dump(mode="json")
-
-    async def create_project(
-        self,
-        *,
-        name: str,
-        domain_config: dict[str, Any],
-        description: str | None = None,
-    ) -> dict[str, Any] | None:
-        return await self.runtime.projects.create_project(
-            name=name,
-            domain_config=domain_config,
-            description=description,
-        )
-
-    async def create_session(
-        self,
-        *,
-        project_id: str,
-        model: str | None = None,
-        agent_id: str | None = None,
-        enabled_tools: list[str] | None = None,
-    ) -> SessionHandle:
-        session = await self.runtime.sessions.create_session(
-            project_id=project_id,
-            model=model,
-            agent_id=agent_id,
-            enabled_tools=enabled_tools,
-        )
-        return SessionHandle(
-            session_id=session.session_id,
-            project_id=session.project_id,
-            model=session.model,
-        )
-
-    async def submit_turn(
-        self,
-        *,
-        session_id: str,
-        turn: Turn,
-        idempotency_key: str | None = None,
-    ) -> RunSnapshot:
-        return await self._runs.submit_turn(
-            session_id=session_id,
-            turn=turn,
-            idempotency_key=idempotency_key,
-        )
-
-    def get_run(self, run_id: str) -> RunSnapshot:
-        return self._runs.get_run(run_id)
-
-    async def subscribe_events(self, run_id: str) -> AsyncIterator[RunEvent]:
-        async for event in self._runs.subscribe_events(run_id):
-            yield event
-
-    async def cancel_run(self, run_id: str) -> RunSnapshot:
-        return await self._runs.cancel(run_id)
-
-    async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        await self._runs.close()
-        await self.runtime.shutdown()

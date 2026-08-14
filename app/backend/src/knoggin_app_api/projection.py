@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
-from application.contracts import RunEvent, RunSnapshot, SessionHandle
+from knoggin import SessionHandle
+
+from .runs import RunEvent, RunSnapshot
 
 
 def project_response(project: dict[str, Any] | None) -> dict[str, Any]:
@@ -18,8 +21,8 @@ def project_response(project: dict[str, Any] | None) -> dict[str, Any]:
         "status": str(project.get("status", "active")),
         "accessMode": str(project.get("access_mode", "open")),
         "sessionCount": int(project.get("session_count", 0)),
-        "createdAt": project.get("created_at"),
-        "updatedAt": project.get("updated_at"),
+        "createdAt": timestamp(project.get("created_at")),
+        "updatedAt": timestamp(project.get("updated_at")),
     }
 
 
@@ -185,3 +188,11 @@ def allowlisted_arguments(value: Any) -> dict[str, str | int | float | bool]:
 
 def text(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def timestamp(value: Any) -> str | None:
+    """Serialize an engine timestamp only at the browser HTTP boundary."""
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return text(value)

@@ -11,7 +11,6 @@ from common.schema.document import (
     dump_document_focus,
     parse_document_focus,
 )
-from common.utils.events import EventEmitter
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
@@ -97,13 +96,7 @@ class SessionManager:
             for row in rows:
                 meta = dict(row)
                 sid = meta["session_id"]
-                # Convert timestamps to ISO string
-                if meta.get("created_at"):
-                    meta["created_at"] = meta["created_at"].isoformat()
-                if meta.get("last_active_at"):
-                    meta["last_active_at"] = meta["last_active_at"].isoformat()
-
-                # Parse JSONB fields back to dict/lists if needed
+                # Normalize database JSON fields while preserving native values.
                 if isinstance(meta.get("enabled_tools"), str):
                     meta["enabled_tools"] = safe_json_loads(meta["enabled_tools"])
                 if isinstance(meta.get("document_focus"), str):
@@ -284,13 +277,10 @@ class SessionManager:
         runtime: Optional[AsyncContextManager[ProjectState]] = None,
     ) -> None:
         """Release the non-durable resources owned by one live session."""
-        project_id = getattr(context, "project_id", None)
         try:
             if hasattr(context, "shutdown"):
                 await context.shutdown()
         finally:
-            if project_id:
-                EventEmitter.get().unregister_session(project_id, session_id)
             runtime = runtime or self._project_runtime_contexts.pop(
                 session_id,
                 None,

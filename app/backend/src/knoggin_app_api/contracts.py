@@ -4,10 +4,10 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from application.contracts import (
+from knoggin import (
     DocumentFocus as SdkDocumentFocus,
 )
-from application.contracts import (
+from knoggin import (
     DocumentFocusDocument,
     DocumentFocusFolderUpload,
     DocumentFocusSubtree,

@@ -60,7 +60,7 @@ class Orchestrator:
         hot_topics: Optional[List[str]] = None,
         agent_persona_override: Optional[str] = None,
         agent_name_override: Optional[str] = None,
-        client_tools: Optional[List[Dict]] = None,
+        additional_tool_schemas: Optional[List[Dict]] = None,
         user_message_id: Optional[int] = None,
         pasted_text_spans: Optional[List[Dict]] = None,
         request_document_focus: Optional[DocumentFocus] = None,
@@ -182,7 +182,7 @@ class Orchestrator:
                 agent_temperature=effective_temperature,
                 agent_brain=agent_brain or (agent_cfg.brain if agent_cfg else None),
                 agent_directives=agent_directives,
-                client_tools=client_tools,
+                additional_tool_schemas=additional_tool_schemas,
             ):
                 yield validate_agent_execution_event(event)
 

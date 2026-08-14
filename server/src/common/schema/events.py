@@ -1,4 +1,4 @@
-"""Internal event contracts shared by debug and coordination adapters."""
+"""Internal event contracts used by engine coordination adapters."""
 
 from dataclasses import dataclass
 from typing import Any, Dict
@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 @dataclass(frozen=True, slots=True)
 class InternalEvent:
-    """One internal event before debug and coordination adapters diverge."""
+    """One scoped engine event before coordination persistence."""
 
     ts: str
     scope_id: str

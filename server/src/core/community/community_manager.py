@@ -528,7 +528,7 @@ class CommunityManager:
         )
 
         full_response: str = ""
-        enabled_tools, client_tools = self._resolve_agent_tools(agent)
+        enabled_tools, additional_tool_schemas = self._resolve_agent_tools(agent)
 
         try:
             async for event in executor.execute(
@@ -537,7 +537,7 @@ class CommunityManager:
                 agent_brain=agent.brain,
                 agent_directives=agent_directives,
                 enabled_tools=enabled_tools,
-                client_tools=client_tools,
+                additional_tool_schemas=additional_tool_schemas,
             ):
                 e_type = event.get("event")
                 data = event.get("data", {})
@@ -574,12 +574,12 @@ class CommunityManager:
 
         allowed = set(agent.enabled_tools)
         enabled_tools = [name for name in COMMUNITY_ENABLED_TOOLS if name in allowed]
-        client_tools = [
+        additional_tool_schemas = [
             schema
             for schema in AAC_SPECIFIC_SCHEMAS
             if schema["function"]["name"] in allowed
         ]
-        return enabled_tools, client_tools
+        return enabled_tools, additional_tool_schemas
 
     async def _seed_discussion(self) -> Optional[Dict]:
         """Use seeding agent to analyze graph and initiate a discussion."""

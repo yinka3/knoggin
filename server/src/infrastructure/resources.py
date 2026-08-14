@@ -15,7 +15,6 @@ from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
 from common.schema.settings import RedisConnectionSettings
 from common.utils.coordination_log import configure_coordination_log
-from common.utils.events import CommunityEventEmitter
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.knowledge_store import KnowledgeStore
@@ -123,7 +122,6 @@ class ResourceManager:
                 redis_settings = RedisConnectionSettings.from_env()
                 instance.redis_manager = AsyncRedisClient(redis_settings)
                 instance.redis = await instance.redis_manager.connect()
-                CommunityEventEmitter.get().bind_redis(instance.redis)
 
                 config = ConfigManager.get().config
                 configure_coordination_log(config.developer_settings.coordination_log)
@@ -244,8 +242,6 @@ class ResourceManager:
             self.executor.shutdown(wait=wait)
             self.executor = None
 
-        if self.redis is not None:
-            CommunityEventEmitter.get().unbind_redis(self.redis)
         if self.redis_manager is not None:
             await self.redis_manager.close()
             self.redis_manager = None

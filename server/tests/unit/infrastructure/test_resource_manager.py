@@ -31,7 +31,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     subscribe_calls = []
     redis_client = object()
     redis_instances = []
-    event_calls = []
+    redis_calls = []
     configure_coordination_log = MagicMock()
 
     class FakeConfigManager:
@@ -76,14 +76,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 
         async def close(self):
             self.closed = True
-            event_calls.append(("close", redis_client))
-
-    class FakeCommunityEmitter:
-        def bind_redis(self, redis):
-            event_calls.append(("bind", redis))
-
-        def unbind_redis(self, redis):
-            event_calls.append(("unbind", redis))
+            redis_calls.append(("close", redis_client))
 
     class FakeLLMService:
         def __init__(self, **kwargs):
@@ -154,11 +147,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
     monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(
-        resources_module.CommunityEventEmitter,
-        "get",
-        staticmethod(lambda: FakeCommunityEmitter()),
-    )
-    monkeypatch.setattr(
         resources_module,
         "configure_coordination_log",
         configure_coordination_log,
@@ -176,7 +164,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     assert manager.redis is redis_client
     assert manager.redis_manager is redis_instances[0]
     assert redis_instances[0].settings.url == "redis://localhost:6379/0"
-    assert event_calls == [("bind", redis_client)]
+    assert redis_calls == []
     assert captured_llm_kwargs["base_url"] == "https://llm.example/v1"
     assert captured_llm_kwargs["trace_logger"] is None
     assert manager.embedding.embedding_model == "custom/embedder"
@@ -197,11 +185,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 
     assert unsubscribe_calls == ["developer_settings.coordination_log", "llm"]
     assert redis_instances[0].closed is True
-    assert event_calls == [
-        ("bind", redis_client),
-        ("unbind", redis_client),
-        ("close", redis_client),
-    ]
+    assert redis_calls == [("close", redis_client)]
 
 
 @pytest.mark.no_network
@@ -219,7 +203,6 @@ async def test_resource_manager_raises_if_database_url_missing(monkeypatch):
 @pytest.mark.no_network
 async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatch):
     redis_client = object()
-    event_calls = []
     knowledge_store_instances = []
     redis_instances = []
     embedding_instances = []
@@ -265,13 +248,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
         async def close(self):
             self.closed = True
-
-    class FakeCommunityEmitter:
-        def bind_redis(self, redis):
-            event_calls.append(("bind", redis))
-
-        def unbind_redis(self, redis):
-            event_calls.append(("unbind", redis))
 
     class FakeLLMService:
         def __init__(self, **kwargs):
@@ -348,11 +324,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         FailingPostgresClient,
     )
     monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
-    monkeypatch.setattr(
-        resources_module.CommunityEventEmitter,
-        "get",
-        staticmethod(lambda: FakeCommunityEmitter()),
-    )
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -371,10 +342,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
     assert embedding_instances[0].cleaned_up is True
     assert llm_instances[0].closed is True
     assert executor_instances[0].shutdown_calls == [False]
-    assert event_calls == [
-        ("bind", redis_client),
-        ("unbind", redis_client),
-    ]
 
 
 @pytest.mark.no_network

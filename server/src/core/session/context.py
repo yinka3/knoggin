@@ -17,7 +17,7 @@ from common.schema.source.references import SourceReference, SourceReferenceCand
 from common.utils.core_utils import (
     fetch_conversation_turns,
 )
-from common.utils.events import EventEmitter, emit
+from common.utils.events import emit
 from common.utils.tasks import BackgroundTaskGroup
 from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.ingestion.batch import IngestionBatch
@@ -744,4 +744,3 @@ class Session:
 
         await self.task_group.shutdown(timeout=10.0)
         await emit(self.session_id, "system", "session_shutdown", {})
-        await EventEmitter.get().cleanup_scope(self.session_id)

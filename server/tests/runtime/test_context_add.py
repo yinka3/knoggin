@@ -38,7 +38,6 @@ def _response_event(content, *, sources_consulted=None):
             "total_tokens": 8,
             "approximate": False,
         },
-        "sources": None,
     }
     if sources_consulted:
         data["sources_consulted"] = sources_consulted

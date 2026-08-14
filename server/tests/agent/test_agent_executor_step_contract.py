@@ -144,7 +144,7 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
             temp=0.2,
             agent_brain="Use citations",
             last_result=None,
-            client_tools=[client_tool],
+            additional_tool_schemas=[client_tool],
         )
     ]
 

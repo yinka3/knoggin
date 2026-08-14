@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-from common.utils.events import EventEmitter
 from core.session.context import Session
 from core.session.session_manager import SessionManager
 from infrastructure.redis_client import RedisKeys
@@ -118,15 +117,8 @@ async def test_create_session_cleans_runtime_when_persistence_fails(
     async def failing_execute(*_args, **_kwargs):
         raise RuntimeError("database unavailable")
 
-    unregister_calls = []
-
-    class FakeEmitter:
-        def unregister_session(self, project_id, session_id):
-            unregister_calls.append((project_id, session_id))
-
     monkeypatch.setattr(Session, "create", fake_create)
     monkeypatch.setattr(resources.postgres, "execute", failing_execute)
-    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: FakeEmitter()))
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         await manager.create_session(project_id="project-1")
@@ -134,7 +126,6 @@ async def test_create_session_cleans_runtime_when_persistence_fails(
     assert context.shutdown_count == 1
     assert project_manager.release_calls == ["project-1"]
     assert project_manager.remove_session_calls == [("project-1", context.session_id)]
-    assert unregister_calls == [("project-1", context.session_id)]
     assert active_sessions == {}
 
 
@@ -268,7 +259,6 @@ async def test_close_session_releases_project_and_shuts_context_down(
         "session-1",
         json.dumps({"project_id": "project-1"}),
     )
-    unregister_calls = []
     order = []
 
     async def shutdown():
@@ -282,19 +272,12 @@ async def test_close_session_releases_project_and_shuts_context_down(
     ctx.shutdown = shutdown
     project_manager.release_project = release_project
 
-    class FakeEmitter:
-        def unregister_session(self, project_id, session_id):
-            unregister_calls.append((project_id, session_id))
-
-    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: FakeEmitter()))
-
     assert await manager.close_session("session-1") is True
 
     assert active_sessions == {}
     assert ctx.shutdown_count == 1
     assert project_manager.release_calls == ["project-1"]
     assert order == ["shutdown", "release_project"]
-    assert unregister_calls == [("project-1", "session-1")]
     metadata = json.loads(
         await resources.redis.hget(RedisKeys.sessions("ada"), "session-1")
     )
@@ -309,24 +292,12 @@ async def test_shutdown_deactivates_every_runtime_session(monkeypatch, session_m
     second = FakeSession(session_id="session-2", project_id="project-2")
     await activate_runtime_session(manager, project_manager, first)
     await activate_runtime_session(manager, project_manager, second)
-    unregister_calls = []
-
-    class FakeEmitter:
-        def unregister_session(self, project_id, session_id):
-            unregister_calls.append((project_id, session_id))
-
-    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: FakeEmitter()))
-
     await manager.shutdown()
 
     assert active_sessions == {}
     assert first.shutdown_count == 1
     assert second.shutdown_count == 1
     assert set(project_manager.release_calls) == {"project-1", "project-2"}
-    assert set(unregister_calls) == {
-        ("project-1", "session-1"),
-        ("project-2", "session-2"),
-    }
 
 
 @pytest.mark.runtime
@@ -353,14 +324,6 @@ async def test_delete_session_data_does_not_remove_project_documents(
     await resources.redis.set(dedup_key, "42")
     await resources.redis.rpush(RedisKeys.buffer("ada", "session-1"), "pending")
 
-    unregister_calls = []
-
-    class FakeEmitter:
-        def unregister_session(self, project_id, session_id):
-            unregister_calls.append((project_id, session_id))
-
-    monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: FakeEmitter()))
-
     deleted = await manager.delete_session_data("session-1")
 
     assert deleted >= 1
@@ -368,7 +331,6 @@ async def test_delete_session_data_does_not_remove_project_documents(
     assert ctx.shutdown_count == 1
     assert active_sessions == {}
     assert project_manager.release_calls == ["project-1"]
-    assert unregister_calls == [("project-1", "session-1")]
     assert project_manager.remove_session_calls == []
     assert await resources.redis.hget(RedisKeys.sessions("ada"), "session-1") is None
     assert await resources.redis.get(memory_key) is None

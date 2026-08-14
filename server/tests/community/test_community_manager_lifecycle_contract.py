@@ -616,7 +616,7 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
         "- Vague claims"
     )
     assert execute_kwargs["enabled_tools"] == ["search_entity"]
-    assert execute_kwargs["client_tools"] == [
+    assert execute_kwargs["additional_tool_schemas"] == [
         schema
         for schema in AAC_SPECIFIC_SCHEMAS
         if schema["function"]["name"] == "save_insight"
@@ -666,10 +666,10 @@ def test_community_tool_resolution_preserves_empty_allowlists_and_brain_restore(
         enabled_tools=["restore_brain_section"],
     )
 
-    enabled, client_tools = manager._resolve_agent_tools(default_agent)
+    enabled, additional_tool_schemas = manager._resolve_agent_tools(default_agent)
     assert enabled == COMMUNITY_ENABLED_TOOLS
     assert "restore_brain_section" in enabled
-    assert client_tools == AAC_SPECIFIC_SCHEMAS
+    assert additional_tool_schemas == AAC_SPECIFIC_SCHEMAS
 
     assert manager._resolve_agent_tools(empty_agent) == ([], [])
     assert manager._resolve_agent_tools(restore_agent) == (
