@@ -11,6 +11,10 @@ from common.schema.episode.models import (
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from infrastructure.postgres_client import PostgresClient
 
+# UI may expose prior automated narratives, but source messages stay canonical.
+# Keep history bounded so a long-lived project episode cannot grow without limit.
+EPISODE_VERSION_HISTORY_LIMIT = 10
+
 
 class EpisodeWriter:
     """Persists an episode with all graph context derived from source messages."""
@@ -144,6 +148,175 @@ class EpisodeWriter:
                 ),
             )
         return True
+
+    async def write_project_episode_window(
+        self,
+        episodes: List[Episode],
+        window_messages: List[Dict],
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> bool:
+        """Commit a project window and all affected session cursors together."""
+
+        user_name = require_scope_value(user_name, "user_name", "write_project_episode_window")
+        project_id = require_scope_value(project_id, "project_id", "write_project_episode_window")
+        if not window_messages:
+            raise ValueError("Project episode window requires source messages")
+        by_session: Dict[str, List[Dict]] = {}
+        for message in window_messages:
+            session_id = require_scope_value(str(message.get("session_id") or ""), "session_id", "write_project_episode_window")
+            by_session.setdefault(session_id, []).append(message)
+        if any(episode.project_id != project_id for episode in episodes):
+            raise ValueError("Project episode scope must match its checkpoint scope")
+
+        async with self.client.transaction() as cur:
+            checkpoints: Dict[str, EpisodeCheckpoint] = {}
+            for session_id in sorted(by_session):
+                checkpoints[session_id] = await self._lock_checkpoint(
+                    cur, user_name=user_name, project_id=project_id, session_id=session_id
+                )
+            if all(
+                await self._window_is_checkpointed(
+                    cur,
+                    [int(message["message_id"]) for message in messages],
+                    checkpoint=checkpoints[session_id],
+                    user_name=user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                )
+                for session_id, messages in by_session.items()
+            ):
+                return False
+            next_checkpoints: Dict[str, EpisodeCheckpoint] = {}
+            for session_id, messages in by_session.items():
+                next_checkpoints[session_id] = await self._validate_project_session_window(
+                    cur,
+                    messages,
+                    checkpoint=checkpoints[session_id],
+                    user_name=user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                )
+            for episode in episodes:
+                await self._write_project_episode(cur, episode, user_name=user_name)
+            for session_id, checkpoint in next_checkpoints.items():
+                await cur.execute(
+                    """
+                    UPDATE episode_processing_checkpoints
+                    SET last_evaluated_message_id = %s,
+                        last_evaluated_timestamp_ms = %s,
+                        updated_at = NOW()
+                    WHERE project_id = %s AND session_id = %s
+                    """,
+                    (checkpoint.last_evaluated_message_id, checkpoint.last_evaluated_timestamp_ms, project_id, session_id),
+                )
+        return True
+
+    async def _write_project_episode(self, cur, episode: Episode, *, user_name: str) -> None:
+        if episode.generator_metadata.get("effective_action") == "consolidate":
+            await cur.execute(
+                """
+                SELECT user_modified FROM episodes
+                WHERE episode_id = %s AND project_id = %s FOR UPDATE
+                """,
+                (episode.episode_id, episode.project_id),
+            )
+            existing = await cur.fetchone()
+            if existing is not None and bool(existing["user_modified"]):
+                raise ValueError("User-modified episodes cannot be consolidated automatically")
+        source_ids = [item.message_id for item in episode.messages]
+        expected_sessions = {item.message_id: item.session_id for item in episode.messages}
+        await cur.execute(
+            """
+            SELECT message_id, session_id, timestamp_ms
+            FROM messages
+            WHERE user_name = %s AND project_id = %s AND message_id = ANY(%s)
+            """,
+            (user_name, episode.project_id, source_ids),
+        )
+        rows = await cur.fetchall()
+        if {int(row["message_id"]) for row in rows} != set(source_ids) or any(
+            str(row["session_id"]) != expected_sessions[int(row["message_id"])] for row in rows
+        ):
+            raise ValueError("Episode source messages must exist in their recorded sessions")
+        timestamps = {int(row["message_id"]): row.get("timestamp_ms") for row in rows}
+        entities = await self._load_entities_by_message(cur, source_ids, project_id=episode.project_id)
+        relationships = await self._load_project_relationships(cur, source_ids, project_id=episode.project_id)
+        self._validate_ranked_context(episode.entities, episode.relationships, entities, relationships)
+        await self._upsert_episode(cur, episode, timestamps)
+        await self._upsert_messages(cur, episode)
+        await self._upsert_entities(cur, episode, entities, timestamps)
+        await self._upsert_relationships(cur, episode, relationships)
+
+    @staticmethod
+    async def _validate_project_session_window(
+        cur, messages: List[Dict], *, checkpoint: EpisodeCheckpoint,
+        user_name: str, project_id: str, session_id: str,
+    ) -> EpisodeCheckpoint:
+        """Reject a stale or non-contiguous source stream before any writes."""
+
+        await cur.execute(
+            """
+            SELECT m.message_id, m.timestamp_ms, m.role, m.lifecycle_state,
+                   m.ingestion_state, m.episode_eligible, m.user_msg_id,
+                   s.episode_participation_enabled,
+                   s.episode_participation_after_message_id,
+                   parent.lifecycle_state AS parent_lifecycle_state,
+                   parent.ingestion_state AS parent_ingestion_state
+            FROM messages m
+            JOIN sessions s
+              ON s.session_id = m.session_id AND s.project_id = m.project_id
+            LEFT JOIN messages parent
+              ON parent.message_id = m.user_msg_id
+             AND parent.project_id = m.project_id AND parent.session_id = m.session_id
+            WHERE m.user_name = %s AND m.project_id = %s AND m.session_id = %s
+              AND ((%s = 0 AND %s::BIGINT IS NULL)
+                OR (%s::BIGINT IS NOT NULL AND (m.timestamp_ms > %s
+                    OR (m.timestamp_ms = %s AND m.message_id > %s) OR m.timestamp_ms IS NULL))
+                OR (%s::BIGINT IS NULL AND %s > 0 AND m.timestamp_ms IS NULL
+                    AND m.message_id > %s))
+            ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id
+            LIMIT %s
+            """,
+            (user_name, project_id, session_id, checkpoint.last_evaluated_message_id,
+             checkpoint.last_evaluated_timestamp_ms, checkpoint.last_evaluated_timestamp_ms,
+             checkpoint.last_evaluated_timestamp_ms, checkpoint.last_evaluated_timestamp_ms,
+             checkpoint.last_evaluated_message_id, checkpoint.last_evaluated_timestamp_ms,
+             checkpoint.last_evaluated_message_id, checkpoint.last_evaluated_message_id, len(messages)),
+        )
+        rows = await cur.fetchall()
+        expected_ids = [int(item["message_id"]) for item in messages]
+        if [int(row["message_id"]) for row in rows] != expected_ids:
+            raise ValueError("Project episode window is stale or not a next session range")
+        for row in rows:
+            if (
+                not row["episode_participation_enabled"]
+                or int(row["message_id"])
+                <= int(row["episode_participation_after_message_id"])
+            ):
+                raise ValueError("Project episode window includes an excluded session message")
+            ready = (row["role"] == "user" and row["lifecycle_state"] == "sealed" and row["ingestion_state"] == "processed" and row["episode_eligible"]) or (row["role"] == "assistant" and row["parent_lifecycle_state"] == "sealed" and row["parent_ingestion_state"] == "processed")
+            if not ready:
+                raise ValueError("Project episode window includes a non-ready message")
+        last = rows[-1]
+        return EpisodeCheckpoint(last_evaluated_message_id=int(last["message_id"]), last_evaluated_timestamp_ms=last["timestamp_ms"])
+
+    @staticmethod
+    async def _load_project_relationships(cur, message_ids: List[int], *, project_id: str) -> Dict[int, Set[str]]:
+        await cur.execute(
+            """
+            SELECT rer.message_id, rer.relationship_id
+            FROM relationship_evidence_refs rer
+            JOIN relationships r ON r.relationship_id = rer.relationship_id AND r.project_id = rer.project_id
+            WHERE rer.message_id = ANY(%s) AND rer.project_id = %s
+            """,
+            (message_ids, project_id),
+        )
+        values = {message_id: set() for message_id in message_ids}
+        for row in await cur.fetchall():
+            values[int(row["message_id"])].add(str(row["relationship_id"]))
+        return values
 
     async def _write_episode(
         self,
@@ -509,7 +682,6 @@ class EpisodeWriter:
             INSERT INTO episodes (
                 episode_id,
                 project_id,
-                session_id,
                 summary,
                 new_developments,
                 updates,
@@ -521,12 +693,13 @@ class EpisodeWriter:
                 embedding,
                 generator_metadata,
                 version_history,
+                user_modified,
                 created_at,
                 updated_at
             )
             VALUES (
-                %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                %s, %s, %s, %s, %s::vector, %s::jsonb, %s::jsonb, %s, %s
+                %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
+                %s, %s, %s, %s, %s::vector, %s::jsonb, %s::jsonb, %s, %s, %s
             )
             ON CONFLICT (episode_id) DO UPDATE
             SET summary = EXCLUDED.summary,
@@ -547,13 +720,11 @@ class EpisodeWriter:
                 END,
                 updated_at = EXCLUDED.updated_at
             WHERE episodes.project_id = EXCLUDED.project_id
-              AND episodes.session_id = EXCLUDED.session_id
             RETURNING episode_id
             """,
             (
                 episode.episode_id,
                 episode.project_id,
-                episode.session_id,
                 episode.summary,
                 json.dumps(episode.new_developments),
                 json.dumps(episode.updates),
@@ -569,6 +740,7 @@ class EpisodeWriter:
                 ),
                 json.dumps(episode.generator_metadata),
                 json.dumps(version_history),
+                episode.user_modified,
                 episode.created_at,
                 episode.updated_at,
             ),
@@ -578,7 +750,7 @@ class EpisodeWriter:
 
     @staticmethod
     async def _snapshot_before_consolidation(cur, episode: Episode) -> List[Dict]:
-        """Keep at most two prior summaries before replacing one episode."""
+        """Retain bounded automated narrative snapshots before replacement."""
 
         await cur.execute(
             """
@@ -595,10 +767,9 @@ class EpisodeWriter:
             FROM episodes
             WHERE episode_id = %s
               AND project_id = %s
-              AND session_id = %s
             FOR UPDATE
             """,
-            (episode.episode_id, episode.project_id, episode.session_id),
+            (episode.episode_id, episode.project_id),
         )
         existing = await cur.fetchone()
         if existing is None:
@@ -656,7 +827,7 @@ class EpisodeWriter:
                 ),
             }
         )
-        return history[-2:]
+        return history[-EPISODE_VERSION_HISTORY_LIMIT:]
 
     @staticmethod
     def _json_list(value) -> List:
@@ -697,7 +868,7 @@ class EpisodeWriter:
                 (
                     episode.episode_id,
                     episode.project_id,
-                    episode.session_id,
+                    message.session_id,
                     message.message_id,
                     message.influence_weight,
                     message.influence_reason,

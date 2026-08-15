@@ -43,6 +43,10 @@ from core.knowledge.db.writers.entity_writer import EntityWriter
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
+from core.knowledge.db.writers.message_lifecycle_writer import (
+    IngestionClaim,
+    MessageLifecycleWriter,
+)
 from core.knowledge.db.writers.relationship_advisory_writer import (
     RelationshipAdvisoryWriter,
 )
@@ -89,6 +93,9 @@ class KnowledgeStore:
             self._postgres_client
         )
         self._graph_writer = GraphWriter(self._postgres_client)
+        self._message_lifecycle_writer = MessageLifecycleWriter(
+            self._postgres_client, self._graph_writer
+        )
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._retention_writer = RetentionWriter(self._postgres_client)
         self._relationship_advisory_writer = RelationshipAdvisoryWriter(
@@ -118,6 +125,101 @@ class KnowledgeStore:
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         return await self._graph_writer.save_message_logs(messages)
+
+    async def create_editable_user_message(
+        self, message: Dict, *, edit_window_seconds: int
+    ) -> None:
+        await self._message_lifecycle_writer.create_editable_user_message(
+            message, edit_window_seconds=edit_window_seconds
+        )
+
+    async def edit_user_message(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        message_id: int,
+        content: str,
+    ) -> int:
+        return await self._message_lifecycle_writer.edit_user_message(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            message_id=message_id,
+            content=content,
+        )
+
+    async def select_user_message_revision(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        message_id: int,
+        revision: int,
+    ) -> str:
+        return await self._message_lifecycle_writer.select_user_message_revision(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            message_id=message_id,
+            revision=revision,
+        )
+
+    async def seal_due_user_messages(
+        self, *, user_name: str, project_id: str, session_id: str, settle_delay_seconds: float
+    ) -> List[int]:
+        return await self._message_lifecycle_writer.seal_due_user_messages(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            settle_delay_seconds=settle_delay_seconds,
+        )
+
+    async def claim_next_full_ingestion_batch(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_size: int,
+        claim_lease_seconds: float,
+    ) -> IngestionClaim | None:
+        return await self._message_lifecycle_writer.claim_next_full_batch(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            batch_size=batch_size,
+            claim_lease_seconds=claim_lease_seconds,
+        )
+
+    async def finish_ingestion_claim(
+        self, *, user_name: str, project_id: str, session_id: str, batch_id: str
+    ) -> None:
+        await self._message_lifecycle_writer.finish_ingestion_claim(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            batch_id=batch_id,
+        )
+
+    async def release_ingestion_claim(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_id: str,
+        blocked: bool,
+    ) -> None:
+        await self._message_lifecycle_writer.release_ingestion_claim(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            batch_id=batch_id,
+            blocked=blocked,
+        )
 
     async def save_assistant_message_with_source_refs(
         self,
@@ -259,6 +361,25 @@ class KnowledgeStore:
             session_id=session_id,
         )
 
+    async def get_project_episode_source_refs(
+        self, episode_id: str, *, user_name: str, project_id: str
+    ) -> List[SourceConsulted]:
+        return await self._source_reference_reader.get_project_episode_source_refs(
+            episode_id, user_name=user_name, project_id=project_id
+        )
+
+    async def write_project_episode_window(
+        self,
+        episodes: List[Episode],
+        window_messages: List[Dict],
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> bool:
+        return await self._episode_writer.write_project_episode_window(
+            episodes, window_messages, user_name=user_name, project_id=project_id
+        )
+
     async def get_episode_checkpoint(
         self,
         *,
@@ -287,6 +408,57 @@ class KnowledgeStore:
             session_id=session_id,
             checkpoint=checkpoint,
             message_count=message_count,
+        )
+
+    async def get_next_project_episode_window(
+        self, *, user_name: str, project_id: str, message_count: int
+    ) -> List[Dict]:
+        return await self._episode_reader.get_next_project_episode_window(
+            user_name=user_name, project_id=project_id, message_count=message_count
+        )
+
+    async def get_project_episode(
+        self, episode_id: str, *, user_name: str, project_id: str
+    ) -> Optional[Episode]:
+        return await self._episode_reader.get_project_episode(
+            episode_id, user_name=user_name, project_id=project_id
+        )
+
+    async def get_recent_project_episodes(
+        self, *, user_name: str, project_id: str, limit: int
+    ) -> List[Episode]:
+        return await self._episode_reader.get_recent_project_episodes(
+            user_name=user_name, project_id=project_id, limit=limit
+        )
+
+    async def search_project_episodes(
+        self, query: str, *, user_name: str, project_id: str, limit: int
+    ) -> List[Episode]:
+        return await self._episode_reader.search_project_episodes(
+            query, user_name=user_name, project_id=project_id, limit=limit
+        )
+
+    async def search_project_episodes_by_embedding(
+        self, embedding: List[float], *, user_name: str, project_id: str,
+        limit: int = 10, score_threshold: float = 0.35,
+    ) -> List[tuple[Episode, float]]:
+        return await self._episode_reader.search_project_episodes_by_embedding(
+            embedding, user_name=user_name, project_id=project_id, limit=limit,
+            score_threshold=score_threshold,
+        )
+
+    async def get_project_episode_source_messages(
+        self, episode_id: str, *, user_name: str, project_id: str
+    ) -> List[Dict]:
+        return await self._episode_reader.get_project_episode_source_messages(
+            episode_id, user_name=user_name, project_id=project_id
+        )
+
+    async def get_project_episodes_for_entities(
+        self, entity_ids: List[int], *, user_name: str, project_id: str, limit: int
+    ) -> List[Episode]:
+        return await self._episode_reader.get_project_episodes_for_entities(
+            entity_ids, user_name=user_name, project_id=project_id, limit=limit
         )
 
     async def get_episode(

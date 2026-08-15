@@ -68,7 +68,7 @@ class _DrainProcessor(_Processor):
     def capture_policy(self, _ingestion_settings):
         return ingestion_policy()
 
-    def open_batch(self, messages, session_text, *, session_id, policy):
+    def open_batch(self, messages, session_text, *, session_id, policy, batch_id=None):
         self.batch = IngestionBatch.open(
             user_name="ada",
             project_id=self.project_id,
@@ -76,6 +76,7 @@ class _DrainProcessor(_Processor):
             messages=messages,
             session_text=session_text,
             policy=policy,
+            batch_id=batch_id,
         )
         return self.batch
 
@@ -198,6 +199,70 @@ async def _queue_one_message(worker: IngestionWorker) -> None:
         worker._buffer_key,
         json.dumps({"id": 7, "message": "Ada met Grace.", "role": "user"}),
     )
+
+
+class _DurableQueueStore:
+    def __init__(self):
+        self.seal_calls = []
+        self.claims = [
+            type(
+                "Claim",
+                (),
+                {
+                    "batch_id": "claim-1",
+                    "messages": [
+                        {
+                            "id": 7,
+                            "message": "Ada met Grace.",
+                            "role": "user",
+                        }
+                    ],
+                },
+            )()
+        ]
+        self.finished = []
+        self.released = []
+
+    async def seal_due_user_messages(self, **kwargs):
+        self.seal_calls.append(kwargs)
+        return [7]
+
+    async def claim_next_full_ingestion_batch(self, **_kwargs):
+        return self.claims.pop(0) if self.claims else None
+
+    async def finish_ingestion_claim(self, **kwargs):
+        self.finished.append(kwargs["batch_id"])
+
+    async def release_ingestion_claim(self, **kwargs):
+        self.released.append(kwargs)
+
+    async def save_candidate_suggestions(self, _scope, _suggestions):
+        return 0
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_consumer_uses_durable_full_batch_claim_and_never_rewrites_messages(
+    monkeypatch,
+):
+    async def emit_nothing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(batch_consumer, "emit", emit_nothing)
+    processor = _DrainProcessor("success")
+    worker = _checkpoint_worker(FakeRedis(), processor)
+    store = _DurableQueueStore()
+    worker.knowledge_store = store
+    worker._shutdown_requested = False
+
+    await worker._drain_durable_queue()
+
+    assert store.seal_calls[0]["settle_delay_seconds"] == 120.0
+    assert store.finished == ["claim-1"]
+    assert store.released == []
+    assert processor.batch.batch_id == "claim-1"
+    assert IngestionMilestone.MESSAGE_LOGS_HANDLED in processor.batch.milestones
+    assert IngestionMilestone.CHECKPOINT_COMMITTED in processor.batch.milestones
 
 
 def _completed_batch(*, policy=None) -> IngestionBatch:

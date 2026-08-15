@@ -250,11 +250,27 @@ class IngestionWorker:
         self.batch_timeout = config.batch_timeout
         self.checkpoint_interval = config.checkpoint_interval
         self.session_window = config.session_window
+        self.message_lifecycle_poll_seconds = config.message_lifecycle_poll_seconds
+        self.ingestion_batch_settle_delay_seconds = (
+            config.ingestion_batch_settle_delay_seconds
+        )
+        self.ingestion_claim_lease_seconds = config.ingestion_claim_lease_seconds
 
         logger.info(
             "Consumer ingestion settings updated: "
             f"batch={self.batch_size}, debounce={self.batch_debounce_seconds}, "
             f"timeout={self.batch_timeout}"
+        )
+
+    def _uses_durable_queue(self) -> bool:
+        """Prefer canonical storage when the persistence facade supports it.
+
+        The compatibility branch keeps narrow unit fakes usable while the real
+        KnowledgeStore no longer lets Redis decide ingestion order.
+        """
+
+        return callable(
+            getattr(self.knowledge_store, "claim_next_full_ingestion_batch", None)
         )
 
     async def _wait_for_batch(self) -> bool:
@@ -290,27 +306,38 @@ class IngestionWorker:
                 timed_out = False
                 try:
                     await asyncio.wait_for(
-                        self._wake_event.wait(), timeout=self.batch_timeout
+                        self._wake_event.wait(),
+                        timeout=(
+                            min(
+                                self.batch_timeout,
+                                self.message_lifecycle_poll_seconds,
+                            )
+                            if self._uses_durable_queue()
+                            else self.batch_timeout
+                        ),
                     )
                 except asyncio.TimeoutError:
                     timed_out = True
 
                 self._wake_event.clear()
                 try:
-                    flush_partial = (
-                        timed_out
-                        or self._flush_future is not None
-                        or self._shutdown_requested
-                    )
-                    if not flush_partial:
-                        flush_partial = await self._wait_for_batch()
-                    while True:
-                        deferred_partial = await self._drain_buffer(
-                            flush_partial=flush_partial
+                    if self._uses_durable_queue():
+                        await self._drain_durable_queue()
+                    else:
+                        flush_partial = (
+                            timed_out
+                            or self._flush_future is not None
+                            or self._shutdown_requested
                         )
-                        if not deferred_partial or self._shutdown_requested:
-                            break
-                        flush_partial = await self._wait_for_batch()
+                        if not flush_partial:
+                            flush_partial = await self._wait_for_batch()
+                        while True:
+                            deferred_partial = await self._drain_buffer(
+                                flush_partial=flush_partial
+                            )
+                            if not deferred_partial or self._shutdown_requested:
+                                break
+                            flush_partial = await self._wait_for_batch()
                     error_count = 0  # Reset on success
                 except Exception as e:
                     error_count += 1
@@ -328,13 +355,120 @@ class IngestionWorker:
 
         logger.info("IngestionWorker shutting down, final drain...")
         try:
-            await self._drain_buffer(flush_partial=True)
+            if self._uses_durable_queue():
+                await self._drain_durable_queue()
+            else:
+                await self._drain_buffer(flush_partial=True)
 
             logger.info("IngestionWorker shutdown complete")
         except Exception as e:
             self._record_health_failure("shutdown_drain")
             self._health_state = "failed"
             logger.error(f"IngestionWorker shutdown sequence failed: {e}")
+
+    async def _drain_durable_queue(self) -> None:
+        """Process only sealed, settled, full FIFO batches from Postgres."""
+
+        await self.knowledge_store.seal_due_user_messages(
+            user_name=self.user_name,
+            project_id=self.processor.project_id,
+            session_id=self.session_id,
+            settle_delay_seconds=self.ingestion_batch_settle_delay_seconds,
+        )
+        processed = 0
+        message_ids: list[int] = []
+        while not self._shutdown_requested:
+            claim = await self.knowledge_store.claim_next_full_ingestion_batch(
+                user_name=self.user_name,
+                project_id=self.processor.project_id,
+                session_id=self.session_id,
+                batch_size=self.batch_size,
+                claim_lease_seconds=self.ingestion_claim_lease_seconds,
+            )
+            if claim is None:
+                break
+
+            messages = claim.messages
+            self._health_current_batch_size = len(messages)
+            self._health_current_batch_started_at = get_now()
+            conversation = await self.get_session_context(
+                self.session_window, messages[0]["id"]
+            )
+            session_text = self._format_session_text(conversation)
+            batch = self.processor.open_batch(
+                messages,
+                session_text,
+                session_id=self.session_id,
+                policy=self.processor.capture_policy(self.settings),
+                batch_id=claim.batch_id,
+            )
+            try:
+                await self._process_messages(batch)
+                if not batch.success:
+                    raise RuntimeError(batch.error or "ingestion processing failed")
+                # User messages were durably created before they reached this
+                # worker; recording them again would make Redis authoritative.
+                batch.mark_message_logs_handled()
+                can_continue, dlq_written = await self._save_candidate_suggestions_or_dlq(
+                    batch
+                )
+                if not can_continue or dlq_written:
+                    raise RuntimeError("candidate suggestion persistence failed")
+                can_continue, dlq_written = await self._write_graph_or_dlq(batch)
+                if not can_continue or dlq_written:
+                    raise RuntimeError("graph persistence failed")
+                await self.knowledge_store.finish_ingestion_claim(
+                    user_name=self.user_name,
+                    project_id=self.processor.project_id,
+                    session_id=self.session_id,
+                    batch_id=claim.batch_id,
+                )
+                batch.record_checkpoint_progress(current_count=len(messages))
+                batch.mark_checkpoint_committed()
+                self._mark_batch_work_succeeded(batch)
+                processed += 1
+                message_ids.extend(message["id"] for message in messages)
+                self._health_last_success_at = get_now()
+                self._health_consecutive_failures = 0
+            except asyncio.CancelledError:
+                await self.knowledge_store.release_ingestion_claim(
+                    user_name=self.user_name,
+                    project_id=self.processor.project_id,
+                    session_id=self.session_id,
+                    batch_id=claim.batch_id,
+                    blocked=False,
+                )
+                raise
+            except Exception as exc:
+                self._record_health_failure("durable_batch")
+                self._mark_batch_work_failed(batch, exc)
+                # A failure remains ahead of subsequent messages. Operators can
+                # inspect/replay it without silently changing the session order.
+                await self.knowledge_store.release_ingestion_claim(
+                    user_name=self.user_name,
+                    project_id=self.processor.project_id,
+                    session_id=self.session_id,
+                    batch_id=claim.batch_id,
+                    blocked=True,
+                )
+                logger.error("Durable ingestion batch {} blocked: {}", claim.batch_id, exc)
+                break
+            finally:
+                batch.release()
+                self._health_current_batch_size = 0
+                self._health_current_batch_started_at = None
+
+        await emit(
+            self.session_id,
+            "pipeline",
+            "drain_complete",
+            {
+                "batches_processed": processed,
+                "total_messages": len(message_ids),
+                "msg_ids": message_ids,
+                "partial_flush": False,
+            },
+        )
 
     async def _drain_buffer(self, flush_partial: bool) -> bool:
         """Drain complete batches and report whether an undersized tail remains."""

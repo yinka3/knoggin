@@ -386,12 +386,9 @@ class EntityWriter:
                     scope,
                 )
 
-            if eligible_messages:
-                await self._mark_episode_eligible_messages(
-                    cur,
-                    eligible_messages,
-                    scope,
-                )
+            # Graph writes are part of an ingestion claim, not its durable
+            # completion boundary.  MessageLifecycleWriter marks the claimed
+            # user turns episode-ready only after the claim finishes.
 
             if relationships:
                 rel_params = []

@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from common.schema.settings import EpisodeSettings, IngestionSettings
+from common.schema.settings import EpisodeSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,8 +17,8 @@ class EpisodeGenerationPolicy:
     enabled: bool
     target_message_count: int
     max_message_count: int
+    max_narrative_chars: int
     max_age_hours: float | None
-    max_sessions_per_run: int
     prior_episode_candidate_count: int
 
     @classmethod
@@ -26,9 +26,11 @@ class EpisodeGenerationPolicy:
         cls,
         *,
         settings: EpisodeSettings,
-        ingestion_settings: IngestionSettings,
+        episode_window_size: int,
     ) -> "EpisodeGenerationPolicy":
-        target_message_count = ingestion_settings.batch_size * settings.batch_multiple
+        if not 8 <= episode_window_size <= 72:
+            raise ValueError("episode_window_size must be between 8 and 72")
+        target_message_count = episode_window_size
         if settings.max_message_count < target_message_count:
             raise ValueError(
                 "Episode max_message_count must be at least the target window size"
@@ -38,8 +40,8 @@ class EpisodeGenerationPolicy:
             "enabled": settings.enabled,
             "target_message_count": target_message_count,
             "max_message_count": settings.max_message_count,
+            "max_narrative_chars": settings.max_narrative_chars,
             "max_age_hours": settings.max_age_hours,
-            "max_sessions_per_run": settings.max_sessions_per_run,
             "prior_episode_candidate_count": settings.prior_episode_candidate_count,
         }
         encoded = json.dumps(values, sort_keys=True, separators=(",", ":"))
@@ -55,6 +57,14 @@ class EpisodeGenerationPolicy:
             "version": self.version,
             "target_message_count": self.target_message_count,
             "max_message_count": self.max_message_count,
+            "max_narrative_chars": self.max_narrative_chars,
+            "prompt_narrative_chars": self.prompt_narrative_chars,
             "max_age_hours": self.max_age_hours,
             "prior_episode_candidate_count": self.prior_episode_candidate_count,
         }
+
+    @property
+    def prompt_narrative_chars(self) -> int:
+        """Leave a deterministic 10% generation buffer below the hard cap."""
+
+        return max(1, int(self.max_narrative_chars * 0.9))

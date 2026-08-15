@@ -75,6 +75,25 @@ class EpisodeStore(Protocol):
         session_id: str,
     ) -> EpisodeCheckpoint: ...
 
+    async def get_next_project_episode_window(
+        self, *, user_name: str, project_id: str, message_count: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_recent_project_episodes(
+        self, *, user_name: str, project_id: str, limit: int
+    ) -> list[Episode]: ...
+
+    async def get_project_episodes_for_entities(
+        self, entity_ids: list[int], *, user_name: str, project_id: str, limit: int
+    ) -> list[Episode]: ...
+
+    async def write_project_episode_window(
+        self,
+        episodes: list[Episode],
+        window_messages: list[dict[str, Any]],
+        *, user_name: str, project_id: str,
+    ) -> bool: ...
+
     async def get_next_episode_window(
         self,
         *,

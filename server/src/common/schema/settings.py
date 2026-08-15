@@ -116,6 +116,10 @@ class IngestionSettings(ConfigModel):
     batch_size: int = Field(8, ge=1, le=100)
     batch_debounce_seconds: float = Field(0.75, ge=0.0, le=10.0)
     batch_timeout: float = Field(300.0, ge=10.0)
+    message_edit_window_seconds: int = Field(600, ge=1, le=86_400)
+    ingestion_batch_settle_delay_seconds: float = Field(120.0, ge=0.0, le=3_600.0)
+    message_lifecycle_poll_seconds: float = Field(15.0, ge=1.0, le=300.0)
+    ingestion_claim_lease_seconds: float = Field(300.0, ge=10.0, le=3_600.0)
     checkpoint_interval: int = Field(32, ge=1)
     session_window: int = Field(24, ge=1)
 
@@ -136,10 +140,13 @@ class EpisodeSettings(ConfigModel):
     """Configuration for bounded episodic-memory generation windows."""
 
     enabled: bool = Field(True)
-    batch_multiple: int = Field(3, ge=1)
+    # The window size belongs to each project, not to global ingestion batch
+    # tuning.  These remain server-wide operational limits only.
     max_message_count: int = Field(72, ge=1)
+    # A server-owned hard cap across every persisted narrative field.  The
+    # prompt uses 90% of this value; persistence validates the full limit.
+    max_narrative_chars: int = Field(4000, ge=500, le=20000)
     max_age_hours: Optional[float] = Field(None, gt=0)
-    max_sessions_per_run: int = Field(4, ge=1, le=100)
     prior_episode_candidate_count: int = Field(3, ge=1, le=3)
     retrieval_episode_limit: int = Field(5, ge=1)
 

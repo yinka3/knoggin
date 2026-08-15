@@ -451,11 +451,9 @@ class SearchIndexer:
                 e.updates,
                 e.unresolved
             FROM episodes e
-            JOIN sessions s
-              ON s.session_id = e.session_id
-             AND s.project_id = e.project_id
+            JOIN projects p ON p.project_id = e.project_id
             WHERE e.project_id = %s
-              AND s.user_name = %s
+              AND p.user_name = %s
             ORDER BY e.episode_id
             """,
             (project_id, user_name),

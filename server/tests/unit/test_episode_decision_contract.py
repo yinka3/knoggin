@@ -7,8 +7,8 @@ from common.schema.episode.generation import (
     LLMEpisodeDecision,
 )
 from core.ingestion.prompts import (
-    get_episode_consolidation_prompt,
     get_episode_generation_prompt,
+    get_episode_narrative_repair_prompt,
 )
 
 
@@ -25,20 +25,24 @@ def test_episode_decision_accepts_complete_create_and_skip_shapes():
 
 
 def test_episode_generation_prompt_renders_the_user_name():
-    prompt = get_episode_generation_prompt("Ada")
+    prompt = get_episode_generation_prompt(
+        "Ada", prompt_narrative_chars=3600, max_narrative_chars=4000
+    )
 
-    assert "Ada's conversation" in prompt
+    assert "Ada" in prompt
     assert "target_episode_id" in prompt
+    assert "3600" in prompt
+    assert "4000" in prompt
 
 
-def test_episode_consolidation_prompt_and_contract_require_all_influences():
-    prompt = get_episode_consolidation_prompt("Ada")
+def test_episode_repair_prompt_and_contract_require_all_influences():
+    prompt = get_episode_narrative_repair_prompt("Ada", max_narrative_chars=4000)
     consolidation = EpisodeConsolidation(
         summary="The stored episode was regenerated from all source messages.",
         message_influences=[{"message_id": 11, "influence_weight": 0.9}],
     )
 
-    assert "all of its source messages" in prompt
+    assert "4000" in prompt
     assert consolidation.message_influences[0].message_id == 11
 
 

@@ -192,6 +192,37 @@ class SourceReferenceReader:
             presented.append(self._present_reference(reference))
         return presented
 
+    async def get_project_episode_source_refs(
+        self, episode_id: str, *, user_name: str, project_id: str
+    ) -> list[SourceConsulted]:
+        rows = await self.client.fetch_all(
+            """
+            SELECT ref.*
+            FROM public.episode_messages attachment
+            JOIN public.episodes episode
+              ON episode.episode_id = attachment.episode_id
+             AND episode.project_id = attachment.project_id
+            JOIN public.projects project ON project.project_id = episode.project_id
+            JOIN public.message_source_refs ref
+              ON ref.message_id = attachment.message_id
+             AND ref.project_id = attachment.project_id
+             AND ref.session_id = attachment.session_id
+            WHERE attachment.episode_id = %s AND episode.project_id = %s
+              AND project.user_name = %s
+            ORDER BY attachment.message_position, ref.created_at,
+                     ref.result_position, ref.source_ref_id
+            """,
+            (episode_id, project_id, user_name),
+        )
+        presented, seen = [], set()
+        for row in rows:
+            reference = self._reference_from_row(row)
+            key = self._episode_deduplication_key(reference)
+            if key not in seen:
+                seen.add(key)
+                presented.append(self._present_reference(reference))
+        return presented
+
     @staticmethod
     def _scope(
         user_name: str,

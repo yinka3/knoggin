@@ -203,6 +203,18 @@ class GraphWriter:
                         ),
                         "metadata": json.dumps(msg.get("metadata") or {}),
                         "timestamp": self._normalize_timestamp_ms(msg.get("timestamp")),
+                        "lifecycle_state": msg.get("lifecycle_state", "sealed"),
+                        "editable_until_ms": msg.get("editable_until_ms"),
+                        "sealed_at_ms": msg.get("sealed_at_ms"),
+                        "selected_revision": int(msg.get("selected_revision", 1)),
+                        "replaces_message_id": msg.get("replaces_message_id"),
+                        "superseded_at_ms": msg.get("superseded_at_ms"),
+                        "ingestion_state": msg.get("ingestion_state", "excluded"),
+                        "ingestion_not_before_ms": msg.get("ingestion_not_before_ms"),
+                        "ingestion_claim_id": msg.get("ingestion_claim_id"),
+                        "ingestion_claimed_at_ms": msg.get("ingestion_claimed_at_ms"),
+                        "episode_eligible": bool(msg.get("episode_eligible", False)),
+                        "episode_type": msg.get("episode_type"),
                     }
                 )
 
@@ -219,9 +231,24 @@ class GraphWriter:
                         content,
                         user_msg_id,
                         metadata,
-                        timestamp_ms
+                        timestamp_ms,
+                        lifecycle_state,
+                        editable_until_ms,
+                        sealed_at_ms,
+                        selected_revision,
+                        replaces_message_id,
+                        superseded_at_ms,
+                        ingestion_state,
+                        ingestion_not_before_ms,
+                        ingestion_claim_id,
+                        ingestion_claimed_at_ms,
+                        episode_eligible,
+                        episode_type
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
                     ON CONFLICT (user_name, session_id, message_id)
                     DO UPDATE SET
                         message_id = EXCLUDED.message_id,
@@ -243,6 +270,18 @@ class GraphWriter:
                         msg["user_msg_id"],
                         msg["metadata"],
                         msg["timestamp"],
+                        msg["lifecycle_state"],
+                        msg["editable_until_ms"],
+                        msg["sealed_at_ms"],
+                        msg["selected_revision"],
+                        msg["replaces_message_id"],
+                        msg["superseded_at_ms"],
+                        msg["ingestion_state"],
+                        msg["ingestion_not_before_ms"],
+                        msg["ingestion_claim_id"],
+                        msg["ingestion_claimed_at_ms"],
+                        msg["episode_eligible"],
+                        msg["episode_type"],
                     ),
                 )
                 persisted = await cur.fetchone()
@@ -253,7 +292,29 @@ class GraphWriter:
                         f"{msg['id']}"
                     )
 
-            await self.projection.project_messages(cur, batch_params)
+            # Lifecycle and ingestion fields are relational authority. AGE is
+            # a derived traversal projection and intentionally receives only
+            # the message fields it exposes to graph queries.
+            await self.projection.project_messages(
+                cur,
+                [
+                    {
+                        key: msg[key]
+                        for key in (
+                            "id",
+                            "content",
+                            "role",
+                            "user_name",
+                            "session_id",
+                            "project_id",
+                            "user_msg_id",
+                            "metadata",
+                            "timestamp",
+                        )
+                    }
+                    for msg in batch_params
+                ],
+            )
 
             # Write to Hybrid Full Text Search Table
             for msg in batch_params:
@@ -718,7 +779,6 @@ class GraphWriter:
                         JOIN episodes episode
                           ON episode.episode_id = em.episode_id
                          AND episode.project_id = em.project_id
-                         AND episode.session_id = em.session_id
                         JOIN messages m
                           ON m.message_id = em.message_id
                          AND m.project_id = em.project_id

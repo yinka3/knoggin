@@ -152,6 +152,39 @@ class LLMEpisodeDecision(EpisodeNarrative):
         ]
 
 
+class LLMEpisodeWindowDecision(StructuredLLMOutput):
+    """The one model response for a project episode window.
+
+    An empty proposal list is the explicit, grounded decision to retain no
+    episodic memory from this window.  A proposal is never a standalone
+    ``skip`` because that makes source ownership ambiguous.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposals: List[LLMEpisodeDecision] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_proposals(self) -> "LLMEpisodeWindowDecision":
+        source_ids: set[str] = set()
+        target_ids: set[str] = set()
+        for proposal in self.proposals:
+            if proposal.action == "skip":
+                raise ValueError("episode window proposals cannot use skip")
+            proposal_sources = {
+                influence.message_id for influence in proposal.message_influences
+            }
+            if source_ids.intersection(proposal_sources):
+                raise ValueError("episode proposals cannot share source messages")
+            source_ids.update(proposal_sources)
+            if proposal.action == "consolidate":
+                assert proposal.target_episode_id is not None
+                if proposal.target_episode_id in target_ids:
+                    raise ValueError("episode proposals must target distinct episodes")
+                target_ids.add(proposal.target_episode_id)
+        return self
+
+
 class LLMEpisodeConsolidation(EpisodeNarrative):
     """Model-facing episode regeneration output with local references."""
 

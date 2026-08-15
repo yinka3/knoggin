@@ -12,6 +12,10 @@ from common.utils.time_utils import get_now
 EPISODE_EMBEDDING_DIMENSION = 1024
 
 
+class EpisodeNarrativeLimitError(ValueError):
+    """The model produced a valid shape that exceeds the server hard limit."""
+
+
 class EpisodeNarrative(BaseModel):
     """Narrative content independent of an episode's reference representation."""
 
@@ -21,11 +25,34 @@ class EpisodeNarrative(BaseModel):
     unresolved: List[str] = Field(default_factory=list)
     importance: float = Field(0.0, ge=0.0, le=1.0)
 
+    def narrative_character_count(self) -> int:
+        """Count the exact text persisted in the narrative fields."""
+
+        return sum(
+            len(value)
+            for value in (
+                self.summary or "",
+                *self.new_developments,
+                *self.updates,
+                *self.unresolved,
+            )
+        )
+
+    def validate_narrative_character_limit(self, maximum: int) -> None:
+        if maximum <= 0:
+            raise ValueError("episode narrative character limit must be positive")
+        count = self.narrative_character_count()
+        if count > maximum:
+            raise EpisodeNarrativeLimitError(
+                f"episode narrative is {count} characters; limit is {maximum}"
+            )
+
 
 class MessageEpisode(BaseModel):
     """A canonical source message and its contribution to an episode."""
 
     message_id: int = Field(..., gt=0)
+    session_id: str = Field(..., min_length=1)
     influence_weight: float = Field(0.0, ge=0.0)
     influence_reason: Optional[str] = None
     message_position: int = Field(..., ge=0)
@@ -77,7 +104,6 @@ class Episode(EpisodeNarrative):
 
     episode_id: str = Field(..., min_length=1)
     project_id: str = Field(..., min_length=1)
-    session_id: str = Field(..., min_length=1)
     summary: str = Field(..., min_length=1)
     source_message_count: int = Field(0, ge=0)
     first_message_at: Optional[datetime] = None
@@ -87,6 +113,8 @@ class Episode(EpisodeNarrative):
     entities: List[EntityEpisode] = Field(default_factory=list)
     relationships: List[RelationshipEpisode] = Field(default_factory=list)
     version_history: List[EpisodeVersion] = Field(default_factory=list)
+    # Automation must never silently replace an episode that a person curated.
+    user_modified: bool = False
     created_at: datetime = Field(default_factory=get_now)
     updated_at: datetime = Field(default_factory=get_now)
     generator_metadata: Dict[str, Any] = Field(default_factory=dict)

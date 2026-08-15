@@ -212,6 +212,7 @@ class IngestionPipeline:
         *,
         session_id: str,
         policy: IngestionPolicy,
+        batch_id: Optional[str] = None,
     ) -> IngestionBatch:
         """Allocate the aggregate that the worker owns through persistence."""
         if not session_id:
@@ -224,6 +225,7 @@ class IngestionPipeline:
             messages=messages,
             session_text=session_text,
             policy=policy,
+            batch_id=batch_id,
         )
 
     async def process(self, batch: IngestionBatch) -> None:

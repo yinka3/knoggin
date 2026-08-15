@@ -278,6 +278,44 @@ class ProjectManager:
             meta.pop(private_field, None)
         return meta
 
+    async def get_episode_window_size(self, project_id: str) -> int:
+        """Return the one project-owned episode window setting."""
+
+        row = await self.pg.fetch_one(
+            """
+            SELECT episode_window_size
+            FROM public.projects
+            WHERE user_name = %s AND project_id = %s
+            """,
+            (self.user_name, project_id),
+        )
+        if row is None:
+            raise ValueError("Episode settings require an existing project")
+        return int(row["episode_window_size"])
+
+    async def update_episode_window_size(
+        self, project_id: str, episode_window_size: int
+    ) -> int:
+        """Persist and immediately apply a project's episode window size."""
+
+        if not 8 <= episode_window_size <= 72:
+            raise ValueError("episode_window_size must be between 8 and 72")
+        row = await self.pg.fetch_one(
+            """
+            UPDATE public.projects
+            SET episode_window_size = %s, updated_at = now()
+            WHERE user_name = %s AND project_id = %s
+            RETURNING episode_window_size
+            """,
+            (episode_window_size, self.user_name, project_id),
+        )
+        if row is None:
+            raise ValueError("Episode settings require an existing project")
+        active = self.active_projects.get(project_id)
+        if active is not None and active.episode_job is not None:
+            active.episode_job.update_episode_window_size(episode_window_size)
+        return int(row["episode_window_size"])
+
     def validate_domain_config(self, candidate: DomainCandidate) -> DomainValidation:
         """Validate a complete candidate without touching project state."""
 
@@ -432,6 +470,102 @@ class ProjectManager:
             {"user_name": self.user_name, "project_id": project_id},
         )
         return [row["session_id"] for row in rows]
+
+    async def get_episode_session_participation(self, project_id: str) -> List[dict]:
+        """List the sessions currently allowed to feed future episode windows."""
+
+        rows = await self.pg.fetch_all(
+            """
+            SELECT session_id, episode_participation_enabled,
+                   episode_participation_after_message_id
+            FROM public.sessions
+            WHERE user_name = %(user_name)s
+              AND project_id = %(project_id)s
+              AND status <> 'deleted'
+            ORDER BY created_at ASC
+            """,
+            {"user_name": self.user_name, "project_id": project_id},
+        )
+        return [
+            {
+                "session_id": str(row["session_id"]),
+                "enabled": bool(row["episode_participation_enabled"]),
+                "after_message_id": int(
+                    row["episode_participation_after_message_id"]
+                ),
+            }
+            for row in rows
+        ]
+
+    async def set_episode_participating_sessions(
+        self, project_id: str, session_ids: List[str]
+    ) -> List[dict]:
+        """Select exactly which project sessions feed future episode windows.
+
+        A state transition records the current message frontier.  Therefore a
+        session enabled later contributes only messages made after that choice,
+        rather than reviving material intentionally excluded while disabled.
+        """
+
+        selected = {session_id for session_id in session_ids if session_id}
+        async with self.pg.transaction() as cur:
+            await cur.execute(
+                """
+                SELECT session_id, episode_participation_enabled
+                FROM public.sessions
+                WHERE user_name = %s
+                  AND project_id = %s
+                  AND status <> 'deleted'
+                FOR UPDATE
+                """,
+                (self.user_name, project_id),
+            )
+            rows = await cur.fetchall()
+            available = {str(row["session_id"]) for row in rows}
+            unknown = selected.difference(available)
+            if unknown:
+                raise ValueError(
+                    "Episode participation includes sessions outside this project: "
+                    + ", ".join(sorted(unknown))
+                )
+            for row in rows:
+                session_id = str(row["session_id"])
+                enabled = session_id in selected
+                if enabled == bool(row["episode_participation_enabled"]):
+                    continue
+                await cur.execute(
+                    """
+                    UPDATE public.sessions
+                    SET episode_participation_enabled = %s,
+                        episode_participation_after_message_id = COALESCE(
+                            (
+                                SELECT MAX(message_id)
+                                FROM public.messages
+                                WHERE user_name = %s
+                                  AND project_id = %s
+                                  AND session_id = %s
+                            ),
+                            0
+                        )
+                    WHERE user_name = %s
+                      AND project_id = %s
+                      AND session_id = %s
+                    """,
+                    (
+                        enabled,
+                        self.user_name,
+                        project_id,
+                        session_id,
+                        self.user_name,
+                        project_id,
+                        session_id,
+                    ),
+                )
+
+        active = self.active_projects.get(project_id)
+        if active is not None:
+            await active.scheduler.record_activity()
+        return await self.get_episode_session_participation(project_id)
 
     async def add_session(self, project_id: str, session_id: str) -> None:
         """Record project/session membership when a caller manages a session row."""
@@ -1216,10 +1350,9 @@ class ProjectManager:
         return EpisodeJob(
             knowledge_store=self.resources.knowledge_store,
             settings=jobs_cfg.episode,
-            ingestion_settings=self.dev_settings.ingestion,
             llm=self.resources.llm_service,
             embedding_service=self.resources.embedding,
-            session_ids_provider=lambda: self.get_session_ids(project_id),
+            episode_window_size_provider=lambda: self.get_episode_window_size(project_id),
         )
 
     def _register_background_jobs(
@@ -1268,18 +1401,8 @@ class ProjectManager:
             config_mgr.subscribe(
                 lambda config: episode_job.update_settings(
                     config,
-                    self.dev_settings.ingestion,
                 ),
                 "developer_settings.jobs.episode",
-            )
-        )
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                lambda config: episode_job.update_settings(
-                    self.dev_settings.jobs.episode,
-                    config,
-                ),
-                "developer_settings.ingestion",
             )
         )
 

@@ -28,6 +28,18 @@ MESSAGE_SQL_PARAMS = (
     7,
     "{}",
     123456,
+    "sealed",
+    None,
+    None,
+    1,
+    None,
+    None,
+    "excluded",
+    None,
+    None,
+    None,
+    False,
+    None,
 )
 
 MERGE_RELATIONSHIP_PROJECTION_FIELDS = {

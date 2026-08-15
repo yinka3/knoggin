@@ -490,6 +490,16 @@ class FakeKnowledgeStore:
         self.saved_message_logs.append(messages)
         return True
 
+    async def create_editable_user_message(self, message, *, edit_window_seconds):
+        row = {
+            **message,
+            "lifecycle_state": "editable",
+            "ingestion_state": "waiting_for_seal",
+            "episode_eligible": False,
+            "edit_window_seconds": edit_window_seconds,
+        }
+        self.saved_message_logs.append([row])
+
     async def save_assistant_message_with_source_refs(self, message, candidates):
         self.saved_message_logs.append([message])
         return list(candidates)
@@ -739,6 +749,8 @@ class FakePostgresClient:
                     for row in rows
                     if row.get("session_id") == params.get("session_id")
                 ]
+            if "status = 'open'" in normalized:
+                rows = [row for row in rows if row.get("status", "open") == "open"]
             return rows[:1] if "limit 1" in normalized else rows
 
         if "from public.messages" in normalized:
@@ -852,6 +864,8 @@ class FakePostgresClient:
                 )
             if "last_active_at = now()" in normalized:
                 row["last_active_at"] = self._now()
+            if "status = 'closed'" in normalized:
+                row["status"] = "closed"
             for field in ("model", "agent_id", "enabled_tools"):
                 if field in params:
                     value = params[field]
@@ -1090,7 +1104,12 @@ class FakeConfigValue:
                     "Limits",
                     (),
                     {"conversation_context_turns": conversation_context_turns},
-                )()
+                )(),
+                "ingestion": type(
+                    "Ingestion",
+                    (),
+                    {"message_edit_window_seconds": 600},
+                )(),
             },
         )()
 

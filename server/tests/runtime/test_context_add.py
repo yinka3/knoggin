@@ -112,7 +112,7 @@ async def test_conversation_history_can_exclude_the_current_first_message():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_persists_maps_enqueues_and_signals_consumer(context):
+async def test_context_add_persists_editable_turn_maps_and_signals_consumer(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
@@ -133,6 +133,10 @@ async def test_context_add_persists_maps_enqueues_and_signals_consumer(context):
                 "timestamp": timestamp.timestamp() * 1000,
                 "metadata": {},
                 "user_msg_id": 1,
+                "lifecycle_state": "editable",
+                "ingestion_state": "waiting_for_seal",
+                "episode_eligible": False,
+                "edit_window_seconds": 600,
             }
         ]
     ]
@@ -140,7 +144,6 @@ async def test_context_add_persists_maps_enqueues_and_signals_consumer(context):
     conv_key = RedisKeys.conversation("ada", "session-1")
     recent_key = RedisKeys.recent_conversation("ada", "session-1")
     content_key = RedisKeys.message_content("ada", "session-1")
-    buffer_key = RedisKeys.buffer("ada", "session-1")
     project_heartbeat_key = RedisKeys.project_heartbeat_counter("ada", "project-1")
 
     assert json.loads(resources.redis.hashes[conv_key]["1"])["content"] == "hello world"
@@ -155,13 +158,7 @@ async def test_context_add_persists_maps_enqueues_and_signals_consumer(context):
         "role": "user",
     }
 
-    buffer_payload = json.loads(resources.redis.lists[buffer_key][0])
-    assert buffer_payload == {
-        "id": 1,
-        "message": "hello world",
-        "timestamp": timestamp.isoformat(),
-        "role": "user",
-    }
+    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
     assert await resources.redis.get(project_heartbeat_key) == "1"
     assert resources.redis.expirations
 
@@ -255,29 +252,29 @@ async def test_context_add_releases_dedup_claim_after_failure(context, monkeypat
     assert retried.id == 2
     assert ctx.consumer.signaled == 1
     assert ctx.project.scheduler.activity_count == 1
-    assert len(resources.redis.lists[RedisKeys.buffer("ada", "session-1")]) == 1
+    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_keeps_durable_pending_claim_and_recovers_enqueue_failure(
+async def test_context_add_keeps_durable_pending_claim_and_recovers_signal_failure(
     context, monkeypatch
 ):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
-    original_rpush = resources.redis.rpush
+    original_incr = resources.redis.incr
     attempts = 0
 
-    async def fail_once(key, value):
+    async def fail_once(key):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise ConnectionError("temporary queue failure")
-        return await original_rpush(key, value)
+            raise ConnectionError("temporary signal failure")
+        return await original_incr(key)
 
-    monkeypatch.setattr(resources.redis, "rpush", fail_once)
+    monkeypatch.setattr(resources.redis, "incr", fail_once)
 
-    with pytest.raises(ConnectionError, match="temporary queue failure"):
+    with pytest.raises(ConnectionError, match="temporary signal failure"):
         await ctx.add(Message(content="hello", timestamp=timestamp))
 
     dedup_keys = [
@@ -293,7 +290,7 @@ async def test_context_add_keeps_durable_pending_claim_and_recovers_enqueue_fail
 
     assert retried.id == 1
     assert await resources.redis.get(dedup_key) == "accepted:1"
-    assert len(resources.redis.lists[RedisKeys.buffer("ada", "session-1")]) == 1
+    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
     assert ctx.consumer.signaled == 1
     assert [
         batch[0]["id"] for batch in resources.knowledge_store.saved_message_logs
@@ -320,7 +317,7 @@ async def test_context_add_keeps_claim_after_message_is_queued(context, monkeypa
     retried = await ctx.add(Message(content="hello", timestamp=timestamp))
 
     assert retried.id == 1
-    assert len(resources.redis.lists[RedisKeys.buffer("ada", "session-1")]) == 1
+    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
 
 
 @pytest.mark.runtime
@@ -346,10 +343,14 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
                 "user_name": "ada",
                 "session_id": "session-1",
                 "project_id": "project-1",
-                "timestamp": timestamp.timestamp() * 1000,
-                "metadata": {},
-                "user_msg_id": None,
-            }
+                    "timestamp": timestamp.timestamp() * 1000,
+                    "metadata": {},
+                    "user_msg_id": None,
+                    "lifecycle_state": "sealed",
+                    "sealed_at_ms": int(timestamp.timestamp() * 1000),
+                    "ingestion_state": "excluded",
+                    "episode_eligible": True,
+                }
         ]
     ]
 
@@ -383,10 +384,14 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
                 "user_name": "ada",
                 "session_id": "session-1",
                 "project_id": "project-1",
-                "timestamp": timestamp.timestamp() * 1000,
-                "metadata": {},
-                "user_msg_id": None,
-            },
+                    "timestamp": timestamp.timestamp() * 1000,
+                    "metadata": {},
+                    "user_msg_id": None,
+                    "lifecycle_state": "sealed",
+                    "sealed_at_ms": int(timestamp.timestamp() * 1000),
+                    "ingestion_state": "excluded",
+                    "episode_eligible": True,
+                },
             [candidate],
         )
     ]
@@ -697,3 +702,94 @@ async def test_cancel_active_agent_run_keeps_only_the_durable_user_turn(context)
         "queued_message_ids": [],
         "queue_paused": True,
     }
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_session_shutdown_cancels_active_run_and_prevents_queued_run(context):
+    ctx, resources = context
+    first_started = asyncio.Event()
+    never_finish = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "first":
+            first_started.set()
+            await never_finish.wait()
+        yield _response_event(f"answer to {kwargs['user_query']}")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    first = asyncio.create_task(
+        _collect_turn(ctx, Message(content="first"), orchestrator)
+    )
+    await first_started.wait()
+    second = asyncio.create_task(
+        _collect_turn(ctx, Message(content="second"), orchestrator)
+    )
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert ctx.agent_run_snapshot()["queued_message_ids"] == [1, 2]
+
+    await ctx.shutdown()
+
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    second_events = await second
+
+    assert [call["user_query"] for call in orchestrator.calls] == ["first"]
+    assert second_events == [
+        {
+            "event": "error",
+            "data": {
+                "message": "The response could not be completed or saved. Please try again."
+            },
+        }
+    ]
+    assert [batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs] == [
+        "user",
+        "user",
+    ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_cancelling_one_session_run_does_not_cancel_another(context):
+    ctx, _ = context
+    other_resources = FakeResources()
+    other = Session("ada", ["General"], other_resources)
+    other.session_id = "session-2"
+    other.project_id = "project-2"
+    other.project = make_project_state("project-2", redis=other_resources.redis)
+    other.consumer = FakeConsumer()
+
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_second = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["session_id"] == "session-1":
+            first_started.set()
+            await asyncio.Event().wait()
+        second_started.set()
+        await release_second.wait()
+        yield _response_event("second session answer")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    first = asyncio.create_task(
+        _collect_turn(ctx, Message(content="first"), orchestrator)
+    )
+    second = asyncio.create_task(
+        _collect_turn(other, Message(content="second"), orchestrator)
+    )
+    await first_started.wait()
+    await second_started.wait()
+
+    assert await ctx.cancel_active_agent_run() is True
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    release_second.set()
+    second_events = await second
+
+    assert second_events[-1]["data"]["content"] == "second session answer"
+    assert other.agent_run_snapshot()["state"] == "completed"

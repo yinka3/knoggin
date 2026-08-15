@@ -409,7 +409,7 @@ class Session:
                 user_msg_id=msg.id,
                 metadata=msg.metadata,
             )
-            await self._enqueue_user_message(msg)
+            await self._signal_user_message()
             await self.redis_client.set(
                 dedup_key,
                 f"accepted:{msg.id}",
@@ -507,24 +507,26 @@ class Session:
         await pipe.execute()
 
     async def _persist_user_turn(self, msg: Message):
-        """Write the canonical user message before acknowledging or enqueueing."""
-        await self.knowledge_store.save_message_logs(
-            [
-                {
-                    "id": msg.id,
-                    "content": msg.content.strip(),
-                    "role": "user",
-                    "user_name": self.user_name,
-                    "session_id": self.session_id,
-                    "project_id": self.project_id,
-                    "timestamp": msg.timestamp.timestamp() * 1000,
-                    "metadata": msg.metadata,
-                    "user_msg_id": msg.id,
-                }
-            ]
+        """Durably create an editable canonical user message and revision one."""
+        await self.knowledge_store.create_editable_user_message(
+            {
+                "id": msg.id,
+                "content": msg.content.strip(),
+                "role": "user",
+                "user_name": self.user_name,
+                "session_id": self.session_id,
+                "project_id": self.project_id,
+                "timestamp": msg.timestamp.timestamp() * 1000,
+                "metadata": msg.metadata,
+                "user_msg_id": msg.id,
+            },
+            edit_window_seconds=(
+                self.current_config.developer_settings.ingestion.message_edit_window_seconds
+            ),
         )
 
-    async def _enqueue_user_message(self, msg: Message):
+    async def _signal_user_message(self):
+        """Refresh operational counters; Postgres owns the ingestion queue."""
         await self.redis_client.incr(
             RedisKeys.heartbeat_counter(self.user_name, self.session_id)
         )
@@ -533,18 +535,6 @@ class Session:
         await self.redis_client.incr(
             RedisKeys.project_heartbeat_counter(self.user_name, self.project_id)
         )
-
-        buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
-        payload = json.dumps(
-            {
-                "id": msg.id,
-                "message": msg.content.strip(),
-                "timestamp": msg.timestamp.isoformat(),
-                "role": "user",
-            }
-        )
-        await self.redis_client.lrem(buffer_key, 0, payload)
-        await self.redis_client.rpush(buffer_key, payload)
 
     async def add_assistant_turn(
         self,
@@ -654,6 +644,10 @@ class Session:
                         "timestamp": timestamp.timestamp() * 1000,
                         "metadata": metadata or {},
                         "user_msg_id": user_msg_id,
+                        "lifecycle_state": "sealed",
+                        "sealed_at_ms": int(timestamp.timestamp() * 1000),
+                        "ingestion_state": "excluded",
+                        "episode_eligible": False,
                     }
                 ]
 

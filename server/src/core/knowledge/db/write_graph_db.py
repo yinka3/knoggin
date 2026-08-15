@@ -203,13 +203,6 @@ async def prepare_ingestion_batch_graph_writes(
         for entity_id in sorted(safe_entity_ids)
         for message_id in sorted(set(batch.entity_message_map.get(entity_id, [])))
     ]
-    eligible_messages = [
-        EpisodeEligibility(message_id=message_id)
-        for message_id in sorted(
-            {int(message_id) for message_id in batch.trace.message_ids}
-        )
-    ]
-
     batch.set_graph_write_buffers(
         graph_work_unit=graph_work_unit,
         safe_entity_ids=safe_entity_ids,
@@ -217,7 +210,9 @@ async def prepare_ingestion_batch_graph_writes(
         entity_writes=entity_writes,
         relationship_writes=relationship_writes,
         message_entity_refs=message_entity_refs,
-        eligible_messages=eligible_messages,
+        # Eligibility is a canonical message lifecycle transition, not a
+        # side-effect of whether entity extraction happened to run.
+        eligible_messages=(),
         skipped_relationships=skipped_relationships,
         zombie_entity_ids=zombie_entity_ids,
         dirty_entity_ids=set(safe_entity_ids),

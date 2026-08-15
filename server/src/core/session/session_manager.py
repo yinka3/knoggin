@@ -40,6 +40,9 @@ class SessionManager:
         self._project_runtime_contexts: Dict[
             str, AsyncContextManager[ProjectState]
         ] = {}
+        # A durable close must also hide an in-memory context immediately; the
+        # database filter covers this again after an engine restart.
+        self._closed_session_ids: set[str] = set()
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -162,6 +165,7 @@ class SessionManager:
                         "model": model,
                         "agent_id": agent_id,
                         "enabled_tools": enabled_tools,
+                        "status": "open",
                         "created_at": get_now_iso(),
                         "last_active": get_now_iso(),
                     },
@@ -188,7 +192,7 @@ class SessionManager:
             if self._closed:
                 raise RuntimeError("SessionManager is shutting down")
             active_session = self.active_sessions.get(session_id)
-            if active_session is not None:
+            if active_session is not None and session_id not in self._closed_session_ids:
                 return active_session
             if session_id not in self._session_locks:
                 self._session_locks[session_id] = asyncio.Lock()
@@ -199,7 +203,10 @@ class SessionManager:
                 if self._closed:
                     raise RuntimeError("SessionManager is shutting down")
                 active_session = self.active_sessions.get(session_id)
-                if active_session is not None:
+                if (
+                    active_session is not None
+                    and session_id not in self._closed_session_ids
+                ):
                     return active_session
 
             query = """
@@ -207,6 +214,7 @@ class SessionManager:
                 FROM public.sessions
                 WHERE user_name = %(user_name)s
                   AND session_id = %(session_id)s
+                  AND status = 'open'
             """
             rows = await self.pg.fetch_all(
                 query,
@@ -251,6 +259,7 @@ class SessionManager:
                 )
                 redis_metadata["project_id"] = project_id
                 redis_metadata["model"] = model
+                redis_metadata["status"] = "open"
                 redis_metadata["last_active"] = get_now_iso()
                 await self._write_redis_session_metadata(session_id, redis_metadata)
 
@@ -322,15 +331,37 @@ class SessionManager:
             ) from failures[0]
 
     async def close_session(self, session_id: str) -> bool:
-        deactivated = await self.deactivate_runtime_session(session_id)
-        if not deactivated:
-            return False
+        """Durably close a session, then release any live runtime it owns."""
 
-        update_query = "UPDATE public.sessions SET last_active_at = now() WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
-        await self.pg.execute(update_query, {"user_name": self.user_name, "session_id": session_id})
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("SessionManager is shutting down")
+            lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+
+        async with lock:
+            update_query = """
+                UPDATE public.sessions
+                SET status = 'closed', last_active_at = now()
+                WHERE user_name = %(user_name)s
+                  AND session_id = %(session_id)s
+                  AND status = 'open'
+            """
+            updated = await self.pg.execute(
+                update_query,
+                {"user_name": self.user_name, "session_id": session_id},
+            )
+            if updated != 1:
+                return False
+
+            async with self._lock:
+                self._closed_session_ids.add(session_id)
+
+            await self.deactivate_runtime_session(session_id)
+
         metadata = await self._read_redis_session_metadata(session_id)
         if metadata is not None:
             metadata["last_active"] = get_now_iso()
+            metadata["status"] = "closed"
             await self._write_redis_session_metadata(session_id, metadata)
 
         logger.info(f"Closed session: {session_id}")

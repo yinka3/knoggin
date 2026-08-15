@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS public.projects (
     topic_config JSONB NOT NULL,
     domain_config JSONB NOT NULL
         CHECK (jsonb_typeof(domain_config) = 'object'),
+    episode_window_size INTEGER NOT NULL DEFAULT 24
+        CHECK (episode_window_size BETWEEN 8 AND 72),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     archived_at TIMESTAMPTZ,
@@ -26,6 +28,10 @@ CREATE TABLE IF NOT EXISTS public.projects (
 ALTER TABLE public.projects
 ADD COLUMN IF NOT EXISTS domain_config JSONB NOT NULL
     CHECK (jsonb_typeof(domain_config) = 'object');
+
+ALTER TABLE public.projects
+ADD COLUMN IF NOT EXISTS episode_window_size INTEGER NOT NULL DEFAULT 24
+    CHECK (episode_window_size BETWEEN 8 AND 72);
 
 ALTER TABLE public.projects
 ALTER COLUMN domain_config DROP DEFAULT;
@@ -107,6 +113,11 @@ CREATE TABLE IF NOT EXISTS public.sessions (
     document_focus JSONB,
     status TEXT NOT NULL DEFAULT 'open'
         CHECK (status IN ('open', 'closed', 'deleted')),
+    -- Participation controls only future project episode windows.  The
+    -- message-ID boundary is moved whenever the user changes this setting.
+    episode_participation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    episode_participation_after_message_id BIGINT NOT NULL DEFAULT 0
+        CHECK (episode_participation_after_message_id >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at TIMESTAMPTZ,
@@ -115,6 +126,11 @@ CREATE TABLE IF NOT EXISTS public.sessions (
 
 CREATE INDEX IF NOT EXISTS sessions_project_idx
 ON public.sessions(user_name, project_id, created_at);
+
+ALTER TABLE public.sessions
+ADD COLUMN IF NOT EXISTS episode_participation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+ADD COLUMN IF NOT EXISTS episode_participation_after_message_id BIGINT NOT NULL DEFAULT 0
+    CHECK (episode_participation_after_message_id >= 0);
 
 -- ==============================================================================
 -- KNOWLEDGE GRAPH
@@ -140,6 +156,18 @@ CREATE TABLE IF NOT EXISTS public.messages (
     user_msg_id BIGINT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     timestamp_ms BIGINT,
+    lifecycle_state TEXT NOT NULL DEFAULT 'sealed'
+        CHECK (lifecycle_state IN ('editable', 'sealed', 'superseded')),
+    editable_until_ms BIGINT,
+    sealed_at_ms BIGINT,
+    selected_revision INTEGER NOT NULL DEFAULT 1,
+    replaces_message_id BIGINT,
+    superseded_at_ms BIGINT,
+    ingestion_state TEXT NOT NULL DEFAULT 'excluded'
+        CHECK (ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'processed', 'blocked', 'excluded')),
+    ingestion_not_before_ms BIGINT,
+    ingestion_claim_id TEXT,
+    ingestion_claimed_at_ms BIGINT,
     episode_eligible BOOLEAN NOT NULL DEFAULT FALSE,
     episode_type TEXT,
     PRIMARY KEY (user_name, session_id, message_id),
@@ -155,6 +183,23 @@ CREATE TABLE IF NOT EXISTS public.messages (
 
 CREATE INDEX IF NOT EXISTS messages_project_idx
 ON public.messages(user_name, project_id, message_id);
+
+CREATE INDEX IF NOT EXISTS messages_ingestion_queue_idx
+ON public.messages(user_name, session_id, message_id)
+WHERE role = 'user' AND ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'blocked');
+
+CREATE TABLE IF NOT EXISTS public.message_revisions (
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    message_id BIGINT NOT NULL,
+    revision INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (user_name, session_id, message_id, revision),
+    FOREIGN KEY (user_name, session_id, message_id, project_id)
+        REFERENCES public.messages(user_name, session_id, message_id, project_id)
+        ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS public.entities (
     entity_id BIGINT PRIMARY KEY,
@@ -478,14 +523,10 @@ CREATE TABLE IF NOT EXISTS public.episodes (
     embedding vector(1024),
     generator_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     version_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+    user_modified BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT episodes_scope_key UNIQUE (episode_id, project_id, session_id),
-    CONSTRAINT episodes_id_project_key UNIQUE (episode_id, project_id),
-    CONSTRAINT episodes_session_project_fk
-        FOREIGN KEY (session_id, project_id)
-        REFERENCES public.sessions(session_id, project_id)
-        ON DELETE CASCADE
+    CONSTRAINT episodes_id_project_key UNIQUE (episode_id, project_id)
 );
 
 ALTER TABLE public.relationships
@@ -580,8 +621,8 @@ ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMPTZ,
 ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ,
 ADD COLUMN IF NOT EXISTS version_history JSONB NOT NULL DEFAULT '[]'::jsonb;
 
-CREATE INDEX IF NOT EXISTS episodes_session_updated_idx
-ON public.episodes(project_id, session_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS episodes_project_updated_idx
+ON public.episodes(project_id, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS episodes_embedding_idx
 ON public.episodes USING hnsw (embedding vector_cosine_ops)
@@ -603,8 +644,8 @@ CREATE TABLE IF NOT EXISTS public.episode_messages (
     PRIMARY KEY (episode_id, message_id),
     UNIQUE (episode_id, message_position),
     CONSTRAINT episode_messages_episode_scope_fk
-        FOREIGN KEY (episode_id, project_id, session_id)
-        REFERENCES public.episodes(episode_id, project_id, session_id)
+        FOREIGN KEY (episode_id, project_id)
+        REFERENCES public.episodes(episode_id, project_id)
         ON DELETE CASCADE,
     CONSTRAINT episode_messages_message_scope_fk
         FOREIGN KEY (message_id, project_id, session_id)
@@ -2226,3 +2267,37 @@ CREATE TRIGGER episode_entities_focus_limit_trigger
 AFTER INSERT OR UPDATE OF episode_id, is_focus_entity
 ON public.episode_entities
 FOR EACH ROW EXECUTE FUNCTION public.enforce_episode_focus_entity_limit();
+
+-- Upgrade the unreleased session-owned shape without losing provenance:
+-- source rows already carry the session that produced each message.
+ALTER TABLE public.episodes
+ADD COLUMN IF NOT EXISTS user_modified BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE public.episode_messages
+DROP CONSTRAINT IF EXISTS episode_messages_episode_scope_fk;
+
+ALTER TABLE public.episodes
+DROP CONSTRAINT IF EXISTS episodes_session_project_fk,
+DROP CONSTRAINT IF EXISTS episodes_scope_key;
+
+ALTER TABLE public.episodes
+DROP COLUMN IF EXISTS session_id;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'episode_messages_episode_project_fk'
+          AND conrelid = 'public.episode_messages'::regclass
+    ) THEN
+        ALTER TABLE public.episode_messages
+        ADD CONSTRAINT episode_messages_episode_project_fk
+        FOREIGN KEY (episode_id, project_id)
+        REFERENCES public.episodes(episode_id, project_id)
+        ON DELETE CASCADE;
+    END IF;
+END $$;
+
+DROP INDEX IF EXISTS public.episodes_session_updated_idx;
+CREATE INDEX IF NOT EXISTS episodes_project_updated_idx
+ON public.episodes(project_id, updated_at DESC);

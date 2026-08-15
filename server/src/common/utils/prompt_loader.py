@@ -35,12 +35,12 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
     "generate_episode": PromptDefinition(
         "prompts/episode.md",
         "Generate Episode",
-        frozenset({"user_name"}),
+        frozenset({"user_name", "prompt_narrative_chars", "max_narrative_chars"}),
     ),
-    "regenerate_episode_consolidation": PromptDefinition(
+    "repair_episode_narrative": PromptDefinition(
         "prompts/episode.md",
-        "Regenerate Consolidated Episode",
-        frozenset({"user_name"}),
+        "Repair Episode Narrative",
+        frozenset({"user_name", "max_narrative_chars"}),
     ),
 }
 

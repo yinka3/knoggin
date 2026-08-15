@@ -177,11 +177,10 @@ class GraphTools:
                 for eid in candidate_ids:
                     profile = await self.entities.get_profile(eid)
                     canonical = profile.canonical_name if profile else str(eid)
-                    episodes = await self.knowledge_store.get_episodes_for_entity(
-                        eid,
+                    episodes = await self.knowledge_store.get_project_episodes_for_entities(
+                        [eid],
                         user_name=self.user_name,
                         project_id=self.project_id,
-                        session_id=self.session_id,
                         limit=self._episode_retrieval_limit(),
                     )
 
@@ -210,11 +209,10 @@ class GraphTools:
         embedding_service = getattr(self, "embedding_service", None)
         if embedding_service is not None:
             query_embedding = await embedding_service.encode_single(query)
-            semantic_matches = await self.knowledge_store.search_episodes_by_embedding(
+            semantic_matches = await self.knowledge_store.search_project_episodes_by_embedding(
                 query_embedding,
                 user_name=self.user_name,
                 project_id=self.project_id,
-                session_id=self.session_id,
                 limit=self._episode_retrieval_limit(),
             )
             if semantic_matches:
@@ -246,11 +244,10 @@ class GraphTools:
                     ],
                 }
 
-        episodes = await self.knowledge_store.search_episodes(
+        episodes = await self.knowledge_store.search_project_episodes(
             query,
             user_name=self.user_name,
             project_id=self.project_id,
-            session_id=self.session_id,
             limit=self._episode_retrieval_limit(),
         )
         if episodes:
@@ -289,20 +286,18 @@ class GraphTools:
     async def read_episode(self, episode_id: str) -> List[Dict]:
         """Expand one retrieved episode into all of its source messages."""
 
-        episode = await self.knowledge_store.get_episode(
+        episode = await self.knowledge_store.get_project_episode(
             episode_id,
             user_name=self.user_name,
             project_id=self.project_id,
-            session_id=self.session_id,
         )
         if episode is None:
             return []
         expansion_started_at = perf_counter()
-        sources = await self.knowledge_store.get_episode_source_messages(
+        sources = await self.knowledge_store.get_project_episode_source_messages(
             episode.episode_id,
             user_name=self.user_name,
             project_id=self.project_id,
-            session_id=self.session_id,
         )
         await emit(
             self.session_id,
@@ -328,10 +323,9 @@ class GraphTools:
             raise ValueError("read_recent_episodes limit must be positive")
         effective_limit = min(limit, self._episode_retrieval_limit())
         retrieval_started_at = perf_counter()
-        episodes = await self.knowledge_store.get_recent_episodes(
+        episodes = await self.knowledge_store.get_recent_project_episodes(
             user_name=self.user_name,
             project_id=self.project_id,
-            session_id=self.session_id,
             limit=effective_limit,
         )
         retrieval_metrics: Dict[str, int | float] = {}
@@ -371,11 +365,10 @@ class GraphTools:
         returned_evidence_count = 0
         for episode in episodes or []:
             expansion_started_at = perf_counter()
-            sources = await self.knowledge_store.get_episode_source_messages(
+            sources = await self.knowledge_store.get_project_episode_source_messages(
                 episode.episode_id,
                 user_name=self.user_name,
                 project_id=self.project_id,
-                session_id=self.session_id,
             )
             expansion_latency_ms += (perf_counter() - expansion_started_at) * 1000
             expanded_source_message_count += len(sources)
@@ -387,7 +380,7 @@ class GraphTools:
             returned_evidence_count += len(evidence)
             source_reference_reader = getattr(
                 self.knowledge_store,
-                "get_episode_source_refs",
+                "get_project_episode_source_refs",
                 None,
             )
             sources_consulted = (
@@ -395,7 +388,6 @@ class GraphTools:
                     episode.episode_id,
                     user_name=self.user_name,
                     project_id=self.project_id,
-                    session_id=self.session_id,
                 )
                 if callable(source_reference_reader)
                 else []

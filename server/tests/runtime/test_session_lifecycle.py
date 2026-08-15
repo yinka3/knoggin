@@ -76,6 +76,7 @@ async def test_create_session_stores_metadata_and_active_context(
     assert metadata["model"] == "test-model"
     assert metadata["agent_id"] == "agent-1"
     assert metadata["enabled_tools"] == ["search"]
+    assert metadata["status"] == "open"
     assert "topics_config" not in metadata
 
 
@@ -162,6 +163,7 @@ async def test_resume_session_uses_persisted_project_and_updates_last_active(
         await resources.redis.hget(RedisKeys.sessions("ada"), "session-1")
     )
     assert metadata["last_active"]
+    assert metadata["status"] == "open"
 
 
 @pytest.mark.runtime
@@ -253,6 +255,13 @@ async def test_close_session_releases_project_and_shuts_context_down(
 ):
     manager, resources, project_manager, active_sessions = session_manager
     ctx = FakeSession(session_id="session-1", project_id="project-1")
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "model": None,
+        "status": "open",
+    }
     await activate_runtime_session(manager, project_manager, ctx)
     await resources.redis.hset(
         RedisKeys.sessions("ada"),
@@ -278,10 +287,38 @@ async def test_close_session_releases_project_and_shuts_context_down(
     assert ctx.shutdown_count == 1
     assert project_manager.release_calls == ["project-1"]
     assert order == ["shutdown", "release_project"]
+    assert resources.postgres.sessions["session-1"]["status"] == "closed"
     metadata = json.loads(
         await resources.redis.hget(RedisKeys.sessions("ada"), "session-1")
     )
     assert metadata["last_active"]
+    assert metadata["status"] == "closed"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_close_unloaded_session_is_durable_and_prevents_resume(
+    monkeypatch, session_manager
+):
+    manager, resources, project_manager, active_sessions = session_manager
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "model": "resume-model",
+        "status": "open",
+    }
+
+    async def should_not_create(**_kwargs):
+        raise AssertionError("closed sessions must not be resumed")
+
+    monkeypatch.setattr(Session, "create", should_not_create)
+
+    assert await manager.close_session("session-1") is True
+    assert resources.postgres.sessions["session-1"]["status"] == "closed"
+    assert await manager.get_or_resume_session("session-1") is None
+    assert project_manager.acquire_calls == []
+    assert active_sessions == {}
 
 
 @pytest.mark.runtime
