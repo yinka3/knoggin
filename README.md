@@ -1,109 +1,116 @@
 # Knoggin
 
-Knoggin is a self-hosted memory engine for AI agents and personal tools. It turns conversations, files, and observations into a source-grounded knowledge graph — entities, relationships, and facts — that agents can query without losing the trail back to original evidence.
+Knoggin is a self-hosted, source-grounded memory engine for AI agents and personal tools. It turns conversations and files into a project-scoped knowledge graph of entities, relationships, facts, and evidence—so an agent can retrieve useful context without losing the path back to the original source.
 
-You bring a topic configuration that reflects your domain: the entity types that matter, the aliases people use, the relationships worth tracking, and how strict matching should be. Knoggin uses that configuration to decide what to extract, how to classify it, and when to exercise caution. Think of it less as "the model figures everything out" and more as a tunable library index over evidence.
+It is designed around a domain configuration supplied per project. Rather than inferring a universal ontology, Knoggin uses the entity types, aliases, relationships, topics, and matching rules that matter in your domain.
 
-> Knoggin is an active personal project and still early. The core is being built and tested, and the design will keep changing as I learn what holds up in real use.
+> Knoggin is an early personal project. The engine runtime is under active development and may change.
 
-## Features
+## What it does
 
-- **Source-grounded memory** — extracted knowledge is an index over evidence, not unquestionable truth. Every fact traces back to the message or file that produced it.
-- **Project-scoped** — memory, sessions, entities, and jobs are all scoped to a project boundary.
-- **Domain-shaped extraction** — topic configuration controls entity labels, aliases, active topics, and matching thresholds; `PART_OF` hierarchy edges live in the knowledge graph.
-- **Hybrid NER pipeline** — combines known-alias matching, GLiNER, and LLM extraction with confidence filtering and deduplication.
-- **Graph-guided retrieval** — the knowledge graph helps find related context instead of treating every memory as an isolated chunk.
-- **Background maintenance** — scheduled jobs handle profile refinement, entity merges, duplicate detection, dead-letter replay, and cleanup.
-- **Contradiction detection** — new facts are checked against existing facts using embedding similarity, NLI classification, and LLM judgment.
-- **Agent tool suite** — tools for graph queries, memory search, entity lookup, document focus, web search, and topic management.
-
-## Topic Configuration
-
-Knoggin is not a universal ontology generator. It works best when the user provides a topic configuration that reflects the domain. A useful config tells the system:
-
-- Which entity types matter (people, tools, concepts, etc.)
-- Which names or aliases should resolve to the same entity
-- Which relationships are worth tracking
-- Which topics are currently active
-- How strict or forgiving entity matching should be
-- When hierarchy matters (e.g. project → milestone → task)
-
-These constraints keep the graph closer to a usable index than a pile of generated guesses.
+- Keeps memory **source-grounded**: facts and graph records retain links to the messages or documents that produced them.
+- Separates data by **project**: projects, sessions, documents, entities, jobs, and memory are scoped together.
+- Extracts and resolves entities with known aliases, GLiNER, optional LLM extraction, confidence filtering, and deduplication.
+- Uses graph-aware and hybrid retrieval to give agents related context, not just isolated chunks.
+- Ingests documents and supports focused retrieval over a selected document, folder upload, or subtree.
+- Runs background maintenance for episodic memory, profiles, merges, duplicate detection, dead-letter replay, and retention.
+- Checks potential contradictions with embedding similarity, NLI, and LLM judgment.
 
 ## Architecture
 
-The engine runs as two loops that share the same project memory:
-
-- The **conversation loop** answers the user by reading from tools, memory, files, and the graph.
-- The **learning loop** runs behind the scenes, turning new messages into entities, relationships, facts, and background work.
-
-Both loops are shaped by the project's topic configuration.
-
 ```mermaid
 flowchart LR
-    User["User message"]
-    Session["Session context<br/>project + topic config"]
+    Client["Embedding application"]
 
-    subgraph Conversation["Conversation loop"]
-        Agent["Agent orchestrator"]
-        Tools["Tools<br/>search, graph, files, memory"]
-        Reply["Assistant reply"]
+    subgraph Engine["Knoggin engine"]
+        Session["Projects, sessions, and agent runtime"]
+        Agent["Agent and tools"]
+        Ingest["Ingestion and extraction"]
+        Jobs["Background jobs"]
     end
 
-    subgraph Learning["Learning loop"]
-        Queue["Redis message buffer"]
-        Extract["Extract mentions<br/>known aliases, GLiNER, LLM"]
-        Resolve["Resolve entities<br/>topic-aware matching"]
-        Write["Write evidence graph<br/>messages, entities, facts, edges"]
-    end
+    Redis["Redis\nqueues and runtime state"]
+    Store["Postgres + Apache AGE\nevidence and graph"]
 
-    subgraph Maintenance["Background maintenance"]
-        Jobs["Scheduled jobs<br/>profiles, merges, topic evolution, cleanup, DLQ"]
-    end
-
-    Store["Postgres + Apache AGE<br/>source-grounded graph"]
-    Redis["Redis<br/>sessions, queues, config, working memory"]
-
-    User --> Session
+    Client --> Session
     Session --> Agent
-    Agent --> Tools
-    Tools --> Store
-    Tools --> Redis
-    Tools --> Reply
-
-    Session --> Queue
-    Queue --> Extract
-    Extract --> Resolve
-    Resolve --> Write
-    Write --> Store
-
-    Store --> Jobs
-    Redis --> Jobs
-    Jobs --> Store
-    Jobs --> Redis
+    Session --> Ingest
+    Agent --> Store
+    Ingest --> Store
+    Ingest --> Redis
+    Jobs <--> Store
+    Jobs <--> Redis
 ```
 
-The main runtime object is `ProjectState`, which holds the topic config, entity resolver, text pipeline, and job scheduler for a project. Active sessions get a `Session` context that points into that project state, so the agent and ingestion pipeline operate against the same view of memory.
+The engine lives in `server/` and intentionally does not prescribe an HTTP transport. An embedding application owns its own integration surface while Knoggin owns the durable memory, retrieval, and background processing runtime.
 
-## Project Structure
+## Quick start
 
+### Prerequisites
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/)
+- Docker and Docker Compose
+
+From the repository root, create local configuration and start the storage services:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d
+uv sync --package server
 ```
-server/src/
-  common/           Shared schemas, config, scoping, utilities
-  core/
-    agent/          Agent orchestrator, executor, reasoning loop, tool suite
-    ingestion/      NER pipeline, batch consumer, DLQ, profile jobs
-    knowledge/      Entity resolution, fact resolution, graph readers/writers,
-                    embeddings, merge service, document service
-    project/        ProjectState, ProjectManager
-    session/        Session context, lifecycle, onboarding
-    community/      Cross-project entity sharing
-  infrastructure/   Postgres, Redis, LLM client, knowledge store, job scheduler
+
+The first engine start downloads the embedding, reranking, NLI, spaCy, and GLiNER models. To download those before integrating the engine, run:
+
+```powershell
+./setup.sh --prefetch-models
 ```
 
-## Development Note
+On Windows, run `setup.sh` from Git Bash, WSL, or another Bash-compatible shell. Copying `.env.example` directly is sufficient for local Docker defaults.
 
-I use AI tools while building Knoggin, mostly for coding help and review passes. The project direction, tradeoffs, and final calls are mine.
+Stop the storage services when finished:
+
+```powershell
+docker compose down
+```
+
+This preserves the named Postgres volume. Use `docker compose down -v` only when you intend to remove local database data.
+
+## Configuration
+
+`.env.example` documents local runtime settings, including the database URL, model choices, resource profile, and document storage directory. Docker Compose starts Redis and a Postgres image configured with Apache AGE, pgvector, and the project schema.
+
+Knoggin writes application-level settings to `config/knoggin.yml`. This file is managed by the app; manual changes can be overwritten. The topic seed lives at `server/src/common/templates/topics.yaml`.
+
+For more predictable startup performance, set `KNOGGIN_RESOURCE_PROFILE` to `conservative`, `balanced` (default), or `performance`. Set `KNOGGIN_GPU=true` when a supported accelerator and matching runtime are available.
+
+## Development
+
+Run the server test suite:
+
+```powershell
+uv run --package server pytest server/tests
+```
+
+Lint the engine:
+
+```powershell
+uv run ruff check server/src server/tests
+```
+
+## Repository layout
+
+```text
+server/src/common/      Shared schemas, configuration, and utilities
+server/src/core/agent/  Agent orchestration, prompting, execution, and tools
+server/src/core/project/  Project state, domain config, and workspace services
+server/src/core/session/  Session lifecycle and runtime context
+server/src/core/ingestion/  Extraction, batching, episodes, and dead-letter work
+server/src/core/knowledge/  Entity resolution, documents, graph, and retrieval
+server/src/infrastructure/  Postgres, Redis, models, queues, and scheduling
+server/tests/            Unit, runtime, ingestion, storage, and integration tests
+docker/                 Local Postgres image and initialization
+```
 
 ## License
 
@@ -111,4 +118,4 @@ I use AI tools while building Knoggin, mostly for coding help and review passes.
 
 ## Contact
 
-Feedback is welcome: adedewe.a@northeastern.edu
+Feedback is welcome at adedewe.a@northeastern.edu.

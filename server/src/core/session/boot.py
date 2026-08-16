@@ -55,7 +55,7 @@ class SessionFactory:
         # Instantiate Session shell first
         ctx = Session(
             self.user_name,
-            list(project_state.topic_config.raw.keys()),
+            list(project_state.compiled_domain.active_topics),
             self.resources,
         )
         ctx.session_id = session_id

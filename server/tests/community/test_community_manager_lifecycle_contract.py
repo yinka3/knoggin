@@ -100,7 +100,6 @@ def make_resources(*, redis=None, llm_service=None):
 def make_project_state():
     return SimpleNamespace(
         project_id="project-1",
-        topic_config=SimpleNamespace(active_topics=["General"]),
         entities=SimpleNamespace(
             embedding_service=object(),
             project_id="project-1",

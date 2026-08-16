@@ -201,10 +201,10 @@ async def test_step_presents_maintenance_as_optional_when_tool_is_enabled(
     executor = make_executor(llm)
     executor.ctx.maintenance_candidates = [
         MaintenanceCandidate(
-            id="topic_evaluation:project-1",
-            kind="topic_evaluation",
-            reason="Project heartbeat reached 40 messages.",
-            suggested_tool="update_topics",
+            id="graph_merge_scan:project-1",
+            kind="graph_merge_scan",
+            reason="Merge queue has 2 candidate entities.",
+            suggested_tool="check_graph_health",
         )
     ]
     prompt_calls = []
@@ -225,7 +225,7 @@ async def test_step_presents_maintenance_as_optional_when_tool_is_enabled(
             model="model",
             reasoning="high",
             current_mode="Architect",
-            enabled_tools=["update_topics"],
+            enabled_tools=["check_graph_health"],
             documents_context="",
             document_focus_context="",
             directives="",
@@ -239,7 +239,7 @@ async def test_step_presents_maintenance_as_optional_when_tool_is_enabled(
     assert "Optional maintenance is available" in instruction
     assert "You may handle one candidate" in instruction
     assert "MUST" not in instruction
-    assert "`update_topics`" in instruction
+    assert "`check_graph_health`" in instruction
     assert events[0]["event"] == "tool_calls"
 
 
@@ -256,10 +256,10 @@ async def test_step_does_not_auto_add_disabled_maintenance_tool(monkeypatch):
     executor = make_executor(llm)
     executor.ctx.maintenance_candidates = [
         MaintenanceCandidate(
-            id="topic_evaluation:project-1",
-            kind="topic_evaluation",
-            reason="Project heartbeat reached 40 messages.",
-            suggested_tool="update_topics",
+            id="graph_merge_scan:project-1",
+            kind="graph_merge_scan",
+            reason="Merge queue has 2 candidate entities.",
+            suggested_tool="check_graph_health",
         )
     ]
     prompt_calls = []
@@ -291,7 +291,7 @@ async def test_step_does_not_auto_add_disabled_maintenance_tool(monkeypatch):
 
     tool_names = [schema["function"]["name"] for schema in llm.calls[0]["tools"]]
     assert "search_messages" in tool_names
-    assert "update_topics" not in tool_names
+    assert "check_graph_health" not in tool_names
     assert prompt_calls[0]["runtime_instructions"] == ""
 
 

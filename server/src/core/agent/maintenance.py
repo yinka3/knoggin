@@ -11,7 +11,6 @@ from core.agent.tools.registry import (
 from core.agent.types import MaintenanceCandidate
 from infrastructure.redis_client import RedisKeys
 
-TOPIC_EVALUATION_CANDIDATE = "topic_evaluation"
 GRAPH_MERGE_SCAN_CANDIDATE = "graph_merge_scan"
 DEFAULT_MAINTENANCE_MAX_ATTEMPTS = 3
 DEFAULT_MAINTENANCE_COOLDOWN_SECONDS = 3600
@@ -31,7 +30,6 @@ async def build_maintenance_candidates(
     user_name: str,
     project_id: str | None,
     enabled_tools: list[str] | None,
-    topic_settings: Any,
     max_attempts: int = DEFAULT_MAINTENANCE_MAX_ATTEMPTS,
 ) -> list[MaintenanceCandidate]:
     if not project_id:
@@ -39,33 +37,6 @@ async def build_maintenance_candidates(
 
     tools = active_tool_names(enabled_tools)
     candidates: list[MaintenanceCandidate] = []
-
-    if "update_topics" in tools and getattr(topic_settings, "enabled", False):
-        heartbeat_raw = await redis.get(
-            RedisKeys.project_heartbeat_counter(user_name, project_id)
-        )
-        heartbeat_count = _safe_int(heartbeat_raw)
-        interval = int(getattr(topic_settings, "interval_msgs", 0) or 0)
-        if interval > 0 and heartbeat_count >= interval:
-            candidate = await _candidate_if_available(
-                redis=redis,
-                user_name=user_name,
-                project_id=project_id,
-                kind=TOPIC_EVALUATION_CANDIDATE,
-                reason=(
-                    f"Project heartbeat reached {heartbeat_count} messages "
-                    f"against a {interval}-message topic evaluation interval."
-                ),
-                suggested_tool="update_topics",
-                priority="normal",
-                metadata={
-                    "heartbeat_count": heartbeat_count,
-                    "interval_msgs": interval,
-                },
-                max_attempts=max_attempts,
-            )
-            if candidate:
-                candidates.append(candidate)
 
     if "check_graph_health" in tools:
         merge_count = await redis.scard(RedisKeys.merge_queue(user_name, project_id))

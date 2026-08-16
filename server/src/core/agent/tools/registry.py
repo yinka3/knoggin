@@ -3,7 +3,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 import httpx
 
-from common.conf.topics_config import TopicConfig
+from common.conf.domain_config import CompiledDomain
 from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.tool_contracts import (
     CAPABILITY_CLASSES,
@@ -18,7 +18,6 @@ from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
-from core.agent.tools.topic_tools import TopicTools
 from core.agent.tools.workspace import WorkspaceTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
@@ -31,7 +30,6 @@ CORE_TOOL_LAYERS = frozenset({"core_memory", "core_brain"})
 FEATURE_TOOL_LAYERS = frozenset(
     {
         "feature_external",
-        "feature_project_admin",
         "feature_project_workspace",
         "feature_maintenance",
         "feature_community",
@@ -84,20 +82,6 @@ class ToolDefinition:
     default_limit: Optional[int] = None
 
 
-async def _project_admin_after_tool_result(
-    ctx,
-    tools,
-    tool_name: str,
-    result: Dict,
-) -> None:
-    del tools
-    if tool_name != "update_topics":
-        return
-    data = result.get("data")
-    if isinstance(data, dict) and data.get("success"):
-        ctx.active_topics = list(data.get("active_topics", ctx.active_topics))
-
-
 async def _maintenance_after_tool_result(
     ctx,
     tools,
@@ -111,11 +95,6 @@ async def _maintenance_after_tool_result(
     data = result.get("data")
     if isinstance(data, dict) and data.get("error"):
         await _record_maintenance_failure(ctx, tools, candidate)
-        return
-
-    if tool_name == "update_topics" and isinstance(data, dict):
-        if data.get("success"):
-            await _mark_maintenance_handled(ctx, tools, candidate)
         return
 
     if tool_name == "check_graph_health" and isinstance(data, dict):
@@ -306,13 +285,6 @@ TOOL_MODULES = {
             ("update_workspace_file", 2),
             ("append_workspace_file", 2),
         ),
-    ),
-    "feature_project_admin": ToolModule(
-        name="feature_project_admin",
-        layer="feature_project_admin",
-        tools=frozenset({"update_topics"}),
-        default_limits=(("update_topics", 1),),
-        after_tool_result=_project_admin_after_tool_result,
     ),
     "core_brain": ToolModule(
         name="core_brain",
@@ -818,7 +790,6 @@ class Tools(
     SearchTools,
     GraphTools,
     MemoryTools,
-    TopicTools,
     MaintenanceTools,
     HealthTools,
     WorkspaceTools,
@@ -828,7 +799,7 @@ class Tools(
         user_name: str,
         entities: EntityResolver,
         session_id: str,
-        topic_config: Optional[TopicConfig] = None,
+        compiled_domain: Optional[CompiledDomain] = None,
         search_config: Optional[dict] = None,
         document_service: Optional[DocumentService] = None,
         document_focus: Optional[dict] = None,
@@ -836,7 +807,6 @@ class Tools(
         postgres=None,
         redis=None,
         agent_id: Optional[str] = None,
-        topic_refresh_callback=None,
         episode_settings: Optional[EpisodeSettings] = None,
         health_service=None,
         workspace_service=None,
@@ -855,16 +825,17 @@ class Tools(
         self.embedding_service = entities.embedding_service
         self.project_id = entities.project_id
         self.readable_project_ids = entities.readable_project_ids
-        self.topic_config = topic_config
+        self.compiled_domain = compiled_domain
         self.document_service = document_service
         self.workspace_service = workspace_service
         self.document_focus = document_focus
-        self.active_topics = topic_config.active_topics if topic_config else None
+        self.active_topics = (
+            list(compiled_domain.active_topics) if compiled_domain else None
+        )
         self.search_cfg = search_config or {}
         episode_settings = episode_settings or EpisodeSettings()
         self.episode_retrieval_limit = episode_settings.retrieval_episode_limit
         self.agent_id = agent_id or "AGENT_IDENTITY"
-        self.topic_refresh_callback = topic_refresh_callback
         self.tool_authorization: Optional[ToolPermissions] = None
         self.active_tool_schemas: Dict[str, dict] = {}
         self.health_service = health_service

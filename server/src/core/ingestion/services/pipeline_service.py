@@ -11,7 +11,6 @@ from wordfreq import word_frequency
 
 from common.conf.domain_config import CompiledDomain
 from common.conf.relationship_config import normalize_relationship
-from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
 from common.schema.ingestion.contracts import (
     CandidateSuggestion,
@@ -72,7 +71,6 @@ class IngestionPipeline:
         processor: TextProcessor,
         cpu_executor: ThreadPoolExecutor,
         user_name: str,
-        topic_config: TopicConfig,
         get_next_ent_id,
         compiled_domain: CompiledDomain,
         resolution_threshold: Optional[float] = None,
@@ -90,7 +88,6 @@ class IngestionPipeline:
         self.processor = processor
         self.executor = cpu_executor
         self.user_name = user_name
-        self.topic_config = topic_config
         if not isinstance(compiled_domain, CompiledDomain):
             raise TypeError(
                 "IngestionPipeline requires an active CompiledDomain"
@@ -127,10 +124,6 @@ class IngestionPipeline:
     @get_next_ent_id.setter
     def get_next_ent_id(self, fn):
         self._get_next_ent_id = fn
-
-    def refresh_topic_mappings(self) -> None:
-        if hasattr(self.processor, "refresh_topic_mappings"):
-            self.processor.refresh_topic_mappings()
 
     def set_compiled_domain(self, compiled_domain: CompiledDomain) -> None:
         """Install the next immutable domain snapshot for future batches."""
@@ -201,7 +194,6 @@ class IngestionPipeline:
                 common_word_frequency_threshold=self.common_word_frequency_threshold,
                 sparse_context_verbs=sorted(self.sparse_context_verbs),
             ),
-            topic_config=self.topic_config,
             compiled_domain=self.compiled_domain,
         )
 

@@ -6,7 +6,6 @@ import spacy
 from gliner import GLiNER
 from spacy.matcher import PhraseMatcher
 
-from common.conf.topics_config import TopicConfig
 from common.exceptions import ConfigurationError, LLMError
 from common.schema.ingestion.contracts import (
     ValidationIssue,
@@ -49,7 +48,6 @@ class TextProcessor:
     def __init__(
         self,
         llm: LLMService,
-        topic_config: TopicConfig,
         get_known_aliases: Callable[[], Dict[str, int]],
         get_alias_version: Callable[[], int],
         get_profile: Callable[[int], Awaitable[Optional[EntityProfile]]],
@@ -59,11 +57,9 @@ class TextProcessor:
         model_work: Optional[ModelWorkCoordinator] = None,
     ):
         self.llm_client = llm
-        self.topic_config = topic_config
         self.get_known_aliases = get_known_aliases
         self.get_alias_version = get_alias_version
         self.get_profile = get_profile
-        self._label_to_topics = self._build_label_to_topics()
         self._nlp = spacy
         self._gliner = gliner
         self._model_work = model_work
@@ -79,21 +75,6 @@ class TextProcessor:
         self.gliner_threshold = config.gliner_threshold
         self.vp01_min_confidence = config.vp01_min_confidence
         self.llm_ner = config.llm_ner
-
-    def _build_label_to_topics(self) -> Dict[str, List[str]]:
-        """Invert topic_config: label -> [topics that include it]"""
-        label_to_topics = {}
-
-        for topic, config in self.topic_config.raw.items():
-            if not config.active:
-                continue
-            for label in config.labels:
-                label_lower = label.lower()
-                if label_lower not in label_to_topics:
-                    label_to_topics[label_lower] = []
-                label_to_topics[label_lower].append(topic)
-
-        return label_to_topics
 
     async def _run_model_work(
         self,
@@ -228,7 +209,7 @@ class TextProcessor:
 
         if not policy.domain.is_active_entity_type(entity_type):
             return False
-        return validate_entity(name, "", policy.topics, label=label or entity_type)
+        return validate_entity(name, "", policy.domain, label=label or entity_type)
 
     async def extract_mentions(
         self,
@@ -568,7 +549,3 @@ class TextProcessor:
         )
 
         return output
-
-    def refresh_topic_mappings(self):
-        """Rebuild label-to-topics map after TopicConfig change."""
-        self._label_to_topics = self._build_label_to_topics()

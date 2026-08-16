@@ -108,7 +108,7 @@ class Orchestrator:
                 # Request focus is ephemeral.  It overrides a persisted session
                 # focus for this run without writing to session state.
                 tools.document_focus = request_document_focus.model_dump(mode="json")
-            topic_config = context.project.topic_config
+            compiled_domain = context.project.compiled_domain
 
             effective_enabled_tools = (
                 enabled_tools
@@ -120,16 +120,15 @@ class Orchestrator:
                 user_name=user_name,
                 project_id=context.project_id,
                 enabled_tools=effective_enabled_tools,
-                topic_settings=config.developer_settings.topic_evaluation,
             )
 
             # One aggregate owns all mutable state for this execution.
-            requested_hot_topics = (
-                hot_topics if hot_topics is not None else topic_config.hot_topics
-            )
-            effective_hot_topics = topic_config.validate_hot_topics(
-                requested_hot_topics
-            )
+            requested_hot_topics = hot_topics or []
+            effective_hot_topics = []
+            for topic in requested_hot_topics:
+                normalized = compiled_domain.normalize_topic(topic)
+                if normalized and normalized not in effective_hot_topics:
+                    effective_hot_topics.append(normalized)
             hot_topic_context = {}
             if effective_hot_topics:
                 try:
@@ -152,7 +151,7 @@ class Orchestrator:
                 temperature=effective_temperature,
                 enabled_tools=effective_enabled_tools,
                 hot_topics=effective_hot_topics,
-                active_topics=topic_config.active_topics,
+                active_topics=list(compiled_domain.active_topics),
                 hot_topic_context=hot_topic_context,
                 history=conversation_history or [],
                 maintenance_candidates=maintenance_candidates,
@@ -243,7 +242,7 @@ class Orchestrator:
             user_name=context.user_name,
             entities=context.project.entities,
             session_id=context.session_id,
-            topic_config=context.project.topic_config,
+            compiled_domain=context.project.compiled_domain,
             search_config=search_cfg,
             document_service=context.document_service,
             workspace_service=getattr(context.project, "workspace_service", None),
@@ -254,9 +253,6 @@ class Orchestrator:
             agent_id=agent_id,
             episode_settings=config.developer_settings.jobs.episode,
             health_service=getattr(context.resources, "health_service", None),
-            topic_refresh_callback=(
-                context.project.refresh_topic_mappings if context.project else None
-            ),
         )
 
         return tools

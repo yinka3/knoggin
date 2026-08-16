@@ -1,7 +1,7 @@
 import os
 from typing import List, Optional
 
-from pydantic import ConfigDict, Field, ValidationError, field_validator
+from pydantic import ConfigDict, Field, ValidationError
 
 from common.exceptions import ConfigurationError
 from common.schema.agent.settings import AgentLimitSettings
@@ -50,30 +50,6 @@ class RedisConnectionSettings(ConfigModel):
                 "Invalid Redis connection settings",
                 details={"errors": errors},
             ) from exc
-
-
-class TopicSchema(ConfigModel):
-    active: bool = Field(True)
-    hot: bool = Field(False)
-    labels: List[str] = Field(default_factory=list)
-    aliases: List[str] = Field(default_factory=list)
-
-    @field_validator("labels", "aliases")
-    @classmethod
-    def _normalize_unique_topic_terms(cls, values: List[str]) -> List[str]:
-        normalized = []
-        seen = set()
-        for raw_value in values:
-            if not isinstance(raw_value, str):
-                raise ValueError("topic labels and aliases must be strings")
-            value = " ".join(raw_value.split()).casefold()
-            if not value:
-                raise ValueError("topic labels and aliases must not be blank")
-            if value in seen:
-                raise ValueError("topic labels and aliases must not contain duplicates")
-            seen.add(value)
-            normalized.append(value)
-        return normalized
 
 
 DEFAULT_SPARSE_CONTEXT_VERBS = [
@@ -187,11 +163,6 @@ class JobSettings(ConfigModel):
     )
 
 
-class TopicEvaluationSettings(ConfigModel):
-    enabled: bool = Field(True)
-    interval_msgs: int = Field(40, ge=1)
-
-
 class TextProcessorSettings(ConfigModel):
     gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
     vp01_min_confidence: float = Field(0.8, ge=0.0, le=1.0)
@@ -253,9 +224,6 @@ class CoordinationLogSettings(ConfigModel):
 class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
-    topic_evaluation: TopicEvaluationSettings = Field(
-        default_factory=TopicEvaluationSettings
-    )
     limits: AgentLimitSettings = Field(default_factory=AgentLimitSettings)
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings

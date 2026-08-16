@@ -142,14 +142,13 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
         "developer_settings.jobs.episode",
-        "developer_settings.ingestion",
         "developer_settings.jobs.document_indexing",
         "developer_settings.jobs.dlq",
         "developer_settings.jobs.cleaner",
         "developer_settings.jobs.merge_rollback",
         "developer_settings.jobs.audit_retention",
     ]
-    assert len(project_state.unsubscribers) == 9
+    assert len(project_state.unsubscribers) == 8
 
 
 @pytest.mark.runtime
@@ -214,11 +213,10 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
 
     assert entities.updates[-1] is marker
     assert processor.updates[-2:] == [marker, marker]
-    assert episode.updates[-1][0] is marker
+    assert episode.updates[-1] is marker
     assert state.scheduler._jobs["document_index_recovery"].updates[-1] is marker
     assert state.scheduler._jobs["dlq_auto_replay"].updates[-1] is marker
     assert state.scheduler._jobs["entity_cleanup"].updates[-1] is marker
     assert state.scheduler._jobs["merge_rollback_cleanup"].updates[-1] is marker
     assert state.scheduler._jobs["audit_retention_cleanup"].updates[-1] is marker
     assert "merge_detection" not in state.scheduler._jobs
-    assert "topic_config" not in state.scheduler._jobs

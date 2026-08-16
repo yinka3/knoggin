@@ -6,7 +6,6 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain, DomainConfig
-from common.conf.topics_config import TopicConfig
 from common.scoping import require_scope_value, require_visible_project_ids
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.documents import DocumentService
@@ -30,7 +29,6 @@ class ProjectState:
     def __init__(
         self,
         project_id: str,
-        topic_config: TopicConfig,
         entities: EntityResolver,
         pipeline: TextProcessor,
         scheduler: Scheduler,
@@ -55,7 +53,6 @@ class ProjectState:
         )
         if not isinstance(domain_config, DomainConfig):
             raise TypeError("ProjectState requires a DomainConfig")
-        self.topic_config = topic_config
         self.entities = entities
         self.pipeline = pipeline
         self.scheduler = scheduler
@@ -172,16 +169,6 @@ class ProjectState:
         # EntityResolver and others don't have explicit shutdown methods,
         # but they will be garbage collected.
 
-    async def update_topics_config(self, new_config: dict):
-        """Replace project topics, persist to Postgres, and refresh runtime mappings."""
-        self.topic_config.replace(new_config)
-        await self.topic_config.save(
-            self.postgres_client,
-            self.user_name,
-            self.project_id,
-        )
-        self.refresh_topic_mappings()
-
     async def load_domain_config(self) -> DomainConfig:
         """Load the active domain and install its immutable runtime snapshot."""
         async with self._domain_config_lock:
@@ -262,10 +249,3 @@ class ProjectState:
             self.compiled_domain = activation.compiled
             self._install_compiled_domain(activation.compiled)
             return activation
-
-    def refresh_topic_mappings(self):
-        """Refresh runtime consumers after the shared TopicConfig changes."""
-        if self.batch_processor is not None:
-            self.batch_processor.refresh_topic_mappings()
-        else:
-            self.pipeline.refresh_topic_mappings()

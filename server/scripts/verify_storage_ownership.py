@@ -146,20 +146,28 @@ async def seed_durable_state(pg: PostgresClient, *, user: str, project_id: str) 
         await cur.execute(
             """
             INSERT INTO public.projects (
-                project_id, user_name, name, description, topic_config
+                project_id, user_name, name, description, domain_config
             )
             VALUES (%s, %s, %s, %s, %s::jsonb)
             ON CONFLICT (project_id) DO UPDATE SET
                 user_name = EXCLUDED.user_name,
                 name = EXCLUDED.name,
-                topic_config = EXCLUDED.topic_config
+                domain_config = EXCLUDED.domain_config
             """,
             (
                 project_id,
                 user,
                 "Phase 7 Storage Ownership",
                 "Verification seed project",
-                json.dumps({"General": {"active": True}}),
+                json.dumps(
+                    {
+                        "version": 0,
+                        "topics": {"Identity": {"active": True}},
+                        "entity_types": {
+                            "Identity": {"topic": "Identity", "labels": ["identity"]}
+                        },
+                    }
+                ),
             ),
         )
         await cur.execute(

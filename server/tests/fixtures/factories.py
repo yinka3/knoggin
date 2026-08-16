@@ -1,6 +1,4 @@
 from common.conf.domain_config import DomainConfig
-from common.conf.topics_config import TopicConfig
-from common.schema.settings import TopicSchema
 from core.project.state import ProjectState
 from tests.fixtures.fakes import (
     FakeEmbeddingService,
@@ -9,15 +7,6 @@ from tests.fixtures.fakes import (
     FakeRedis,
     FakeScheduler,
 )
-
-
-def make_topic_config():
-    return TopicConfig(
-        {
-            "General": TopicSchema(active=True, labels=[], aliases=[]),
-            "Identity": TopicSchema(active=True, labels=["person"], aliases=["me"]),
-        }
-    )
 
 
 def make_domain_config(version=1):
@@ -56,7 +45,6 @@ def make_project_state(
     embedding = embedding or FakeEmbeddingService()
     return ProjectState(
         project_id=project_id,
-        topic_config=make_topic_config(),
         entities=object(),
         pipeline=FakePipeline(),
         scheduler=scheduler,

@@ -5,7 +5,7 @@ import pytest
 from common.schema.settings import DeveloperSettings, RootConfig
 from core.project.state import ProjectState
 from core.session.boot import SessionFactory
-from tests.fixtures.factories import make_domain_config, make_topic_config
+from tests.fixtures.factories import make_domain_config
 from tests.fixtures.fakes import (
     FakeKnowledgeStore,
     FakePipeline,
@@ -81,12 +81,11 @@ def assembler_harness(monkeypatch):
         llm=resources.llm_service,
         entities=entities,
         processor=pipeline,
-        topic_config=make_topic_config(),
+        compiled_domain=make_domain_config().compile(),
         get_next_ent_id=get_next_ent_id,
     )
     project_state = ProjectState(
         project_id="project-1",
-        topic_config=shared_processor.kwargs["topic_config"],
         entities=entities,
         pipeline=pipeline,
         scheduler=FakeScheduler(),
@@ -135,7 +134,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.project_id == "project-1"
     assert ctx.project is harness.project_state
     assert ctx.model == "model-a"
-    assert ctx.active_topics == ["General", "Identity"]
+    assert ctx.active_topics == ["Identity", "General"]
 
     assert harness.resources.redis.evals == []
 
@@ -147,7 +146,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert processor.kwargs["llm"] is harness.resources.llm_service
     assert processor.kwargs["entities"] is harness.project_state.entities
     assert processor.kwargs["processor"] is harness.project_state.pipeline
-    assert processor.kwargs["topic_config"] is harness.project_state.topic_config
+    assert processor.kwargs["compiled_domain"] == harness.project_state.compiled_domain
     assert processor.get_next_ent_id is harness.get_next_ent_id
 
     consumer = RecordingIngestionWorker.instances[0]

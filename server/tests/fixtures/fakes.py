@@ -622,18 +622,6 @@ class FakePostgresClient:
             "description": None,
             "access_mode": "open",
             "status": status,
-            "topic_config": {
-                "Identity": {
-                    "active": True,
-                    "labels": ["person"],
-                    "aliases": [],
-                },
-                "General": {
-                    "active": True,
-                    "labels": ["concept"],
-                    "aliases": [],
-                },
-            },
             "domain_config": {
                 "version": 1,
                 "topics": {
@@ -686,9 +674,6 @@ class FakePostgresClient:
                 "description": params.get("description"),
                 "access_mode": params.get("access_mode", "open"),
                 "status": params.get("status", "active"),
-                "topic_config": json.loads(params["topic_config"])
-                if isinstance(params.get("topic_config"), str)
-                else params.get("topic_config", {}),
                 "domain_config": json.loads(params["domain_config"])
                 if isinstance(params.get("domain_config"), str)
                 else params.get("domain_config", {}),
@@ -805,9 +790,6 @@ class FakePostgresClient:
                 "description": params.get("description"),
                 "access_mode": params.get("access_mode", "open"),
                 "status": params.get("status", "active"),
-                "topic_config": json.loads(params["topic_config"])
-                if isinstance(params.get("topic_config"), str)
-                else params.get("topic_config", {}),
                 "domain_config": json.loads(params["domain_config"])
                 if isinstance(params.get("domain_config"), str)
                 else params.get("domain_config", {}),
@@ -914,12 +896,11 @@ class FakePostgresClient:
                 "name",
                 "description",
                 "status",
-                "topic_config",
                 "domain_config",
             ):
                 if field in params:
                     value = params[field]
-                    if field in {"topic_config", "domain_config"} and isinstance(
+                    if field == "domain_config" and isinstance(
                         value, str
                     ):
                         value = json.loads(value)

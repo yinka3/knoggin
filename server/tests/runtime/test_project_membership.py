@@ -25,7 +25,6 @@ def project_row(
         "description": None,
         "access_mode": "open",
         "status": status,
-        "topic_config": {},
         "allowed_projects": allowed_projects,
         "session_count": 0,
         "created_at": None,
@@ -141,10 +140,8 @@ async def test_create_project_persists_metadata_and_default_topics(monkeypatch):
     )
     assert insert[2]["name"] == "Research"
     assert insert[2]["status"] == ProjectStatus.ACTIVE.value
-    assert insert[2]["topic_config"]
     assert insert[2]["domain_config"]
     assert result["id"] == "project-1"
-    assert "topic_config" not in result
     assert postgres.transaction_enters == 1
     assert postgres.transaction_exits == 1
 
@@ -199,7 +196,6 @@ async def test_list_projects_normalizes_postgres_rows():
         "project-1",
         "project-2",
     ]
-    assert all("topic_config" not in project for project in projects)
     assert all(project["allowed_projects"] == [] for project in projects)
 
 

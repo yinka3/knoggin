@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS public.projects (
     access_mode TEXT NOT NULL DEFAULT 'open',
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'archived', 'deleted')),
-    topic_config JSONB NOT NULL,
     domain_config JSONB NOT NULL
         CHECK (jsonb_typeof(domain_config) = 'object'),
     episode_window_size INTEGER NOT NULL DEFAULT 24
@@ -33,11 +32,23 @@ ALTER TABLE public.projects
 ADD COLUMN IF NOT EXISTS episode_window_size INTEGER NOT NULL DEFAULT 24
     CHECK (episode_window_size BETWEEN 8 AND 72);
 
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.projects
+        WHERE domain_config IS NULL OR domain_config = '{}'::jsonb
+    ) THEN
+        RAISE EXCEPTION
+            'Cannot remove projects.topic_config while a project lacks domain_config';
+    END IF;
+END $$;
+
 ALTER TABLE public.projects
 ALTER COLUMN domain_config DROP DEFAULT;
 
 ALTER TABLE public.projects
-ALTER COLUMN topic_config DROP DEFAULT;
+DROP COLUMN IF EXISTS topic_config;
 
 CREATE TABLE IF NOT EXISTS public.project_read_scopes (
     user_name TEXT NOT NULL,

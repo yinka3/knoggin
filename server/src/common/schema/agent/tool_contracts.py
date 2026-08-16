@@ -73,46 +73,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "update_topics",
-            "description": (
-                "Propose bounded changes to the current project's durable topic "
-                "configuration. Use when the heartbeat requests evaluation or a "
-                "clear recurring theme warrants a new topic."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "add_topics": {
-                        "type": "array",
-                        "description": "List of new topics to add",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string", "description": "Capitalized topic name"},
-                                "labels": {"type": "array", "items": {"type": "string"}, "description": "Lowercase labels associated with this topic"},
-                                "aliases": {"type": "array", "items": {"type": "string"}, "description": "Alternative names for this topic"}
-                            },
-                            "required": ["name"]
-                        }
-                    },
-                    "deactivate_topics": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of topic names to deactivate (make inactive). Do not deactivate General or Identity."
-                    },
-                    "reasoning": {
-                        "type": "string",
-                        "description": "Short explanation of why these topics are being added or removed."
-                    }
-                }
-            },
-            "tags": ["topics", "core"]
-        }
-    },
-
-    {
-        "type": "function",
-        "function": {
             "name": "search_entity",
             "description": (
                 "The starting point for almost every query. "
@@ -1128,7 +1088,6 @@ SAFE_DEFAULT_CAPABILITIES = frozenset(
 )
 
 _TOOL_CAPABILITIES = {
-    "update_topics": CONFIGURATION_WRITE_CAPABILITY,
     "edit_brain": IDENTITY_WRITE_CAPABILITY,
     "restore_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,

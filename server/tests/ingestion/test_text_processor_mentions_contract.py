@@ -1,15 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from common.conf.topics_config import TopicConfig
+from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMProviderError
 from common.schema.ingestion.contracts import ExtractionTrace
 from common.schema.ingestion.extraction import EntityExtraction, EntityMention
-from common.schema.settings import TextProcessorSettings, TopicSchema
+from common.schema.settings import TextProcessorSettings
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.services.processor import TextProcessor
 from core.knowledge.entity.profile import EntityProfile
-from tests.fixtures.factories import make_topic_config
 from tests.fixtures.ingestion import ingestion_policy
 
 MESSAGES = [
@@ -107,17 +106,21 @@ class RecordingGLiNER:
         return []
 
 
-def make_topic_config_with_tools():
-    return TopicConfig(
+def make_domain_with_tools():
+    return DomainConfig.from_mapping(
         {
-            **make_topic_config().raw,
-            "Tools": TopicSchema(
-                active=True,
-                labels=["tool"],
-                aliases=["apps"],
-            ),
+            "version": 1,
+            "topics": {
+                "Identity": {"active": True},
+                "General": {"active": True},
+                "Tools": {"active": True},
+            },
+            "entity_types": {
+                "Identity": {"topic": "Identity", "labels": ["person", "identity"]},
+                "Tools": {"topic": "Tools", "labels": ["tool"]},
+            },
         }
-    )
+    ).compile()
 
 
 def make_entity(
@@ -147,7 +150,7 @@ def make_processor(
     gliner_matches=None,
     llm_response=None,
     llm_raises=False,
-    topic_config=None,
+    compiled_domain=None,
     llm_ner=False,
 ):
     known_aliases = known_aliases or {}
@@ -160,10 +163,8 @@ def make_processor(
     async def get_profile(entity_id):
         return profiles.get(entity_id)
 
-    policy_topics = topic_config or make_topic_config_with_tools()
     processor = TextProcessor(
         llm=llm,
-        topic_config=policy_topics,
         get_known_aliases=lambda: known_aliases,
         get_alias_version=lambda: alias_version,
         get_profile=get_profile,
@@ -179,7 +180,7 @@ def make_processor(
     processor.run_gliner = lambda text, _policy: list(gliner_matches.get(text, []))
     processor._test_policy = ingestion_policy(
         text_processor=TextProcessorSettings(llm_ner=llm_ner),
-        topics=policy_topics,
+        compiled_domain=compiled_domain or make_domain_with_tools(),
     )
     return processor, llm
 
@@ -217,7 +218,6 @@ def test_build_phrase_matcher_reuses_cache_until_alias_version_changes(monkeypat
 
     processor = TextProcessor(
         llm=FakeLLM(),
-        topic_config=make_topic_config_with_tools(),
         get_known_aliases=lambda: known_aliases,
         get_alias_version=lambda: alias_version,
         get_profile=get_profile,
@@ -252,7 +252,7 @@ def test_gliner_uses_the_threshold_captured_by_the_batch_policy():
     processor.gliner_threshold = 0.99
     policy = ingestion_policy(
         text_processor=TextProcessorSettings(gliner_threshold=0.23),
-        topics=make_topic_config_with_tools(),
+        compiled_domain=make_domain_with_tools(),
     )
 
     assert TextProcessor.run_gliner(processor, "Ada", policy) == []

@@ -87,7 +87,6 @@ def make_tool(*, postgres=None, participants=None):
     base_tools = SimpleNamespace(
         entities=entities,
         session_id="session-1",
-        topic_config=SimpleNamespace(active_topics=["General"]),
         search_cfg={},
         document_service=None,
         document_focus=None,

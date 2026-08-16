@@ -3,7 +3,7 @@
 from common.exceptions import LLMProviderError
 from core.ingestion.services.pipeline_service import IngestionPipeline
 from core.knowledge.entity.resolver import EntityResolver
-from tests.fixtures.factories import make_domain_config, make_topic_config
+from tests.fixtures.factories import make_domain_config
 
 
 class FakeEmbeddingService:
@@ -138,7 +138,6 @@ def make_harness():
         processor=None,
         cpu_executor=None,
         user_name="ada",
-        topic_config=make_topic_config(),
         compiled_domain=make_domain_config().compile(),
         get_next_ent_id=get_next_ent_id,
     )

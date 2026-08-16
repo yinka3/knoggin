@@ -8,102 +8,11 @@ from dataclasses import dataclass, is_dataclass
 from typing import Any, Mapping
 
 from common.conf.domain_config import CompiledDomain
-from common.conf.topics_config import TopicConfig
 from common.schema.settings import (
     EntityResolutionSettings,
     IngestionSettings,
     TextProcessorSettings,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class TopicRule:
-    """One immutable topic definition used by a single ingestion operation."""
-
-    name: str
-    active: bool
-    labels: tuple[str, ...]
-    aliases: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class TopicPolicy:
-    """Detached, read-only topic schema for one ingestion operation."""
-
-    rules: tuple[TopicRule, ...]
-
-    @classmethod
-    def capture(cls, topic_config: TopicConfig) -> "TopicPolicy":
-        return cls(
-            rules=tuple(
-                TopicRule(
-                    name=name,
-                    active=schema.active,
-                    labels=tuple(schema.labels),
-                    aliases=tuple(schema.aliases),
-                )
-                for name, schema in topic_config.snapshot().items()
-            )
-        )
-
-    def normalize_topic(self, topic: str) -> str | None:
-        normalized = (topic or "").strip().casefold()
-        if not normalized:
-            return None
-        for rule in self.rules:
-            if normalized == rule.name.casefold() or normalized in {
-                alias.casefold() for alias in rule.aliases
-            }:
-                return rule.name
-        return None
-
-    def is_active(self, topic: str) -> bool:
-        return any(rule.name == topic and rule.active for rule in self.rules)
-
-    @property
-    def active_topics(self) -> tuple[str, ...]:
-        return tuple(rule.name for rule in self.rules if rule.active)
-
-    @property
-    def labels(self) -> tuple[str, ...]:
-        labels: list[str] = []
-        seen: set[str] = set()
-        for rule in self.rules:
-            if not rule.active:
-                continue
-            for label in rule.labels:
-                normalized = label.casefold()
-                if normalized in seen:
-                    continue
-                seen.add(normalized)
-                labels.append(label)
-        return tuple(labels)
-
-    def label_topics(self, label: str) -> tuple[str, ...]:
-        normalized = (label or "").strip().casefold()
-        if not normalized:
-            return ()
-        return tuple(
-            rule.name
-            for rule in self.rules
-            if rule.active
-            and normalized in {configured.casefold() for configured in rule.labels}
-        )
-
-    @property
-    def label_block(self) -> str:
-        lines = []
-        for rule in self.rules:
-            if rule.name == "Identity" or not rule.active or not rule.labels:
-                continue
-            lines.extend(
-                (
-                    f"Topic: {rule.name}",
-                    f"  Labels: {', '.join(rule.labels)}",
-                    "",
-                )
-            )
-        return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +30,6 @@ class IngestionPolicy:
     resolution_threshold: float
     common_word_frequency_threshold: float
     sparse_context_verbs: tuple[str, ...]
-    topics: TopicPolicy
     domain: CompiledDomain
 
     @classmethod
@@ -131,7 +39,6 @@ class IngestionPolicy:
         ingestion: IngestionSettings,
         text_processor: TextProcessorSettings,
         entity_resolution: EntityResolutionSettings,
-        topic_config: TopicConfig,
         compiled_domain: CompiledDomain,
     ) -> "IngestionPolicy":
         if not isinstance(compiled_domain, CompiledDomain):
@@ -153,7 +60,6 @@ class IngestionPolicy:
                 for verb in entity_resolution.sparse_context_verbs
                 if verb and verb.strip()
             ),
-            "topics": TopicPolicy.capture(topic_config),
             "domain": compiled_domain,
         }
         version = cls._version_for(payload)
@@ -165,17 +71,6 @@ class IngestionPolicy:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "IngestionPolicy":
         try:
-            topics = TopicPolicy(
-                rules=tuple(
-                    TopicRule(
-                        name=rule["name"],
-                        active=rule["active"],
-                        labels=tuple(rule["labels"]),
-                        aliases=tuple(rule["aliases"]),
-                    )
-                    for rule in payload["topics"]["rules"]
-                )
-            )
             domain = CompiledDomain.from_dict(payload["domain"])
             values = {
                 "checkpoint_interval": payload["checkpoint_interval"],
@@ -190,7 +85,6 @@ class IngestionPolicy:
                     "common_word_frequency_threshold"
                 ],
                 "sparse_context_verbs": tuple(payload["sparse_context_verbs"]),
-                "topics": topics,
                 "domain": domain,
             }
             version = payload["version"]
@@ -198,6 +92,16 @@ class IngestionPolicy:
             raise ValueError("Invalid ingestion policy payload") from exc
 
         expected_version = cls._version_for(values)
+        legacy_topics = payload.get("topics")
+        if legacy_topics is not None:
+            # Jobs admitted before DomainConfig became the single source of
+            # topic rules include a redundant, detached topic snapshot. Its
+            # hash remains part of their durable policy contract, so accept
+            # it only when the original payload remains intact. Runtime work
+            # uses the compiled domain exclusively.
+            expected_version = cls._version_for(
+                {**values, "topics": legacy_topics}
+            )
         if version != expected_version:
             raise ValueError("Ingestion policy version does not match its contents")
         return cls(version=version, **values)

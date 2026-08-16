@@ -83,11 +83,10 @@ async def test_scope_replacement_rolls_back_when_new_scope_insert_fails(
     await real_postgres_client.execute(
         """
         INSERT INTO projects (
-            project_id, user_name, name, topic_config, domain_config
+            project_id, user_name, name, domain_config
         )
         VALUES (
             'project-3', 'ada', 'Project 3',
-            '{"Identity":{"active":true,"labels":["person"],"aliases":[]},"General":{"active":true,"labels":["concept"],"aliases":[]}}'::jsonb,
             '{"version":1,"topics":{"Identity":{"description":"","active":true},"General":{"description":"","active":true}},"entity_types":{"Identity":{"topic":"Identity","description":"","labels":["person"]},"Concept":{"topic":"General","description":"","labels":["concept"]}},"relationships":{}}'::jsonb
         )
         """

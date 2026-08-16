@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.conf.domain_config import DomainConfig
 from common.schema.agent.identity import AgentConfig
 from core.agent.orchestrator import Orchestrator
 from infrastructure.redis_client import RedisKeys
@@ -17,7 +18,6 @@ FAKE_RESPONSE_EVENT = {
             "total_tokens": 0,
             "approximate": False,
         },
-        "sources": None,
     },
 }
 
@@ -39,11 +39,6 @@ class FakeConfig:
         {
             "limits": FakeLimits(),
             "search": type("Search", (), {"model_dump": lambda self: {}})(),
-            "topic_evaluation": type(
-                "TopicEvaluation",
-                (),
-                {"enabled": True, "interval_msgs": 10},
-            )(),
         },
     )()
     search = type("SearchKeys", (), {"model_dump": lambda self: {}})()
@@ -67,18 +62,6 @@ class FakeTools:
             topic: {"entities": [{"name": f"{topic} entity"}], "messages": []}
             for topic in hot_topics
         }
-
-
-class FakeTopicConfig:
-    hot_topics = ["Research", "unknown"]
-    active_topics = ["Research", "Identity"]
-
-    def validate_hot_topics(self, hot_topics):
-        valid = []
-        for topic in hot_topics:
-            if topic in self.active_topics and topic not in valid:
-                valid.append(topic)
-        return valid
 
 
 class FakeExecutor:
@@ -107,8 +90,18 @@ class FakeSession:
         self.project_id = "project-1"
         self.project = SimpleNamespace(
             entities=object(),
-            topic_config=FakeTopicConfig(),
-            refresh_topic_mappings=None,
+            compiled_domain=DomainConfig.from_mapping(
+                {
+                    "version": 1,
+                    "topics": {
+                        "Research": {"active": True},
+                        "Identity": {"active": True},
+                    },
+                    "entity_types": {
+                        "Identity": {"topic": "Identity", "labels": ["identity"]}
+                    },
+                }
+            ).compile(),
         )
 
 
@@ -218,15 +211,10 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.limits.max_calls == 9
     assert executor.ctx.limits.tool_timeout == 1.5
     assert executor.ctx.limits.get_tool_limit("search_entity") == 4
-    assert executor.ctx.hot_topics == ["Research"]
+    assert executor.ctx.hot_topics == []
     assert executor.ctx.active_topics == ["Research", "Identity"]
-    assert executor.ctx.hot_topic_context == {
-        "Research": {
-            "entities": [{"name": "Research entity"}],
-            "messages": [],
-        }
-    }
-    assert tools.hot_topic_calls == [(["Research"], True)]
+    assert executor.ctx.hot_topic_context == {}
+    assert tools.hot_topic_calls == []
     assert executor.execute_kwargs["model"] == "agent-model"
     assert executor.execute_kwargs["agent_temperature"] == 0.25
     assert "Use memory" in executor.execute_kwargs["agent_brain"]
@@ -319,15 +307,12 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
 ):
     context = FakeSession()
     tools = FakeTools()
-    await context.redis_client.set(
-        RedisKeys.project_heartbeat_counter("ada", "project-1"),
-        "10",
-    )
+    await context.redis_client.sadd(RedisKeys.merge_queue("ada", "project-1"), "1")
     agent = AgentConfig(
         id="agent-1",
         name="Researcher",
         persona="Careful",
-        enabled_tools=["update_topics"],
+        enabled_tools=["check_graph_health"],
     )
     context.resources.postgres.upsert_agent(agent)
 
@@ -355,9 +340,9 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
 
     assert events == [FAKE_RESPONSE_EVENT]
     candidate = FakeExecutor.instances[0].ctx.maintenance_candidates[0]
-    assert candidate.kind == "topic_evaluation"
-    assert candidate.suggested_tool == "update_topics"
-    assert "heartbeat reached 10" in candidate.reason
+    assert candidate.kind == "graph_merge_scan"
+    assert candidate.suggested_tool == "check_graph_health"
+    assert "Merge queue has 1" in candidate.reason
 
 
 @pytest.mark.runtime

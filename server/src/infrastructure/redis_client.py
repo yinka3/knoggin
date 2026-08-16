@@ -182,7 +182,6 @@ class RedisKeys:
     LEGACY_NON_AUTHORITATIVE = frozenset(
         {
             "projects",
-            "project_topic_config",
             "sessions",
             "project_sessions",
             "agents",
@@ -360,10 +359,6 @@ class RedisKeys:
     @staticmethod
     def projects(user: str) -> str:
         return f"projects:{user}"
-
-    @staticmethod
-    def project_topic_config(user: str) -> str:
-        return f"project_topic_config:{user}"
 
     @staticmethod
     def sessions(user: str) -> str:

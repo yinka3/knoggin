@@ -12,8 +12,6 @@ from loguru import logger
 
 from common.conf.domain_config import DomainConfig
 from common.conf.manager import ConfigManager
-from common.conf.topics_config import TopicConfig
-from common.schema.settings import TopicSchema
 from common.scoping import IDENTITY_ENTITY_ID, build_readable_project_ids
 from common.utils.time_utils import get_now_iso
 from core.community.community_job import AACJob
@@ -67,32 +65,6 @@ class ProjectStatus(str, Enum):
     ACTIVE = "active"
     ARCHIVED = "archived"
     DELETED = "deleted"
-
-
-def _topic_projection(domain_config: DomainConfig) -> dict[str, TopicSchema]:
-    """Build the internal topic view from the active domain configuration.
-
-    DomainConfig is the only project-owned semantic configuration.  A compact
-    topic projection remains for older runtime consumers that need active topic
-    names or prompt formatting; it is derived at project creation and is never
-    seeded independently.
-    """
-
-    labels_by_topic: dict[str, list[str]] = {
-        topic.name: [] for topic in domain_config.topics
-    }
-    for entity_type in domain_config.entity_types:
-        labels_by_topic[entity_type.topic].extend(entity_type.labels)
-
-    projected: dict[str, TopicSchema] = {}
-    for topic in domain_config.topics:
-        labels = list(dict.fromkeys(labels_by_topic[topic.name]))
-        projected[topic.name] = TopicSchema(
-            active=topic.active,
-            labels=labels,
-            aliases=[],
-        )
-    return projected
 
 
 def _parse_initial_domain(candidate: DomainConfig | Mapping[str, object]) -> DomainConfig:
@@ -164,18 +136,13 @@ class ProjectManager:
         allowed_projects = await self._validate_allowed_project_ids(
             project_id, allowed_projects or []
         )
-        topic_projection = {
-            topic: config.model_dump(mode="json")
-            for topic, config in _topic_projection(active_domain).items()
-        }
-
         project_query = """
             INSERT INTO public.projects (
                 project_id, user_name, name, description, access_mode, status,
-                topic_config, domain_config
+                domain_config
             ) VALUES (
                 %(project_id)s, %(user_name)s, %(name)s, %(description)s,
-                %(access_mode)s, %(status)s, %(topic_config)s, %(domain_config)s
+                %(access_mode)s, %(status)s, %(domain_config)s
             )
         """
         scope_query = """
@@ -205,7 +172,6 @@ class ProjectManager:
                     "description": description,
                     "access_mode": access_mode,
                     "status": ProjectStatus.ACTIVE.value,
-                    "topic_config": json.dumps(topic_projection),
                     "domain_config": json.dumps(active_domain.to_dict()),
                 },
             )
@@ -250,8 +216,7 @@ class ProjectManager:
             meta = dict(row)
             meta["id"] = meta.pop("project_id")
             meta["allowed_projects"] = meta["allowed_projects"] or []
-            for private_field in ("topic_config", "domain_config"):
-                meta.pop(private_field, None)
+            meta.pop("domain_config", None)
             projects.append(meta)
 
         return projects
@@ -274,8 +239,7 @@ class ProjectManager:
         meta = dict(rows[0])
         meta["id"] = meta.pop("project_id")
         meta["allowed_projects"] = meta["allowed_projects"] or []
-        for private_field in ("topic_config", "domain_config"):
-            meta.pop(private_field, None)
+        meta.pop("domain_config", None)
         return meta
 
     async def get_episode_window_size(self, project_id: str) -> int:
@@ -866,7 +830,6 @@ class ProjectManager:
 
         deleted = int(await redis.delete(*sorted(keys))) if keys else 0
         await redis.hdel(RedisKeys.projects(self.user_name), project_id)
-        await redis.hdel(RedisKeys.project_topic_config(self.user_name), project_id)
         if session_ids:
             await redis.hdel(RedisKeys.sessions(self.user_name), *session_ids)
         if agent_ids:
@@ -969,7 +932,6 @@ class ProjectManager:
 
         domain_store = DomainConfigStore(self.pg)
         domain_config = await domain_store.load(self.user_name, project_id)
-        t_config = await TopicConfig.load(self.pg, self.user_name, project_id)
         compiled_domain = domain_config.compile()
 
         # Entity Manager
@@ -993,7 +955,6 @@ class ProjectManager:
             partial(
                 TextProcessor,
                 llm=self.resources.llm_service,
-                topic_config=t_config,
                 get_known_aliases=entities.get_known_aliases,
                 get_alias_version=entities.get_alias_version,
                 get_profile=entities.get_profile,
@@ -1013,7 +974,6 @@ class ProjectManager:
             knowledge_store=self.resources.knowledge_store,
             cpu_executor=self.resources.executor,
             user_name=self.user_name,
-            topic_config=t_config,
             compiled_domain=compiled_domain,
             get_next_ent_id=self.resources.knowledge_store.allocate_entity_id,
             resolution_threshold=er_cfg.resolution_threshold,
@@ -1033,7 +993,6 @@ class ProjectManager:
 
         project_state = ProjectState(
             project_id=project_id,
-            topic_config=t_config,
             entities=entities,
             pipeline=pipeline,
             scheduler=scheduler,

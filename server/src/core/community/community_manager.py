@@ -481,7 +481,7 @@ class CommunityManager:
         base_tools = SimpleNamespace(
             entities=ctx.project.entities,
             session_id=ctx.session_id,
-            topic_config=ctx.project.topic_config,
+            compiled_domain=getattr(ctx.project, "compiled_domain", None),
             search_cfg={},
             knowledge_store=self.resources.knowledge_store,
             document_service=ctx.document_service,

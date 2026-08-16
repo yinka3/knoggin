@@ -44,7 +44,6 @@ def make_processor(llm_response):
         processor=None,
         cpu_executor=None,
         user_name="Ada",
-        topic_config=None,
         compiled_domain=make_domain_config().compile(),
         get_next_ent_id=None,
     )

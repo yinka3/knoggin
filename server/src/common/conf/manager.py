@@ -58,11 +58,9 @@ class ConfigManager:
 
     def load(self):
         """Loads configuration from YAML."""
-        from common.conf.topics_config import load_topic_seed
         from common.utils.prompt_loader import validate_prompt_library
 
         validate_prompt_library()
-        load_topic_seed()
         data = None
         load_failed = False
         config_exists = CONFIG_FILE_YAML.exists()

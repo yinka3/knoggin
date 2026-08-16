@@ -38,7 +38,7 @@ class CommunityTools(Tools):
             user_name=user_name,
             entities=base_tools.entities,
             session_id=base_tools.session_id,
-            topic_config=base_tools.topic_config,
+            compiled_domain=getattr(base_tools, "compiled_domain", None),
             search_config=base_tools.search_cfg,
             document_service=getattr(base_tools, "document_service", None),
             workspace_service=getattr(base_tools, "workspace_service", None),

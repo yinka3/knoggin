@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from loguru import logger
 from wordfreq import word_frequency
 
-from common.conf.topics_config import TopicConfig
+from common.conf.domain_config import CompiledDomain
 
 PRONOUNS = {
     "my",
@@ -137,7 +137,7 @@ def is_covered(candidate: str, covered_texts: set[str]) -> bool:
 
 
 def validate_entity(
-    name: str, topic: str, topic_config: TopicConfig, label: Optional[str] = None
+    name: str, topic: str, domain: CompiledDomain, label: Optional[str] = None
 ) -> bool:
     """Filter invalid mentions before resolution."""
 
@@ -161,8 +161,8 @@ def validate_entity(
         return False
 
     if topic:
-        normalized = topic_config.normalize_topic(topic)
-        if not normalized or not topic_config.is_active(normalized):
+        normalized = domain.normalize_topic(topic)
+        if not normalized:
             logger.debug(f"Invalid topic '{topic}' for entity '{name}'")
             return False
 

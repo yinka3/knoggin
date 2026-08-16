@@ -37,7 +37,6 @@ class RecordingPostgres:
                 "description": "A project description",
                 "access_mode": "open",
                 "status": "active",
-                "topic_config": {},
                 "domain_config": {},
                 "allowed_projects": [],
                 "session_count": 0,
